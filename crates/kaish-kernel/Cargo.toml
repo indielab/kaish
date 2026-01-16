@@ -37,6 +37,10 @@ chrono = { workspace = true }
 # MCP client (L8)
 rmcp = { workspace = true }
 
+# State persistence (L10)
+rusqlite = { workspace = true }
+directories = { workspace = true }
+
 [dev-dependencies]
 proptest = { workspace = true }
 

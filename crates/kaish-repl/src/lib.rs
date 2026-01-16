@@ -1,7 +1,7 @@
 //! kaish REPL — Interactive shell for 会sh.
 //!
 //! This is an evolving REPL that grows with each layer of the kaish project.
-//! Currently (L8), it provides:
+//! Currently (L10), it provides:
 //!
 //! - Parse input and display AST (`/ast` toggle)
 //! - Evaluate expressions with persistent Scope
@@ -10,7 +10,8 @@
 //! - Pipeline execution (`a | b | c`)
 //! - Background jobs (`cmd &`) with `jobs` and `wait` commands
 //! - MCP tool integration via pre-configured ToolRegistry
-//! - Meta-commands: `/help`, `/quit`, `/ast`, `/scope`, `/cwd`, `/jobs`, `/tools`
+//! - SQLite-backed session persistence
+//! - Meta-commands: `/help`, `/quit`, `/ast`, `/scope`, `/cwd`, `/jobs`, `/tools`, `/state`
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -25,6 +26,7 @@ use kaish_kernel::ast::{Arg, Expr, Pipeline, Stmt, Value};
 use kaish_kernel::interpreter::{ExecResult, Scope};
 use kaish_kernel::parser::parse;
 use kaish_kernel::scheduler::{JobManager, PipelineRunner};
+use kaish_kernel::state::{StateStore, paths as state_paths};
 use kaish_kernel::tools::{ExecContext, ToolArgs, ToolRegistry, register_builtins};
 use kaish_kernel::vfs::{LocalFs, MemoryFs, VfsRouter};
 
@@ -37,6 +39,8 @@ pub struct Repl {
     runtime: Runtime,
     pipeline_runner: PipelineRunner,
     job_manager: Arc<JobManager>,
+    /// SQLite-backed state persistence (None for ephemeral sessions).
+    state: Option<StateStore>,
 }
 
 impl Repl {
@@ -105,15 +109,55 @@ impl Repl {
         // Create tokio runtime for async tool execution
         let runtime = Runtime::new().context("Failed to create tokio runtime")?;
 
+        // Open or create state database
+        let (state, scope) = Self::init_state()?;
+
+        // Restore cwd from state if available
+        if let Some(ref store) = state {
+            if let Ok(cwd) = store.get_cwd() {
+                if cwd != "/" && !cwd.is_empty() {
+                    exec_ctx.set_cwd(PathBuf::from(&cwd));
+                }
+            }
+        }
+
         Ok(Self {
-            scope: Scope::new(),
+            scope,
             show_ast: false,
             tools,
             exec_ctx,
             runtime,
             pipeline_runner,
             job_manager,
+            state,
         })
+    }
+
+    /// Initialize state storage and load persisted variables.
+    fn init_state() -> Result<(Option<StateStore>, Scope)> {
+        let state_dir = state_paths::kernels_dir();
+        let db_path = state_dir.join("repl.db");
+
+        // Try to open/create state database
+        let store = match StateStore::open(&db_path) {
+            Ok(s) => Some(s),
+            Err(e) => {
+                tracing::warn!("Could not open state database at {}: {}", db_path.display(), e);
+                None
+            }
+        };
+
+        // Load variables into scope
+        let mut scope = Scope::new();
+        if let Some(ref store) = store {
+            if let Ok(vars) = store.load_all_variables() {
+                for (name, value) in vars {
+                    scope.set(name, value);
+                }
+            }
+        }
+
+        Ok((store, scope))
     }
 
     /// Process a single line of input.
@@ -171,6 +215,12 @@ impl Repl {
             Stmt::Assignment(assign) => {
                 let value = self.eval_expr(&assign.value)?;
                 self.scope.set(&assign.name, value.clone());
+                // Persist to state store
+                if let Some(ref store) = self.state {
+                    if let Err(e) = store.set_variable(&assign.name, &value) {
+                        tracing::warn!("Failed to persist variable {}: {}", assign.name, e);
+                    }
+                }
                 Ok(Some(format!("{} = {}", assign.name, format_value(&value))))
             }
             Stmt::Command(cmd) => {
@@ -285,10 +335,15 @@ impl Repl {
 
         // Sync cwd back to scope if cd was called
         if name == "cd" && result.ok() {
+            let cwd_str = self.exec_ctx.cwd.to_string_lossy().to_string();
             // Update scope with new cwd for display
-            self.scope.set("CWD", Value::String(
-                self.exec_ctx.cwd.to_string_lossy().to_string()
-            ));
+            self.scope.set("CWD", Value::String(cwd_str.clone()));
+            // Persist to state store
+            if let Some(ref store) = self.state {
+                if let Err(e) = store.set_cwd(&cwd_str) {
+                    tracing::warn!("Failed to persist cwd: {}", e);
+                }
+            }
         }
 
         Ok(result)
@@ -489,6 +544,39 @@ impl Repl {
                     Ok(Some(output.trim_end().to_string()))
                 }
             }
+            "/state" | "/session" => {
+                match &self.state {
+                    Some(store) => {
+                        let session_id = store.session_id().unwrap_or_else(|_| "unknown".into());
+                        let vars = store.list_variables().unwrap_or_default();
+                        let db_path = state_paths::kernels_dir().join("repl.db");
+                        Ok(Some(format!(
+                            "Session: {}\nDatabase: {}\nPersisted variables: {}\nState: active",
+                            session_id,
+                            db_path.display(),
+                            vars.len()
+                        )))
+                    }
+                    None => {
+                        Ok(Some("State: ephemeral (no persistence)".to_string()))
+                    }
+                }
+            }
+            "/clear-state" => {
+                if let Some(ref store) = self.state {
+                    // Delete all variables from state
+                    if let Ok(vars) = store.list_variables() {
+                        for name in vars {
+                            let _ = store.delete_variable(&name);
+                        }
+                    }
+                    // Clear scope
+                    self.scope = Scope::new();
+                    Ok(Some("State cleared".to_string()))
+                } else {
+                    Ok(Some("No state to clear (ephemeral session)".to_string()))
+                }
+            }
             _ => {
                 Ok(Some(format!("Unknown command: {}\nType /help for available commands.", command)))
             }
@@ -628,7 +716,7 @@ fn result_to_value(result: &ExecResult) -> Value {
     Value::Object(fields)
 }
 
-const HELP_TEXT: &str = r#"会sh — kaish REPL (Layer 7: Pipes & Jobs)
+const HELP_TEXT: &str = r#"会sh — kaish REPL (Layer 10: State & Persistence)
 
 Meta Commands:
   /help, /h, /?     Show this help
@@ -639,6 +727,8 @@ Meta Commands:
   /cwd              Show current working directory
   /tools            List available tools
   /jobs             List background jobs
+  /state, /session  Show session/state info
+  /clear-state      Clear all persisted state
 
 Built-in Tools:
   echo [args...]    Print arguments
@@ -679,8 +769,8 @@ Examples:
 
 /// Run the REPL.
 pub fn run() -> Result<()> {
-    println!("会sh — kaish v{} (Layer 7: Pipes & Jobs)", env!("CARGO_PKG_VERSION"));
-    println!("Type /help for commands, /quit to exit.\n");
+    println!("会sh — kaish v{} (Layer 10: State & Persistence)", env!("CARGO_PKG_VERSION"));
+    println!("Type /help for commands, /quit to exit.");
 
     let mut rl: Editor<(), DefaultHistory> = Editor::new()
         .context("Failed to create editor")?;
@@ -693,6 +783,15 @@ pub fn run() -> Result<()> {
     }
 
     let mut repl = Repl::new()?;
+
+    // Show state status
+    if repl.state.is_some() {
+        let vars = repl.scope.all_names();
+        if !vars.is_empty() {
+            println!("Restored {} variables from previous session.", vars.len());
+        }
+    }
+    println!();
 
     loop {
         let prompt = "会sh> ";
