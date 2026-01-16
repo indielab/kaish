@@ -6,7 +6,7 @@ use kaish_repl::Repl;
 
 /// Helper to run multiple lines through a REPL and collect outputs.
 fn run_script(script: &str) -> Vec<String> {
-    let mut repl = Repl::new();
+    let mut repl = Repl::new().expect("Failed to create REPL");
     let mut outputs = Vec::new();
 
     for line in script.lines() {

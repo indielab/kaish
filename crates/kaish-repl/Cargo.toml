@@ -27,5 +27,8 @@ tracing-subscriber = { workspace = true }
 # Paths
 dirs = "6"
 
+# Async runtime
+tokio = { workspace = true }
+
 [lints]
 workspace = true

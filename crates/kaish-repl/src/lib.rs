@@ -1,36 +1,78 @@
 //! kaish REPL — Interactive shell for 会sh.
 //!
 //! This is an evolving REPL that grows with each layer of the kaish project.
-//! Currently (L4), it provides:
+//! Currently (L6), it provides:
 //!
 //! - Parse input and display AST (`/ast` toggle)
 //! - Evaluate expressions with persistent Scope
 //! - `set X = value` assignments
-//! - Stub executor returns dummy `$?` for commands
-//! - Meta-commands: `/help`, `/quit`, `/ast`, `/scope`
+//! - Real tool execution via VFS (ls, cat, echo, cd, pwd, mkdir, write, rm)
+//! - Meta-commands: `/help`, `/quit`, `/ast`, `/scope`, `/cwd`
+
+use std::path::PathBuf;
+use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use rustyline::error::ReadlineError;
 use rustyline::history::DefaultHistory;
 use rustyline::Editor;
+use tokio::runtime::Runtime;
 
 use kaish_kernel::ast::{Arg, Expr, Pipeline, Stmt, Value};
 use kaish_kernel::interpreter::{ExecResult, Scope};
 use kaish_kernel::parser::parse;
+use kaish_kernel::tools::{ExecContext, ToolArgs, ToolRegistry, register_builtins};
+use kaish_kernel::vfs::{LocalFs, MemoryFs, VfsRouter};
 
 /// REPL configuration and state.
 pub struct Repl {
     scope: Scope,
     show_ast: bool,
+    tools: ToolRegistry,
+    exec_ctx: ExecContext,
+    runtime: Runtime,
 }
 
 impl Repl {
-    /// Create a new REPL instance.
-    pub fn new() -> Self {
-        Self {
+    /// Create a new REPL instance with VFS rooted at current directory.
+    pub fn new() -> Result<Self> {
+        let cwd = std::env::current_dir().context("Failed to get current directory")?;
+        Self::with_root(cwd)
+    }
+
+    /// Create a new REPL with VFS rooted at the given path.
+    pub fn with_root(root: PathBuf) -> Result<Self> {
+        // Build the VFS
+        let mut vfs = VfsRouter::new();
+
+        // Mount the real filesystem at /mnt/local
+        let local_fs = LocalFs::new(root.clone());
+        vfs.mount("/mnt/local", local_fs);
+
+        // Mount a memory fs at /scratch for ephemeral data
+        vfs.mount("/scratch", MemoryFs::new());
+
+        // Mount root as memory fs (for now)
+        vfs.mount("/", MemoryFs::new());
+
+        // Create execution context starting at /mnt/local
+        let mut exec_ctx = ExecContext::new(Arc::new(vfs));
+        exec_ctx.set_cwd(PathBuf::from("/mnt/local"));
+
+        // Build tool registry with builtins
+        let mut tools = ToolRegistry::new();
+        register_builtins(&mut tools);
+
+        // Create tokio runtime for async tool execution
+        let runtime = Runtime::new().context("Failed to create tokio runtime")?;
+
+        Ok(Self {
             scope: Scope::new(),
             show_ast: false,
-        }
+            tools,
+            exec_ctx,
+            runtime,
+        })
     }
 
     /// Process a single line of input.
@@ -153,59 +195,53 @@ impl Repl {
         }
     }
 
-    /// Execute a command (stub implementation).
+    /// Execute a command using the tool registry.
     fn execute_command(&mut self, name: &str, args: &[Arg]) -> Result<ExecResult> {
-        // Evaluate arguments
-        let mut evaluated_args = Vec::new();
+        // Special built-ins that don't need the tool registry
+        match name {
+            "true" => return Ok(ExecResult::success("")),
+            "false" => return Ok(ExecResult::failure(1, "")),
+            _ => {}
+        }
+
+        // Look up tool in registry
+        let tool = match self.tools.get(name) {
+            Some(t) => t,
+            None => {
+                return Ok(ExecResult::failure(
+                    127,
+                    format!("{}: command not found", name),
+                ));
+            }
+        };
+
+        // Convert AST args to ToolArgs
+        let mut tool_args = ToolArgs::new();
         for arg in args {
             match arg {
                 Arg::Positional(expr) => {
                     let value = self.eval_expr(expr)?;
-                    evaluated_args.push(format_value(&value));
+                    tool_args.positional.push(value);
                 }
                 Arg::Named { key, value } => {
                     let val = self.eval_expr(value)?;
-                    evaluated_args.push(format!("{}={}", key, format_value(&val)));
+                    tool_args.named.insert(key.clone(), val);
                 }
             }
         }
 
-        // Special handling for built-in commands we can simulate
-        match name {
-            "echo" => {
-                // For echo, strip quotes from string values
-                let output: Vec<String> = args.iter().map(|arg| {
-                    match arg {
-                        Arg::Positional(expr) => {
-                            if let Ok(value) = self.eval_expr(expr) {
-                                format_value_unquoted(&value)
-                            } else {
-                                "<error>".to_string()
-                            }
-                        }
-                        Arg::Named { key, value } => {
-                            if let Ok(val) = self.eval_expr(value) {
-                                format!("{}={}", key, format_value_unquoted(&val))
-                            } else {
-                                format!("{}=<error>", key)
-                            }
-                        }
-                    }
-                }).collect();
-                Ok(ExecResult::success(output.join(" ")))
-            }
-            "true" => Ok(ExecResult::success("")),
-            "false" => Ok(ExecResult::failure(1, "")),
-            _ => {
-                // Stub: just show what would be executed
-                let cmd_line = if evaluated_args.is_empty() {
-                    name.to_string()
-                } else {
-                    format!("{} {}", name, evaluated_args.join(" "))
-                };
-                Ok(ExecResult::success(format!("[stub] {}", cmd_line)))
-            }
+        // Execute the tool asynchronously
+        let result = self.runtime.block_on(tool.execute(tool_args, &mut self.exec_ctx));
+
+        // Sync cwd back to scope if cd was called
+        if name == "cd" && result.ok() {
+            // Update scope with new cwd for display
+            self.scope.set("CWD", Value::String(
+                self.exec_ctx.cwd.to_string_lossy().to_string()
+            ));
         }
+
+        Ok(result)
     }
 
     /// Execute a pipeline (stub implementation).
@@ -364,6 +400,13 @@ impl Repl {
                 let result = self.scope.last_result();
                 Ok(Some(format_result(result)))
             }
+            "/cwd" => {
+                Ok(Some(self.exec_ctx.cwd.to_string_lossy().to_string()))
+            }
+            "/tools" => {
+                let names = self.tools.names();
+                Ok(Some(format!("Available tools: {}", names.join(", "))))
+            }
             _ => {
                 Ok(Some(format!("Unknown command: {}\nType /help for available commands.", command)))
             }
@@ -373,7 +416,7 @@ impl Repl {
 
 impl Default for Repl {
     fn default() -> Self {
-        Self::new()
+        Self::new().expect("Failed to create REPL")
     }
 }
 
@@ -503,18 +546,29 @@ fn result_to_value(result: &ExecResult) -> Value {
     Value::Object(fields)
 }
 
-const HELP_TEXT: &str = r#"会sh — kaish REPL (Layer 4)
+const HELP_TEXT: &str = r#"会sh — kaish REPL (Layer 6)
 
-Commands:
+Meta Commands:
   /help, /h, /?     Show this help
   /quit, /q, /exit  Exit the REPL
   /ast              Toggle AST display mode
   /scope, /vars     Show all variables
   /result, /$?      Show last command result
+  /cwd              Show current working directory
+  /tools            List available tools
+
+Built-in Tools:
+  echo [args...]    Print arguments
+  pwd               Print working directory
+  cd [path]         Change directory
+  ls [path] [-l]    List directory contents
+  cat <path>        Read file contents
+  mkdir <path>      Create directory
+  write <path> <content>  Write to file
+  rm <path>         Remove file or empty directory
 
 Language:
   set X = value     Assign a variable
-  echo "hello"      Run a command (stub for most)
   ${VAR}            Variable reference
   ${VAR.field}      Nested access
   ${?.ok}           Last result access
@@ -523,15 +577,17 @@ Language:
   for X in arr; do ... done
 
 Examples:
-  set NAME = "World"
-  echo "Hello ${NAME}"
-  set DATA = {"count": 42}
-  echo ${DATA.count}
+  ls                         # List current directory
+  cd subdir                  # Change to subdir
+  cat README.md              # Read a file
+  echo "Hello ${USER}"       # Print with variable
+  set DATA = {"count": 42}   # Create object
+  echo ${DATA.count}         # Access field
 "#;
 
 /// Run the REPL.
 pub fn run() -> Result<()> {
-    println!("会sh — kaish v{} (Layer 4: Eval REPL)", env!("CARGO_PKG_VERSION"));
+    println!("会sh — kaish v{} (Layer 6: Tools)", env!("CARGO_PKG_VERSION"));
     println!("Type /help for commands, /quit to exit.\n");
 
     let mut rl: Editor<(), DefaultHistory> = Editor::new()
@@ -544,7 +600,7 @@ pub fn run() -> Result<()> {
         let _ = rl.load_history(path);
     }
 
-    let mut repl = Repl::new();
+    let mut repl = Repl::new()?;
 
     loop {
         let prompt = "会sh> ";

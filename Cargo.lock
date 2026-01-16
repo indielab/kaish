@@ -319,6 +319,7 @@ dependencies = [
  "dirs",
  "kaish-kernel",
  "rustyline",
+ "tokio",
  "tracing",
  "tracing-subscriber",
 ]
