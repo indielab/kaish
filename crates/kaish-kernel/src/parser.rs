@@ -366,18 +366,48 @@ where
         .boxed()
 }
 
-/// Argument: positional value or `name=value`
+/// Argument: positional value, `name=value`, or flags (`-x`, `--name`)
 fn arg_parser<'tokens, I>(
 ) -> impl Parser<'tokens, I, Arg, extra::Err<Rich<'tokens, Token, Span>>> + Clone
 where
     I: ValueInput<'tokens, Token = Token, Span = Span>,
 {
-    ident_parser()
+    // Long flag with value: --name=value
+    let long_flag_with_value = select! {
+        Token::LongFlag(name) => name,
+    }
+    .then_ignore(just(Token::Eq))
+    .then(primary_expr_parser())
+    .map(|(key, value)| Arg::Named { key, value });
+
+    // Boolean long flag: --name
+    let long_flag = select! {
+        Token::LongFlag(name) => Arg::LongFlag(name),
+    };
+
+    // Boolean short flag: -x
+    let short_flag = select! {
+        Token::ShortFlag(name) => Arg::ShortFlag(name),
+    };
+
+    // Named argument: name=value
+    let named = ident_parser()
         .then_ignore(just(Token::Eq))
         .then(primary_expr_parser())
-        .map(|(key, value)| Arg::Named { key, value })
-        .or(primary_expr_parser().map(Arg::Positional))
-        .boxed()
+        .map(|(key, value)| Arg::Named { key, value });
+
+    // Positional argument
+    let positional = primary_expr_parser().map(Arg::Positional);
+
+    // Order matters: try more specific patterns first
+    choice((
+        long_flag_with_value,
+        long_flag,
+        short_flag,
+        named,
+        positional,
+    ))
+    .boxed()
 }
 
 /// Redirect: `> file`, `>> file`, `< file`, `2> file`, `&> file`
@@ -513,11 +543,40 @@ where
     E: Parser<'tokens, I, Expr, extra::Err<Rich<'tokens, Token, Span>>> + Clone,
 {
     // Argument parser using the recursive expression parser
-    let arg = ident_parser()
+    // Long flag with value: --name=value
+    let long_flag_with_value = select! {
+        Token::LongFlag(name) => name,
+    }
+    .then_ignore(just(Token::Eq))
+    .then(expr.clone())
+    .map(|(key, value)| Arg::Named { key, value });
+
+    // Boolean long flag: --name
+    let long_flag = select! {
+        Token::LongFlag(name) => Arg::LongFlag(name),
+    };
+
+    // Boolean short flag: -x
+    let short_flag = select! {
+        Token::ShortFlag(name) => Arg::ShortFlag(name),
+    };
+
+    // Named argument: name=value
+    let named = ident_parser()
         .then_ignore(just(Token::Eq))
         .then(expr.clone())
-        .map(|(key, value)| Arg::Named { key, value })
-        .or(expr.map(Arg::Positional));
+        .map(|(key, value)| Arg::Named { key, value });
+
+    // Positional argument
+    let positional = expr.map(Arg::Positional);
+
+    let arg = choice((
+        long_flag_with_value,
+        long_flag,
+        short_flag,
+        named,
+        positional,
+    ));
 
     // Command parser
     let command = ident_parser()
@@ -833,6 +892,98 @@ mod tests {
             Stmt::Command(cmd) => {
                 assert_eq!(cmd.args.len(), 1);
                 assert!(matches!(&cmd.args[0], Arg::Named { .. }));
+            }
+            _ => panic!("expected Command"),
+        }
+    }
+
+    #[test]
+    fn parse_short_flag() {
+        let result = parse("ls -l");
+        assert!(result.is_ok());
+        let program = result.expect("ok");
+        match &program.statements[0] {
+            Stmt::Command(cmd) => {
+                assert_eq!(cmd.name, "ls");
+                assert_eq!(cmd.args.len(), 1);
+                match &cmd.args[0] {
+                    Arg::ShortFlag(name) => assert_eq!(name, "l"),
+                    _ => panic!("expected ShortFlag"),
+                }
+            }
+            _ => panic!("expected Command"),
+        }
+    }
+
+    #[test]
+    fn parse_long_flag() {
+        let result = parse("git push --force");
+        assert!(result.is_ok());
+        let program = result.expect("ok");
+        match &program.statements[0] {
+            Stmt::Command(cmd) => {
+                assert_eq!(cmd.name, "git");
+                assert_eq!(cmd.args.len(), 2);
+                match &cmd.args[0] {
+                    Arg::Positional(Expr::Literal(Value::String(s))) => assert_eq!(s, "push"),
+                    _ => panic!("expected Positional push"),
+                }
+                match &cmd.args[1] {
+                    Arg::LongFlag(name) => assert_eq!(name, "force"),
+                    _ => panic!("expected LongFlag"),
+                }
+            }
+            _ => panic!("expected Command"),
+        }
+    }
+
+    #[test]
+    fn parse_long_flag_with_value() {
+        let result = parse(r#"git commit --message="hello""#);
+        assert!(result.is_ok());
+        let program = result.expect("ok");
+        match &program.statements[0] {
+            Stmt::Command(cmd) => {
+                assert_eq!(cmd.name, "git");
+                assert_eq!(cmd.args.len(), 2);
+                match &cmd.args[1] {
+                    Arg::Named { key, value } => {
+                        assert_eq!(key, "message");
+                        match value {
+                            Expr::Literal(Value::String(s)) => assert_eq!(s, "hello"),
+                            _ => panic!("expected String value"),
+                        }
+                    }
+                    _ => panic!("expected Named from --flag=value"),
+                }
+            }
+            _ => panic!("expected Command"),
+        }
+    }
+
+    #[test]
+    fn parse_mixed_flags_and_args() {
+        let result = parse(r#"git commit -m "message" --amend"#);
+        assert!(result.is_ok());
+        let program = result.expect("ok");
+        match &program.statements[0] {
+            Stmt::Command(cmd) => {
+                assert_eq!(cmd.name, "git");
+                assert_eq!(cmd.args.len(), 4);
+                // commit (positional)
+                assert!(matches!(&cmd.args[0], Arg::Positional(_)));
+                // -m (short flag)
+                match &cmd.args[1] {
+                    Arg::ShortFlag(name) => assert_eq!(name, "m"),
+                    _ => panic!("expected ShortFlag -m"),
+                }
+                // "message" (positional)
+                assert!(matches!(&cmd.args[2], Arg::Positional(_)));
+                // --amend (long flag)
+                match &cmd.args[3] {
+                    Arg::LongFlag(name) => assert_eq!(name, "amend"),
+                    _ => panic!("expected LongFlag --amend"),
+                }
             }
             _ => panic!("expected Command"),
         }

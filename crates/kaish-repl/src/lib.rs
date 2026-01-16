@@ -227,6 +227,15 @@ impl Repl {
                     let val = self.eval_expr(value)?;
                     tool_args.named.insert(key.clone(), val);
                 }
+                Arg::ShortFlag(name) => {
+                    // Expand combined flags like -la into individual flags
+                    for c in name.chars() {
+                        tool_args.flags.insert(c.to_string());
+                    }
+                }
+                Arg::LongFlag(name) => {
+                    tool_args.flags.insert(name.clone());
+                }
             }
         }
 

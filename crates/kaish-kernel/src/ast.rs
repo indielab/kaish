@@ -102,6 +102,10 @@ pub enum Arg {
     Positional(Expr),
     /// Named argument: `key=value`
     Named { key: String, value: Expr },
+    /// Short flag: `-l`, `-v` (boolean flag)
+    ShortFlag(String),
+    /// Long flag: `--force`, `--verbose` (boolean flag)
+    LongFlag(String),
 }
 
 /// I/O redirection.

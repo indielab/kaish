@@ -211,6 +211,22 @@ pub enum Token {
     CmdSubstStart,
 
     // ═══════════════════════════════════════════════════════════════════
+    // Flags (must come before Int to win over negative numbers)
+    // ═══════════════════════════════════════════════════════════════════
+
+    /// Long flag: `--name` or `--foo-bar`
+    #[regex(r"--[a-zA-Z][a-zA-Z0-9-]*", lex_long_flag, priority = 3)]
+    LongFlag(String),
+
+    /// Short flag: `-l` or `-la` (combined short flags)
+    #[regex(r"-[a-zA-Z][a-zA-Z0-9]*", lex_short_flag, priority = 3)]
+    ShortFlag(String),
+
+    /// Double dash: `--` alone marks end of flags
+    #[token("--")]
+    DoubleDash,
+
+    // ═══════════════════════════════════════════════════════════════════
     // Literals (with values)
     // ═══════════════════════════════════════════════════════════════════
 
@@ -281,6 +297,18 @@ fn lex_ident(lex: &mut logos::Lexer<Token>) -> String {
     lex.slice().to_string()
 }
 
+/// Lex a long flag: `--name` → `name`
+fn lex_long_flag(lex: &mut logos::Lexer<Token>) -> String {
+    // Strip the leading `--`
+    lex.slice()[2..].to_string()
+}
+
+/// Lex a short flag: `-l` → `l`, `-la` → `la`
+fn lex_short_flag(lex: &mut logos::Lexer<Token>) -> String {
+    // Strip the leading `-`
+    lex.slice()[1..].to_string()
+}
+
 impl fmt::Display for Token {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
@@ -327,6 +355,9 @@ impl fmt::Display for Token {
             Token::LParen => write!(f, "("),
             Token::RParen => write!(f, ")"),
             Token::CmdSubstStart => write!(f, "$("),
+            Token::LongFlag(s) => write!(f, "--{}", s),
+            Token::ShortFlag(s) => write!(f, "-{}", s),
+            Token::DoubleDash => write!(f, "--"),
             Token::String(s) => write!(f, "STRING({:?})", s),
             Token::VarRef(v) => write!(f, "VARREF({})", v),
             Token::Int(n) => write!(f, "INT({})", n),
@@ -1048,6 +1079,112 @@ mod tests {
                 Token::Ident("count".to_string()),
                 Token::Eq,
                 Token::Int(10),
+            ]
+        );
+    }
+
+    // ═══════════════════════════════════════════════════════════════════
+    // Flag tests
+    // ═══════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn short_flag() {
+        assert_eq!(lex("-l"), vec![Token::ShortFlag("l".to_string())]);
+        assert_eq!(lex("-a"), vec![Token::ShortFlag("a".to_string())]);
+        assert_eq!(lex("-v"), vec![Token::ShortFlag("v".to_string())]);
+    }
+
+    #[test]
+    fn short_flag_combined() {
+        // Combined short flags like -la
+        assert_eq!(lex("-la"), vec![Token::ShortFlag("la".to_string())]);
+        assert_eq!(lex("-vvv"), vec![Token::ShortFlag("vvv".to_string())]);
+    }
+
+    #[test]
+    fn long_flag() {
+        assert_eq!(lex("--force"), vec![Token::LongFlag("force".to_string())]);
+        assert_eq!(lex("--verbose"), vec![Token::LongFlag("verbose".to_string())]);
+        assert_eq!(lex("--foo-bar"), vec![Token::LongFlag("foo-bar".to_string())]);
+    }
+
+    #[test]
+    fn double_dash() {
+        // -- alone marks end of flags
+        assert_eq!(lex("--"), vec![Token::DoubleDash]);
+    }
+
+    #[test]
+    fn flags_vs_negative_numbers() {
+        // -123 should be a negative integer, not a flag
+        assert_eq!(lex("-123"), vec![Token::Int(-123)]);
+        // -l should be a flag
+        assert_eq!(lex("-l"), vec![Token::ShortFlag("l".to_string())]);
+        // -1a is ambiguous - should be Int(-1) then Ident(a)
+        // Actually the regex -[a-zA-Z] won't match -1a since 1 isn't a letter
+        assert_eq!(
+            lex("-1 a"),
+            vec![Token::Int(-1), Token::Ident("a".to_string())]
+        );
+    }
+
+    #[test]
+    fn command_with_flags() {
+        assert_eq!(
+            lex("ls -l"),
+            vec![
+                Token::Ident("ls".to_string()),
+                Token::ShortFlag("l".to_string()),
+            ]
+        );
+        assert_eq!(
+            lex("git commit -m"),
+            vec![
+                Token::Ident("git".to_string()),
+                Token::Ident("commit".to_string()),
+                Token::ShortFlag("m".to_string()),
+            ]
+        );
+        assert_eq!(
+            lex("git push --force"),
+            vec![
+                Token::Ident("git".to_string()),
+                Token::Ident("push".to_string()),
+                Token::LongFlag("force".to_string()),
+            ]
+        );
+    }
+
+    #[test]
+    fn flag_with_value() {
+        assert_eq!(
+            lex(r#"git commit -m "message""#),
+            vec![
+                Token::Ident("git".to_string()),
+                Token::Ident("commit".to_string()),
+                Token::ShortFlag("m".to_string()),
+                Token::String("message".to_string()),
+            ]
+        );
+        assert_eq!(
+            lex(r#"--message="hello""#),
+            vec![
+                Token::LongFlag("message".to_string()),
+                Token::Eq,
+                Token::String("hello".to_string()),
+            ]
+        );
+    }
+
+    #[test]
+    fn end_of_flags_marker() {
+        assert_eq!(
+            lex("git checkout -- file"),
+            vec![
+                Token::Ident("git".to_string()),
+                Token::Ident("checkout".to_string()),
+                Token::DoubleDash,
+                Token::Ident("file".to_string()),
             ]
         );
     }

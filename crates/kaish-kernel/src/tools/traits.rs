@@ -1,7 +1,7 @@
 //! Core tool traits and types.
 
 use async_trait::async_trait;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use crate::ast::Value;
 use crate::interpreter::ExecResult;
@@ -82,6 +82,8 @@ pub struct ToolArgs {
     pub positional: Vec<Value>,
     /// Named arguments by key.
     pub named: HashMap<String, Value>,
+    /// Boolean flags (e.g., -l, --force).
+    pub flags: HashSet<String>,
 }
 
 impl ToolArgs {
@@ -132,8 +134,13 @@ impl ToolArgs {
         })
     }
 
-    /// Check if a flag is set (named bool or presence).
+    /// Check if a flag is set (in flags set, or named bool).
     pub fn has_flag(&self, name: &str) -> bool {
+        // Check the flags set first (from -x or --name syntax)
+        if self.flags.contains(name) {
+            return true;
+        }
+        // Fall back to checking named args (from name=true syntax)
         self.named.get(name).map_or(false, |v| match v {
             Value::Bool(b) => *b,
             Value::String(s) => !s.is_empty() && s != "false" && s != "0",
