@@ -3,6 +3,7 @@ resolver = "2"
 members = [
     "crates/kaish-schema",
     "crates/kaish-kernel",
+    "crates/kaish-repl",
 ]
 
 [workspace.package]
@@ -37,6 +38,9 @@ capnpc = "0.21"
 logos = "0.15"
 chumsky = { git = "https://github.com/zesterer/chumsky.git", rev = "b3c17795" }
 ariadne = "0.5"
+
+# REPL (L4)
+rustyline = "15"
 
 # Testing
 proptest = "1"

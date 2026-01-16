@@ -1,0 +1,31 @@
+[package]
+name = "kaish-repl"
+description = "Interactive REPL for kaish (会sh)"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[[bin]]
+name = "kaish"
+path = "src/main.rs"
+
+[dependencies]
+kaish-kernel = { path = "../kaish-kernel" }
+
+# Line editing
+rustyline = { workspace = true }
+
+# Error handling
+anyhow = { workspace = true }
+
+# Logging
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+
+# Paths
+dirs = "6"
+
+[lints]
+workspace = true

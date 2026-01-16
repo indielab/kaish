@@ -19,47 +19,76 @@ L3: Core Runtime
     ├── Variable scope
     └── ExecResult ($?)
 
-L4: VFS
+L4: REPL (Evolving) ← NEW: grows with each layer
+    ├── kaish-repl crate with rustyline
+    ├── Parse → AST display mode (/ast toggle)
+    ├── Expression evaluation with Scope
+    └── Stub executor for commands (returns dummy $?)
+
+L5: VFS
     ├── Filesystem trait
     ├── MemoryFs (/scratch)
     ├── LocalFs (/src)
     └── VfsRouter (mount points)
+    └── REPL+: cat, ls on VFS paths
 
-L5: Tools
+L6: Tools
     ├── Tool trait
     ├── ToolRegistry
-    └── Builtins (echo, ls, cat, grep, etc.)
+    └── Builtins (echo, set, cat, grep, etc.)
+    └── REPL+: real command execution
 
-L6: Pipes & Jobs
+L7: Pipes & Jobs
     ├── Pipeline execution (tokio channels)
     └── Background jobs (JobManager)
+    └── REPL+: pipelines, &, jobs, wait
 
-L7: MCP Client
+L8: MCP Client
     ├── McpClient wrapper
     └── Tool discovery
+    └── REPL+: MCP tool calls
 
-L8: 散/集 (Scatter/Gather)
+L9: 散/集 (Scatter/Gather)
     ├── scatter implementation
     └── gather implementation
+    └── REPL+: parallel execution
 
-L9: State Persistence
+L10: State Persistence
     ├── SQLite integration (rusqlite)
     └── State save/restore
+    └── REPL+: session persistence
 
-L10: 核 (Kernel)
+L11: 核 (Kernel)
     ├── Kernel struct
     ├── Cap'n Proto RPC server
     └── Socket listener
 
-L11: Clients
-    ├── EmbeddedClient
-    └── IpcClient
+L12: Clients
+    ├── EmbeddedClient (wraps Kernel directly)
+    └── IpcClient (connects via socket)
 
-L12: Frontends
-    ├── Script runner
-    ├── REPL (rustyline)
-    └── MCP server mode
+L13: Frontends (Final)
+    ├── Script runner (kaish script.kai)
+    ├── REPL client mode (connects to kernel)
+    └── MCP server mode (kaish serve)
 ```
+
+### REPL Evolution Strategy
+
+The REPL is introduced early (L4) and gains capabilities incrementally:
+
+| Layer | REPL Capabilities |
+|-------|-------------------|
+| L4 | Parse input, show AST, evaluate expressions, `set` variables |
+| L5 | `cat`, `ls` work on VFS paths |
+| L6 | All builtins work, real command execution |
+| L7 | Pipelines (`a \| b`), background jobs (`&`), `jobs`, `wait` |
+| L8 | MCP tool calls (`server.tool arg=val`) |
+| L9 | `scatter`/`gather` parallelism |
+| L10 | Session save/restore across restarts |
+| L13 | Connect to remote kernels via IPC |
+
+This gives us an interactive playground throughout development.
 
 ---
 
@@ -350,7 +379,57 @@ assert_eq!(eval(&parse("${X}"), &scope), Value::Int(42));
 
 ---
 
-## Layer 4: VFS
+## Layer 4: REPL (Evolving)
+
+**Goal**: Interactive shell that grows with each layer.
+
+### Files:
+```
+crates/kaish-repl/
+├── Cargo.toml
+└── src/
+    ├── lib.rs              # Core REPL logic
+    └── main.rs             # Entry point
+```
+
+### Dependencies:
+```toml
+rustyline = "14"
+kaish-kernel = { path = "../kaish-kernel" }
+```
+
+### Initial Capabilities (L4):
+- Parse input and display AST (`/ast` toggle)
+- Evaluate expressions with persistent Scope
+- `set X = value` assignments work
+- Stub executor returns dummy `$?` for commands
+- `/help`, `/quit` meta-commands
+
+### REPL Commands:
+```
+会sh> set NAME = "Alice"
+会sh> echo "Hello ${NAME}"
+[stub] echo "Hello Alice"
+$? = { ok: true, code: 0, out: "Hello Alice" }
+
+会sh> /ast
+AST mode: ON
+会sh> set X = 5
+Stmt::Assignment { name: "X", value: Literal(Int(5)) }
+
+会sh> /help
+Commands: /ast, /scope, /quit, /help
+```
+
+### Verification:
+- `cargo run -p kaish-repl` launches REPL
+- Can set variables and see them in expressions
+- `/ast` shows parsed AST
+- `/scope` dumps current variables
+
+---
+
+## Layer 5: VFS (formerly L4)
 
 **Goal**: Abstract filesystem with mount points.
 
@@ -631,15 +710,16 @@ src/main.rs                 # CLI binary
 | L1 | kaish-kernel (lexer) | 50 | Token stream correct |
 | L2 | kaish-kernel (parser) | 100 | AST from source |
 | L3 | kaish-kernel (runtime) | 80 | Variables, $? work |
-| L4 | kaish-kernel (vfs) | 60 | Mount, read, write |
-| L5 | kaish-kernel (tools) | 100 | Builtins work |
-| L6 | kaish-kernel (pipes) | 40 | Pipelines, jobs |
-| L7 | kaish-kernel (mcp) | 30 | MCP calls work |
-| L8 | kaish-kernel (scatter) | 50 | 散/集 parallelism |
-| L9 | kaish-kernel (state) | 40 | Save/restore |
-| L10 | kaish-kernel (kernel) | 30 | Full kernel |
-| L11 | kaish-client | 20 | Both client types |
-| L12 | frontends | 50 | REPL, script, serve |
+| **L4** | **kaish-repl** | **20** | **Interactive REPL works** |
+| L5 | kaish-kernel (vfs) | 60 | Mount, read, write |
+| L6 | kaish-kernel (tools) | 100 | Builtins work |
+| L7 | kaish-kernel (pipes) | 40 | Pipelines, jobs |
+| L8 | kaish-kernel (mcp) | 30 | MCP calls work |
+| L9 | kaish-kernel (scatter) | 50 | 散/集 parallelism |
+| L10 | kaish-kernel (state) | 40 | Save/restore |
+| L11 | kaish-kernel (kernel) | 30 | Full kernel |
+| L12 | kaish-client | 20 | Both client types |
+| L13 | frontends (final) | 30 | Script runner, MCP serve |
 | **Total** | | **~650** | |
 
 ---
