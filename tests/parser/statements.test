@@ -1,0 +1,561 @@
+# Parser Tests: Statements
+# Format:
+#   # test: name
+#   # expect: ok | error
+#   ---
+#   input
+#   ---
+#   expected AST (S-expression) or error message
+#   ===
+
+# ============================================================
+# ASSIGNMENTS
+# ============================================================
+
+# test: assign_int
+# expect: ok
+---
+set X = 5
+---
+(assign X (int 5))
+===
+
+# test: assign_negative_int
+# expect: ok
+---
+set X = -42
+---
+(assign X (int -42))
+===
+
+# test: assign_float
+# expect: ok
+---
+set PI = 3.14159
+---
+(assign PI (float 3.14159))
+===
+
+# test: assign_bool_true
+# expect: ok
+---
+set FLAG = true
+---
+(assign FLAG (bool true))
+===
+
+# test: assign_bool_false
+# expect: ok
+---
+set FLAG = false
+---
+(assign FLAG (bool false))
+===
+
+# test: assign_string
+# expect: ok
+---
+set NAME = "alice"
+---
+(assign NAME (string "alice"))
+===
+
+# test: assign_string_with_spaces
+# expect: ok
+---
+set MSG = "hello world"
+---
+(assign MSG (string "hello world"))
+===
+
+# test: assign_string_with_escapes
+# expect: ok
+---
+set MSG = "line\nbreak"
+---
+(assign MSG (string "line\nbreak"))
+===
+
+# test: assign_array_empty
+# expect: ok
+---
+set LIST = []
+---
+(assign LIST (array))
+===
+
+# test: assign_array_ints
+# expect: ok
+---
+set NUMS = [1, 2, 3]
+---
+(assign NUMS (array (int 1) (int 2) (int 3)))
+===
+
+# test: assign_array_mixed
+# expect: ok
+---
+set MIX = [1, "two", true]
+---
+(assign MIX (array (int 1) (string "two") (bool true)))
+===
+
+# test: assign_object_empty
+# expect: ok
+---
+set OBJ = {}
+---
+(assign OBJ (object))
+===
+
+# test: assign_object_simple
+# expect: ok
+---
+set CFG = {host: "localhost", port: 8080}
+---
+(assign CFG (object (pair host (string "localhost")) (pair port (int 8080))))
+===
+
+# test: assign_varref
+# expect: ok
+---
+set Y = ${X}
+---
+(assign Y (varref X))
+===
+
+# test: assign_interpolated
+# expect: ok
+---
+set MSG = "hello ${NAME}"
+---
+(assign MSG (interpolated "hello " (varref NAME)))
+===
+
+# test: error_assign_no_set
+# expect: error
+---
+X = 5
+---
+error at 1:1: unexpected token, use 'set X = ...' for assignment
+===
+
+# test: error_assign_ambiguous_value
+# expect: error
+---
+set FLAG = YES
+---
+error at 1:12: ambiguous value 'YES', use 'true' or '"YES"'
+===
+
+# test: error_assign_bare_word
+# expect: error
+---
+set NAME = alice
+---
+error at 1:12: ambiguous value 'alice', use '"alice"'
+===
+
+# ============================================================
+# COMMANDS
+# ============================================================
+
+# test: cmd_simple
+# expect: ok
+---
+echo
+---
+(cmd echo)
+===
+
+# test: cmd_positional_string
+# expect: ok
+---
+echo "hello"
+---
+(cmd echo (pos (string "hello")))
+===
+
+# test: cmd_positional_multiple
+# expect: ok
+---
+echo "hello" "world"
+---
+(cmd echo (pos (string "hello")) (pos (string "world")))
+===
+
+# test: cmd_named_int
+# expect: ok
+---
+fetch count=10
+---
+(cmd fetch (named count (int 10)))
+===
+
+# test: cmd_named_string
+# expect: ok
+---
+search query="rust"
+---
+(cmd search (named query (string "rust")))
+===
+
+# test: cmd_named_multiple
+# expect: ok
+---
+api endpoint="/users" limit=50 verbose=true
+---
+(cmd api (named endpoint (string "/users")) (named limit (int 50)) (named verbose (bool true)))
+===
+
+# test: cmd_mixed_args
+# expect: ok
+---
+grep "pattern" path="/src" context=3
+---
+(cmd grep (pos (string "pattern")) (named path (string "/src")) (named context (int 3)))
+===
+
+# test: cmd_named_array
+# expect: ok
+---
+select fields=[name, age, email]
+---
+(cmd select (named fields (array (string "name") (string "age") (string "email"))))
+===
+
+# test: cmd_named_object
+# expect: ok
+---
+query filter={active: true, role: "admin"}
+---
+(cmd query (named filter (object (pair active (bool true)) (pair role (string "admin")))))
+===
+
+# test: cmd_dotted_name
+# expect: ok
+---
+exa.web_search query="rust"
+---
+(cmd exa.web_search (named query (string "rust")))
+===
+
+# test: error_cmd_space_in_named
+# expect: error
+---
+cmd foo = bar
+---
+error at 1:9: unexpected '=' in command arguments; named args use 'key=value' with no spaces
+===
+
+# ============================================================
+# PIPELINES
+# ============================================================
+
+# test: pipe_two
+# expect: ok
+---
+a | b
+---
+(pipeline (cmd a) (cmd b))
+===
+
+# test: pipe_three
+# expect: ok
+---
+cat file | grep "pattern" | head 10
+---
+(pipeline (cmd cat (pos (string "file"))) (cmd grep (pos (string "pattern"))) (cmd head (pos (int 10))))
+===
+
+# test: pipe_with_args
+# expect: ok
+---
+ls path="/src" | grep pattern="\.rs$" | wc
+---
+(pipeline
+  (cmd ls (named path (string "/src")))
+  (cmd grep (named pattern (string "\\.rs$")))
+  (cmd wc))
+===
+
+# test: pipe_background
+# expect: ok
+---
+slow-task &
+---
+(background (cmd slow-task))
+===
+
+# test: pipe_chain_background
+# expect: ok
+---
+a | b | c &
+---
+(background (pipeline (cmd a) (cmd b) (cmd c)))
+===
+
+# ============================================================
+# REDIRECTS
+# ============================================================
+
+# test: redirect_stdout
+# expect: ok
+---
+echo "hello" > /tmp/out
+---
+(cmd echo (pos (string "hello")) (redir > (string "/tmp/out")))
+===
+
+# test: redirect_append
+# expect: ok
+---
+echo "more" >> /tmp/out
+---
+(cmd echo (pos (string "more")) (redir >> (string "/tmp/out")))
+===
+
+# test: redirect_stdin
+# expect: ok
+---
+wc < /tmp/input
+---
+(cmd wc (redir < (string "/tmp/input")))
+===
+
+# test: redirect_stderr
+# expect: ok
+---
+risky-cmd 2> /tmp/err
+---
+(cmd risky-cmd (redir 2> (string "/tmp/err")))
+===
+
+# test: redirect_both
+# expect: ok
+---
+cmd &> /tmp/all
+---
+(cmd cmd (redir &> (string "/tmp/all")))
+===
+
+# test: redirect_multiple
+# expect: ok
+---
+cmd < /in > /out 2> /err
+---
+(cmd cmd (redir < (string "/in")) (redir > (string "/out")) (redir 2> (string "/err")))
+===
+
+# test: redirect_in_pipeline
+# expect: ok
+---
+a | b > /out
+---
+(pipeline (cmd a) (cmd b (redir > (string "/out"))))
+===
+
+# ============================================================
+# CONTROL FLOW
+# ============================================================
+
+# test: if_simple
+# expect: ok
+---
+if ${?.ok}; then
+    echo "yes"
+fi
+---
+(if (varref ?.ok) (then (cmd echo (pos (string "yes")))))
+===
+
+# test: if_else
+# expect: ok
+---
+if ${?.ok}; then
+    echo "yes"
+else
+    echo "no"
+fi
+---
+(if (varref ?.ok) (then (cmd echo (pos (string "yes")))) (else (cmd echo (pos (string "no")))))
+===
+
+# test: if_command_condition
+# expect: ok
+---
+if test-something; then
+    echo "passed"
+fi
+---
+(if (cmd test-something) (then (cmd echo (pos (string "passed")))))
+===
+
+# test: if_comparison
+# expect: ok
+---
+if (${X} > 5); then
+    echo "big"
+fi
+---
+(if (cmp > (varref X) (int 5)) (then (cmd echo (pos (string "big")))))
+===
+
+# test: for_simple
+# expect: ok
+---
+for X in ${LIST}; do
+    echo ${X}
+done
+---
+(for X (varref LIST) (do (cmd echo (pos (varref X)))))
+===
+
+# test: for_array_literal
+# expect: ok
+---
+for N in [1, 2, 3]; do
+    echo ${N}
+done
+---
+(for N (array (int 1) (int 2) (int 3)) (do (cmd echo (pos (varref N)))))
+===
+
+# test: and_chain
+# expect: ok
+---
+a && b && c
+---
+(and (cmd a) (and (cmd b) (cmd c)))
+===
+
+# test: or_chain
+# expect: ok
+---
+a || b || c
+---
+(or (cmd a) (or (cmd b) (cmd c)))
+===
+
+# test: mixed_chain
+# expect: ok
+---
+a && b || c
+---
+(or (and (cmd a) (cmd b)) (cmd c))
+===
+
+# ============================================================
+# TOOL DEFINITIONS
+# ============================================================
+
+# test: tool_minimal
+# expect: ok
+---
+tool noop {
+}
+---
+(tooldef noop () ())
+===
+
+# test: tool_one_param
+# expect: ok
+---
+tool greet name:string {
+    echo "hello ${name}"
+}
+---
+(tooldef greet ((param name string)) ((cmd echo (pos (interpolated "hello " (varref name))))))
+===
+
+# test: tool_multiple_params
+# expect: ok
+---
+tool fetch url:string timeout:int retries:int {
+    http-get url=${url} timeout=${timeout}
+}
+---
+(tooldef fetch
+  ((param url string) (param timeout int) (param retries int))
+  ((cmd http-get (named url (varref url)) (named timeout (varref timeout)))))
+===
+
+# test: tool_default_values
+# expect: ok
+---
+tool search query:string limit:int=10 offset:int=0 {
+    db-query q=${query} l=${limit} o=${offset}
+}
+---
+(tooldef search
+  ((param query string) (param limit int (int 10)) (param offset int (int 0)))
+  ((cmd db-query (named q (varref query)) (named l (varref limit)) (named o (varref offset)))))
+===
+
+# test: tool_typed_array
+# expect: ok
+---
+tool multi items:array {
+    echo ${items}
+}
+---
+(tooldef multi ((param items array)) ((cmd echo (pos (varref items)))))
+===
+
+# test: tool_typed_object
+# expect: ok
+---
+tool config opts:object {
+    apply ${opts}
+}
+---
+(tooldef config ((param opts object)) ((cmd apply (pos (varref opts)))))
+===
+
+# ============================================================
+# SCATTER/GATHER
+# ============================================================
+
+# test: scatter_basic
+# expect: ok
+---
+cat input | scatter | process | gather
+---
+(pipeline (cmd cat (pos (string "input"))) (cmd scatter) (cmd process) (cmd gather))
+===
+
+# test: scatter_with_as
+# expect: ok
+---
+cat input | scatter as=ITEM | process ${ITEM} | gather
+---
+(pipeline
+  (cmd cat (pos (string "input")))
+  (cmd scatter (named as (string "ITEM")))
+  (cmd process (pos (varref ITEM)))
+  (cmd gather))
+===
+
+# test: scatter_with_limit
+# expect: ok
+---
+cat input | scatter as=X limit=4 | process ${X} | gather
+---
+(pipeline
+  (cmd cat (pos (string "input")))
+  (cmd scatter (named as (string "X")) (named limit (int 4)))
+  (cmd process (pos (varref X)))
+  (cmd gather))
+===
+
+# test: gather_with_options
+# expect: ok
+---
+cat input | scatter | process | gather progress=true errors="/tmp/err"
+---
+(pipeline
+  (cmd cat (pos (string "input")))
+  (cmd scatter)
+  (cmd process)
+  (cmd gather (named progress (bool true)) (named errors (string "/tmp/err"))))
+===

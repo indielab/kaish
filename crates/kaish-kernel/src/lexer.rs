@@ -1,0 +1,1054 @@
+//! Lexer for kaish source code.
+//!
+//! Converts source text into a stream of tokens using the logos lexer generator.
+//! The lexer is designed to be unambiguous: every valid input produces exactly
+//! one token sequence, and invalid input produces clear errors.
+//!
+//! # Token Categories
+//!
+//! - **Keywords**: `set`, `tool`, `if`, `then`, `else`, `fi`, `for`, `in`, `do`, `done`
+//! - **Literals**: strings, integers, floats, booleans (`true`/`false`)
+//! - **Operators**: `=`, `|`, `&`, `>`, `>>`, `<`, `2>`, `&>`, `&&`, `||`
+//! - **Punctuation**: `;`, `:`, `,`, `.`, `{`, `}`, `[`, `]`
+//! - **Variable references**: `${...}` with nested path access
+//! - **Identifiers**: command names, variable names, parameter names
+
+use logos::{Logos, Span};
+use std::fmt;
+
+/// A token with its span in the source text.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Spanned<T> {
+    pub token: T,
+    pub span: Span,
+}
+
+impl<T> Spanned<T> {
+    pub fn new(token: T, span: Span) -> Self {
+        Self { token, span }
+    }
+}
+
+/// Lexer error types.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub enum LexerError {
+    #[default]
+    UnexpectedCharacter,
+    UnterminatedString,
+    UnterminatedVarRef,
+    InvalidEscape,
+    InvalidNumber,
+}
+
+impl fmt::Display for LexerError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            LexerError::UnexpectedCharacter => write!(f, "unexpected character"),
+            LexerError::UnterminatedString => write!(f, "unterminated string"),
+            LexerError::UnterminatedVarRef => write!(f, "unterminated variable reference"),
+            LexerError::InvalidEscape => write!(f, "invalid escape sequence"),
+            LexerError::InvalidNumber => write!(f, "invalid number"),
+        }
+    }
+}
+
+/// Tokens produced by the kaish lexer.
+///
+/// The order of variants matters for logos priority. More specific patterns
+/// (like keywords) should come before more general ones (like identifiers).
+///
+/// Tokens that carry semantic values (strings, numbers, identifiers) include
+/// the parsed value directly. This ensures the parser has access to actual
+/// data, not just token types.
+#[derive(Logos, Debug, Clone, PartialEq)]
+#[logos(error = LexerError)]
+#[logos(skip r"[ \t]+")]
+pub enum Token {
+    // ═══════════════════════════════════════════════════════════════════
+    // Keywords (must come before Ident for priority)
+    // ═══════════════════════════════════════════════════════════════════
+    #[token("set")]
+    Set,
+
+    #[token("tool")]
+    Tool,
+
+    #[token("if")]
+    If,
+
+    #[token("then")]
+    Then,
+
+    #[token("else")]
+    Else,
+
+    #[token("fi")]
+    Fi,
+
+    #[token("for")]
+    For,
+
+    #[token("in")]
+    In,
+
+    #[token("do")]
+    Do,
+
+    #[token("done")]
+    Done,
+
+    #[token("true")]
+    True,
+
+    #[token("false")]
+    False,
+
+    // ═══════════════════════════════════════════════════════════════════
+    // Type keywords (for tool parameters)
+    // ═══════════════════════════════════════════════════════════════════
+    #[token("string")]
+    TypeString,
+
+    #[token("int")]
+    TypeInt,
+
+    #[token("float")]
+    TypeFloat,
+
+    #[token("bool")]
+    TypeBool,
+
+    #[token("array")]
+    TypeArray,
+
+    #[token("object")]
+    TypeObject,
+
+    // ═══════════════════════════════════════════════════════════════════
+    // Multi-character operators (must come before single-char versions)
+    // ═══════════════════════════════════════════════════════════════════
+    #[token("&&")]
+    And,
+
+    #[token("||")]
+    Or,
+
+    #[token("==")]
+    EqEq,
+
+    #[token("!=")]
+    NotEq,
+
+    #[token(">=")]
+    GtEq,
+
+    #[token("<=")]
+    LtEq,
+
+    #[token(">>")]
+    GtGt,
+
+    #[token("2>")]
+    Stderr,
+
+    #[token("&>")]
+    Both,
+
+    // ═══════════════════════════════════════════════════════════════════
+    // Single-character operators and punctuation
+    // ═══════════════════════════════════════════════════════════════════
+    #[token("=")]
+    Eq,
+
+    #[token("|")]
+    Pipe,
+
+    #[token("&")]
+    Amp,
+
+    #[token(">")]
+    Gt,
+
+    #[token("<")]
+    Lt,
+
+    #[token(";")]
+    Semi,
+
+    #[token(":")]
+    Colon,
+
+    #[token(",")]
+    Comma,
+
+    #[token(".")]
+    Dot,
+
+    #[token("{")]
+    LBrace,
+
+    #[token("}")]
+    RBrace,
+
+    #[token("[")]
+    LBracket,
+
+    #[token("]")]
+    RBracket,
+
+    #[token("(")]
+    LParen,
+
+    #[token(")")]
+    RParen,
+
+    // ═══════════════════════════════════════════════════════════════════
+    // Command substitution
+    // ═══════════════════════════════════════════════════════════════════
+
+    /// Command substitution start: `$(` - begins a command substitution
+    #[token("$(")]
+    CmdSubstStart,
+
+    // ═══════════════════════════════════════════════════════════════════
+    // Literals (with values)
+    // ═══════════════════════════════════════════════════════════════════
+
+    /// String literal: `"..."` - value is the parsed content (quotes removed, escapes processed)
+    #[regex(r#""([^"\\]|\\.)*""#, lex_string)]
+    String(String),
+
+    /// Variable reference: `${VAR}` or `${VAR.field}` - value is the raw inner content
+    #[regex(r"\$\{[^}]+\}", lex_varref)]
+    VarRef(String),
+
+    /// Integer literal - value is the parsed i64
+    #[regex(r"-?[0-9]+", lex_int, priority = 2)]
+    Int(i64),
+
+    /// Float literal - value is the parsed f64
+    #[regex(r"-?[0-9]+\.[0-9]+", lex_float)]
+    Float(f64),
+
+    // ═══════════════════════════════════════════════════════════════════
+    // Identifiers (command names, variable names, etc.)
+    // ═══════════════════════════════════════════════════════════════════
+
+    /// Identifier - value is the identifier string
+    #[regex(r"[a-zA-Z_][a-zA-Z0-9_-]*", lex_ident)]
+    Ident(String),
+
+    // ═══════════════════════════════════════════════════════════════════
+    // Structural tokens
+    // ═══════════════════════════════════════════════════════════════════
+
+    /// Comment: `# ...` to end of line
+    #[regex(r"#[^\n\r]*")]
+    Comment,
+
+    /// Newline (significant in kaish - ends statements)
+    #[regex(r"\n|\r\n")]
+    Newline,
+
+    /// Line continuation: backslash at end of line
+    #[regex(r"\\[ \t]*(\n|\r\n)")]
+    LineContinuation,
+}
+
+/// Lex a string literal, processing escape sequences.
+fn lex_string(lex: &mut logos::Lexer<Token>) -> Result<String, LexerError> {
+    parse_string_literal(lex.slice())
+}
+
+/// Lex a variable reference, extracting the inner content.
+fn lex_varref(lex: &mut logos::Lexer<Token>) -> String {
+    // Keep the full ${...} for later parsing of path segments
+    lex.slice().to_string()
+}
+
+/// Lex an integer literal.
+fn lex_int(lex: &mut logos::Lexer<Token>) -> Result<i64, LexerError> {
+    lex.slice().parse().map_err(|_| LexerError::InvalidNumber)
+}
+
+/// Lex a float literal.
+fn lex_float(lex: &mut logos::Lexer<Token>) -> Result<f64, LexerError> {
+    lex.slice().parse().map_err(|_| LexerError::InvalidNumber)
+}
+
+/// Lex an identifier.
+fn lex_ident(lex: &mut logos::Lexer<Token>) -> String {
+    lex.slice().to_string()
+}
+
+impl fmt::Display for Token {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Token::Set => write!(f, "set"),
+            Token::Tool => write!(f, "tool"),
+            Token::If => write!(f, "if"),
+            Token::Then => write!(f, "then"),
+            Token::Else => write!(f, "else"),
+            Token::Fi => write!(f, "fi"),
+            Token::For => write!(f, "for"),
+            Token::In => write!(f, "in"),
+            Token::Do => write!(f, "do"),
+            Token::Done => write!(f, "done"),
+            Token::True => write!(f, "true"),
+            Token::False => write!(f, "false"),
+            Token::TypeString => write!(f, "string"),
+            Token::TypeInt => write!(f, "int"),
+            Token::TypeFloat => write!(f, "float"),
+            Token::TypeBool => write!(f, "bool"),
+            Token::TypeArray => write!(f, "array"),
+            Token::TypeObject => write!(f, "object"),
+            Token::And => write!(f, "&&"),
+            Token::Or => write!(f, "||"),
+            Token::EqEq => write!(f, "=="),
+            Token::NotEq => write!(f, "!="),
+            Token::GtEq => write!(f, ">="),
+            Token::LtEq => write!(f, "<="),
+            Token::GtGt => write!(f, ">>"),
+            Token::Stderr => write!(f, "2>"),
+            Token::Both => write!(f, "&>"),
+            Token::Eq => write!(f, "="),
+            Token::Pipe => write!(f, "|"),
+            Token::Amp => write!(f, "&"),
+            Token::Gt => write!(f, ">"),
+            Token::Lt => write!(f, "<"),
+            Token::Semi => write!(f, ";"),
+            Token::Colon => write!(f, ":"),
+            Token::Comma => write!(f, ","),
+            Token::Dot => write!(f, "."),
+            Token::LBrace => write!(f, "{{"),
+            Token::RBrace => write!(f, "}}"),
+            Token::LBracket => write!(f, "["),
+            Token::RBracket => write!(f, "]"),
+            Token::LParen => write!(f, "("),
+            Token::RParen => write!(f, ")"),
+            Token::CmdSubstStart => write!(f, "$("),
+            Token::String(s) => write!(f, "STRING({:?})", s),
+            Token::VarRef(v) => write!(f, "VARREF({})", v),
+            Token::Int(n) => write!(f, "INT({})", n),
+            Token::Float(n) => write!(f, "FLOAT({})", n),
+            Token::Ident(s) => write!(f, "IDENT({})", s),
+            Token::Comment => write!(f, "COMMENT"),
+            Token::Newline => write!(f, "NEWLINE"),
+            Token::LineContinuation => write!(f, "LINECONT"),
+        }
+    }
+}
+
+impl Token {
+    /// Returns true if this token is a keyword.
+    pub fn is_keyword(&self) -> bool {
+        matches!(
+            self,
+            Token::Set
+                | Token::Tool
+                | Token::If
+                | Token::Then
+                | Token::Else
+                | Token::Fi
+                | Token::For
+                | Token::In
+                | Token::Do
+                | Token::Done
+                | Token::True
+                | Token::False
+        )
+    }
+
+    /// Returns true if this token is a type keyword.
+    pub fn is_type(&self) -> bool {
+        matches!(
+            self,
+            Token::TypeString
+                | Token::TypeInt
+                | Token::TypeFloat
+                | Token::TypeBool
+                | Token::TypeArray
+                | Token::TypeObject
+        )
+    }
+
+    /// Returns true if this token starts a statement.
+    pub fn starts_statement(&self) -> bool {
+        matches!(
+            self,
+            Token::Set | Token::Tool | Token::If | Token::For | Token::Ident(_)
+        )
+    }
+
+    /// Returns true if this token can appear in an expression.
+    pub fn is_value(&self) -> bool {
+        matches!(
+            self,
+            Token::String(_)
+                | Token::Int(_)
+                | Token::Float(_)
+                | Token::True
+                | Token::False
+                | Token::VarRef(_)
+                | Token::LBracket
+                | Token::LBrace
+                | Token::CmdSubstStart
+        )
+    }
+}
+
+/// Tokenize source code into a vector of spanned tokens.
+///
+/// Skips whitespace and comments (unless you need them for formatting).
+/// Returns errors with their positions for nice error messages.
+pub fn tokenize(source: &str) -> Result<Vec<Spanned<Token>>, Vec<Spanned<LexerError>>> {
+    let lexer = Token::lexer(source);
+    let mut tokens = Vec::new();
+    let mut errors = Vec::new();
+
+    for (result, span) in lexer.spanned() {
+        match result {
+            Ok(token) => {
+                // Skip comments and line continuations - they're not needed for parsing
+                if !matches!(token, Token::Comment | Token::LineContinuation) {
+                    tokens.push(Spanned::new(token, span));
+                }
+            }
+            Err(err) => {
+                errors.push(Spanned::new(err, span));
+            }
+        }
+    }
+
+    if errors.is_empty() {
+        Ok(tokens)
+    } else {
+        Err(errors)
+    }
+}
+
+/// Tokenize source code, preserving comments.
+///
+/// Useful for pretty-printing or formatting tools that need to preserve comments.
+pub fn tokenize_with_comments(source: &str) -> Result<Vec<Spanned<Token>>, Vec<Spanned<LexerError>>> {
+    let lexer = Token::lexer(source);
+    let mut tokens = Vec::new();
+    let mut errors = Vec::new();
+
+    for (result, span) in lexer.spanned() {
+        match result {
+            Ok(token) => {
+                tokens.push(Spanned::new(token, span));
+            }
+            Err(err) => {
+                errors.push(Spanned::new(err, span));
+            }
+        }
+    }
+
+    if errors.is_empty() {
+        Ok(tokens)
+    } else {
+        Err(errors)
+    }
+}
+
+/// Extract the string content from a string token (removes quotes, processes escapes).
+pub fn parse_string_literal(source: &str) -> Result<String, LexerError> {
+    // Remove surrounding quotes
+    if source.len() < 2 || !source.starts_with('"') || !source.ends_with('"') {
+        return Err(LexerError::UnterminatedString);
+    }
+
+    let inner = &source[1..source.len() - 1];
+    let mut result = String::with_capacity(inner.len());
+    let mut chars = inner.chars().peekable();
+
+    while let Some(ch) = chars.next() {
+        if ch == '\\' {
+            match chars.next() {
+                Some('n') => result.push('\n'),
+                Some('t') => result.push('\t'),
+                Some('r') => result.push('\r'),
+                Some('\\') => result.push('\\'),
+                Some('"') => result.push('"'),
+                Some('u') => {
+                    // Unicode escape: \uXXXX
+                    let mut hex = String::with_capacity(4);
+                    for _ in 0..4 {
+                        match chars.next() {
+                            Some(h) if h.is_ascii_hexdigit() => hex.push(h),
+                            _ => return Err(LexerError::InvalidEscape),
+                        }
+                    }
+                    let codepoint = u32::from_str_radix(&hex, 16)
+                        .map_err(|_| LexerError::InvalidEscape)?;
+                    let ch = char::from_u32(codepoint)
+                        .ok_or(LexerError::InvalidEscape)?;
+                    result.push(ch);
+                }
+                _ => return Err(LexerError::InvalidEscape),
+            }
+        } else {
+            result.push(ch);
+        }
+    }
+
+    Ok(result)
+}
+
+/// Parse a variable reference, extracting the path segments.
+/// Input: "${VAR.field[0].nested}" → ["VAR", "field", "[0]", "nested"]
+pub fn parse_var_ref(source: &str) -> Result<Vec<String>, LexerError> {
+    // Remove ${ and }
+    if source.len() < 4 || !source.starts_with("${") || !source.ends_with('}') {
+        return Err(LexerError::UnterminatedVarRef);
+    }
+
+    let inner = &source[2..source.len() - 1];
+
+    // Special case: $? (last result)
+    if inner == "?" {
+        return Ok(vec!["?".to_string()]);
+    }
+
+    let mut segments = Vec::new();
+    let mut current = String::new();
+    let mut chars = inner.chars().peekable();
+
+    while let Some(ch) = chars.next() {
+        match ch {
+            '.' => {
+                if !current.is_empty() {
+                    segments.push(current.clone());
+                    current.clear();
+                }
+            }
+            '[' => {
+                if !current.is_empty() {
+                    segments.push(current.clone());
+                    current.clear();
+                }
+                // Collect the index
+                let mut index = String::from("[");
+                while let Some(&c) = chars.peek() {
+                    index.push(chars.next().expect("peeked char should exist"));
+                    if c == ']' {
+                        break;
+                    }
+                }
+                segments.push(index);
+            }
+            _ => {
+                current.push(ch);
+            }
+        }
+    }
+
+    if !current.is_empty() {
+        segments.push(current);
+    }
+
+    Ok(segments)
+}
+
+/// Parse an integer literal.
+pub fn parse_int(source: &str) -> Result<i64, LexerError> {
+    source.parse().map_err(|_| LexerError::InvalidNumber)
+}
+
+/// Parse a float literal.
+pub fn parse_float(source: &str) -> Result<f64, LexerError> {
+    source.parse().map_err(|_| LexerError::InvalidNumber)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn lex(source: &str) -> Vec<Token> {
+        tokenize(source)
+            .expect("lexer should succeed")
+            .into_iter()
+            .map(|s| s.token)
+            .collect()
+    }
+
+    // ═══════════════════════════════════════════════════════════════════
+    // Keyword tests
+    // ═══════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn keywords() {
+        assert_eq!(lex("set"), vec![Token::Set]);
+        assert_eq!(lex("tool"), vec![Token::Tool]);
+        assert_eq!(lex("if"), vec![Token::If]);
+        assert_eq!(lex("then"), vec![Token::Then]);
+        assert_eq!(lex("else"), vec![Token::Else]);
+        assert_eq!(lex("fi"), vec![Token::Fi]);
+        assert_eq!(lex("for"), vec![Token::For]);
+        assert_eq!(lex("in"), vec![Token::In]);
+        assert_eq!(lex("do"), vec![Token::Do]);
+        assert_eq!(lex("done"), vec![Token::Done]);
+        assert_eq!(lex("true"), vec![Token::True]);
+        assert_eq!(lex("false"), vec![Token::False]);
+    }
+
+    #[test]
+    fn type_keywords() {
+        assert_eq!(lex("string"), vec![Token::TypeString]);
+        assert_eq!(lex("int"), vec![Token::TypeInt]);
+        assert_eq!(lex("float"), vec![Token::TypeFloat]);
+        assert_eq!(lex("bool"), vec![Token::TypeBool]);
+        assert_eq!(lex("array"), vec![Token::TypeArray]);
+        assert_eq!(lex("object"), vec![Token::TypeObject]);
+    }
+
+    // ═══════════════════════════════════════════════════════════════════
+    // Operator tests
+    // ═══════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn single_char_operators() {
+        assert_eq!(lex("="), vec![Token::Eq]);
+        assert_eq!(lex("|"), vec![Token::Pipe]);
+        assert_eq!(lex("&"), vec![Token::Amp]);
+        assert_eq!(lex(">"), vec![Token::Gt]);
+        assert_eq!(lex("<"), vec![Token::Lt]);
+        assert_eq!(lex(";"), vec![Token::Semi]);
+        assert_eq!(lex(":"), vec![Token::Colon]);
+        assert_eq!(lex(","), vec![Token::Comma]);
+        assert_eq!(lex("."), vec![Token::Dot]);
+    }
+
+    #[test]
+    fn multi_char_operators() {
+        assert_eq!(lex("&&"), vec![Token::And]);
+        assert_eq!(lex("||"), vec![Token::Or]);
+        assert_eq!(lex("=="), vec![Token::EqEq]);
+        assert_eq!(lex("!="), vec![Token::NotEq]);
+        assert_eq!(lex(">="), vec![Token::GtEq]);
+        assert_eq!(lex("<="), vec![Token::LtEq]);
+        assert_eq!(lex(">>"), vec![Token::GtGt]);
+        assert_eq!(lex("2>"), vec![Token::Stderr]);
+        assert_eq!(lex("&>"), vec![Token::Both]);
+    }
+
+    #[test]
+    fn brackets() {
+        assert_eq!(lex("{"), vec![Token::LBrace]);
+        assert_eq!(lex("}"), vec![Token::RBrace]);
+        assert_eq!(lex("["), vec![Token::LBracket]);
+        assert_eq!(lex("]"), vec![Token::RBracket]);
+        assert_eq!(lex("("), vec![Token::LParen]);
+        assert_eq!(lex(")"), vec![Token::RParen]);
+    }
+
+    // ═══════════════════════════════════════════════════════════════════
+    // Literal tests
+    // ═══════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn integers() {
+        assert_eq!(lex("0"), vec![Token::Int(0)]);
+        assert_eq!(lex("42"), vec![Token::Int(42)]);
+        assert_eq!(lex("-1"), vec![Token::Int(-1)]);
+        assert_eq!(lex("999999"), vec![Token::Int(999999)]);
+    }
+
+    #[test]
+    fn floats() {
+        assert_eq!(lex("3.14"), vec![Token::Float(3.14)]);
+        assert_eq!(lex("-0.5"), vec![Token::Float(-0.5)]);
+        assert_eq!(lex("123.456"), vec![Token::Float(123.456)]);
+    }
+
+    #[test]
+    fn strings() {
+        assert_eq!(lex(r#""hello""#), vec![Token::String("hello".to_string())]);
+        assert_eq!(lex(r#""hello world""#), vec![Token::String("hello world".to_string())]);
+        assert_eq!(lex(r#""""#), vec![Token::String("".to_string())]); // empty string
+        assert_eq!(lex(r#""with \"quotes\"""#), vec![Token::String("with \"quotes\"".to_string())]);
+        assert_eq!(lex(r#""with\nnewline""#), vec![Token::String("with\nnewline".to_string())]);
+    }
+
+    #[test]
+    fn var_refs() {
+        assert_eq!(lex("${X}"), vec![Token::VarRef("${X}".to_string())]);
+        assert_eq!(lex("${VAR}"), vec![Token::VarRef("${VAR}".to_string())]);
+        assert_eq!(lex("${VAR.field}"), vec![Token::VarRef("${VAR.field}".to_string())]);
+        assert_eq!(lex("${VAR[0]}"), vec![Token::VarRef("${VAR[0]}".to_string())]);
+        assert_eq!(lex("${?.ok}"), vec![Token::VarRef("${?.ok}".to_string())]);
+    }
+
+    // ═══════════════════════════════════════════════════════════════════
+    // Identifier tests
+    // ═══════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn identifiers() {
+        assert_eq!(lex("foo"), vec![Token::Ident("foo".to_string())]);
+        assert_eq!(lex("foo_bar"), vec![Token::Ident("foo_bar".to_string())]);
+        assert_eq!(lex("foo-bar"), vec![Token::Ident("foo-bar".to_string())]);
+        assert_eq!(lex("_private"), vec![Token::Ident("_private".to_string())]);
+        assert_eq!(lex("cmd123"), vec![Token::Ident("cmd123".to_string())]);
+    }
+
+    #[test]
+    fn keyword_prefix_identifiers() {
+        // Identifiers that start with keywords but aren't keywords
+        assert_eq!(lex("setup"), vec![Token::Ident("setup".to_string())]);
+        assert_eq!(lex("tools"), vec![Token::Ident("tools".to_string())]);
+        assert_eq!(lex("iffy"), vec![Token::Ident("iffy".to_string())]);
+        assert_eq!(lex("forked"), vec![Token::Ident("forked".to_string())]);
+        assert_eq!(lex("done-with-it"), vec![Token::Ident("done-with-it".to_string())]);
+    }
+
+    // ═══════════════════════════════════════════════════════════════════
+    // Statement tests
+    // ═══════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn assignment() {
+        assert_eq!(
+            lex("set X = 5"),
+            vec![Token::Set, Token::Ident("X".to_string()), Token::Eq, Token::Int(5)]
+        );
+    }
+
+    #[test]
+    fn command_simple() {
+        assert_eq!(lex("echo"), vec![Token::Ident("echo".to_string())]);
+        assert_eq!(
+            lex(r#"echo "hello""#),
+            vec![Token::Ident("echo".to_string()), Token::String("hello".to_string())]
+        );
+    }
+
+    #[test]
+    fn command_with_args() {
+        assert_eq!(
+            lex("cmd arg1 arg2"),
+            vec![Token::Ident("cmd".to_string()), Token::Ident("arg1".to_string()), Token::Ident("arg2".to_string())]
+        );
+    }
+
+    #[test]
+    fn command_with_named_args() {
+        assert_eq!(
+            lex("cmd key=value"),
+            vec![Token::Ident("cmd".to_string()), Token::Ident("key".to_string()), Token::Eq, Token::Ident("value".to_string())]
+        );
+    }
+
+    #[test]
+    fn pipeline() {
+        assert_eq!(
+            lex("a | b | c"),
+            vec![Token::Ident("a".to_string()), Token::Pipe, Token::Ident("b".to_string()), Token::Pipe, Token::Ident("c".to_string())]
+        );
+    }
+
+    #[test]
+    fn if_statement() {
+        assert_eq!(
+            lex("if true; then echo; fi"),
+            vec![
+                Token::If,
+                Token::True,
+                Token::Semi,
+                Token::Then,
+                Token::Ident("echo".to_string()),
+                Token::Semi,
+                Token::Fi
+            ]
+        );
+    }
+
+    #[test]
+    fn for_loop() {
+        assert_eq!(
+            lex("for X in items; do echo; done"),
+            vec![
+                Token::For,
+                Token::Ident("X".to_string()),
+                Token::In,
+                Token::Ident("items".to_string()),
+                Token::Semi,
+                Token::Do,
+                Token::Ident("echo".to_string()),
+                Token::Semi,
+                Token::Done
+            ]
+        );
+    }
+
+    // ═══════════════════════════════════════════════════════════════════
+    // Whitespace and newlines
+    // ═══════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn whitespace_ignored() {
+        assert_eq!(lex("   set   X   =   5   "), lex("set X = 5"));
+    }
+
+    #[test]
+    fn newlines_preserved() {
+        let tokens = lex("a\nb");
+        assert_eq!(
+            tokens,
+            vec![Token::Ident("a".to_string()), Token::Newline, Token::Ident("b".to_string())]
+        );
+    }
+
+    #[test]
+    fn multiple_newlines() {
+        let tokens = lex("a\n\n\nb");
+        assert_eq!(
+            tokens,
+            vec![Token::Ident("a".to_string()), Token::Newline, Token::Newline, Token::Newline, Token::Ident("b".to_string())]
+        );
+    }
+
+    // ═══════════════════════════════════════════════════════════════════
+    // Comments
+    // ═══════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn comments_skipped() {
+        assert_eq!(lex("# comment"), vec![]);
+        assert_eq!(lex("a # comment"), vec![Token::Ident("a".to_string())]);
+        assert_eq!(
+            lex("a # comment\nb"),
+            vec![Token::Ident("a".to_string()), Token::Newline, Token::Ident("b".to_string())]
+        );
+    }
+
+    #[test]
+    fn comments_preserved_when_requested() {
+        let tokens = tokenize_with_comments("a # comment")
+            .expect("should succeed")
+            .into_iter()
+            .map(|s| s.token)
+            .collect::<Vec<_>>();
+        assert_eq!(tokens, vec![Token::Ident("a".to_string()), Token::Comment]);
+    }
+
+    // ═══════════════════════════════════════════════════════════════════
+    // String parsing
+    // ═══════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn parse_simple_string() {
+        assert_eq!(parse_string_literal(r#""hello""#).expect("ok"), "hello");
+    }
+
+    #[test]
+    fn parse_string_with_escapes() {
+        assert_eq!(
+            parse_string_literal(r#""hello\nworld""#).expect("ok"),
+            "hello\nworld"
+        );
+        assert_eq!(
+            parse_string_literal(r#""tab\there""#).expect("ok"),
+            "tab\there"
+        );
+        assert_eq!(
+            parse_string_literal(r#""quote\"here""#).expect("ok"),
+            "quote\"here"
+        );
+    }
+
+    #[test]
+    fn parse_string_with_unicode() {
+        assert_eq!(
+            parse_string_literal(r#""emoji \u2764""#).expect("ok"),
+            "emoji ❤"
+        );
+    }
+
+    // ═══════════════════════════════════════════════════════════════════
+    // Variable reference parsing
+    // ═══════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn parse_simple_var() {
+        assert_eq!(
+            parse_var_ref("${X}").expect("ok"),
+            vec!["X"]
+        );
+    }
+
+    #[test]
+    fn parse_var_with_field() {
+        assert_eq!(
+            parse_var_ref("${VAR.field}").expect("ok"),
+            vec!["VAR", "field"]
+        );
+    }
+
+    #[test]
+    fn parse_var_with_index() {
+        assert_eq!(
+            parse_var_ref("${VAR[0]}").expect("ok"),
+            vec!["VAR", "[0]"]
+        );
+    }
+
+    #[test]
+    fn parse_var_nested() {
+        assert_eq!(
+            parse_var_ref("${VAR.field[0].nested}").expect("ok"),
+            vec!["VAR", "field", "[0]", "nested"]
+        );
+    }
+
+    #[test]
+    fn parse_last_result() {
+        assert_eq!(
+            parse_var_ref("${?}").expect("ok"),
+            vec!["?"]
+        );
+        assert_eq!(
+            parse_var_ref("${?.ok}").expect("ok"),
+            vec!["?", "ok"]
+        );
+    }
+
+    // ═══════════════════════════════════════════════════════════════════
+    // Number parsing
+    // ═══════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn parse_integers() {
+        assert_eq!(parse_int("0").expect("ok"), 0);
+        assert_eq!(parse_int("42").expect("ok"), 42);
+        assert_eq!(parse_int("-1").expect("ok"), -1);
+    }
+
+    #[test]
+    fn parse_floats() {
+        assert!((parse_float("3.14").expect("ok") - 3.14).abs() < f64::EPSILON);
+        assert!((parse_float("-0.5").expect("ok") - (-0.5)).abs() < f64::EPSILON);
+    }
+
+    // ═══════════════════════════════════════════════════════════════════
+    // Edge cases and errors
+    // ═══════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn empty_input() {
+        assert_eq!(lex(""), vec![]);
+    }
+
+    #[test]
+    fn only_whitespace() {
+        assert_eq!(lex("   \t\t   "), vec![]);
+    }
+
+    #[test]
+    fn json_array() {
+        assert_eq!(
+            lex(r#"[1, 2, 3]"#),
+            vec![
+                Token::LBracket,
+                Token::Int(1),
+                Token::Comma,
+                Token::Int(2),
+                Token::Comma,
+                Token::Int(3),
+                Token::RBracket
+            ]
+        );
+    }
+
+    #[test]
+    fn json_object() {
+        assert_eq!(
+            lex(r#"{"key": "value"}"#),
+            vec![
+                Token::LBrace,
+                Token::String("key".to_string()),
+                Token::Colon,
+                Token::String("value".to_string()),
+                Token::RBrace
+            ]
+        );
+    }
+
+    #[test]
+    fn redirect_operators() {
+        assert_eq!(
+            lex("cmd > file"),
+            vec![Token::Ident("cmd".to_string()), Token::Gt, Token::Ident("file".to_string())]
+        );
+        assert_eq!(
+            lex("cmd >> file"),
+            vec![Token::Ident("cmd".to_string()), Token::GtGt, Token::Ident("file".to_string())]
+        );
+        assert_eq!(
+            lex("cmd 2> err"),
+            vec![Token::Ident("cmd".to_string()), Token::Stderr, Token::Ident("err".to_string())]
+        );
+        assert_eq!(
+            lex("cmd &> all"),
+            vec![Token::Ident("cmd".to_string()), Token::Both, Token::Ident("all".to_string())]
+        );
+    }
+
+    #[test]
+    fn background_job() {
+        assert_eq!(
+            lex("cmd &"),
+            vec![Token::Ident("cmd".to_string()), Token::Amp]
+        );
+    }
+
+    #[test]
+    fn command_substitution() {
+        assert_eq!(
+            lex("$(cmd)"),
+            vec![Token::CmdSubstStart, Token::Ident("cmd".to_string()), Token::RParen]
+        );
+        assert_eq!(
+            lex("$(cmd arg)"),
+            vec![
+                Token::CmdSubstStart,
+                Token::Ident("cmd".to_string()),
+                Token::Ident("arg".to_string()),
+                Token::RParen
+            ]
+        );
+        assert_eq!(
+            lex("$(a | b)"),
+            vec![
+                Token::CmdSubstStart,
+                Token::Ident("a".to_string()),
+                Token::Pipe,
+                Token::Ident("b".to_string()),
+                Token::RParen
+            ]
+        );
+    }
+
+    #[test]
+    fn complex_pipeline() {
+        assert_eq!(
+            lex(r#"cat file | grep pattern="foo" | head count=10"#),
+            vec![
+                Token::Ident("cat".to_string()),
+                Token::Ident("file".to_string()),
+                Token::Pipe,
+                Token::Ident("grep".to_string()),
+                Token::Ident("pattern".to_string()),
+                Token::Eq,
+                Token::String("foo".to_string()),
+                Token::Pipe,
+                Token::Ident("head".to_string()),
+                Token::Ident("count".to_string()),
+                Token::Eq,
+                Token::Int(10),
+            ]
+        );
+    }
+}

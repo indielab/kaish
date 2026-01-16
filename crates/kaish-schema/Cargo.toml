@@ -1,0 +1,17 @@
+[package]
+name = "kaish-schema"
+description = "Cap'n Proto schema definitions for kaish kernel protocol"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+capnp = { workspace = true }
+
+[build-dependencies]
+capnpc = { workspace = true }
+
+[lints]
+workspace = true

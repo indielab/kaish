@@ -1,0 +1,37 @@
+[package]
+name = "kaish-kernel"
+description = "Core kernel for kaish: lexer, parser, interpreter, and runtime"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+kaish-schema = { path = "../kaish-schema" }
+
+# Async runtime
+tokio = { workspace = true }
+async-trait = { workspace = true }
+
+# Error handling
+thiserror = { workspace = true }
+anyhow = { workspace = true }
+
+# Serialization
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+# Logging
+tracing = { workspace = true }
+
+# Lexer/Parser
+logos = { workspace = true }
+chumsky = { workspace = true }
+ariadne = { workspace = true }
+
+[dev-dependencies]
+proptest = { workspace = true }
+
+[lints]
+workspace = true

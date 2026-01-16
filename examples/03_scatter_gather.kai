@@ -1,0 +1,77 @@
+#!/usr/bin/env kaish
+# Example 3: Scatter/Gather - Parallel execution made easy
+# This is where kaish gets interesting ✨
+
+# --- Basic background jobs (familiar) ---
+
+slow-download url="https://big.file/a" > /scratch/a.dat &
+slow-download url="https://big.file/b" > /scratch/b.dat &
+slow-download url="https://big.file/c" > /scratch/c.dat &
+
+jobs                    # list running jobs
+wait                    # block until all complete
+echo "All downloads finished"
+
+# ${JOBS} contains array of results after wait
+echo "Results: ${JOBS}"
+
+# Wait for specific jobs
+job1 &
+job2 &
+job3 &
+wait %1 %2             # only wait for first two
+
+# --- Scatter: Fan-out parallelism ---
+
+# Scatter reads lines from stdin, runs pipeline in parallel for each
+cat /scratch/urls.txt | scatter | fetch url=${ITEM} | gather > /scratch/results.json
+
+# With explicit variable name
+cat /scratch/urls.txt | scatter as=URL | fetch url=${URL} | gather
+
+# Limit parallelism (default might be 8 or ncpus)
+cat /scratch/big_list.txt | scatter as=ID limit=4 | process-item id=${ID} | gather
+
+# Scatter over JSON array input
+echo '[1, 2, 3, 4, 5]' | scatter as=N | compute val=${N} | gather
+# Output: [{"val": 1, "result": ...}, {"val": 2, "result": ...}, ...]
+
+# --- Gather options ---
+
+# Default gather: collect into JSON array, preserve order
+cat items.txt | scatter | process ${ITEM} | gather > out.json
+
+# Gather with progress
+cat items.txt | scatter | slow-process ${ITEM} | gather progress=true
+
+# Gather first N results (cancel remaining)
+cat items.txt | scatter | maybe-fails ${ITEM} | gather first=5
+
+# Gather all successes, collect errors separately
+cat items.txt | scatter | risky-op ${ITEM} | gather errors=/scratch/failed.json
+
+# --- Real example: Parallel health checks ---
+
+set SERVICES = ["api", "auth", "db", "cache", "worker"]
+
+echo "${SERVICES}" | scatter as=SVC limit=10 | health-check service=${SVC} | gather > /scratch/health.json
+
+# Check results
+cat /scratch/health.json | jq path="[.[] | select(.ok == false)]"
+if ${?.ok}; then
+    echo "All services healthy ✅"
+else
+    echo "Unhealthy services: ${?.out}"
+fi
+
+# --- Nested scatter (extracting links, then fetching them) ---
+
+# Get pages, extract links, fetch each link
+cat seed_urls.txt \
+    | scatter as=URL limit=2 \
+    | fetch url=${URL} \
+    | extract-links \
+    | scatter as=LINK limit=4 \
+    | fetch url=${LINK} \
+    | gather \
+    | gather > /scratch/crawl_results.json

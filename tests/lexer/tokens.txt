@@ -1,0 +1,118 @@
+# Lexer Token Tests
+# Format: INPUT | EXPECTED_TOKENS
+# Use ERROR for expected lex failure
+
+# === Keywords ===
+set         | SET
+tool        | TOOL
+if          | IF
+then        | THEN
+else        | ELSE
+fi          | FI
+for         | FOR
+in          | IN
+do          | DO
+done        | DONE
+
+# === Identifiers ===
+foo         | IDENT(foo)
+foo_bar     | IDENT(foo_bar)
+foo-bar     | IDENT(foo-bar)
+_private    | IDENT(_private)
+x1          | IDENT(x1)
+123abc      | ERROR: identifier cannot start with digit
+
+# === Integers ===
+0           | INT(0)
+123         | INT(123)
+-456        | INT(-456)
+999999999   | INT(999999999)
+
+# === Floats ===
+0.0         | FLOAT(0.0)
+3.14        | FLOAT(3.14)
+-2.5        | FLOAT(-2.5)
+.5          | ERROR: float must have leading digit
+5.          | ERROR: float must have trailing digit
+
+# === Booleans ===
+true        | BOOL(true)
+false       | BOOL(false)
+TRUE        | ERROR: ambiguous boolean, use lowercase 'true'
+FALSE       | ERROR: ambiguous boolean, use lowercase 'false'
+True        | ERROR: ambiguous boolean, use lowercase 'true'
+yes         | ERROR: ambiguous boolean-like 'yes', use 'true' or '"yes"'
+no          | ERROR: ambiguous boolean-like 'no', use 'false' or '"no"'
+YES         | ERROR: ambiguous boolean-like 'YES', use 'true' or '"YES"'
+NO          | ERROR: ambiguous boolean-like 'NO', use 'false' or '"NO"'
+
+# === Strings ===
+"hello"             | STRING(hello)
+"hello world"       | STRING(hello world)
+""                  | STRING()
+"line\nbreak"       | STRING(line\nbreak)
+"tab\there"         | STRING(tab\there)
+"quote\"here"       | STRING(quote"here)
+"slash\\here"       | STRING(slash\here)
+"unicode\u0041"     | STRING(unicodeA)
+"unterminated       | ERROR: unterminated string
+
+# === Variable References ===
+${X}                | VARREF(X)
+${foo}              | VARREF(foo)
+${foo_bar}          | VARREF(foo_bar)
+${X.field}          | VARREF(X.field)
+${X[0]}             | VARREF(X[0])
+${X.a.b[0].c}       | VARREF(X.a.b[0].c)
+${?.ok}             | VARREF(?.ok)
+${?.data.x}         | VARREF(?.data.x)
+$X                  | ERROR: use ${X} not $X
+$foo                | ERROR: use ${foo} not $foo
+${                  | ERROR: unterminated variable reference
+${X                 | ERROR: unterminated variable reference
+
+# === Operators ===
+=           | EQ
+==          | EQEQ
+!=          | NEQ
+<           | LT
+>           | GT
+<=          | LEQ
+>=          | GEQ
+|           | PIPE
+&           | AMP
+&&          | AMPAMP
+||          | PIPEPIPE
+
+# === Redirects ===
+>           | REDIR_OUT
+>>          | REDIR_APPEND
+<           | REDIR_IN
+2>          | REDIR_ERR
+&>          | REDIR_BOTH
+
+# === Brackets ===
+{           | LBRACE
+}           | RBRACE
+[           | LBRACK
+]           | RBRACK
+(           | LPAREN
+)           | RPAREN
+
+# === Punctuation ===
+,           | COMMA
+:           | COLON
+;           | SEMI
+.           | DOT
+
+# === Whitespace & Comments ===
+"  spaces  "        | STRING(  spaces  )
+# comment           | COMMENT( comment)
+#                   | COMMENT()
+
+# === Combined Sequences ===
+set X = 5           | SET IDENT(X) EQ INT(5)
+echo "hi"           | IDENT(echo) STRING(hi)
+cmd a=1 b=2         | IDENT(cmd) IDENT(a) EQ INT(1) IDENT(b) EQ INT(2)
+a | b | c           | IDENT(a) PIPE IDENT(b) PIPE IDENT(c)
+x > file            | IDENT(x) REDIR_OUT IDENT(file)
