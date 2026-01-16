@@ -1,0 +1,77 @@
+# Control Flow Interaction Tests
+# Tests nested conditionals, loops, and their interactions
+
+# Nested if
+set X = 5
+if ${X} > 0; then
+    if ${X} < 10; then
+        echo "0 < X < 10"
+    fi
+fi
+
+# If with else
+set Y = -1
+if ${Y} > 0; then
+    echo "positive"
+else
+    echo "non-positive"
+fi
+
+# Loop with conditional inside
+for I in [1, 2, 3, 4, 5]; do
+    if ${I} == 3; then
+        echo "found three"
+    fi
+done
+
+# Nested loops
+for I in [1, 2]; do
+    for J in ["a", "b"]; do
+        echo "${I}-${J}"
+    done
+done
+
+# Loop over object values (via array)
+set ITEMS = [{"name": "Alice"}, {"name": "Bob"}]
+for ITEM in ${ITEMS}; do
+    echo ${ITEM}
+done
+
+# Conditional with complex expression
+set A = 5
+set B = 10
+if ${A} < ${B} && ${B} < 20; then
+    echo "A < B < 20"
+fi
+
+# Multiple statements in then branch
+if true; then
+    set FIRST = "one"
+    set SECOND = "two"
+    echo "${FIRST} ${SECOND}"
+fi
+
+# Empty else branch (should work)
+if false; then
+    echo "never"
+fi
+
+# Loop with zero iterations
+set EMPTY = []
+for I in ${EMPTY}; do
+    echo "never executed"
+done
+echo "after empty loop"
+
+# Deeply nested control flow
+if true; then
+    for I in [1]; do
+        if ${I} == 1; then
+            for J in [2]; do
+                if ${J} == 2; then
+                    echo "deep nesting works"
+                fi
+            done
+        fi
+    done
+fi

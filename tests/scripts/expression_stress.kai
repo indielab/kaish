@@ -1,0 +1,65 @@
+# Expression Stress Tests
+# Tests operator precedence, short-circuit evaluation, type coercion
+
+# Basic comparisons
+set X = 5
+if ${X} == 5; then echo "X is 5"; fi
+if ${X} != 3; then echo "X is not 3"; fi
+if ${X} > 3; then echo "X > 3"; fi
+if ${X} < 10; then echo "X < 10"; fi
+if ${X} >= 5; then echo "X >= 5"; fi
+if ${X} <= 5; then echo "X <= 5"; fi
+
+# Chained && (all must be true)
+if true && true && true; then echo "all true"; fi
+if true && false && true; then echo "WRONG"; else echo "short-circuit &&"; fi
+
+# Chained || (first true wins)
+if false || false || true; then echo "found true"; fi
+if true || false || false; then echo "first was true"; fi
+
+# Mixed && and || (test precedence: && binds tighter)
+# true || false && false  should be  true || (false && false) = true || false = true
+if true || false && false; then echo "precedence correct"; fi
+
+# false && true || true  should be  (false && true) || true = false || true = true
+if false && true || true; then echo "precedence 2 correct"; fi
+
+# Int/float comparison
+set I = 5
+set F = 5.0
+if ${I} == ${F}; then echo "int equals float"; fi
+
+set F2 = 5.1
+if ${I} < ${F2}; then echo "5 < 5.1"; fi
+
+# String comparison
+set S1 = "apple"
+set S2 = "banana"
+if ${S1} < ${S2}; then echo "apple < banana"; fi
+if ${S1} != ${S2}; then echo "apple != banana"; fi
+
+# Truthiness edge cases
+if 0; then echo "WRONG: 0 is truthy"; else echo "0 is falsy"; fi
+if 1; then echo "1 is truthy"; fi
+if -1; then echo "-1 is truthy"; fi
+if ""; then echo "WRONG: empty string truthy"; else echo "empty string falsy"; fi
+if "x"; then echo "non-empty string truthy"; fi
+if null; then echo "WRONG: null truthy"; else echo "null is falsy"; fi
+
+# Empty array is falsy
+set EMPTY_ARR = []
+if ${EMPTY_ARR}; then echo "WRONG: [] truthy"; else echo "[] is falsy"; fi
+
+# Non-empty array is truthy
+set ARR = [1]
+if ${ARR}; then echo "[1] is truthy"; fi
+
+# Object is always truthy (even empty)
+set EMPTY_OBJ = {}
+if ${EMPTY_OBJ}; then echo "{} is truthy"; fi
+
+# Command substitution in condition
+if $(echo "test"); then echo "cmd subst truthy"; fi
+if $(true); then echo "true command works"; fi
+if $(false); then echo "WRONG"; else echo "false command works"; fi

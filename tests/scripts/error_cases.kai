@@ -1,0 +1,18 @@
+# Error Case Tests
+# Each line tests a specific error - run individually
+
+# Undefined variable (should error)
+echo ${UNDEFINED_VAR}
+
+# Invalid path on non-object
+set X = 42
+echo ${X.field}
+
+# Out of bounds array access
+set ARR = [1, 2, 3]
+echo ${ARR[99]}
+
+# Type error in comparison
+set S = "string"
+set N = 42
+if ${S} < ${N}; then echo "wrong"; fi

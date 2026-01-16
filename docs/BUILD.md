@@ -1,5 +1,69 @@
 # kaish Build Plan — Layered/Bottom-Up
 
+## Relationship to Kaijutsu
+
+**kaish is the execution engine. Kaijutsu wraps it with collaboration.**
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                      kaijutsu-server                            │
+│  ┌──────────────────────────────────────────────────────────┐   │
+│  │  kaijutsu.capnp::World                                   │   │
+│  │  - listKernels(), attachKernel(), createKernel()         │   │
+│  └──────────────────────────────────────────────────────────┘   │
+│  ┌──────────────────────────────────────────────────────────┐   │
+│  │  kaijutsu.capnp::Kernel (collaboration layer)            │   │
+│  │  - lease (who holds the pen)                             │   │
+│  │  - consent mode (collaborative vs autonomous)            │   │
+│  │  - fork/thread (kernel lifecycle)                        │   │
+│  │  - checkpoint (history distillation)                     │   │
+│  │  - messaging (send, subscribe)                           │   │
+│  │                                                          │   │
+│  │  execute() ─────────────────────────────────────────┐    │   │
+│  └─────────────────────────────────────────────────────┼────┘   │
+│                                                        │        │
+│  ┌─────────────────────────────────────────────────────┼────┐   │
+│  │  kaish-kernel (embedded)                            ▼    │   │
+│  │  ┌────────────────────────────────────────────────────┐  │   │
+│  │  │  kaish.capnp::Kernel (execution layer)             │  │   │
+│  │  │  - execute, executeStreaming                       │  │   │
+│  │  │  - getVar, setVar, listVars                        │  │   │
+│  │  │  - listTools, callTool                             │  │   │
+│  │  │  - mount, unmount, listMounts                      │  │   │
+│  │  │  - registerMcp, listMcpServers                     │  │   │
+│  │  │  - snapshot, restore                               │  │   │
+│  │  │  - readBlob, writeBlob                             │  │   │
+│  │  └────────────────────────────────────────────────────┘  │   │
+│  └──────────────────────────────────────────────────────────┘   │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+**kaish owns:**
+- Lexer, parser, interpreter
+- VFS (filesystem abstraction, mount routing)
+- Tools (builtins, MCP client, user-defined)
+- Jobs (pipelines, background, scatter/gather)
+- State persistence (SQLite)
+- **`interface Kernel` for execution** (kaish.capnp)
+- Standalone modes: `kaish serve`, `kaish script.kai`, REPL
+
+**Kaijutsu owns:**
+- `interface World` (multi-kernel orchestration)
+- Collaboration layer: lease, consent, fork/thread, checkpoint
+- Message DAG (room history)
+- Equipment (room-level tool activation)
+- UI (Bevy client)
+
+**Standalone kaish** works without kaijutsu:
+```bash
+kaish                           # REPL
+kaish script.kai                # Run script
+kaish serve --socket=/tmp/k.sock  # RPC server
+kaish serve tools.kai --stdio   # MCP server
+```
+
+---
+
 ## Dependency Graph
 
 ```
@@ -19,7 +83,7 @@ L3: Core Runtime
     ├── Variable scope
     └── ExecResult ($?)
 
-L4: REPL (Evolving) ← NEW: grows with each layer
+L4: REPL (Evolving)
     ├── kaish-repl crate with rustyline
     ├── Parse → AST display mode (/ast toggle)
     ├── Expression evaluation with Scope
@@ -53,24 +117,31 @@ L9: 散/集 (Scatter/Gather)
     └── gather implementation
     └── REPL+: parallel execution
 
-L10: State Persistence
+L10: State & Checkpoints
     ├── SQLite integration (rusqlite)
-    └── State save/restore
+    ├── State save/restore
+    ├── Checkpoint support (distill history → summary)
     └── REPL+: session persistence
 
-L11: 核 (Kernel)
-    ├── Kernel struct
-    ├── Cap'n Proto RPC server
-    └── Socket listener
+L11: 核 RPC Server
+    ├── Kernel struct (owns interpreter + state)
+    ├── Cap'n Proto RPC server (kaish.capnp::Kernel)
+    ├── Unix socket listener
+    └── `kaish serve` command
 
 L12: Clients
-    ├── EmbeddedClient (wraps Kernel directly)
+    ├── EmbeddedClient (wraps Kernel directly, for kaijutsu)
     └── IpcClient (connects via socket)
 
-L13: Frontends (Final)
+L13: Frontends
     ├── Script runner (kaish script.kai)
     ├── REPL client mode (connects to kernel)
-    └── MCP server mode (kaish serve)
+    └── MCP server mode (kaish serve tools.kai --stdio)
+
+L14: Context Generation
+    ├── context-emit command
+    ├── Walk kernel state + VFS → payload
+    └── Format options (claude, openai, raw)
 ```
 
 ### REPL Evolution Strategy
@@ -85,8 +156,10 @@ The REPL is introduced early (L4) and gains capabilities incrementally:
 | L7 | Pipelines (`a \| b`), background jobs (`&`), `jobs`, `wait` |
 | L8 | MCP tool calls (`server.tool arg=val`) |
 | L9 | `scatter`/`gather` parallelism |
-| L10 | Session save/restore across restarts |
+| L10 | Session save/restore, checkpoint management |
+| L11 | `kaish serve` runs standalone RPC server |
 | L13 | Connect to remote kernels via IPC |
+| L14 | `context-emit` for AI payload generation |
 
 This gives us an interactive playground throughout development.
 
@@ -710,17 +783,18 @@ src/main.rs                 # CLI binary
 | L1 | kaish-kernel (lexer) | 50 | Token stream correct |
 | L2 | kaish-kernel (parser) | 100 | AST from source |
 | L3 | kaish-kernel (runtime) | 80 | Variables, $? work |
-| **L4** | **kaish-repl** | **20** | **Interactive REPL works** |
+| **L4** | **kaish-repl** | **50** | **Interactive REPL works** |
 | L5 | kaish-kernel (vfs) | 60 | Mount, read, write |
 | L6 | kaish-kernel (tools) | 100 | Builtins work |
 | L7 | kaish-kernel (pipes) | 40 | Pipelines, jobs |
 | L8 | kaish-kernel (mcp) | 30 | MCP calls work |
 | L9 | kaish-kernel (scatter) | 50 | 散/集 parallelism |
-| L10 | kaish-kernel (state) | 40 | Save/restore |
-| L11 | kaish-kernel (kernel) | 30 | Full kernel |
-| L12 | kaish-client | 20 | Both client types |
-| L13 | frontends (final) | 30 | Script runner, MCP serve |
-| **Total** | | **~650** | |
+| L10 | kaish-kernel (state) | 40 | Save/restore, checkpoints |
+| L11 | kaish-kernel (rpc) | 30 | `kaish serve` works |
+| L12 | kaish-client | 20 | Embedded + IPC clients |
+| L13 | frontends | 30 | Script runner, MCP serve |
+| L14 | context-emit | 20 | AI payload generation |
+| **Total** | | **~700** | |
 
 ---
 

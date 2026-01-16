@@ -660,26 +660,74 @@ async fn execute_pipeline(stages: Vec<PipelineStage>, ctx: &mut ExecContext) -> 
 
 ## Integration with Kaijutsu
 
-kaish is designed to be embedded in Kaijutsu (会術):
+**kaish is the execution engine. Kaijutsu wraps it with collaboration.**
+
+### Interface Ownership
+
+| Interface | Owner | Purpose |
+|-----------|-------|---------|
+| `kaish.capnp::Kernel` | **kaish** | Execution: parse, eval, tools, VFS, MCP, state, blobs |
+| `kaijutsu.capnp::World` | **kaijutsu** | Multi-kernel orchestration |
+| `kaijutsu.capnp::Kernel` | **kaijutsu** | Collaboration: lease, consent, fork/thread, checkpoint, messaging |
+
+### Embedding Pattern
+
+kaijutsu-server embeds kaish-kernel directly (no IPC overhead):
 
 ```rust
-// In Kaijutsu
-use kaish::Kaish;
+// In kaijutsu-server
+use kaish_kernel::{Kernel, EmbeddedClient};
 
-let shell = Kaish::builder()
-    .mount("/workspace", workspace_vfs)
+// Create kaish kernel for this session
+let kaish = Kernel::builder()
+    .mount("/mnt/project", worktree_vfs)
     .mount("/scratch", MemoryFs::new())
-    .mount("/mcp/exa", exa_resources)
-    .register_tools(builtin_tools())
-    .register_mcp_server("exa", exa_client)
+    .register_mcp("exa", exa_client)
     .build();
 
-// Execute user commands
-shell.execute("ls /workspace | grep pattern=rs")?;
+let client = EmbeddedClient::new(kaish);
 
-// Or run a script
-shell.execute_file("automation.kai")?;
+// When kaijutsu.capnp::Kernel.execute() is called:
+let result = client.execute("ls /mnt/project | grep pattern=rs").await?;
+
+// kaijutsu adds collaboration on top:
+// - Acquire lease before execute
+// - Record in message DAG
+// - Release lease after
+// - Checkpoint if autonomous mode triggers it
 ```
+
+### Standalone Mode
+
+kaish also runs independently (without kaijutsu):
+
+```bash
+# Interactive REPL
+kaish
+
+# Run script
+kaish script.kai
+
+# RPC server (other tools can connect)
+kaish serve --socket=/tmp/kaish.sock
+
+# MCP server (Claude Code can call kaish tools)
+kaish serve tools.kai --stdio
+```
+
+### Context Generation
+
+kaish provides `context-emit` for generating AI context payloads:
+
+```bash
+# Generate Claude-format context from kernel state
+kaish context-emit --format=claude
+
+# Include specific mounts, since last checkpoint
+kaish context-emit --format=openai --include=/mnt/project --since=checkpoint:latest
+```
+
+This is the mechanism by which AI "attaches" to a kernel — context is generated fresh from kernel state + VFS, not stored.
 
 ## Next Steps
 
