@@ -135,6 +135,28 @@ dependencies = [
 ]
 
 [[package]]
+name = "capnp-futures"
+version = "0.21.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d04478adeb234836f886ec554a0d96e3af3a939ba7b3962af5addddf7ab71231"
+dependencies = [
+ "capnp",
+ "futures-channel",
+ "futures-util",
+]
+
+[[package]]
+name = "capnp-rpc"
+version = "0.21.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "85e9c19ef52ff1b9c9822fb21bfa68a72bc58711676295ff06eb88e64c7877f7"
+dependencies = [
+ "capnp",
+ "capnp-futures",
+ "futures",
+]
+
+[[package]]
 name = "capnpc"
 version = "0.21.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -589,9 +611,12 @@ dependencies = [
  "anyhow",
  "ariadne",
  "async-trait",
+ "capnp",
+ "capnp-rpc",
  "chrono",
  "chumsky",
  "directories",
+ "futures",
  "kaish-schema",
  "logos",
  "proptest",
@@ -602,6 +627,7 @@ dependencies = [
  "serde_json",
  "thiserror 2.0.17",
  "tokio",
+ "tokio-util",
  "tracing",
 ]
 
@@ -1473,6 +1499,7 @@ checksum = "9ae9cec805b01e8fc3fd2fe289f89149a9b66dd16786abd8b19cfa7b48cb0098"
 dependencies = [
  "bytes",
  "futures-core",
+ "futures-io",
  "futures-sink",
  "pin-project-lite",
  "tokio",

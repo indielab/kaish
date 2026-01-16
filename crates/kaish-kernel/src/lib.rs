@@ -14,10 +14,15 @@
 
 pub mod ast;
 pub mod interpreter;
+pub mod kernel;
 pub mod lexer;
 pub mod mcp;
 pub mod parser;
+pub mod rpc;
 pub mod scheduler;
 pub mod state;
 pub mod tools;
 pub mod vfs;
+
+pub use kernel::{Kernel, KernelConfig};
+pub use rpc::KernelRpcServer;

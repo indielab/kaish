@@ -121,6 +121,13 @@ impl StateStore {
         Ok(())
     }
 
+    /// Delete all variables (for reset).
+    pub fn delete_all_variables(&self) -> Result<()> {
+        self.conn.execute("DELETE FROM variables", [])
+            .context("deleting all variables")?;
+        Ok(())
+    }
+
     /// List all variable names.
     pub fn list_variables(&self) -> Result<Vec<String>> {
         let mut stmt = self.conn.prepare("SELECT name FROM variables ORDER BY name")?;

@@ -186,6 +186,22 @@ impl Scope {
         names.dedup();
         names
     }
+
+    /// Get all variables as (name, value) pairs.
+    ///
+    /// Variables are deduplicated, with inner frames shadowing outer ones.
+    pub fn all(&self) -> Vec<(String, Value)> {
+        let mut result = std::collections::HashMap::new();
+        // Iterate outer to inner so inner frames override
+        for frame in &self.frames {
+            for (name, value) in frame {
+                result.insert(name.clone(), value.clone());
+            }
+        }
+        let mut pairs: Vec<_> = result.into_iter().collect();
+        pairs.sort_by(|(a, _), (b, _)| a.cmp(b));
+        pairs
+    }
 }
 
 impl Default for Scope {
