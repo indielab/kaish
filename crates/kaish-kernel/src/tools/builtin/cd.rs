@@ -1,7 +1,7 @@
 //! cd — Change working directory.
 
 use async_trait::async_trait;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use crate::ast::Value;
 use crate::interpreter::ExecResult;
@@ -23,28 +23,42 @@ impl Tool for Cd {
                 "path",
                 "string",
                 Value::String("/".into()),
-                "Directory to change to",
+                "Directory to change to (use - for previous directory)",
             ))
     }
 
     async fn execute(&self, args: ToolArgs, ctx: &mut ExecContext) -> ExecResult {
-        let path = args
+        let path_arg = args
             .get_string("path", 0)
             .unwrap_or_else(|| "/".to_string());
 
-        let resolved = ctx.resolve_path(&path);
+        // Handle `cd -` for previous directory
+        let resolved: PathBuf = if path_arg == "-" {
+            match ctx.get_prev_cwd() {
+                Some(prev) => prev.clone(),
+                None => return ExecResult::failure(1, "cd: OLDPWD not set"),
+            }
+        } else {
+            ctx.resolve_path(&path_arg)
+        };
 
         // Verify the path exists and is a directory
         match ctx.vfs.stat(Path::new(&resolved)).await {
             Ok(meta) => {
                 if meta.is_dir {
-                    ctx.set_cwd(resolved);
-                    ExecResult::success("")
+                    let new_cwd = resolved.clone();
+                    ctx.set_cwd(new_cwd);
+                    // For `cd -`, output the new directory (like bash)
+                    if path_arg == "-" {
+                        ExecResult::success(resolved.to_string_lossy().to_string())
+                    } else {
+                        ExecResult::success("")
+                    }
                 } else {
-                    ExecResult::failure(1, format!("cd: {}: Not a directory", path))
+                    ExecResult::failure(1, format!("cd: {}: Not a directory", path_arg))
                 }
             }
-            Err(e) => ExecResult::failure(1, format!("cd: {}: {}", path, e)),
+            Err(e) => ExecResult::failure(1, format!("cd: {}: {}", path_arg, e)),
         }
     }
 }
@@ -108,5 +122,61 @@ mod tests {
 
         let result = Cd.execute(args, &mut ctx).await;
         assert!(!result.ok());
+    }
+
+    #[tokio::test]
+    async fn test_cd_dash_previous_dir() {
+        let mut ctx = make_ctx().await;
+
+        // First cd to subdir
+        let mut args = ToolArgs::new();
+        args.positional.push(Value::String("/subdir".into()));
+        let result = Cd.execute(args, &mut ctx).await;
+        assert!(result.ok());
+        assert_eq!(ctx.cwd, PathBuf::from("/subdir"));
+
+        // Now cd - should go back to /
+        let mut args = ToolArgs::new();
+        args.positional.push(Value::String("-".into()));
+        let result = Cd.execute(args, &mut ctx).await;
+        assert!(result.ok());
+        assert_eq!(ctx.cwd, PathBuf::from("/"));
+        // cd - prints the new directory
+        assert_eq!(result.out, "/");
+    }
+
+    #[tokio::test]
+    async fn test_cd_dash_toggles() {
+        let mut ctx = make_ctx().await;
+
+        // cd to subdir
+        let mut args = ToolArgs::new();
+        args.positional.push(Value::String("/subdir".into()));
+        Cd.execute(args, &mut ctx).await;
+        assert_eq!(ctx.cwd, PathBuf::from("/subdir"));
+
+        // cd - back to /
+        let mut args = ToolArgs::new();
+        args.positional.push(Value::String("-".into()));
+        Cd.execute(args, &mut ctx).await;
+        assert_eq!(ctx.cwd, PathBuf::from("/"));
+
+        // cd - back to /subdir
+        let mut args = ToolArgs::new();
+        args.positional.push(Value::String("-".into()));
+        Cd.execute(args, &mut ctx).await;
+        assert_eq!(ctx.cwd, PathBuf::from("/subdir"));
+    }
+
+    #[tokio::test]
+    async fn test_cd_dash_no_previous() {
+        let mut ctx = make_ctx().await;
+        // Without any previous cd, OLDPWD is not set
+        let mut args = ToolArgs::new();
+        args.positional.push(Value::String("-".into()));
+
+        let result = Cd.execute(args, &mut ctx).await;
+        assert!(!result.ok());
+        assert!(result.err.contains("OLDPWD not set"));
     }
 }

@@ -23,16 +23,31 @@ impl Tool for Echo {
                 Value::Array(vec![]),
                 "Values to print",
             ))
+            .param(ParamSchema::optional(
+                "no_newline",
+                "bool",
+                Value::Bool(false),
+                "Do not output trailing newline (-n)",
+            ))
     }
 
     async fn execute(&self, args: ToolArgs, _ctx: &mut ExecContext) -> ExecResult {
+        let no_newline = args.has_flag("no_newline") || args.has_flag("n");
+
         let parts: Vec<String> = args
             .positional
             .iter()
             .map(|v| value_to_string(v))
             .collect();
 
-        let output = parts.join(" ");
+        let mut output = parts.join(" ");
+
+        // By default, echo adds a trailing newline (like Unix echo)
+        // Use -n to suppress it
+        if !no_newline && !output.is_empty() {
+            output.push('\n');
+        }
+
         ExecResult::success(output)
     }
 }
@@ -72,7 +87,7 @@ mod tests {
 
         let result = Echo.execute(args, &mut ctx).await;
         assert!(result.ok());
-        assert_eq!(result.out, "hello");
+        assert_eq!(result.out, "hello\n");
     }
 
     #[tokio::test]
@@ -84,7 +99,7 @@ mod tests {
 
         let result = Echo.execute(args, &mut ctx).await;
         assert!(result.ok());
-        assert_eq!(result.out, "hello world");
+        assert_eq!(result.out, "hello world\n");
     }
 
     #[tokio::test]
@@ -97,7 +112,7 @@ mod tests {
 
         let result = Echo.execute(args, &mut ctx).await;
         assert!(result.ok());
-        assert_eq!(result.out, "42 true 3.14");
+        assert_eq!(result.out, "42 true 3.14\n");
     }
 
     #[tokio::test]
@@ -107,6 +122,30 @@ mod tests {
 
         let result = Echo.execute(args, &mut ctx).await;
         assert!(result.ok());
-        assert_eq!(result.out, "");
+        assert_eq!(result.out, ""); // Empty output, no newline added
+    }
+
+    #[tokio::test]
+    async fn test_echo_n_no_newline() {
+        let mut ctx = make_ctx();
+        let mut args = ToolArgs::new();
+        args.positional.push(Value::String("hello".into()));
+        args.flags.insert("n".to_string());
+
+        let result = Echo.execute(args, &mut ctx).await;
+        assert!(result.ok());
+        assert_eq!(result.out, "hello"); // No trailing newline
+    }
+
+    #[tokio::test]
+    async fn test_echo_no_newline_flag() {
+        let mut ctx = make_ctx();
+        let mut args = ToolArgs::new();
+        args.positional.push(Value::String("test".into()));
+        args.flags.insert("no_newline".to_string());
+
+        let result = Echo.execute(args, &mut ctx).await;
+        assert!(result.ok());
+        assert_eq!(result.out, "test");
     }
 }

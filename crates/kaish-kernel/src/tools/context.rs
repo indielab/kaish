@@ -16,6 +16,8 @@ pub struct ExecContext {
     pub scope: Scope,
     /// Current working directory (VFS path).
     pub cwd: PathBuf,
+    /// Previous working directory (for `cd -`).
+    pub prev_cwd: Option<PathBuf>,
     /// Standard input for the tool (from pipeline).
     pub stdin: Option<String>,
 }
@@ -27,6 +29,7 @@ impl ExecContext {
             vfs,
             scope: Scope::new(),
             cwd: PathBuf::from("/"),
+            prev_cwd: None,
             stdin: None,
         }
     }
@@ -37,6 +40,7 @@ impl ExecContext {
             vfs,
             scope,
             cwd: PathBuf::from("/"),
+            prev_cwd: None,
             stdin: None,
         }
     }
@@ -61,7 +65,15 @@ impl ExecContext {
     }
 
     /// Change the current working directory.
+    ///
+    /// Saves the old directory for `cd -` support.
     pub fn set_cwd(&mut self, path: PathBuf) {
+        self.prev_cwd = Some(self.cwd.clone());
         self.cwd = path;
+    }
+
+    /// Get the previous working directory (for `cd -`).
+    pub fn get_prev_cwd(&self) -> Option<&PathBuf> {
+        self.prev_cwd.as_ref()
     }
 }

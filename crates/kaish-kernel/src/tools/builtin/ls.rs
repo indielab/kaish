@@ -29,7 +29,19 @@ impl Tool for Ls {
                 "long",
                 "bool",
                 Value::Bool(false),
-                "Use long format with details",
+                "Use long format with details (-l)",
+            ))
+            .param(ParamSchema::optional(
+                "all",
+                "bool",
+                Value::Bool(false),
+                "Show hidden files starting with . (-a)",
+            ))
+            .param(ParamSchema::optional(
+                "one",
+                "bool",
+                Value::Bool(false),
+                "One entry per line (-1)",
             ))
     }
 
@@ -40,15 +52,23 @@ impl Tool for Ls {
 
         let resolved = ctx.resolve_path(&path);
         let long_format = args.has_flag("long") || args.has_flag("l");
+        let show_all = args.has_flag("all") || args.has_flag("a");
+        // -1 is always true for now (we output one per line), but flag is recognized
 
         match ctx.vfs.list(Path::new(&resolved)).await {
             Ok(entries) => {
-                if entries.is_empty() {
+                // Filter hidden files (starting with .) unless -a is set
+                let filtered: Vec<_> = entries
+                    .into_iter()
+                    .filter(|e| show_all || !e.name.starts_with('.'))
+                    .collect();
+
+                if filtered.is_empty() {
                     return ExecResult::success("");
                 }
 
                 let lines: Vec<String> = if long_format {
-                    entries
+                    filtered
                         .iter()
                         .map(|e| {
                             let type_char = match e.entry_type {
@@ -59,7 +79,7 @@ impl Tool for Ls {
                         })
                         .collect()
                 } else {
-                    entries.iter().map(|e| e.name.clone()).collect()
+                    filtered.iter().map(|e| e.name.clone()).collect()
                 };
 
                 ExecResult::success(lines.join("\n"))
@@ -130,5 +150,54 @@ mod tests {
 
         let result = Ls.execute(args, &mut ctx).await;
         assert!(!result.ok());
+    }
+
+    async fn make_ctx_with_hidden() -> ExecContext {
+        let mut vfs = VfsRouter::new();
+        let mem = MemoryFs::new();
+        mem.write(Path::new("visible.txt"), b"a").await.unwrap();
+        mem.write(Path::new(".hidden"), b"b").await.unwrap();
+        mem.mkdir(Path::new(".config")).await.unwrap();
+        vfs.mount("/", mem);
+        ExecContext::new(Arc::new(vfs))
+    }
+
+    #[tokio::test]
+    async fn test_ls_hides_dotfiles_by_default() {
+        let mut ctx = make_ctx_with_hidden().await;
+        let mut args = ToolArgs::new();
+        args.positional.push(Value::String("/".into()));
+
+        let result = Ls.execute(args, &mut ctx).await;
+        assert!(result.ok());
+        assert!(result.out.contains("visible.txt"));
+        assert!(!result.out.contains(".hidden"));
+        assert!(!result.out.contains(".config"));
+    }
+
+    #[tokio::test]
+    async fn test_ls_a_shows_hidden() {
+        let mut ctx = make_ctx_with_hidden().await;
+        let mut args = ToolArgs::new();
+        args.positional.push(Value::String("/".into()));
+        args.flags.insert("a".to_string());
+
+        let result = Ls.execute(args, &mut ctx).await;
+        assert!(result.ok());
+        assert!(result.out.contains("visible.txt"));
+        assert!(result.out.contains(".hidden"));
+        assert!(result.out.contains(".config"));
+    }
+
+    #[tokio::test]
+    async fn test_ls_all_shows_hidden() {
+        let mut ctx = make_ctx_with_hidden().await;
+        let mut args = ToolArgs::new();
+        args.positional.push(Value::String("/".into()));
+        args.flags.insert("all".to_string());
+
+        let result = Ls.execute(args, &mut ctx).await;
+        assert!(result.ok());
+        assert!(result.out.contains(".hidden"));
     }
 }
