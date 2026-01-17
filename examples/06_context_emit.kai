@@ -1,0 +1,86 @@
+#!/usr/bin/env kaish
+# Example 6: Context Generation for AI Assistants
+# Generates structured context from kernel state for AI consumption.
+#
+# Usage:
+#   kaish 06_context_emit.kai
+#   kaish 06_context_emit.kai --format=claude
+#   kaish 06_context_emit.kai --format=json --include=/mnt/local/src
+
+# Configuration from named arguments or defaults
+set FORMAT = ${format:-"markdown"}
+set INCLUDE_PATHS = ${include:-[]}
+set MAX_FILE_SIZE = ${max_file_size:-10000}
+
+# Gather kernel introspection data
+set KERNEL_CWD = $(pwd)
+set KERNEL_VARS = $(vars --json)
+set KERNEL_TOOLS = $(tools --json)
+set KERNEL_MOUNTS = $(mounts --json)
+
+# Build the context object
+set CONTEXT = {
+    "cwd": ${KERNEL_CWD},
+    "variables": ${KERNEL_VARS},
+    "tools": ${KERNEL_TOOLS},
+    "mounts": ${KERNEL_MOUNTS}
+}
+
+# Output based on format
+if ${FORMAT} == "json"; then
+    # Raw JSON output
+    echo ${CONTEXT}
+elif ${FORMAT} == "claude"; then
+    # Claude-optimized markdown format
+    echo "# Kaish Kernel Context"
+    echo ""
+    echo "## Current Working Directory"
+    echo "${KERNEL_CWD}"
+    echo ""
+    echo "## Variables"
+    echo "\`\`\`json"
+    echo ${KERNEL_VARS}
+    echo "\`\`\`"
+    echo ""
+    echo "## Available Tools"
+    echo "\`\`\`json"
+    echo ${KERNEL_TOOLS}
+    echo "\`\`\`"
+    echo ""
+    echo "## VFS Mounts"
+    echo "\`\`\`json"
+    echo ${KERNEL_MOUNTS}
+    echo "\`\`\`"
+else
+    # Default markdown format (more readable)
+    echo "# Kernel Context"
+    echo ""
+    echo "**Working Directory:** ${KERNEL_CWD}"
+    echo ""
+    echo "## Variables"
+    vars
+    echo ""
+    echo "## Available Tools"
+    tools
+    echo ""
+    echo "## VFS Mounts"
+    mounts
+fi
+
+# If include paths specified, list their contents
+if $(echo ${#INCLUDE_PATHS}) > 0; then
+    echo ""
+    echo "## Included Paths"
+    for path in ${INCLUDE_PATHS}; do
+        echo ""
+        echo "### ${path}"
+        ls -la "${path}"
+    done
+fi
+
+# Show recent history if available
+history --limit=10 || true
+
+echo ""
+echo "---"
+echo "Context generated at $(date --iso)"

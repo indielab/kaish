@@ -12,6 +12,7 @@ mod exec;
 mod gather;
 mod grep;
 mod help;
+mod introspect;
 mod jobs;
 mod jq;
 mod ls;
@@ -20,6 +21,7 @@ mod mv;
 mod pwd;
 mod rm;
 mod scatter;
+mod vars;
 mod wait;
 mod write;
 
@@ -37,6 +39,10 @@ pub fn register_builtins(registry: &mut ToolRegistry) {
     registry.register(gather::Gather);
     registry.register(grep::Grep);
     registry.register(help::Help);
+    registry.register(introspect::Checkpoints);
+    registry.register(introspect::History);
+    registry.register(introspect::Mounts);
+    registry.register(introspect::Tools);
     registry.register(jobs::Jobs);
     registry.register(jq::Jq);
     registry.register(ls::Ls);
@@ -45,6 +51,7 @@ pub fn register_builtins(registry: &mut ToolRegistry) {
     registry.register(pwd::Pwd);
     registry.register(rm::Rm);
     registry.register(scatter::Scatter);
+    registry.register(vars::Vars);
     registry.register(wait::Wait);
     registry.register(write::Write);
 }

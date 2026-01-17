@@ -31,5 +31,8 @@ dirs = "6"
 # Async runtime
 tokio = { workspace = true }
 
+# Regex for =~ operator
+regex = { workspace = true }
+
 [lints]
 workspace = true

@@ -26,7 +26,7 @@
 
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use anyhow::{Context, Result};
 use tokio::sync::RwLock;
@@ -112,7 +112,8 @@ pub struct Kernel {
     /// Execution context (cwd, stdin, etc.).
     exec_ctx: RwLock<ExecContext>,
     /// Persistent state store (optional).
-    state: Option<StateStore>,
+    /// Wrapped in Mutex because rusqlite Connection is not Sync.
+    state: Option<Arc<Mutex<StateStore>>>,
 }
 
 impl Kernel {
@@ -152,7 +153,9 @@ impl Kernel {
             let state_dir = state_paths::kernels_dir();
             std::fs::create_dir_all(&state_dir).ok();
             let db_path = state_dir.join(format!("{}.db", config.name));
-            StateStore::open(&db_path).ok()
+            StateStore::open(&db_path)
+                .ok()
+                .map(|store| Arc::new(Mutex::new(store)))
         } else {
             None
         };
@@ -160,9 +163,11 @@ impl Kernel {
         // Load scope from state if available
         let scope = if let Some(ref store) = state {
             let mut scope = Scope::new();
-            if let Ok(vars) = store.load_all_variables() {
-                for (name, value) in vars {
-                    scope.set(name, value);
+            if let Ok(guard) = store.lock() {
+                if let Ok(vars) = guard.load_all_variables() {
+                    for (name, value) in vars {
+                        scope.set(name, value);
+                    }
                 }
             }
             scope
@@ -172,7 +177,11 @@ impl Kernel {
 
         // Load cwd from state if available, or use config
         let cwd = if let Some(ref store) = state {
-            let stored = store.get_cwd().unwrap_or_default();
+            let stored = store
+                .lock()
+                .ok()
+                .and_then(|guard| guard.get_cwd().ok())
+                .unwrap_or_default();
             if stored.is_empty() || stored == "/" {
                 config.cwd
             } else {
@@ -187,6 +196,7 @@ impl Kernel {
         exec_ctx.set_cwd(cwd);
         exec_ctx.set_job_manager(jobs.clone());
         exec_ctx.set_tool_schemas(tools.schemas());
+        exec_ctx.state_store = state.clone();
 
         Ok(Self {
             name: config.name,
@@ -252,7 +262,9 @@ impl Kernel {
 
                 // Persist variable
                 if let Some(ref store) = self.state {
-                    store.set_variable(&assign.name, &value).ok();
+                    if let Ok(guard) = store.lock() {
+                        guard.set_variable(&assign.name, &value).ok();
+                    }
                 }
 
                 Ok(ExecResult::success_data(value))
@@ -359,7 +371,9 @@ impl Kernel {
 
         // Persist cwd if changed
         if let Some(ref store) = self.state {
-            store.set_cwd(&ctx.cwd.to_string_lossy()).ok();
+            if let Ok(guard) = store.lock() {
+                guard.set_cwd(&ctx.cwd.to_string_lossy()).ok();
+            }
         }
 
         Ok(result)
@@ -415,7 +429,9 @@ impl Kernel {
         // Persist cwd if cd was called
         if name == "cd" && result.ok() {
             if let Some(ref store) = self.state {
-                store.set_cwd(&ctx.cwd.to_string_lossy()).ok();
+                if let Ok(guard) = store.lock() {
+                    guard.set_cwd(&ctx.cwd.to_string_lossy()).ok();
+                }
             }
         }
 
@@ -458,7 +474,9 @@ impl Kernel {
         scope.set_last_result(result.clone());
 
         if let Some(ref store) = self.state {
-            store.set_last_result(result).ok();
+            if let Ok(guard) = store.lock() {
+                guard.set_last_result(result).ok();
+            }
         }
     }
 
@@ -541,7 +559,9 @@ impl Kernel {
         scope.set(name.to_string(), value.clone());
 
         if let Some(ref store) = self.state {
-            store.set_variable(name, &value).ok();
+            if let Ok(guard) = store.lock() {
+                guard.set_variable(name, &value).ok();
+            }
         }
     }
 
@@ -564,7 +584,9 @@ impl Kernel {
         ctx.set_cwd(path.clone());
 
         if let Some(ref store) = self.state {
-            store.set_cwd(&path.to_string_lossy()).ok();
+            if let Ok(guard) = store.lock() {
+                guard.set_cwd(&path.to_string_lossy()).ok();
+            }
         }
     }
 
@@ -611,8 +633,9 @@ impl Kernel {
         }
 
         if let Some(ref store) = self.state {
-            store.delete_all_variables()?;
-            store.set_cwd("/").ok();
+            let guard = store.lock().map_err(|e| anyhow::anyhow!("failed to lock state store: {}", e))?;
+            guard.delete_all_variables()?;
+            guard.set_cwd("/").ok();
         }
 
         Ok(())

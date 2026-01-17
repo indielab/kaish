@@ -29,6 +29,8 @@ pub enum EvalError {
     NoExecutor,
     /// Division by zero or similar arithmetic error.
     ArithmeticError(String),
+    /// Invalid regex pattern.
+    RegexError(String),
 }
 
 impl fmt::Display for EvalError {
@@ -42,6 +44,7 @@ impl fmt::Display for EvalError {
             EvalError::CommandFailed(msg) => write!(f, "command failed: {msg}"),
             EvalError::NoExecutor => write!(f, "no executor available for command substitution"),
             EvalError::ArithmeticError(msg) => write!(f, "arithmetic error: {msg}"),
+            EvalError::RegexError(msg) => write!(f, "regex error: {msg}"),
         }
     }
 }
@@ -200,6 +203,17 @@ impl<'a, E: Executor> Evaluator<'a, E> {
                 let right_val = self.eval(right)?;
                 compare_values(&left_val, &right_val).map(|ord| Value::Bool(ord.is_ge()))
             }
+            // Regex match operators
+            BinaryOp::Match => {
+                let left_val = self.eval(left)?;
+                let right_val = self.eval(right)?;
+                regex_match(&left_val, &right_val, false)
+            }
+            BinaryOp::NotMatch => {
+                let left_val = self.eval(left)?;
+                let right_val = self.eval(right)?;
+                regex_match(&left_val, &right_val, true)
+            }
         }
     }
 
@@ -357,6 +371,37 @@ fn result_to_value(result: &ExecResult) -> Value {
         fields.push(("data".into(), Expr::Literal(data.clone())));
     }
     Value::Object(fields)
+}
+
+/// Perform regex match or not-match on two values.
+///
+/// The left operand is the string to match against.
+/// The right operand is the regex pattern.
+fn regex_match(left: &Value, right: &Value, negate: bool) -> EvalResult<Value> {
+    let text = match left {
+        Value::String(s) => s.as_str(),
+        _ => {
+            return Err(EvalError::TypeError {
+                expected: "string",
+                got: type_name(left).to_string(),
+            })
+        }
+    };
+
+    let pattern = match right {
+        Value::String(s) => s.as_str(),
+        _ => {
+            return Err(EvalError::TypeError {
+                expected: "string (regex pattern)",
+                got: type_name(right).to_string(),
+            })
+        }
+    };
+
+    let re = regex::Regex::new(pattern).map_err(|e| EvalError::RegexError(e.to_string()))?;
+    let matches = re.is_match(text);
+
+    Ok(Value::Bool(if negate { !matches } else { matches }))
 }
 
 /// Convenience function to evaluate an expression with a scope.

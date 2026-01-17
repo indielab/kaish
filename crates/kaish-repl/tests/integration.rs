@@ -514,3 +514,87 @@ fn stress_complex_condition() {
     "#);
     assert!(outputs_contain(&outputs, &["complex passed"]));
 }
+
+// ============================================================================
+// Introspection Builtin Tests
+// ============================================================================
+
+#[test]
+fn introspect_vars_shows_set_variables() {
+    let outputs = run_script(r#"
+        set X = 42
+        set NAME = "Alice"
+        vars
+    "#);
+    let joined = outputs.join("\n");
+    assert!(joined.contains("X=42"), "vars should show X=42. Output was: {}", joined);
+    assert!(joined.contains("NAME=\"Alice\""), "vars should show NAME. Output was: {}", joined);
+}
+
+#[test]
+fn introspect_vars_json_format() {
+    let outputs = run_script(r#"
+        set COUNT = 100
+        vars --json
+    "#);
+    let joined = outputs.join("\n");
+    assert!(joined.contains("\"name\""), "vars --json should have name field. Output was: {}", joined);
+    assert!(joined.contains("\"value\""), "vars --json should have value field. Output was: {}", joined);
+    assert!(joined.contains("COUNT"), "vars --json should include COUNT. Output was: {}", joined);
+}
+
+#[test]
+fn introspect_tools_lists_builtins() {
+    let outputs = run_script(r#"
+        tools
+    "#);
+    let joined = outputs.join("\n");
+    assert!(joined.contains("echo"), "tools should list echo. Output was: {}", joined);
+    assert!(joined.contains("ls"), "tools should list ls. Output was: {}", joined);
+    assert!(joined.contains("cat"), "tools should list cat. Output was: {}", joined);
+    assert!(joined.contains("vars"), "tools should list vars. Output was: {}", joined);
+}
+
+#[test]
+fn introspect_tools_json_format() {
+    let outputs = run_script(r#"
+        tools --json
+    "#);
+    let joined = outputs.join("\n");
+    assert!(joined.contains("\"name\""), "tools --json should have name field. Output was: {}", joined);
+    assert!(joined.contains("\"description\""), "tools --json should have description field. Output was: {}", joined);
+    // Should contain JSON array structure
+    assert!(joined.contains('[') && joined.contains(']'), "tools --json should return array. Output was: {}", joined);
+}
+
+#[test]
+fn introspect_tools_detail() {
+    let outputs = run_script(r#"
+        tools echo
+    "#);
+    let joined = outputs.join("\n");
+    assert!(joined.contains("echo"), "tools echo should show echo info. Output was: {}", joined);
+}
+
+#[test]
+fn introspect_mounts_shows_vfs() {
+    let outputs = run_script(r#"
+        mounts
+    "#);
+    let joined = outputs.join("\n");
+    // Should show at least the root mount
+    assert!(joined.contains("/"), "mounts should show root. Output was: {}", joined);
+    // Should indicate read-write or read-only
+    assert!(joined.contains("rw") || joined.contains("ro"), "mounts should show mode. Output was: {}", joined);
+}
+
+#[test]
+fn introspect_mounts_json_format() {
+    let outputs = run_script(r#"
+        mounts --json
+    "#);
+    let joined = outputs.join("\n");
+    // Should contain JSON structure
+    assert!(joined.contains("\"path\""), "mounts --json should have path. Output was: {}", joined);
+    assert!(joined.contains("\"read_only\""), "mounts --json should have read_only. Output was: {}", joined);
+}

@@ -775,6 +775,75 @@ src/main.rs                 # CLI binary
 
 ---
 
+## Layer 14: Context Generation
+
+**Goal**: Generate structured context from kernel state for AI assistants.
+
+### Files:
+```
+crates/kaish-kernel/src/tools/builtin/
+├── vars.rs              # List variables
+└── introspect.rs        # tools, mounts, history, checkpoints
+
+examples/
+└── 06_context_emit.kai  # Context generation script
+```
+
+### New Introspection Builtins:
+
+| Builtin | Description |
+|---------|-------------|
+| `vars` | List all variables in scope (`--json` for JSON) |
+| `tools` | List available tools (`--json`, or `name` for detail) |
+| `mounts` | List VFS mount points (`--json`) |
+| `history` | Show execution history (`--limit=N`, `--since_checkpoint`, `--json`) |
+| `checkpoints` | List checkpoints (`--json`) |
+
+### Usage:
+```kaish
+# List variables
+vars              # NAME=value format
+vars --json       # JSON array of {name, value} objects
+
+# List tools
+tools             # Summary list
+tools --json      # Full schemas as JSON
+tools echo        # Detailed schema for echo
+
+# List mounts
+mounts            # Path (mode) format
+mounts --json     # JSON array
+
+# History (requires persistent kernel)
+history           # Last 20 commands
+history --limit=5 # Last 5 commands
+history --json    # JSON format
+```
+
+### Context Generation Script:
+```kaish
+#!/usr/bin/env kaish
+# Generate AI context
+set KERNEL_CWD = $(pwd)
+set KERNEL_VARS = $(vars --json)
+set KERNEL_TOOLS = $(tools --json)
+set KERNEL_MOUNTS = $(mounts --json)
+
+echo "# Kernel Context"
+echo "CWD: ${KERNEL_CWD}"
+echo "Variables: ${KERNEL_VARS}"
+echo "Tools: ${KERNEL_TOOLS}"
+echo "Mounts: ${KERNEL_MOUNTS}"
+```
+
+### Verification:
+- `vars` lists variables after `set X = 42`
+- `tools --json` returns valid JSON array
+- `mounts` shows `/`, `/tmp`, `/mnt/local`
+- History/checkpoints require persistent kernel
+
+---
+
 ## Build Order Summary
 
 | Layer | Crate | Est. Tests | Checkpoint |

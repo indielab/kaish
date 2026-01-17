@@ -1,16 +1,17 @@
 //! kaish REPL — Interactive shell for 会sh.
 //!
 //! This is an evolving REPL that grows with each layer of the kaish project.
-//! Currently (L10), it provides:
+//! Currently (L14), it provides:
 //!
 //! - Parse input and display AST (`/ast` toggle)
-//! - Evaluate expressions with persistent Scope
+//! - Evaluate expressions with persistent scope (via ExecContext)
 //! - `set X = value` assignments
 //! - Real tool execution via VFS
 //! - Pipeline execution (`a | b | c`)
 //! - Background jobs (`cmd &`) with `jobs` and `wait` commands
 //! - MCP tool integration via pre-configured ToolRegistry
 //! - SQLite-backed session persistence
+//! - Introspection builtins: `vars`, `tools`, `mounts`, `history`, `checkpoints`
 //! - Meta-commands: `/help`, `/quit`, `/ast`, `/scope`, `/cwd`, `/jobs`, `/tools`, `/state`
 
 use std::path::PathBuf;
@@ -32,7 +33,6 @@ use kaish_kernel::vfs::{LocalFs, MemoryFs, VfsRouter};
 
 /// REPL configuration and state.
 pub struct Repl {
-    scope: Scope,
     show_ast: bool,
     tools: Arc<ToolRegistry>,
     exec_ctx: ExecContext,
@@ -96,8 +96,9 @@ impl Repl {
         let mut exec_ctx = ExecContext::new(Arc::new(vfs));
         exec_ctx.set_cwd(PathBuf::from("/mnt/local"));
 
-        // Wrap tools in Arc
+        // Wrap tools in Arc and set schemas on context for introspection
         let tools = Arc::new(tools);
+        exec_ctx.set_tool_schemas(tools.schemas());
 
         // Create job manager and add to context
         let job_manager = Arc::new(JobManager::new());
@@ -109,8 +110,8 @@ impl Repl {
         // Create tokio runtime for async tool execution
         let runtime = Runtime::new().context("Failed to create tokio runtime")?;
 
-        // Open or create state database
-        let (state, scope) = Self::init_state()?;
+        // Open or create state database and load persisted variables
+        let state = Self::init_state(&mut exec_ctx)?;
 
         // Restore cwd from state if available
         if let Some(ref store) = state {
@@ -122,7 +123,6 @@ impl Repl {
         }
 
         Ok(Self {
-            scope,
             show_ast: false,
             tools,
             exec_ctx,
@@ -133,8 +133,8 @@ impl Repl {
         })
     }
 
-    /// Initialize state storage and load persisted variables.
-    fn init_state() -> Result<(Option<StateStore>, Scope)> {
+    /// Initialize state storage and load persisted variables into exec_ctx.scope.
+    fn init_state(exec_ctx: &mut ExecContext) -> Result<Option<StateStore>> {
         let state_dir = state_paths::kernels_dir();
         let db_path = state_dir.join("repl.db");
 
@@ -147,17 +147,16 @@ impl Repl {
             }
         };
 
-        // Load variables into scope
-        let mut scope = Scope::new();
+        // Load variables into exec_ctx.scope
         if let Some(ref store) = store {
             if let Ok(vars) = store.load_all_variables() {
                 for (name, value) in vars {
-                    scope.set(name, value);
+                    exec_ctx.scope.set(name, value);
                 }
             }
         }
 
-        Ok((store, scope))
+        Ok(store)
     }
 
     /// Process a single line of input.
@@ -214,7 +213,7 @@ impl Repl {
         match stmt {
             Stmt::Assignment(assign) => {
                 let value = self.eval_expr(&assign.value)?;
-                self.scope.set(&assign.name, value.clone());
+                self.exec_ctx.scope.set(&assign.name, value.clone());
                 // Persist to state store
                 if let Some(ref store) = self.state {
                     if let Err(e) = store.set_variable(&assign.name, &value) {
@@ -225,12 +224,12 @@ impl Repl {
             }
             Stmt::Command(cmd) => {
                 let result = self.execute_command(&cmd.name, &cmd.args)?;
-                self.scope.set_last_result(result.clone());
+                self.exec_ctx.scope.set_last_result(result.clone());
                 Ok(Some(format_result(&result)))
             }
             Stmt::Pipeline(pipeline) => {
                 let result = self.execute_pipeline(pipeline)?;
-                self.scope.set_last_result(result.clone());
+                self.exec_ctx.scope.set_last_result(result.clone());
                 Ok(Some(format_result(&result)))
             }
             Stmt::If(if_stmt) => {
@@ -259,12 +258,12 @@ impl Repl {
                     _ => return Ok(Some("Error: for loop requires an array".into())),
                 };
 
-                self.scope.push_frame();
+                self.exec_ctx.scope.push_frame();
                 let mut output = String::new();
 
                 for item in items {
                     if let Expr::Literal(value) = item {
-                        self.scope.set(&for_loop.variable, value);
+                        self.exec_ctx.scope.set(&for_loop.variable, value);
                         for stmt in &for_loop.body {
                             if let Some(result) = self.execute_stmt(stmt)? {
                                 if !output.is_empty() {
@@ -276,7 +275,7 @@ impl Repl {
                     }
                 }
 
-                self.scope.pop_frame();
+                self.exec_ctx.scope.pop_frame();
                 Ok(if output.is_empty() { None } else { Some(output) })
             }
             Stmt::ToolDef(tool) => {
@@ -337,7 +336,7 @@ impl Repl {
         if name == "cd" && result.ok() {
             let cwd_str = self.exec_ctx.cwd.to_string_lossy().to_string();
             // Update scope with new cwd for display
-            self.scope.set("CWD", Value::String(cwd_str.clone()));
+            self.exec_ctx.scope.set("CWD", Value::String(cwd_str.clone()));
             // Persist to state store
             if let Some(ref store) = self.state {
                 if let Err(e) = store.set_cwd(&cwd_str) {
@@ -403,7 +402,7 @@ impl Repl {
         match expr {
             Expr::Literal(value) => self.eval_literal(value),
             Expr::VarRef(path) => {
-                self.scope.resolve_path(path)
+                self.exec_ctx.scope.resolve_path(path)
                     .ok_or_else(|| anyhow::anyhow!("undefined variable"))
             }
             Expr::Interpolated(parts) => {
@@ -412,7 +411,7 @@ impl Repl {
                     match part {
                         kaish_kernel::ast::StringPart::Literal(s) => result.push_str(s),
                         kaish_kernel::ast::StringPart::Var(path) => {
-                            let value = self.scope.resolve_path(path)
+                            let value = self.exec_ctx.scope.resolve_path(path)
                                 .ok_or_else(|| anyhow::anyhow!("undefined variable in interpolation"))?;
                             result.push_str(&format_value_unquoted(&value));
                         }
@@ -460,12 +459,33 @@ impl Repl {
                         };
                         Ok(Value::Bool(result))
                     }
+                    BinaryOp::Match | BinaryOp::NotMatch => {
+                        let l = self.eval_expr_inner(left)?;
+                        let r = self.eval_expr_inner(right)?;
+                        let text = match &l {
+                            Value::String(s) => s.as_str(),
+                            _ => anyhow::bail!("=~ requires string on left, got {:?}", l),
+                        };
+                        let pattern = match &r {
+                            Value::String(s) => s.as_str(),
+                            _ => anyhow::bail!("=~ requires regex pattern string on right, got {:?}", r),
+                        };
+                        let re = regex::Regex::new(pattern)
+                            .map_err(|e| anyhow::anyhow!("invalid regex: {}", e))?;
+                        let matches = re.is_match(text);
+                        let result = match op {
+                            BinaryOp::Match => matches,
+                            BinaryOp::NotMatch => !matches,
+                            _ => unreachable!(),
+                        };
+                        Ok(Value::Bool(result))
+                    }
                 }
             }
             Expr::CommandSubst(pipeline) => {
                 // Execute the command and return its result as an object
                 let result = self.execute_pipeline(pipeline)?;
-                self.scope.set_last_result(result.clone());
+                self.exec_ctx.scope.set_last_result(result.clone());
                 Ok(result_to_value(&result))
             }
         }
@@ -508,13 +528,13 @@ impl Repl {
                 Ok(Some(format!("AST mode: {}", if self.show_ast { "ON" } else { "OFF" })))
             }
             "/scope" | "/vars" => {
-                let names = self.scope.all_names();
+                let names = self.exec_ctx.scope.all_names();
                 if names.is_empty() {
                     Ok(Some("(no variables set)".to_string()))
                 } else {
                     let mut output = String::from("Variables:\n");
                     for name in names {
-                        if let Some(value) = self.scope.get(name) {
+                        if let Some(value) = self.exec_ctx.scope.get(name) {
                             output.push_str(&format!("  {} = {}\n", name, format_value(value)));
                         }
                     }
@@ -522,7 +542,7 @@ impl Repl {
                 }
             }
             "/result" | "/$?" => {
-                let result = self.scope.last_result();
+                let result = self.exec_ctx.scope.last_result();
                 Ok(Some(format_result(result)))
             }
             "/cwd" => {
@@ -571,7 +591,7 @@ impl Repl {
                         }
                     }
                     // Clear scope
-                    self.scope = Scope::new();
+                    self.exec_ctx.scope = Scope::new();
                     Ok(Some("State cleared".to_string()))
                 } else {
                     Ok(Some("No state to clear (ephemeral session)".to_string()))
@@ -786,7 +806,7 @@ pub fn run() -> Result<()> {
 
     // Show state status
     if repl.state.is_some() {
-        let vars = repl.scope.all_names();
+        let vars = repl.exec_ctx.scope.all_names();
         if !vars.is_empty() {
             println!("Restored {} variables from previous session.", vars.len());
         }
