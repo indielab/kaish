@@ -261,7 +261,12 @@ where
     .labelled("type")
 }
 
-/// If statement: `if COND; then STMTS [else STMTS] fi`
+/// If statement: `if COND; then STMTS [elif COND; then STMTS]* [else STMTS] fi`
+///
+/// elif clauses are desugared to nested if/else:
+///   `if A; then X elif B; then Y else Z fi`
+/// becomes:
+///   `if A; then X else { if B; then Y else Z fi } fi`
 fn if_parser<'tokens, I, S>(
     stmt: S,
 ) -> impl Parser<'tokens, I, IfStmt, extra::Err<Rich<'tokens, Token, Span>>> + Clone
@@ -269,7 +274,26 @@ where
     I: ValueInput<'tokens, Token = Token, Span = Span>,
     S: Parser<'tokens, I, Stmt, extra::Err<Rich<'tokens, Token, Span>>> + Clone + 'tokens,
 {
-    just(Token::If)
+    // Parse a single branch: condition + then statements
+    let branch = condition_parser()
+        .then_ignore(just(Token::Semi).or_not())
+        .then_ignore(just(Token::Newline).repeated())
+        .then_ignore(just(Token::Then))
+        .then_ignore(just(Token::Newline).repeated())
+        .then(
+            stmt.clone()
+                .repeated()
+                .collect::<Vec<_>>()
+                .map(|stmts: Vec<Stmt>| {
+                    stmts
+                        .into_iter()
+                        .filter(|s| !matches!(s, Stmt::Empty))
+                        .collect::<Vec<_>>()
+                }),
+        );
+
+    // Parse elif branches: `elif COND; then STMTS`
+    let elif_branch = just(Token::Elif)
         .ignore_then(condition_parser())
         .then_ignore(just(Token::Semi).or_not())
         .then_ignore(just(Token::Newline).repeated())
@@ -279,23 +303,67 @@ where
             stmt.clone()
                 .repeated()
                 .collect::<Vec<_>>()
-                .map(|stmts| stmts.into_iter().filter(|s| !matches!(s, Stmt::Empty)).collect()),
-        )
-        .then(
-            just(Token::Else)
-                .ignore_then(just(Token::Newline).repeated())
-                .ignore_then(stmt.repeated().collect::<Vec<_>>())
-                .map(|stmts| stmts.into_iter().filter(|s| !matches!(s, Stmt::Empty)).collect())
-                .or_not(),
-        )
+                .map(|stmts: Vec<Stmt>| {
+                    stmts
+                        .into_iter()
+                        .filter(|s| !matches!(s, Stmt::Empty))
+                        .collect::<Vec<_>>()
+                }),
+        );
+
+    // Parse else branch: `else STMTS`
+    let else_branch = just(Token::Else)
+        .ignore_then(just(Token::Newline).repeated())
+        .ignore_then(stmt.repeated().collect::<Vec<_>>())
+        .map(|stmts: Vec<Stmt>| {
+            stmts
+                .into_iter()
+                .filter(|s| !matches!(s, Stmt::Empty))
+                .collect::<Vec<_>>()
+        });
+
+    just(Token::If)
+        .ignore_then(branch)
+        .then(elif_branch.repeated().collect::<Vec<_>>())
+        .then(else_branch.or_not())
         .then_ignore(just(Token::Fi))
-        .map(|((condition, then_branch), else_branch)| IfStmt {
-            condition: Box::new(condition),
-            then_branch,
-            else_branch,
+        .map(|(((condition, then_branch), elif_branches), else_branch)| {
+            // Build nested if/else structure from elif branches
+            build_if_chain(condition, then_branch, elif_branches, else_branch)
         })
         .labelled("if statement")
         .boxed()
+}
+
+/// Build a nested IfStmt chain from elif branches.
+///
+/// Transforms:
+///   if A then X elif B then Y elif C then Z else W fi
+/// Into:
+///   IfStmt { cond: A, then: X, else: Some([IfStmt { cond: B, then: Y, else: Some([IfStmt { cond: C, then: Z, else: Some(W) }]) }]) }
+fn build_if_chain(
+    condition: Expr,
+    then_branch: Vec<Stmt>,
+    mut elif_branches: Vec<(Expr, Vec<Stmt>)>,
+    else_branch: Option<Vec<Stmt>>,
+) -> IfStmt {
+    if elif_branches.is_empty() {
+        // No elif, just if/else
+        IfStmt {
+            condition: Box::new(condition),
+            then_branch,
+            else_branch,
+        }
+    } else {
+        // Pop the first elif and recursively build the rest
+        let (elif_cond, elif_then) = elif_branches.remove(0);
+        let nested_if = build_if_chain(elif_cond, elif_then, elif_branches, else_branch);
+        IfStmt {
+            condition: Box::new(condition),
+            then_branch,
+            else_branch: Some(vec![Stmt::If(nested_if)]),
+        }
+    }
 }
 
 /// For loop: `for VAR in ITEMS; do STMTS done`
@@ -445,6 +513,8 @@ where
     let comparison_op = select! {
         Token::EqEq => BinaryOp::Eq,
         Token::NotEq => BinaryOp::NotEq,
+        Token::Match => BinaryOp::Match,
+        Token::NotMatch => BinaryOp::NotMatch,
         Token::Lt => BinaryOp::Lt,
         Token::Gt => BinaryOp::Gt,
         Token::LtEq => BinaryOp::LtEq,
@@ -861,6 +931,53 @@ mod tests {
             Stmt::If(if_stmt) => assert!(if_stmt.else_branch.is_some()),
             _ => panic!("expected If"),
         }
+    }
+
+    #[test]
+    fn parse_elif_simple() {
+        let result = parse("if true; then echo a; elif false; then echo b; fi");
+        assert!(result.is_ok(), "parse failed: {:?}", result);
+        let program = result.expect("ok");
+        match &program.statements[0] {
+            Stmt::If(if_stmt) => {
+                // elif is desugared to nested if in else
+                assert!(if_stmt.else_branch.is_some());
+                let else_branch = if_stmt.else_branch.as_ref().unwrap();
+                assert_eq!(else_branch.len(), 1);
+                assert!(matches!(&else_branch[0], Stmt::If(_)));
+            }
+            _ => panic!("expected If"),
+        }
+    }
+
+    #[test]
+    fn parse_elif_with_else() {
+        let result = parse("if true; then echo a; elif false; then echo b; else echo c; fi");
+        assert!(result.is_ok(), "parse failed: {:?}", result);
+        let program = result.expect("ok");
+        match &program.statements[0] {
+            Stmt::If(outer_if) => {
+                // Check nested structure: if -> elif -> else
+                let else_branch = outer_if.else_branch.as_ref().expect("outer else");
+                assert_eq!(else_branch.len(), 1);
+                match &else_branch[0] {
+                    Stmt::If(inner_if) => {
+                        // The inner if (from elif) should have the final else
+                        assert!(inner_if.else_branch.is_some());
+                    }
+                    _ => panic!("expected nested If from elif"),
+                }
+            }
+            _ => panic!("expected If"),
+        }
+    }
+
+    #[test]
+    fn parse_multiple_elif() {
+        let result = parse(
+            "if ${X} == 1; then echo one; elif ${X} == 2; then echo two; elif ${X} == 3; then echo three; else echo other; fi",
+        );
+        assert!(result.is_ok(), "parse failed: {:?}", result);
     }
 
     #[test]
@@ -1484,6 +1601,30 @@ mod tests {
         match &result.statements[0] {
             Stmt::If(if_stmt) => match if_stmt.condition.as_ref() {
                 Expr::BinaryOp { op, .. } => assert_eq!(*op, BinaryOp::GtEq),
+                other => panic!("expected binary op, got {:?}", other),
+            },
+            other => panic!("expected if, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn parse_regex_match() {
+        let result = parse(r#"if ${NAME} =~ "^test"; then echo; fi"#).unwrap();
+        match &result.statements[0] {
+            Stmt::If(if_stmt) => match if_stmt.condition.as_ref() {
+                Expr::BinaryOp { op, .. } => assert_eq!(*op, BinaryOp::Match),
+                other => panic!("expected binary op, got {:?}", other),
+            },
+            other => panic!("expected if, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn parse_regex_not_match() {
+        let result = parse(r#"if ${NAME} !~ "^test"; then echo; fi"#).unwrap();
+        match &result.statements[0] {
+            Stmt::If(if_stmt) => match if_stmt.condition.as_ref() {
+                Expr::BinaryOp { op, .. } => assert_eq!(*op, BinaryOp::NotMatch),
                 other => panic!("expected binary op, got {:?}", other),
             },
             other => panic!("expected if, got {:?}", other),

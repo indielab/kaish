@@ -82,6 +82,9 @@ pub enum Token {
     #[token("else")]
     Else,
 
+    #[token("elif")]
+    Elif,
+
     #[token("fi")]
     Fi,
 
@@ -138,6 +141,12 @@ pub enum Token {
 
     #[token("!=")]
     NotEq,
+
+    #[token("=~")]
+    Match,
+
+    #[token("!~")]
+    NotMatch,
 
     #[token(">=")]
     GtEq,
@@ -317,6 +326,7 @@ impl fmt::Display for Token {
             Token::If => write!(f, "if"),
             Token::Then => write!(f, "then"),
             Token::Else => write!(f, "else"),
+            Token::Elif => write!(f, "elif"),
             Token::Fi => write!(f, "fi"),
             Token::For => write!(f, "for"),
             Token::In => write!(f, "in"),
@@ -334,6 +344,8 @@ impl fmt::Display for Token {
             Token::Or => write!(f, "||"),
             Token::EqEq => write!(f, "=="),
             Token::NotEq => write!(f, "!="),
+            Token::Match => write!(f, "=~"),
+            Token::NotMatch => write!(f, "!~"),
             Token::GtEq => write!(f, ">="),
             Token::LtEq => write!(f, "<="),
             Token::GtGt => write!(f, ">>"),
@@ -380,6 +392,7 @@ impl Token {
                 | Token::If
                 | Token::Then
                 | Token::Else
+                | Token::Elif
                 | Token::Fi
                 | Token::For
                 | Token::In
@@ -616,6 +629,7 @@ mod tests {
         assert_eq!(lex("if"), vec![Token::If]);
         assert_eq!(lex("then"), vec![Token::Then]);
         assert_eq!(lex("else"), vec![Token::Else]);
+        assert_eq!(lex("elif"), vec![Token::Elif]);
         assert_eq!(lex("fi"), vec![Token::Fi]);
         assert_eq!(lex("for"), vec![Token::For]);
         assert_eq!(lex("in"), vec![Token::In]);
@@ -658,6 +672,8 @@ mod tests {
         assert_eq!(lex("||"), vec![Token::Or]);
         assert_eq!(lex("=="), vec![Token::EqEq]);
         assert_eq!(lex("!="), vec![Token::NotEq]);
+        assert_eq!(lex("=~"), vec![Token::Match]);
+        assert_eq!(lex("!~"), vec![Token::NotMatch]);
         assert_eq!(lex(">="), vec![Token::GtEq]);
         assert_eq!(lex("<="), vec![Token::LtEq]);
         assert_eq!(lex(">>"), vec![Token::GtGt]);

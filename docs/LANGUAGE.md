@@ -114,6 +114,8 @@ fi
 # Conditional
 if CONDITION; then
     ...
+elif OTHER_CONDITION; then
+    ...
 else
     ...
 fi
@@ -125,6 +127,30 @@ done
 ```
 
 No `case`. No `select`. No arithmetic `(( ))`.
+
+### Comparison Operators
+
+| Operator | Description |
+|----------|-------------|
+| `==` | Equality |
+| `!=` | Inequality |
+| `<` | Less than |
+| `>` | Greater than |
+| `<=` | Less than or equal |
+| `>=` | Greater than or equal |
+| `=~` | Regex match (returns bool) |
+| `!~` | Regex not match (returns bool) |
+
+```bash
+# Regex matching
+if ${filename} =~ "\.rs$"; then
+    echo "Rust source file"
+fi
+
+if ${input} !~ "^[0-9]+$"; then
+    echo "Not a number"
+fi
+```
 
 ### Command Substitution `$(cmd)`
 
@@ -245,6 +271,12 @@ Everything is a tool. Builtins:
 | `gather` | 集 — Collect parallel results |
 | `assert` | Test assertions (error if condition false) |
 | `date` | Current timestamp |
+| `vars` | List variables (`--json` for JSON output) |
+| `tools` | List available tools (`--json` for JSON, `name` for detail) |
+| `mounts` | List VFS mount points (`--json` for JSON output) |
+| `history` | Show execution history (`--limit=N`, `--json`) |
+| `checkpoints` | List checkpoints (`--json` for JSON output) |
+| `exec` | Execute external command |
 
 MCP tools use same syntax:
 ```bash

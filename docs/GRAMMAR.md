@@ -74,6 +74,7 @@ tool_def    = "tool" , IDENT , { param_def } , "{" , { statement } , "}" ;
 param_def   = IDENT , ":" , TYPE , [ "=" , literal ] ;
 
 if_stmt     = "if" , condition , ";" , "then" , { statement } ,
+              { "elif" , condition , ";" , "then" , { statement } } ,
               [ "else" , { statement } ] , "fi" ;
 
 for_stmt    = "for" , IDENT , "in" , value , ";" , "do" , { statement } , "done" ;
@@ -137,7 +138,9 @@ condition   = or_expr ;
 or_expr     = and_expr , { "||" , and_expr } ;
 and_expr    = cmp_expr , { "&&" , cmp_expr } ;
 cmp_expr    = value , [ comp_op , value ] ;
-comp_op     = "==" | "!=" | "<" | ">" | "<=" | ">=" ;
+comp_op     = "==" | "!=" | "<" | ">" | "<=" | ">="
+            | "=~" | "!~"   (* regex match / not match *)
+            ;
 
 (* === Tokens (Lexer) === *)
 

@@ -205,6 +205,10 @@ pub enum BinaryOp {
     Eq,
     /// `!=` - inequality
     NotEq,
+    /// `=~` - regex match
+    Match,
+    /// `!~` - regex not match
+    NotMatch,
     /// `<` - less than
     Lt,
     /// `>` - greater than
@@ -222,6 +226,8 @@ impl fmt::Display for BinaryOp {
             BinaryOp::Or => write!(f, "||"),
             BinaryOp::Eq => write!(f, "=="),
             BinaryOp::NotEq => write!(f, "!="),
+            BinaryOp::Match => write!(f, "=~"),
+            BinaryOp::NotMatch => write!(f, "!~"),
             BinaryOp::Lt => write!(f, "<"),
             BinaryOp::Gt => write!(f, ">"),
             BinaryOp::LtEq => write!(f, "<="),
