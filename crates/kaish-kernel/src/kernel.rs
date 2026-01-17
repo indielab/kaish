@@ -24,13 +24,14 @@
 //! └────────────────────────────────────────────────────────────┘
 //! ```
 
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use tokio::sync::RwLock;
 
-use crate::ast::{Arg, Expr, Stmt, Value};
+use crate::ast::{Arg, Expr, Stmt, ToolDef, Value};
 use crate::interpreter::{eval_expr, ExecResult, Scope};
 use crate::parser::parse;
 use crate::scheduler::{JobManager, PipelineRunner};
@@ -100,6 +101,8 @@ pub struct Kernel {
     scope: RwLock<Scope>,
     /// Tool registry.
     tools: Arc<ToolRegistry>,
+    /// User-defined tools (from `tool name { body }` statements).
+    user_tools: RwLock<HashMap<String, ToolDef>>,
     /// Virtual filesystem router.
     vfs: Arc<VfsRouter>,
     /// Background job manager.
@@ -189,6 +192,7 @@ impl Kernel {
             name: config.name,
             scope: RwLock::new(scope),
             tools,
+            user_tools: RwLock::new(HashMap::new()),
             vfs,
             jobs,
             runner,
@@ -316,9 +320,10 @@ impl Kernel {
                 }
                 Ok(result)
             }
-            Stmt::ToolDef(_tool) => {
-                // TODO: Register user-defined tool
-                Ok(ExecResult::failure(1, "tool definitions not yet implemented"))
+            Stmt::ToolDef(tool_def) => {
+                let mut user_tools = self.user_tools.write().await;
+                user_tools.insert(tool_def.name.clone(), tool_def.clone());
+                Ok(ExecResult::success(""))
             }
             Stmt::Empty => Ok(ExecResult::success("")),
         }
@@ -369,7 +374,17 @@ impl Kernel {
             _ => {}
         }
 
-        // Look up tool
+        // Check user-defined tools first
+        {
+            let user_tools = self.user_tools.read().await;
+            if let Some(tool_def) = user_tools.get(name) {
+                let tool_def = tool_def.clone();
+                drop(user_tools);
+                return self.execute_user_tool(tool_def, args).await;
+            }
+        }
+
+        // Look up builtin tool
         let tool = match self.tools.get(name) {
             Some(t) => t,
             None => return Ok(ExecResult::failure(127, format!("tool not found: {}", name))),
@@ -445,6 +460,71 @@ impl Kernel {
         if let Some(ref store) = self.state {
             store.set_last_result(result).ok();
         }
+    }
+
+    /// Execute a user-defined tool with strict parameter isolation.
+    ///
+    /// User-defined tools get a fresh scope with ONLY their parameters bound.
+    /// They cannot access parent scope variables.
+    async fn execute_user_tool(&self, def: ToolDef, args: &[Arg]) -> Result<ExecResult> {
+        // 1. Build tool_args from AST args (using current scope for evaluation)
+        let tool_args = {
+            let scope = self.scope.read().await;
+            let ctx = self.exec_ctx.read().await;
+            self.build_args(args, &scope, &ctx)?
+        };
+
+        // 2. Create fresh isolated scope
+        let mut isolated_scope = Scope::new();
+
+        // 3. Bind params: named args, then positional, then defaults
+        for (pos, param) in def.params.iter().enumerate() {
+            let value = if let Some(val) = tool_args.named.get(&param.name) {
+                val.clone()
+            } else if let Some(val) = tool_args.positional.get(pos) {
+                val.clone()
+            } else if let Some(ref default_expr) = param.default {
+                let mut scope_clone = isolated_scope.clone();
+                eval_expr(default_expr, &mut scope_clone)
+                    .context(format!("failed to evaluate default for param '{}'", param.name))?
+            } else {
+                return Ok(ExecResult::failure(
+                    1,
+                    format!("{}: missing required parameter '{}'", def.name, param.name),
+                ));
+            };
+
+            isolated_scope.set(&param.name, value);
+        }
+
+        // 4. Save current scope and swap with isolated scope
+        let original_scope = {
+            let mut scope = self.scope.write().await;
+            std::mem::replace(&mut *scope, isolated_scope)
+        };
+
+        // 5. Execute body statements
+        let mut result = ExecResult::success("");
+        for stmt in &def.body {
+            match self.execute_stmt(stmt).await {
+                Ok(r) => result = r,
+                Err(e) => {
+                    // Restore original scope on error
+                    let mut scope = self.scope.write().await;
+                    *scope = original_scope;
+                    return Err(e);
+                }
+            }
+        }
+
+        // 6. Restore original scope
+        {
+            let mut scope = self.scope.write().await;
+            *scope = original_scope;
+        }
+
+        // 7. Return final result
+        Ok(result)
     }
 
     // --- Variable Access ---
@@ -662,5 +742,122 @@ mod tests {
         assert!(is_truthy(&Value::Int(1)));
         assert!(!is_truthy(&Value::String("".into())));
         assert!(is_truthy(&Value::String("x".into())));
+    }
+
+    #[tokio::test]
+    async fn test_jq_in_pipeline() {
+        let kernel = Kernel::transient().expect("failed to create kernel");
+        // kaish uses double quotes only; escape inner quotes
+        let result = kernel
+            .execute(r#"echo "{\"name\": \"Alice\"}" | jq ".name" -r"#)
+            .await
+            .expect("execution failed");
+        assert!(result.ok(), "jq pipeline failed: {}", result.err);
+        assert_eq!(result.out.trim(), "Alice");
+    }
+
+    #[tokio::test]
+    async fn test_user_defined_tool() {
+        let kernel = Kernel::transient().expect("failed to create kernel");
+
+        // Define a tool
+        kernel
+            .execute(r#"tool greet name:string { echo "Hello, ${name}!" }"#)
+            .await
+            .expect("tool definition failed");
+
+        // Call the tool
+        let result = kernel
+            .execute(r#"greet name="World""#)
+            .await
+            .expect("tool call failed");
+
+        assert!(result.ok(), "greet failed: {}", result.err);
+        assert_eq!(result.out.trim(), "Hello, World!");
+    }
+
+    #[tokio::test]
+    async fn test_user_tool_positional_args() {
+        let kernel = Kernel::transient().expect("failed to create kernel");
+
+        // Define a tool with positional param
+        kernel
+            .execute(r#"tool greet name:string { echo "Hi ${name}" }"#)
+            .await
+            .expect("tool definition failed");
+
+        // Call with positional argument
+        let result = kernel
+            .execute(r#"greet "Amy""#)
+            .await
+            .expect("tool call failed");
+
+        assert!(result.ok(), "greet failed: {}", result.err);
+        assert_eq!(result.out.trim(), "Hi Amy");
+    }
+
+    #[tokio::test]
+    async fn test_user_tool_isolation() {
+        let kernel = Kernel::transient().expect("failed to create kernel");
+
+        // Set a variable in parent scope
+        kernel
+            .execute(r#"set SECRET = "hidden""#)
+            .await
+            .expect("set failed");
+
+        // Define a tool that tries to access the parent variable
+        kernel
+            .execute(r#"tool leak { echo "${SECRET}" }"#)
+            .await
+            .expect("tool definition failed");
+
+        // Call the tool - it should either fail or output empty (not "hidden")
+        // Strict isolation means SECRET is not accessible
+        let result = kernel.execute("leak").await;
+
+        match result {
+            Ok(exec_result) => {
+                // If it succeeds, the output must not contain the secret
+                assert!(
+                    !exec_result.out.contains("hidden"),
+                    "SECRET leaked into tool scope: {}",
+                    exec_result.out
+                );
+            }
+            Err(_) => {
+                // Error accessing undefined variable is also acceptable
+                // (confirms isolation)
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn test_user_tool_missing_param() {
+        let kernel = Kernel::transient().expect("failed to create kernel");
+
+        // Define a tool with required param
+        kernel
+            .execute(r#"tool greet name:string { echo "Hi ${name}" }"#)
+            .await
+            .expect("tool definition failed");
+
+        // Call without the required param
+        let result = kernel.execute("greet").await.expect("tool call failed");
+
+        assert!(!result.ok(), "should fail with missing param");
+        assert!(result.err.contains("missing required parameter"));
+    }
+
+    #[tokio::test]
+    async fn test_exec_builtin() {
+        let kernel = Kernel::transient().expect("failed to create kernel");
+        let result = kernel
+            .execute(r#"exec command="/bin/echo" argv=["hello", "world"]"#)
+            .await
+            .expect("exec failed");
+
+        assert!(result.ok(), "exec failed: {}", result.err);
+        assert_eq!(result.out.trim(), "hello world");
     }
 }
