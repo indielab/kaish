@@ -337,6 +337,30 @@ impl Kernel {
                 user_tools.insert(tool_def.name.clone(), tool_def.clone());
                 Ok(ExecResult::success(""))
             }
+            Stmt::AndChain { left, right } => {
+                // cmd1 && cmd2 - run cmd2 only if cmd1 succeeds (exit code 0)
+                let left_result = self.execute_stmt(left).await?;
+                self.update_last_result(&left_result).await;
+                if left_result.ok() {
+                    let right_result = self.execute_stmt(right).await?;
+                    self.update_last_result(&right_result).await;
+                    Ok(right_result)
+                } else {
+                    Ok(left_result)
+                }
+            }
+            Stmt::OrChain { left, right } => {
+                // cmd1 || cmd2 - run cmd2 only if cmd1 fails (non-zero exit code)
+                let left_result = self.execute_stmt(left).await?;
+                self.update_last_result(&left_result).await;
+                if !left_result.ok() {
+                    let right_result = self.execute_stmt(right).await?;
+                    self.update_last_result(&right_result).await;
+                    Ok(right_result)
+                } else {
+                    Ok(left_result)
+                }
+            }
             Stmt::Empty => Ok(ExecResult::success("")),
         }
         })

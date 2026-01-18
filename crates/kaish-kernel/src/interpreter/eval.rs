@@ -9,7 +9,8 @@
 
 use std::fmt;
 
-use crate::ast::{BinaryOp, Expr, Pipeline, StringPart, Value, VarPath};
+use crate::ast::{BinaryOp, Expr, FileTestOp, Pipeline, StringPart, StringTestOp, TestCmpOp, TestExpr, Value, VarPath};
+use std::path::Path;
 
 use super::result::ExecResult;
 use super::scope::Scope;
@@ -103,7 +104,76 @@ impl<'a, E: Executor> Evaluator<'a, E> {
             Expr::Interpolated(parts) => self.eval_interpolated(parts),
             Expr::BinaryOp { left, op, right } => self.eval_binary_op(left, *op, right),
             Expr::CommandSubst(pipeline) => self.eval_command_subst(pipeline),
+            Expr::Test(test_expr) => self.eval_test(test_expr),
         }
+    }
+
+    /// Evaluate a test expression `[[ ... ]]` to a boolean value.
+    fn eval_test(&mut self, test_expr: &TestExpr) -> EvalResult<Value> {
+        let result = match test_expr {
+            TestExpr::FileTest { op, path } => {
+                let path_value = self.eval(path)?;
+                let path_str = value_to_string(&path_value);
+                let path = Path::new(&path_str);
+                match op {
+                    FileTestOp::Exists => path.exists(),
+                    FileTestOp::IsFile => path.is_file(),
+                    FileTestOp::IsDir => path.is_dir(),
+                    FileTestOp::Readable => path.exists() && std::fs::metadata(&path).is_ok(),
+                    FileTestOp::Writable => {
+                        // Check if we can write to the file
+                        if path.exists() {
+                            std::fs::OpenOptions::new().write(true).open(&path).is_ok()
+                        } else {
+                            false
+                        }
+                    }
+                    FileTestOp::Executable => {
+                        #[cfg(unix)]
+                        {
+                            use std::os::unix::fs::PermissionsExt;
+                            path.metadata()
+                                .map(|m| m.permissions().mode() & 0o111 != 0)
+                                .unwrap_or(false)
+                        }
+                        #[cfg(not(unix))]
+                        {
+                            path.exists()
+                        }
+                    }
+                }
+            }
+            TestExpr::StringTest { op, value } => {
+                let val = self.eval(value)?;
+                let s = value_to_string(&val);
+                match op {
+                    StringTestOp::IsEmpty => s.is_empty(),
+                    StringTestOp::IsNonEmpty => !s.is_empty(),
+                }
+            }
+            TestExpr::Comparison { left, op, right } => {
+                let left_val = self.eval(left)?;
+                let right_val = self.eval(right)?;
+
+                match op {
+                    TestCmpOp::Eq => values_equal(&left_val, &right_val),
+                    TestCmpOp::NotEq => !values_equal(&left_val, &right_val),
+                    TestCmpOp::Gt | TestCmpOp::Lt | TestCmpOp::GtEq | TestCmpOp::LtEq => {
+                        // Numeric comparison
+                        let left_num = value_to_f64(&left_val);
+                        let right_num = value_to_f64(&right_val);
+                        match op {
+                            TestCmpOp::Gt => left_num > right_num,
+                            TestCmpOp::Lt => left_num < right_num,
+                            TestCmpOp::GtEq => left_num >= right_num,
+                            TestCmpOp::LtEq => left_num <= right_num,
+                            _ => unreachable!(),
+                        }
+                    }
+                }
+            }
+        };
+        Ok(Value::Bool(result))
     }
 
     /// Evaluate a literal value.
@@ -356,6 +426,17 @@ fn type_name(value: &Value) -> &'static str {
         Value::String(_) => "string",
         Value::Array(_) => "array",
         Value::Object(_) => "object",
+    }
+}
+
+/// Convert a value to f64 for numeric comparisons.
+fn value_to_f64(value: &Value) -> f64 {
+    match value {
+        Value::Int(i) => *i as f64,
+        Value::Float(f) => *f,
+        Value::String(s) => s.parse::<f64>().unwrap_or(0.0),
+        Value::Bool(b) => if *b { 1.0 } else { 0.0 },
+        _ => 0.0,
     }
 }
 

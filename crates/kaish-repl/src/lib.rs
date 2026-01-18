@@ -281,6 +281,26 @@ impl Repl {
             Stmt::ToolDef(tool) => {
                 Ok(Some(format!("Defined tool: {}", tool.name)))
             }
+            Stmt::AndChain { left, right } => {
+                // Run right only if left succeeds
+                let left_result = self.execute_stmt(left)?;
+                // Check if we should run right (last result was success)
+                if self.exec_ctx.scope.last_result().ok() {
+                    self.execute_stmt(right)
+                } else {
+                    Ok(left_result)
+                }
+            }
+            Stmt::OrChain { left, right } => {
+                // Run right only if left fails
+                let left_result = self.execute_stmt(left)?;
+                // Check if we should run right (last result was failure)
+                if !self.exec_ctx.scope.last_result().ok() {
+                    self.execute_stmt(right)
+                } else {
+                    Ok(left_result)
+                }
+            }
             Stmt::Empty => Ok(None),
         }
     }
@@ -487,6 +507,63 @@ impl Repl {
                 let result = self.execute_pipeline(pipeline)?;
                 self.exec_ctx.scope.set_last_result(result.clone());
                 Ok(result_to_value(&result))
+            }
+            Expr::Test(test_expr) => {
+                // Evaluate test expression [[ ... ]] and return boolean
+                use kaish_kernel::ast::{TestExpr, FileTestOp, StringTestOp, TestCmpOp};
+                use std::path::Path;
+
+                let result = match test_expr.as_ref() {
+                    TestExpr::FileTest { op, path } => {
+                        let path_val = self.eval_expr_inner(path)?;
+                        let path_str = format_value_unquoted(&path_val);
+                        let p = Path::new(&path_str);
+                        match op {
+                            FileTestOp::Exists => p.exists(),
+                            FileTestOp::IsFile => p.is_file(),
+                            FileTestOp::IsDir => p.is_dir(),
+                            FileTestOp::Readable => p.exists(),
+                            FileTestOp::Writable => p.exists() && std::fs::OpenOptions::new().write(true).open(&p).is_ok(),
+                            FileTestOp::Executable => {
+                                #[cfg(unix)]
+                                {
+                                    use std::os::unix::fs::PermissionsExt;
+                                    p.metadata().map(|m| m.permissions().mode() & 0o111 != 0).unwrap_or(false)
+                                }
+                                #[cfg(not(unix))]
+                                { p.exists() }
+                            }
+                        }
+                    }
+                    TestExpr::StringTest { op, value } => {
+                        let val = self.eval_expr_inner(value)?;
+                        let s = format_value_unquoted(&val);
+                        match op {
+                            StringTestOp::IsEmpty => s.is_empty(),
+                            StringTestOp::IsNonEmpty => !s.is_empty(),
+                        }
+                    }
+                    TestExpr::Comparison { left, op, right } => {
+                        let l = self.eval_expr_inner(left)?;
+                        let r = self.eval_expr_inner(right)?;
+                        match op {
+                            TestCmpOp::Eq => values_equal(&l, &r),
+                            TestCmpOp::NotEq => !values_equal(&l, &r),
+                            TestCmpOp::Gt | TestCmpOp::Lt | TestCmpOp::GtEq | TestCmpOp::LtEq => {
+                                let lnum = value_to_f64(&l);
+                                let rnum = value_to_f64(&r);
+                                match op {
+                                    TestCmpOp::Gt => lnum > rnum,
+                                    TestCmpOp::Lt => lnum < rnum,
+                                    TestCmpOp::GtEq => lnum >= rnum,
+                                    TestCmpOp::LtEq => lnum <= rnum,
+                                    _ => unreachable!(),
+                                }
+                            }
+                        }
+                    }
+                };
+                Ok(Value::Bool(result))
             }
         }
     }
@@ -719,6 +796,17 @@ fn compare_values(left: &Value, right: &Value) -> Result<std::cmp::Ordering> {
         }
         (Value::String(a), Value::String(b)) => Ok(a.cmp(b)),
         _ => Err(anyhow::anyhow!("cannot compare these types")),
+    }
+}
+
+/// Convert a value to f64 for numeric comparisons.
+fn value_to_f64(value: &Value) -> f64 {
+    match value {
+        Value::Int(i) => *i as f64,
+        Value::Float(f) => *f,
+        Value::String(s) => s.parse::<f64>().unwrap_or(0.0),
+        Value::Bool(b) => if *b { 1.0 } else { 0.0 },
+        _ => 0.0,
     }
 }
 

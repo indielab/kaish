@@ -70,6 +70,9 @@ pub enum Token {
     #[token("set")]
     Set,
 
+    #[token("local")]
+    Local,
+
     #[token("tool")]
     Tool,
 
@@ -239,13 +242,21 @@ pub enum Token {
     // Literals (with values)
     // ═══════════════════════════════════════════════════════════════════
 
-    /// String literal: `"..."` - value is the parsed content (quotes removed, escapes processed)
+    /// Double-quoted string: `"..."` - value is the parsed content (quotes removed, escapes processed)
     #[regex(r#""([^"\\]|\\.)*""#, lex_string)]
     String(String),
 
-    /// Variable reference: `${VAR}` or `${VAR.field}` - value is the raw inner content
+    /// Single-quoted string: `'...'` - literal content, no escape processing
+    #[regex(r"'[^']*'", lex_single_string)]
+    SingleString(String),
+
+    /// Braced variable reference: `${VAR}` or `${VAR.field}` - value is the raw inner content
     #[regex(r"\$\{[^}]+\}", lex_varref)]
     VarRef(String),
+
+    /// Simple variable reference: `$NAME` - just the identifier
+    #[regex(r"\$[a-zA-Z_][a-zA-Z0-9_]*", lex_simple_varref)]
+    SimpleVarRef(String),
 
     /// Integer literal - value is the parsed i64
     #[regex(r"-?[0-9]+", lex_int, priority = 2)]
@@ -280,15 +291,28 @@ pub enum Token {
     LineContinuation,
 }
 
-/// Lex a string literal, processing escape sequences.
+/// Lex a double-quoted string literal, processing escape sequences.
 fn lex_string(lex: &mut logos::Lexer<Token>) -> Result<String, LexerError> {
     parse_string_literal(lex.slice())
 }
 
-/// Lex a variable reference, extracting the inner content.
+/// Lex a single-quoted string literal (no escape processing).
+fn lex_single_string(lex: &mut logos::Lexer<Token>) -> String {
+    let s = lex.slice();
+    // Strip the surrounding single quotes
+    s[1..s.len() - 1].to_string()
+}
+
+/// Lex a braced variable reference, extracting the inner content.
 fn lex_varref(lex: &mut logos::Lexer<Token>) -> String {
     // Keep the full ${...} for later parsing of path segments
     lex.slice().to_string()
+}
+
+/// Lex a simple variable reference: `$NAME` → `NAME`
+fn lex_simple_varref(lex: &mut logos::Lexer<Token>) -> String {
+    // Strip the leading `$`
+    lex.slice()[1..].to_string()
 }
 
 /// Lex an integer literal.
@@ -322,6 +346,7 @@ impl fmt::Display for Token {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Token::Set => write!(f, "set"),
+            Token::Local => write!(f, "local"),
             Token::Tool => write!(f, "tool"),
             Token::If => write!(f, "if"),
             Token::Then => write!(f, "then"),
@@ -371,7 +396,9 @@ impl fmt::Display for Token {
             Token::ShortFlag(s) => write!(f, "-{}", s),
             Token::DoubleDash => write!(f, "--"),
             Token::String(s) => write!(f, "STRING({:?})", s),
+            Token::SingleString(s) => write!(f, "SINGLESTRING({:?})", s),
             Token::VarRef(v) => write!(f, "VARREF({})", v),
+            Token::SimpleVarRef(v) => write!(f, "SIMPLEVARREF({})", v),
             Token::Int(n) => write!(f, "INT({})", n),
             Token::Float(n) => write!(f, "FLOAT({})", n),
             Token::Ident(s) => write!(f, "IDENT({})", s),
@@ -388,6 +415,7 @@ impl Token {
         matches!(
             self,
             Token::Set
+                | Token::Local
                 | Token::Tool
                 | Token::If
                 | Token::Then
@@ -420,7 +448,7 @@ impl Token {
     pub fn starts_statement(&self) -> bool {
         matches!(
             self,
-            Token::Set | Token::Tool | Token::If | Token::For | Token::Ident(_)
+            Token::Set | Token::Local | Token::Tool | Token::If | Token::For | Token::Ident(_) | Token::LBracket
         )
     }
 
@@ -429,11 +457,13 @@ impl Token {
         matches!(
             self,
             Token::String(_)
+                | Token::SingleString(_)
                 | Token::Int(_)
                 | Token::Float(_)
                 | Token::True
                 | Token::False
                 | Token::VarRef(_)
+                | Token::SimpleVarRef(_)
                 | Token::LBracket
                 | Token::LBrace
                 | Token::CmdSubstStart
@@ -1201,6 +1231,92 @@ mod tests {
                 Token::Ident("checkout".to_string()),
                 Token::DoubleDash,
                 Token::Ident("file".to_string()),
+            ]
+        );
+    }
+
+    // ═══════════════════════════════════════════════════════════════════
+    // Bash compatibility tokens
+    // ═══════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn local_keyword() {
+        assert_eq!(lex("local"), vec![Token::Local]);
+        assert_eq!(
+            lex("local X = 5"),
+            vec![Token::Local, Token::Ident("X".to_string()), Token::Eq, Token::Int(5)]
+        );
+    }
+
+    #[test]
+    fn simple_var_ref() {
+        assert_eq!(lex("$X"), vec![Token::SimpleVarRef("X".to_string())]);
+        assert_eq!(lex("$foo"), vec![Token::SimpleVarRef("foo".to_string())]);
+        assert_eq!(lex("$foo_bar"), vec![Token::SimpleVarRef("foo_bar".to_string())]);
+        assert_eq!(lex("$_private"), vec![Token::SimpleVarRef("_private".to_string())]);
+    }
+
+    #[test]
+    fn simple_var_ref_in_command() {
+        assert_eq!(
+            lex("echo $NAME"),
+            vec![Token::Ident("echo".to_string()), Token::SimpleVarRef("NAME".to_string())]
+        );
+    }
+
+    #[test]
+    fn single_quoted_strings() {
+        assert_eq!(lex("'hello'"), vec![Token::SingleString("hello".to_string())]);
+        assert_eq!(lex("'hello world'"), vec![Token::SingleString("hello world".to_string())]);
+        assert_eq!(lex("''"), vec![Token::SingleString("".to_string())]);
+        // Single quotes don't process escapes or variables
+        assert_eq!(lex(r"'no $VAR here'"), vec![Token::SingleString("no $VAR here".to_string())]);
+        assert_eq!(lex(r"'backslash \n stays'"), vec![Token::SingleString(r"backslash \n stays".to_string())]);
+    }
+
+    #[test]
+    fn test_brackets() {
+        // [[ and ]] are now two separate bracket tokens to avoid conflicts with nested arrays
+        assert_eq!(lex("[["), vec![Token::LBracket, Token::LBracket]);
+        assert_eq!(lex("]]"), vec![Token::RBracket, Token::RBracket]);
+        assert_eq!(
+            lex("[[ -f file ]]"),
+            vec![
+                Token::LBracket,
+                Token::LBracket,
+                Token::ShortFlag("f".to_string()),
+                Token::Ident("file".to_string()),
+                Token::RBracket,
+                Token::RBracket
+            ]
+        );
+    }
+
+    #[test]
+    fn test_expression_syntax() {
+        assert_eq!(
+            lex(r#"[[ $X == "value" ]]"#),
+            vec![
+                Token::LBracket,
+                Token::LBracket,
+                Token::SimpleVarRef("X".to_string()),
+                Token::EqEq,
+                Token::String("value".to_string()),
+                Token::RBracket,
+                Token::RBracket
+            ]
+        );
+    }
+
+    #[test]
+    fn bash_style_assignment() {
+        // NAME="value" (no spaces) - lexer sees IDENT EQ STRING
+        assert_eq!(
+            lex(r#"NAME="value""#),
+            vec![
+                Token::Ident("NAME".to_string()),
+                Token::Eq,
+                Token::String("value".to_string())
             ]
         );
     }

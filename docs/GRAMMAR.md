@@ -58,17 +58,25 @@ glob pattern="*.rs" | scatter | process ${ITEM}  # explicit glob tool
 (* === Top Level === *)
 
 program     = { statement } ;
-statement   = assignment
-            | tool_def
-            | if_stmt
-            | for_stmt
-            | pipeline
-            | NEWLINE
-            ;
+statement   = statement_chain , [ ";" | NEWLINE ] ;
+
+(* Statement chaining - && and || at statement level *)
+statement_chain = base_statement , { ( "&&" | "||" ) , base_statement } ;
+
+base_statement = assignment
+               | tool_def
+               | if_stmt
+               | for_stmt
+               | pipeline
+               | NEWLINE
+               ;
 
 (* === Statements === *)
 
-assignment  = "set" , IDENT , "=" , value ;
+(* Assignment - bash-style or local *)
+assignment  = IDENT , "=" , value                    (* bash-style: NAME="value" *)
+            | "local" , IDENT , "=" , value          (* scoped: local NAME = "value" *)
+            ;
 
 tool_def    = "tool" , IDENT , { param_def } , "{" , { statement } , "}" ;
 param_def   = IDENT , ":" , TYPE , [ "=" , literal ] ;
@@ -114,11 +122,28 @@ literal     = STRING
 
 cmd_subst   = "$(" , pipeline , ")" ;
 
-var_ref     = "${" , var_path , "}" ;
+(* Variable references - simple or braced *)
+var_ref     = "${" , var_path , "}"                  (* braced: ${VAR}, ${VAR.field} *)
+            | "$" , IDENT                            (* simple: $VAR *)
+            ;
 var_path    = IDENT , { "." , IDENT | "[" , INT , "]" } ;
 
-interpolated_string = '"' , { string_part } , '"' ;
+(* String literals *)
+string      = '"' , { string_part } , '"'            (* double quotes: interpolation *)
+            | "'" , { CHAR } , "'"                   (* single quotes: literal *)
+            ;
 string_part = CHARS | var_ref ;
+
+(* Test expressions [[ ... ]] *)
+test_expr   = "[[" , test_condition , "]]" ;
+test_condition = file_test | string_test | comparison ;
+file_test   = FILE_OP , value ;                      (* [[ -f path ]] *)
+string_test = STRING_OP , value ;                    (* [[ -z str ]] *)
+comparison  = value , CMP_OP , value ;               (* [[ $X == "y" ]] *)
+
+FILE_OP     = "-e" | "-f" | "-d" | "-r" | "-w" | "-x" ;
+STRING_OP   = "-z" | "-n" ;
+CMP_OP      = "==" | "!=" | "-gt" | "-lt" | "-ge" | "-le" ;
 
 array       = "[" , [ value , { "," , value } ] , "]" ;
 object      = "{" , [ pair , { "," , pair } ] , "}" ;
@@ -131,21 +156,41 @@ redir_op    = ">" | ">>" | "<" | "2>" | "&>" ;
 
 (* === Conditions === *)
 
-(* Conditions are expressions, not commands. Use $(cmd) for command exit checks. *)
-(* Logical operators && and || work on expression results, not statement chaining. *)
+(* Conditions can be expressions, test expressions, or commands *)
+condition   = test_expr                              (* [[ -f path ]] *)
+            | cmd_subst                              (* $(validate) *)
+            | value                                  (* ${VAR} or true/false *)
+            | comparison_expr                        (* ${X} == 5 *)
+            ;
 
-condition   = or_expr ;
-or_expr     = and_expr , { "||" , and_expr } ;
-and_expr    = cmp_expr , { "&&" , cmp_expr } ;
-cmp_expr    = value , [ comp_op , value ] ;
+comparison_expr = value , comp_op , value ;
 comp_op     = "==" | "!=" | "<" | ">" | "<=" | ">="
-            | "=~" | "!~"   (* regex match / not match *)
+            | "=~" | "!~"                            (* regex match / not match *)
             ;
 
 (* === Tokens (Lexer) === *)
 
+(* Keywords *)
+LOCAL       = "local" ;
+TOOL        = "tool" ;
+IF          = "if" ;
+THEN        = "then" ;
+ELIF        = "elif" ;
+ELSE        = "else" ;
+FI          = "fi" ;
+FOR         = "for" ;
+IN          = "in" ;
+DO          = "do" ;
+DONE        = "done" ;
+
+(* Brackets *)
+TESTSTART   = "[[" ;
+TESTEND     = "]]" ;
+
 IDENT       = ALPHA , { ALPHA | DIGIT | "-" | "_" } ;
-STRING      = '"' , { CHAR | ESCAPE | var_ref } , '"' ;
+DQSTRING    = '"' , { CHAR | ESCAPE | var_ref } , '"' ;
+SQSTRING    = "'" , { CHAR - "'" } , "'" ;           (* single quotes: literal *)
+SIMPLEVAR   = "$" , IDENT ;                          (* simple var: $NAME *)
 INT         = [ "-" ] , DIGIT , { DIGIT } ;
 FLOAT       = INT , "." , DIGIT , { DIGIT } ;
 BOOL        = "true" | "false" ;

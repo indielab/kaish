@@ -4,8 +4,9 @@
 //! Uses chumsky for parser combinators with good error recovery.
 
 use crate::ast::{
-    Arg, Assignment, BinaryOp, Command, Expr, ForLoop, IfStmt, ParamDef, ParamType, Pipeline,
-    Program, Redirect, RedirectKind, Stmt, StringPart, ToolDef, Value, VarPath, VarSegment,
+    Arg, Assignment, BinaryOp, Command, Expr, FileTestOp, ForLoop, IfStmt, ParamDef, ParamType,
+    Pipeline, Program, Redirect, RedirectKind, Stmt, StringPart, StringTestOp, TestCmpOp,
+    TestExpr, ToolDef, Value, VarPath, VarSegment,
 };
 use crate::lexer::{self, Token};
 use chumsky::{input::ValueInput, prelude::*};
@@ -33,32 +34,55 @@ fn parse_varpath(raw: &str) -> VarPath {
     VarPath { segments }
 }
 
-/// Parse an interpolated string like "Hello ${NAME}!" into parts.
+/// Parse an interpolated string like "Hello ${NAME}!" or "Hello $NAME!" into parts.
 fn parse_interpolated_string(s: &str) -> Vec<StringPart> {
     let mut parts = Vec::new();
     let mut current_text = String::new();
     let mut chars = s.chars().peekable();
 
     while let Some(ch) = chars.next() {
-        if ch == '$' && chars.peek() == Some(&'{') {
-            // Start of variable reference
-            if !current_text.is_empty() {
-                parts.push(StringPart::Literal(std::mem::take(&mut current_text)));
-            }
-
-            // Consume the '{'
-            chars.next();
-
-            // Collect until '}'
-            let mut var_content = String::from("${");
-            while let Some(c) = chars.next() {
-                var_content.push(c);
-                if c == '}' {
-                    break;
+        if ch == '$' {
+            // Check for braced variable ${...} or simple $NAME
+            if chars.peek() == Some(&'{') {
+                // Braced variable reference ${...}
+                if !current_text.is_empty() {
+                    parts.push(StringPart::Literal(std::mem::take(&mut current_text)));
                 }
-            }
 
-            parts.push(StringPart::Var(parse_varpath(&var_content)));
+                // Consume the '{'
+                chars.next();
+
+                // Collect until '}'
+                let mut var_content = String::from("${");
+                while let Some(c) = chars.next() {
+                    var_content.push(c);
+                    if c == '}' {
+                        break;
+                    }
+                }
+
+                parts.push(StringPart::Var(parse_varpath(&var_content)));
+            } else if chars.peek().map(|c| c.is_ascii_alphabetic() || *c == '_').unwrap_or(false) {
+                // Simple variable reference $NAME
+                if !current_text.is_empty() {
+                    parts.push(StringPart::Literal(std::mem::take(&mut current_text)));
+                }
+
+                // Collect identifier characters
+                let mut var_name = String::new();
+                while let Some(&c) = chars.peek() {
+                    if c.is_ascii_alphanumeric() || c == '_' {
+                        var_name.push(chars.next().expect("peeked char should exist"));
+                    } else {
+                        break;
+                    }
+                }
+
+                parts.push(StringPart::Var(VarPath::simple(var_name)));
+            } else {
+                // Literal $ (not followed by { or identifier start)
+                current_text.push(ch);
+            }
         } else {
             current_text.push(ch);
         }
@@ -153,6 +177,7 @@ where
 }
 
 /// Statement parser - dispatches based on leading token.
+/// Supports statement-level chaining with && and ||.
 fn statement_parser<'tokens, I>(
 ) -> impl Parser<'tokens, I, Stmt, extra::Err<Rich<'tokens, Token, Span>>> + Clone
 where
@@ -161,12 +186,18 @@ where
     recursive(|stmt| {
         let terminator = choice((just(Token::Newline), just(Token::Semi))).repeated();
 
-        choice((
+        // Base statement (without chaining)
+        let base_statement = choice((
             just(Token::Newline).to(Stmt::Empty),
             assignment_parser().map(Stmt::Assignment),
             tool_def_parser(stmt.clone()).map(Stmt::ToolDef),
             if_parser(stmt.clone()).map(Stmt::If),
-            for_parser(stmt).map(Stmt::For),
+            for_parser(stmt.clone()).map(Stmt::For),
+            test_expr_stmt_parser().map(|test| Stmt::Command(Command {
+                name: "test".to_string(),
+                args: vec![Arg::Positional(Expr::Test(Box::new(test)))],
+                redirects: vec![],
+            })),
             pipeline_parser().map(|p| {
                 // Unwrap single-command pipelines without background
                 if p.commands.len() == 1 && !p.background {
@@ -180,22 +211,76 @@ where
                 }
             }),
         ))
-        .boxed()
-        .then_ignore(terminator)
+        .boxed();
+
+        // Statement chaining: base_stmt { ( "&&" | "||" ) base_stmt }
+        base_statement
+            .clone()
+            .foldl(
+                choice((
+                    just(Token::And).to(true),  // true = && (and chain)
+                    just(Token::Or).to(false),  // false = || (or chain)
+                ))
+                .then(base_statement)
+                .repeated(),
+                |left, (is_and, right)| {
+                    if is_and {
+                        Stmt::AndChain {
+                            left: Box::new(left),
+                            right: Box::new(right),
+                        }
+                    } else {
+                        Stmt::OrChain {
+                            left: Box::new(left),
+                            right: Box::new(right),
+                        }
+                    }
+                },
+            )
+            .then_ignore(terminator)
     })
 }
 
-/// Assignment: `set NAME = value`
+/// Assignment: `NAME=value` (bash-style) or `local NAME = value` (scoped) or `set NAME = value` (legacy)
 fn assignment_parser<'tokens, I>(
 ) -> impl Parser<'tokens, I, Assignment, extra::Err<Rich<'tokens, Token, Span>>> + Clone
 where
     I: ValueInput<'tokens, Token = Token, Span = Span>,
 {
-    just(Token::Set)
+    // Legacy: set NAME = value
+    let set_assignment = just(Token::Set)
         .ignore_then(ident_parser())
         .then_ignore(just(Token::Eq))
         .then(expr_parser())
-        .map(|(name, value)| Assignment { name, value })
+        .map(|(name, value)| Assignment {
+            name,
+            value,
+            local: false,
+        });
+
+    // local NAME = value (with spaces around =)
+    let local_assignment = just(Token::Local)
+        .ignore_then(ident_parser())
+        .then_ignore(just(Token::Eq))
+        .then(expr_parser())
+        .map(|(name, value)| Assignment {
+            name,
+            value,
+            local: true,
+        });
+
+    // Bash-style: NAME=value (no spaces around =)
+    // The lexer produces IDENT EQ EXPR, so we parse it here
+    let bash_assignment = ident_parser()
+        .then_ignore(just(Token::Eq))
+        .then(expr_parser())
+        .map(|(name, value)| Assignment {
+            name,
+            value,
+            local: false,
+        });
+
+    choice((local_assignment, set_assignment, bash_assignment))
         .labelled("assignment")
         .boxed()
 }
@@ -498,6 +583,79 @@ where
         .boxed()
 }
 
+/// Test expression parser for `[[ ... ]]` syntax.
+///
+/// Supports:
+/// - File tests: `[[ -f path ]]`, `[[ -d path ]]`, etc.
+/// - String tests: `[[ -z str ]]`, `[[ -n str ]]`
+/// - Comparisons: `[[ $X == "value" ]]`, `[[ $NUM -gt 5 ]]`
+fn test_expr_stmt_parser<'tokens, I>(
+) -> impl Parser<'tokens, I, TestExpr, extra::Err<Rich<'tokens, Token, Span>>> + Clone
+where
+    I: ValueInput<'tokens, Token = Token, Span = Span>,
+{
+    // File test operators: -e, -f, -d, -r, -w, -x
+    let file_test_op = select! {
+        Token::ShortFlag(s) if s == "e" => FileTestOp::Exists,
+        Token::ShortFlag(s) if s == "f" => FileTestOp::IsFile,
+        Token::ShortFlag(s) if s == "d" => FileTestOp::IsDir,
+        Token::ShortFlag(s) if s == "r" => FileTestOp::Readable,
+        Token::ShortFlag(s) if s == "w" => FileTestOp::Writable,
+        Token::ShortFlag(s) if s == "x" => FileTestOp::Executable,
+    };
+
+    // String test operators: -z, -n
+    let string_test_op = select! {
+        Token::ShortFlag(s) if s == "z" => StringTestOp::IsEmpty,
+        Token::ShortFlag(s) if s == "n" => StringTestOp::IsNonEmpty,
+    };
+
+    // Comparison operators: ==, !=, -gt, -lt, -ge, -le
+    let cmp_op = choice((
+        just(Token::EqEq).to(TestCmpOp::Eq),
+        just(Token::NotEq).to(TestCmpOp::NotEq),
+        select! { Token::ShortFlag(s) if s == "gt" => TestCmpOp::Gt },
+        select! { Token::ShortFlag(s) if s == "lt" => TestCmpOp::Lt },
+        select! { Token::ShortFlag(s) if s == "ge" => TestCmpOp::GtEq },
+        select! { Token::ShortFlag(s) if s == "le" => TestCmpOp::LtEq },
+    ));
+
+    // File test: [[ -f path ]]
+    let file_test = file_test_op
+        .then(primary_expr_parser())
+        .map(|(op, path)| TestExpr::FileTest {
+            op,
+            path: Box::new(path),
+        });
+
+    // String test: [[ -z str ]]
+    let string_test = string_test_op
+        .then(primary_expr_parser())
+        .map(|(op, value)| TestExpr::StringTest {
+            op,
+            value: Box::new(value),
+        });
+
+    // Comparison: [[ $X == "value" ]] or [[ $NUM -gt 5 ]]
+    let comparison = primary_expr_parser()
+        .then(cmp_op)
+        .then(primary_expr_parser())
+        .map(|((left, op), right)| TestExpr::Comparison {
+            left: Box::new(left),
+            op,
+            right: Box::new(right),
+        });
+
+    // [[ ]] is two consecutive bracket tokens (not a single TestStart token)
+    // to avoid conflicts with nested array syntax like [[1, 2], [3, 4]]
+    just(Token::LBracket)
+        .then(just(Token::LBracket))
+        .ignore_then(choice((file_test, string_test, comparison)))
+        .then_ignore(just(Token::RBracket).then(just(Token::RBracket)))
+        .labelled("test expression")
+        .boxed()
+}
+
 /// Condition parser: supports comparisons, && and || operators.
 ///
 /// Grammar:
@@ -590,7 +748,7 @@ where
     .boxed()
 }
 
-/// Variable reference: `${VAR}` or `${VAR.field}` etc.
+/// Variable reference: `${VAR}`, `${VAR.field}`, or `$VAR` (simple form).
 fn var_ref_parser<'tokens, I>(
 ) -> impl Parser<'tokens, I, VarPath, extra::Err<Rich<'tokens, Token, Span>>> + Clone
 where
@@ -598,6 +756,7 @@ where
 {
     select! {
         Token::VarRef(raw) => parse_varpath(&raw),
+        Token::SimpleVarRef(name) => VarPath::simple(name),
     }
     .labelled("variable reference")
 }
@@ -674,18 +833,19 @@ where
         .labelled("command substitution")
 }
 
-/// Interpolated string parser - detects strings with ${} inside.
+/// String parser - handles double-quoted strings (with interpolation) and single-quoted (literal).
 fn interpolated_string_parser<'tokens, I>(
 ) -> impl Parser<'tokens, I, Expr, extra::Err<Rich<'tokens, Token, Span>>> + Clone
 where
     I: ValueInput<'tokens, Token = Token, Span = Span>,
 {
-    select! {
+    // Double-quoted string: may contain $VAR or ${VAR} interpolation
+    let double_quoted = select! {
         Token::String(s) => s,
     }
     .map(|s| {
-        // Check if string contains interpolation markers
-        if s.contains("${") {
+        // Check if string contains interpolation markers (${} or $NAME)
+        if s.contains('$') {
             // Parse interpolated parts
             let parts = parse_interpolated_string(&s);
             if parts.len() == 1 {
@@ -697,8 +857,14 @@ where
         } else {
             Expr::Literal(Value::String(s))
         }
-    })
-    .labelled("string")
+    });
+
+    // Single-quoted string: literal, no interpolation
+    let single_quoted = select! {
+        Token::SingleString(s) => Expr::Literal(Value::String(s)),
+    };
+
+    choice((single_quoted, double_quoted)).labelled("string")
 }
 
 /// Literal value parser (excluding strings, which are handled by interpolated_string_parser).

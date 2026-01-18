@@ -22,30 +22,40 @@ Part of the Kaijutsu (会術) project — the art of gathering.
 ### Variables
 
 ```bash
-set NAME = "value"                  # assignment (set keyword required)
-set X = 42                          # numbers
-set LIST = ["a", "b", "c"]          # arrays (JSON syntax)
-set OBJ = {"key": "value"}          # objects (JSON syntax)
+# Both styles work - bash-style preferred
+NAME="value"                        # bash-style assignment (no spaces around =)
+local NAME = "value"                # explicit local scope (spaces allowed)
 
-echo ${NAME}                        # interpolation (ONLY this form)
-echo "${NAME} more text"            # in strings
-echo ${OBJ.key}                     # nested access
-echo ${LIST[0]}                     # array index
+X=42                                # numbers
+LIST=["a", "b", "c"]                # arrays (JSON syntax)
+OBJ={"key": "value"}                # objects (JSON syntax)
+
+# Variable expansion - both forms work
+echo $NAME                          # simple expansion (identifiers only)
+echo ${NAME}                        # braced expansion (equivalent)
+echo "${NAME} more text"            # interpolation in strings
+echo ${OBJ.key}                     # nested access (braces required for paths)
+echo ${LIST[0]}                     # array index (braces required)
 ```
 
-No `$NAME`. No `${NAME:-default}`. No arrays-of-arrays.
+Simple `$NAME` works for plain identifiers. Use `${VAR}` for paths: `${OBJ.field}`, `${ARR[0]}`.
+No `${NAME:-default}`. No parameter expansion. No arrays-of-arrays.
 
-### Quoting (JSON Rules)
+### Quoting
 
 ```bash
 echo hello                   # bare word, no quotes needed
 echo "hello world"           # double quotes for spaces
 echo "line\nbreak"           # JSON escapes work: \n \t \\ \"
-echo "value: ${X}"           # interpolation in double quotes
+echo "value: $X"             # interpolation in double quotes
 echo "literal \${X}"         # escaped = no interpolation
+
+# Single quotes - literal strings, no interpolation
+echo 'hello $NAME'           # prints: hello $NAME (literal)
+echo 'no escapes: \n'        # prints: no escapes: \n (literal backslash-n)
 ```
 
-No single quotes. No `$'...'`. No backticks.
+No `$'...'`. No backticks.
 
 ### Arguments (JSON only)
 
@@ -86,27 +96,65 @@ tool &> file                 # stdout + stderr
 
 No `2>&1`. No process substitution. No here-docs (yet?).
 
-### The Result Type: `$?`
+### Exit Code: `$?`
 
-After any command, `$?` contains:
+After any command, `$?` is an **integer exit code** (0-255), just like bash:
 
 ```bash
-${?.code}      # int: exit code (0 = success)
-${?.ok}        # bool: true if code == 0
-${?.err}       # string: error message
-${?.out}       # string: raw stdout
-${?.data}      # object: parsed JSON (if stdout was JSON)
-```
+some-command
+echo $?                      # prints: 0 (or non-zero on failure)
 
-Example:
-```bash
-api-call endpoint=/users
-if ${?.ok}; then
-    echo "Got ${?.data.count} users"
-else
-    echo "Error: ${?.err}"
+# Use in conditions
+if [[ $? == 0 ]]; then
+    echo "success"
 fi
 ```
+
+To capture structured output, use command substitution:
+
+```bash
+RESULT=$(api-call endpoint=/users)
+echo ${RESULT.count}         # if stdout was JSON, access fields
+```
+
+### Statement Chaining
+
+Commands can be chained with `&&` and `||` at the statement level:
+
+```bash
+# Run cmd2 only if cmd1 succeeds (exit code 0)
+cmd1 && cmd2
+
+# Run cmd2 only if cmd1 fails (non-zero exit code)
+cmd1 || cmd2
+
+# Chained
+mkdir /tmp/work && cd /tmp/work && init-project
+try-primary || try-fallback || echo "all failed"
+```
+
+### Test Expressions `[[ ]]`
+
+Bash-style test expressions for conditionals:
+
+```bash
+# File tests
+if [[ -f /path/file ]]; then echo "is file"; fi
+if [[ -d /path/dir ]]; then echo "is directory"; fi
+if [[ -e /path/any ]]; then echo "exists"; fi
+
+# String tests
+if [[ -z $VAR ]]; then echo "empty"; fi
+if [[ -n $VAR ]]; then echo "non-empty"; fi
+
+# Comparisons
+if [[ $X == "value" ]]; then echo "match"; fi
+if [[ $X != "other" ]]; then echo "no match"; fi
+if [[ $NUM -gt 5 ]]; then echo "greater"; fi
+if [[ $NUM -lt 10 ]]; then echo "less"; fi
+```
+
+Note: `[ ]` (single brackets) is reserved for JSON arrays. Use `[[ ]]` for tests.
 
 ### Control Flow
 
@@ -286,8 +334,6 @@ filesystem.read path="/etc/hosts"
 
 ## What We Explicitly Don't Support
 
-- Single quotes
-- `$VAR` (must use `${VAR}`)
 - Parameter expansion (`${VAR:-default}`, `${VAR##*/}`, etc.)
 - Arithmetic expansion `$(( ))`
 - Brace expansion `{a,b,c}`
@@ -295,7 +341,7 @@ filesystem.read path="/etc/hosts"
 - Here-docs `<<EOF`
 - Process substitution `<(cmd)`
 - Backtick command substitution `` `cmd` `` (use `$(cmd)` instead)
-- Statement-level `&&`/`||` chaining (use expression operators instead)
+- Single bracket tests `[ ]` (reserved for JSON arrays, use `[[ ]]`)
 - Aliases
 - `eval`
 - Arrays of arrays

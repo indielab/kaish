@@ -103,13 +103,16 @@ impl Scope {
     }
 
     /// Resolve path segments on the last result ($?).
+    ///
+    /// `$?` alone returns the exit code as an integer (0-255).
+    /// For structured result access, use command substitution: `RESULT=$(cmd); ${RESULT.field}`
     fn resolve_result_path(&self, segments: &[VarSegment]) -> Option<Value> {
         if segments.is_empty() {
-            // Return the full result as an object
-            return Some(self.result_to_value());
+            // $? alone returns just the exit code as an integer (bash-compatible)
+            return Some(Value::Int(self.last_result.code));
         }
 
-        // First segment must be a field access
+        // Allow ${?.code}, ${?.ok}, etc. for backward compatibility (but $? alone is int)
         let field_name = match &segments[0] {
             VarSegment::Field(name) => name,
             VarSegment::Index(_) => return None,
@@ -153,21 +156,6 @@ impl Scope {
             Expr::Literal(v) => Some(v.clone()),
             _ => None, // Other expr types need evaluation
         }
-    }
-
-    /// Convert the last result to a Value::Object for `$?` access.
-    fn result_to_value(&self) -> Value {
-        let result = &self.last_result;
-        let mut fields = vec![
-            ("code".into(), Expr::Literal(Value::Int(result.code))),
-            ("ok".into(), Expr::Literal(Value::Bool(result.ok()))),
-            ("out".into(), Expr::Literal(Value::String(result.out.clone()))),
-            ("err".into(), Expr::Literal(Value::String(result.err.clone()))),
-        ];
-        if let Some(data) = &result.data {
-            fields.push(("data".into(), Expr::Literal(data.clone())));
-        }
-        Value::Object(fields)
     }
 
     /// Check if a variable exists in any frame.

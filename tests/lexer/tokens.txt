@@ -4,10 +4,12 @@
 
 # === Keywords ===
 set         | SET
+local       | LOCAL
 tool        | TOOL
 if          | IF
 then        | THEN
 else        | ELSE
+elif        | ELIF
 fi          | FI
 for         | FOR
 in          | IN
@@ -46,7 +48,7 @@ no          | ERROR: ambiguous boolean-like 'no', use 'false' or '"no"'
 YES         | ERROR: ambiguous boolean-like 'YES', use 'true' or '"YES"'
 NO          | ERROR: ambiguous boolean-like 'NO', use 'false' or '"NO"'
 
-# === Strings ===
+# === Double-Quoted Strings (with interpolation) ===
 "hello"             | STRING(hello)
 "hello world"       | STRING(hello world)
 ""                  | STRING()
@@ -57,19 +59,32 @@ NO          | ERROR: ambiguous boolean-like 'NO', use 'false' or '"NO"'
 "unicode\u0041"     | STRING(unicodeA)
 "unterminated       | ERROR: unterminated string
 
+# === Single-Quoted Strings (literal, no interpolation) ===
+'hello'             | SINGLESTRING(hello)
+'hello world'       | SINGLESTRING(hello world)
+''                  | SINGLESTRING()
+'no $VAR here'      | SINGLESTRING(no $VAR here)
+'no escapes: \n'    | SINGLESTRING(no escapes: \n)
+'unterminated       | ERROR: unterminated single-quoted string
+
 # === Variable References ===
-${X}                | VARREF(X)
-${foo}              | VARREF(foo)
-${foo_bar}          | VARREF(foo_bar)
-${X.field}          | VARREF(X.field)
-${X[0]}             | VARREF(X[0])
-${X.a.b[0].c}       | VARREF(X.a.b[0].c)
-${?.ok}             | VARREF(?.ok)
-${?.data.x}         | VARREF(?.data.x)
-$X                  | ERROR: use ${X} not $X
-$foo                | ERROR: use ${foo} not $foo
+# Braced form (required for paths)
+${X}                | VARREF(${X})
+${foo}              | VARREF(${foo})
+${foo_bar}          | VARREF(${foo_bar})
+${X.field}          | VARREF(${X.field})
+${X[0]}             | VARREF(${X[0]})
+${X.a.b[0].c}       | VARREF(${X.a.b[0].c})
+${?.ok}             | VARREF(${?.ok})
+${?.data.x}         | VARREF(${?.data.x})
 ${                  | ERROR: unterminated variable reference
 ${X                 | ERROR: unterminated variable reference
+
+# Simple form (identifiers only, no paths)
+$X                  | SIMPLEVARREF(X)
+$foo                | SIMPLEVARREF(foo)
+$foo_bar            | SIMPLEVARREF(foo_bar)
+$_private           | SIMPLEVARREF(_private)
 
 # === Operators ===
 =           | EQ
@@ -98,6 +113,10 @@ ${X                 | ERROR: unterminated variable reference
 ]           | RBRACK
 (           | LPAREN
 )           | RPAREN
+# Note: [[ and ]] are two separate bracket tokens (not TESTSTART/TESTEND)
+# This allows nested arrays like [[1, 2], [3, 4]] to work correctly
+[[          | LBRACK LBRACK
+]]          | RBRACK RBRACK
 
 # === Punctuation ===
 ,           | COMMA

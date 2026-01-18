@@ -14,7 +14,7 @@ pub struct Program {
 /// A single statement in kaish.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Stmt {
-    /// Variable assignment: `set X = value`
+    /// Variable assignment: `NAME=value` or `local NAME = value`
     Assignment(Assignment),
     /// Simple command: `tool arg1 arg2`
     Command(Command),
@@ -26,15 +26,21 @@ pub enum Stmt {
     For(ForLoop),
     /// Tool definition: `tool name(params) { body }`
     ToolDef(ToolDef),
+    /// Statement chain with `&&`: run right only if left succeeds
+    AndChain { left: Box<Stmt>, right: Box<Stmt> },
+    /// Statement chain with `||`: run right only if left fails
+    OrChain { left: Box<Stmt>, right: Box<Stmt> },
     /// Empty statement (newline or semicolon only)
     Empty,
 }
 
-/// Variable assignment: `set NAME = value`
+/// Variable assignment: `NAME=value` (bash-style) or `local NAME = value` (scoped)
 #[derive(Debug, Clone, PartialEq)]
 pub struct Assignment {
     pub name: String,
     pub value: Expr,
+    /// True if declared with `local` keyword (explicit local scope)
+    pub local: bool,
 }
 
 /// A command invocation with arguments and redirections.
@@ -135,9 +141,9 @@ pub enum RedirectKind {
 pub enum Expr {
     /// Literal value
     Literal(Value),
-    /// Variable reference: `${VAR}` or `${VAR.field}`
+    /// Variable reference: `${VAR}` or `${VAR.field}` or `$VAR`
     VarRef(VarPath),
-    /// String with interpolation: `"hello ${NAME}"`
+    /// String with interpolation: `"hello ${NAME}"` or `"hello $NAME"`
     Interpolated(Vec<StringPart>),
     /// Binary operation: `a && b`, `a || b`
     BinaryOp {
@@ -147,6 +153,62 @@ pub enum Expr {
     },
     /// Command substitution: `$(pipeline)` - runs a pipeline and returns its result
     CommandSubst(Box<Pipeline>),
+    /// Test expression: `[[ -f path ]]` or `[[ $X == "value" ]]`
+    Test(Box<TestExpr>),
+}
+
+/// Test expression for `[[ ... ]]` conditionals.
+#[derive(Debug, Clone, PartialEq)]
+pub enum TestExpr {
+    /// File test: `[[ -f path ]]`, `[[ -d path ]]`, etc.
+    FileTest { op: FileTestOp, path: Box<Expr> },
+    /// String test: `[[ -z str ]]`, `[[ -n str ]]`
+    StringTest { op: StringTestOp, value: Box<Expr> },
+    /// Comparison: `[[ $X == "value" ]]`, `[[ $NUM -gt 5 ]]`
+    Comparison { left: Box<Expr>, op: TestCmpOp, right: Box<Expr> },
+}
+
+/// File test operators for `[[ ]]`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FileTestOp {
+    /// `-e` - exists
+    Exists,
+    /// `-f` - is regular file
+    IsFile,
+    /// `-d` - is directory
+    IsDir,
+    /// `-r` - is readable
+    Readable,
+    /// `-w` - is writable
+    Writable,
+    /// `-x` - is executable
+    Executable,
+}
+
+/// String test operators for `[[ ]]`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StringTestOp {
+    /// `-z` - string is empty
+    IsEmpty,
+    /// `-n` - string is non-empty
+    IsNonEmpty,
+}
+
+/// Comparison operators for `[[ ]]` tests.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TestCmpOp {
+    /// `==` - string equality
+    Eq,
+    /// `!=` - string inequality
+    NotEq,
+    /// `-gt` - greater than (numeric)
+    Gt,
+    /// `-lt` - less than (numeric)
+    Lt,
+    /// `-ge` - greater than or equal (numeric)
+    GtEq,
+    /// `-le` - less than or equal (numeric)
+    LtEq,
 }
 
 /// A literal value.
@@ -244,6 +306,41 @@ impl fmt::Display for RedirectKind {
             RedirectKind::Stdin => write!(f, "<"),
             RedirectKind::Stderr => write!(f, "2>"),
             RedirectKind::Both => write!(f, "&>"),
+        }
+    }
+}
+
+impl fmt::Display for FileTestOp {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            FileTestOp::Exists => write!(f, "-e"),
+            FileTestOp::IsFile => write!(f, "-f"),
+            FileTestOp::IsDir => write!(f, "-d"),
+            FileTestOp::Readable => write!(f, "-r"),
+            FileTestOp::Writable => write!(f, "-w"),
+            FileTestOp::Executable => write!(f, "-x"),
+        }
+    }
+}
+
+impl fmt::Display for StringTestOp {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            StringTestOp::IsEmpty => write!(f, "-z"),
+            StringTestOp::IsNonEmpty => write!(f, "-n"),
+        }
+    }
+}
+
+impl fmt::Display for TestCmpOp {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            TestCmpOp::Eq => write!(f, "=="),
+            TestCmpOp::NotEq => write!(f, "!="),
+            TestCmpOp::Gt => write!(f, "-gt"),
+            TestCmpOp::Lt => write!(f, "-lt"),
+            TestCmpOp::GtEq => write!(f, "-ge"),
+            TestCmpOp::LtEq => write!(f, "-le"),
         }
     }
 }

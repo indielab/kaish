@@ -124,6 +124,14 @@ set Y = ${X}
 (assign Y (varref X))
 ===
 
+# test: assign_simple_varref
+# expect: ok
+---
+set Y = $X
+---
+(assign Y (varref X))
+===
+
 # test: assign_interpolated
 # expect: ok
 ---
@@ -132,12 +140,52 @@ set MSG = "hello ${NAME}"
 (assign MSG (interpolated "hello " (varref NAME)))
 ===
 
-# test: error_assign_no_set
-# expect: error
+# test: assign_interpolated_simple
+# expect: ok
 ---
-X = 5
+set MSG = "hello $NAME"
 ---
-error at 1:1: unexpected token, use 'set X = ...' for assignment
+(assign MSG (interpolated "hello " (varref NAME)))
+===
+
+# test: assign_single_quoted
+# expect: ok
+---
+set MSG = 'hello $NAME'
+---
+(assign MSG (string "hello $NAME"))
+===
+
+# test: bash_assign_int
+# expect: ok
+---
+X=5
+---
+(assign X (int 5) local=false)
+===
+
+# test: bash_assign_string
+# expect: ok
+---
+NAME="alice"
+---
+(assign NAME (string "alice") local=false)
+===
+
+# test: local_assign_int
+# expect: ok
+---
+local X = 5
+---
+(assign X (int 5) local=true)
+===
+
+# test: local_assign_string
+# expect: ok
+---
+local MSG = "hello"
+---
+(assign MSG (string "hello") local=true)
 ===
 
 # test: error_assign_ambiguous_value
@@ -558,4 +606,108 @@ cat input | scatter | process | gather progress=true errors="/tmp/err"
   (cmd scatter)
   (cmd process)
   (cmd gather (named progress (bool true)) (named errors (string "/tmp/err"))))
+===
+
+# ============================================================
+# TEST EXPRESSIONS [[ ]]
+# ============================================================
+
+# test: test_file_exists
+# expect: ok
+---
+[[ -f /etc/hosts ]]
+---
+(test (file -f (string "/etc/hosts")))
+===
+
+# test: test_file_dir
+# expect: ok
+---
+[[ -d /tmp ]]
+---
+(test (file -d (string "/tmp")))
+===
+
+# test: test_string_empty
+# expect: ok
+---
+[[ -z $VAR ]]
+---
+(test (string -z (varref VAR)))
+===
+
+# test: test_string_nonempty
+# expect: ok
+---
+[[ -n $VAR ]]
+---
+(test (string -n (varref VAR)))
+===
+
+# test: test_comparison_eq
+# expect: ok
+---
+[[ $X == "value" ]]
+---
+(test (cmp == (varref X) (string "value")))
+===
+
+# test: test_comparison_neq
+# expect: ok
+---
+[[ $X != "other" ]]
+---
+(test (cmp != (varref X) (string "other")))
+===
+
+# test: test_comparison_gt
+# expect: ok
+---
+[[ $NUM -gt 5 ]]
+---
+(test (cmp -gt (varref NUM) (int 5)))
+===
+
+# test: test_comparison_lt
+# expect: ok
+---
+[[ $NUM -lt 10 ]]
+---
+(test (cmp -lt (varref NUM) (int 10)))
+===
+
+# ============================================================
+# STATEMENT CHAINING
+# ============================================================
+
+# test: stmt_and_chain
+# expect: ok
+---
+cmd1 && cmd2
+---
+(and-chain (cmd cmd1) (cmd cmd2))
+===
+
+# test: stmt_or_chain
+# expect: ok
+---
+cmd1 || cmd2
+---
+(or-chain (cmd cmd1) (cmd cmd2))
+===
+
+# test: stmt_chain_three
+# expect: ok
+---
+mkdir dir && cd dir && init
+---
+(and-chain (and-chain (cmd mkdir (pos (string "dir"))) (cmd cd (pos (string "dir")))) (cmd init))
+===
+
+# test: stmt_chain_mixed
+# expect: ok
+---
+try-primary || try-fallback || echo "failed"
+---
+(or-chain (or-chain (cmd try-primary) (cmd try-fallback)) (cmd echo (pos (string "failed"))))
 ===
