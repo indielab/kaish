@@ -5,32 +5,29 @@ This document defines kaish syntax in a way that's:
 2. LL(k) friendly (predictable with limited lookahead)
 3. Testable (every production rule can be exercised in isolation)
 
-## Design Principles for Testability
+## Design Principles
 
-### 1. Every Construct Has a Unique Leading Token
+### 1. Bourne-Compatible Where Possible
 
-```
-set NAME = ...     # assignment starts with 'set'
-tool NAME ...      # tool def starts with 'tool'
-if COND ...        # conditional starts with 'if'
-for VAR ...        # loop starts with 'for'
-IDENT ...          # command starts with identifier
-```
-
-No ambiguity about what we're parsing after seeing the first token.
-
-### 2. Explicit Delimiters Everywhere (JSON Only)
-
-```
-${VAR}                    # variables always braced
-{body}                    # tool bodies in braces (newline after {)
-["a", "b", "c"]           # arrays - JSON syntax
-{"key": "val"}            # objects - JSON syntax
-"string"                  # strings always quoted
+```bash
+NAME="value"           # assignment (bash-style)
+local NAME="value"     # scoped assignment
+tool NAME ...          # tool def starts with 'tool'
+if COND ...            # conditional starts with 'if'
+while COND ...         # while loop starts with 'while'
+for VAR ...            # for loop starts with 'for'
+IDENT ...              # command starts with identifier
 ```
 
-**Core parser is JSON-only** for structured data. No YAML-lite ambiguity.
-REPL provides expansion: type `{host: localhost}<TAB>` → `{"host": "localhost"}`
+### 2. Explicit Delimiters
+
+```bash
+${VAR}                    # braced variables for paths/indices
+$VAR                      # simple variables for identifiers
+{body}                    # tool bodies in braces
+"string"                  # double quotes - interpolation
+'string'                  # single quotes - literal
+```
 
 ### 3. No Implicit Operations
 
@@ -39,16 +36,15 @@ REPL provides expansion: type `{host: localhost}<TAB>` → `{"host": "localhost"
 echo $FILES        # might expand to multiple args!
 
 # kaish: explicit everything
-echo ${FILES}      # interpolates to single value
-glob pattern="*.rs" | scatter | process ${ITEM}  # explicit glob tool
+echo $FILES        # interpolates to single value
+glob pattern="*.rs" | scatter | process $ITEM  # explicit glob tool
 ```
 
-### 4. Whitespace Rules Are Simple
+### 4. Simple Whitespace Rules
 
 - Whitespace separates tokens
-- Newlines are significant (end statements, except after `\` or inside `{}[]`)
+- Newlines end statements (except after `\` or inside `{}[]`)
 - Inside quotes, whitespace is literal
-- That's it. No magic.
 
 ---
 
@@ -63,19 +59,34 @@ statement   = statement_chain , [ ";" | NEWLINE ] ;
 (* Statement chaining - && and || at statement level *)
 statement_chain = base_statement , { ( "&&" | "||" ) , base_statement } ;
 
-base_statement = assignment
+base_statement = set_command                          (* set -e, set +e *)
+               | assignment                           (* NAME=value, local NAME=value *)
                | tool_def
                | if_stmt
                | for_stmt
+               | while_stmt
+               | control_stmt
+               | test_expr_stmt                       (* [[ ... ]] as statement *)
                | pipeline
                | NEWLINE
                ;
 
+(* === set command vs assignment disambiguation === *)
+(*
+ * The parser uses lookahead to distinguish:
+ *   set -e           → command (flag follows 'set')
+ *   set +e           → command (plus-flag follows 'set')
+ *   set              → command (nothing follows, or && || ; newline)
+ *   set X = value    → assignment (IDENT follows 'set')
+ *)
+set_command = "set" , { flag_arg | IDENT } ;         (* set -e -u, set +e *)
+
 (* === Statements === *)
 
-(* Assignment - bash-style or local *)
-assignment  = IDENT , "=" , value                    (* bash-style: NAME="value" *)
-            | "local" , IDENT , "=" , value          (* scoped: local NAME = "value" *)
+(* Assignment - bash-style *)
+assignment  = IDENT , "=" , value                    (* NAME="value" - no spaces *)
+            | "local" , IDENT , "=" , value          (* local NAME = value - spaces OK *)
+            | "set" , IDENT , "=" , value            (* set NAME = value - legacy form *)
             ;
 
 tool_def    = "tool" , IDENT , { param_def } , "{" , { statement } , "}" ;
@@ -85,35 +96,54 @@ if_stmt     = "if" , condition , ";" , "then" , { statement } ,
               { "elif" , condition , ";" , "then" , { statement } } ,
               [ "else" , { statement } ] , "fi" ;
 
-for_stmt    = "for" , IDENT , "in" , value , ";" , "do" , { statement } , "done" ;
+for_stmt    = "for" , IDENT , "in" , value , [ ";" ] , "do" , { statement } , "done" ;
+
+while_stmt  = "while" , condition , [ ";" ] , "do" , { statement } , "done" ;
+
+control_stmt = "break" , [ INT ]                     (* break [n] - exit n loop levels *)
+             | "continue" , [ INT ]                  (* continue [n] - skip n levels *)
+             | "return" , [ value ]                  (* return [val] - from tool *)
+             | "exit" , [ value ]                    (* exit [code] - from script *)
+             ;
 
 pipeline    = command , { "|" , command } , [ "&" ] , [ redirect ] ;
 
-command     = IDENT , { argument } ;
+(* Command names: identifiers, 'true', 'false', '.' (source alias), 'source' *)
+command     = command_name , { argument } ;
+command_name = IDENT | "true" | "false" | "." | "source" ;
 
 (* === Arguments === *)
 
-argument    = positional | named | flag_arg ;
+argument    = long_flag_with_value                   (* --name=value *)
+            | long_flag                              (* --name *)
+            | short_flag                             (* -x *)
+            | named                                  (* key=value *)
+            | positional                             (* value *)
+            ;
+
 positional  = value ;
 named       = IDENT , "=" , value ;
 
-(* Flags: planned for L6.1 - see "Flag Arguments" section below *)
-flag_arg    = SHORT_FLAG , [ value ]
-            | LONG_FLAG , [ "=" , value ]
-            ;
+(* Flags *)
+short_flag  = SHORT_FLAG ;                           (* -l, -la *)
+long_flag   = LONG_FLAG ;                            (* --force *)
+long_flag_with_value = LONG_FLAG , "=" , value ;     (* --message="x" *)
+
 SHORT_FLAG  = "-" , ALPHA , { ALPHA | DIGIT } ;
 LONG_FLAG   = "--" , IDENT ;
+PLUS_FLAG   = "+" , ALPHA , { ALPHA | DIGIT } ;      (* +e for set +e *)
+DOUBLE_DASH = "--" ;                                 (* end of flags marker *)
 
 (* === Values === *)
 
 value       = literal
             | var_ref
+            | param_expansion
             | cmd_subst
-            | interpolated_string
+            | string
             ;
 
-literal     = STRING
-            | INT
+literal     = INT
             | FLOAT
             | BOOL
             | array
@@ -122,20 +152,31 @@ literal     = STRING
 
 cmd_subst   = "$(" , pipeline , ")" ;
 
-(* Variable references - simple or braced *)
-var_ref     = "${" , var_path , "}"                  (* braced: ${VAR}, ${VAR.field} *)
-            | "$" , IDENT                            (* simple: $VAR *)
+(* Variable references *)
+var_ref     = "${" , var_path , "}"                  (* ${VAR}, ${VAR.field}, ${VAR[0]} *)
+            | "$" , IDENT                            (* $VAR - simple form *)
+            | "$" , POSITIONAL                       (* $0-$9 *)
+            | "$@"                                   (* all args *)
+            | "$#"                                   (* arg count *)
             ;
+
 var_path    = IDENT , { "." , IDENT | "[" , INT , "]" } ;
+POSITIONAL  = "0" | "1" | "2" | "3" | "4" | "5" | "6" | "7" | "8" | "9" ;
+
+(* Parameter expansion *)
+param_expansion = "${" , IDENT , ":-" , value , "}"  (* ${VAR:-default} *)
+                | "${#" , IDENT , "}"                (* ${#VAR} - string length *)
+                ;
 
 (* String literals *)
-string      = '"' , { string_part } , '"'            (* double quotes: interpolation *)
-            | "'" , { CHAR } , "'"                   (* single quotes: literal *)
+string      = DQSTRING                               (* "..." - interpolation *)
+            | SQSTRING                               (* '...' - literal *)
             ;
-string_part = CHARS | var_ref ;
 
 (* Test expressions [[ ... ]] *)
-test_expr   = "[[" , test_condition , "]]" ;
+(* NOTE: [[ is parsed as two LBracket tokens, not a single token,
+ * to avoid ambiguity with nested arrays like [[1,2],[3,4]] *)
+test_expr_stmt = "[" , "[" , test_condition , "]" , "]" ;
 test_condition = file_test | string_test | comparison ;
 file_test   = FILE_OP , value ;                      (* [[ -f path ]] *)
 string_test = STRING_OP , value ;                    (* [[ -z str ]] *)
@@ -143,11 +184,11 @@ comparison  = value , CMP_OP , value ;               (* [[ $X == "y" ]] *)
 
 FILE_OP     = "-e" | "-f" | "-d" | "-r" | "-w" | "-x" ;
 STRING_OP   = "-z" | "-n" ;
-CMP_OP      = "==" | "!=" | "-gt" | "-lt" | "-ge" | "-le" ;
+CMP_OP      = "==" | "!=" | "-gt" | "-lt" | "-ge" | "-le" | "=~" | "!~" ;
 
 array       = "[" , [ value , { "," , value } ] , "]" ;
 object      = "{" , [ pair , { "," , pair } ] , "}" ;
-pair        = STRING , ":" , value ;   (* JSON style: keys must be quoted *)
+pair        = STRING , ":" , value ;
 
 (* === Redirects === *)
 
@@ -155,22 +196,29 @@ redirect    = redir_op , value ;
 redir_op    = ">" | ">>" | "<" | "2>" | "&>" ;
 
 (* === Conditions === *)
-
-(* Conditions can be expressions, test expressions, or commands *)
-condition   = test_expr                              (* [[ -f path ]] *)
+(*
+ * Precedence (highest to lowest):
+ *   1. Comparison operators (==, !=, <, >, etc.)
+ *   2. && (logical and)
+ *   3. || (logical or)
+ *
+ * So: a || b && c  parses as  a || (b && c)
+ *)
+condition   = or_expr ;
+or_expr     = and_expr , { "||" , and_expr } ;
+and_expr    = cmp_expr , { "&&" , cmp_expr } ;
+cmp_expr    = primary , [ comp_op , primary ] ;
+primary     = test_expr_stmt                         (* [[ -f path ]] *)
             | cmd_subst                              (* $(validate) *)
-            | value                                  (* ${VAR} or true/false *)
-            | comparison_expr                        (* ${X} == 5 *)
+            | value                                  (* $VAR, true, false, literal *)
             ;
-
-comparison_expr = value , comp_op , value ;
 comp_op     = "==" | "!=" | "<" | ">" | "<=" | ">="
             | "=~" | "!~"                            (* regex match / not match *)
             ;
 
 (* === Tokens (Lexer) === *)
 
-(* Keywords *)
+(* Keywords - recognized at statement start *)
 LOCAL       = "local" ;
 TOOL        = "tool" ;
 IF          = "if" ;
@@ -182,107 +230,129 @@ FOR         = "for" ;
 IN          = "in" ;
 DO          = "do" ;
 DONE        = "done" ;
+WHILE       = "while" ;
+BREAK       = "break" ;
+CONTINUE    = "continue" ;
+RETURN      = "return" ;
+EXIT        = "exit" ;
+SET         = "set" ;
 
-(* Brackets *)
-TESTSTART   = "[[" ;
-TESTEND     = "]]" ;
+(* Not keywords - parsed as command names *)
+(* SOURCE and DOT are identifiers that command_parser accepts *)
 
-IDENT       = ALPHA , { ALPHA | DIGIT | "-" | "_" } ;
-DQSTRING    = '"' , { CHAR | ESCAPE | var_ref } , '"' ;
-SQSTRING    = "'" , { CHAR - "'" } , "'" ;           (* single quotes: literal *)
-SIMPLEVAR   = "$" , IDENT ;                          (* simple var: $NAME *)
-INT         = [ "-" ] , DIGIT , { DIGIT } ;
-FLOAT       = INT , "." , DIGIT , { DIGIT } ;
-BOOL        = "true" | "false" ;
+(* Type keywords *)
 TYPE        = "string" | "int" | "float" | "bool" | "array" | "object" ;
 
+(* Literals *)
+BOOL        = "true" | "false" ;
+INT         = [ "-" ] , DIGIT , { DIGIT } ;
+FLOAT       = INT , "." , DIGIT , { DIGIT } ;
+DQSTRING    = '"' , { CHAR | ESCAPE | "$" , IDENT | "${" , var_path , "}" } , '"' ;
+SQSTRING    = "'" , { CHAR - "'" } , "'" ;
+
+(* Identifiers *)
+IDENT       = ALPHA , { ALPHA | DIGIT | "-" | "_" } ;
 ALPHA       = "a"-"z" | "A"-"Z" | "_" ;
 DIGIT       = "0"-"9" ;
-CHAR        = (* any char except " \ ${ *) ;
-ESCAPE      = "\" , ( '"' | "\" | "n" | "t" | "r" | "u" , HEX , HEX , HEX , HEX ) ;
+
+(* Variable references *)
+VARREF      = "${" , { CHAR - "}" } , "}" ;
+SIMPLEVAR   = "$" , IDENT ;
+
+(* Escape sequences in double-quoted strings *)
+CHAR        = (* any char except " \ $ *) ;
+ESCAPE      = "\" , ( '"' | "\" | "n" | "t" | "r" | "$" | "u" , HEX , HEX , HEX , HEX ) ;
 HEX         = DIGIT | "a"-"f" | "A"-"F" ;
 
+(* Whitespace and structure *)
 NEWLINE     = "\n" | "\r\n" ;
 COMMENT     = "#" , { (* any char except newline *) } ;
+LINECONT    = "\" , [ " " | "\t" ] , NEWLINE ;       (* line continuation *)
 ```
 
 ---
 
 ## Ambiguity Analysis
 
-### Potential Ambiguity 1: Object vs Tool Body
+### Resolved Ambiguity 1: `set` Command vs Assignment
 
-Both use `{...}`. Resolution: **context**.
+```bash
+set -e                 # command (flag follows)
+set +e                 # command (plus-flag follows)
+set                    # command (terminator follows)
+set X = 5              # assignment (IDENT '=' follows)
+```
+
+**Resolution:** Parser uses 1-token lookahead after `set`:
+- If flag (`-x`, `+x`) → parse as command
+- If terminator (newline, `;`, `&&`, `||`, EOF) → parse as command with no args
+- If IDENT followed by `=` → parse as assignment
+
+### Resolved Ambiguity 2: Object vs Tool Body
 
 ```bash
 tool foo { ... }           # after 'tool IDENT', brace = body
-cmd config={key: val}      # after '=', brace = object literal
+cmd config={"k": "v"}      # after '=', brace = object literal
 ```
 
-Lexer hint: after `tool IDENT`, switch to "expecting body" mode.
-Or: tool bodies use different delimiters?
+**Resolution:** Context-dependent. After `tool IDENT`, `{` opens a body.
 
-**Option A**: Keep `{}` for both, parser tracks context
-**Option B**: Tool bodies use `do...end` or indentation
-**Option C**: Tool bodies use `{| ... |}` or similar
-
-I lean toward **Option A** (context) since it's familiar, but let's flag it.
-
-### Potential Ambiguity 2: Bare Words vs Keywords
+### Resolved Ambiguity 3: `[[` Test vs Nested Array
 
 ```bash
-set = "value"    # is 'set' a command or keyword?
-if = 5           # is 'if' a command or keyword?
+[[ -f file ]]              # test expression
+[[1, 2], [3, 4]]           # nested array
 ```
 
-Resolution: **keywords are reserved**. You cannot have a command named `set`, `tool`, `if`, `for`, `then`, `else`, `fi`, `do`, `done`.
+**Resolution:** `[[` is lexed as two `[` tokens. Parser distinguishes:
+- `[ [` followed by `-flag` or value `CMP_OP` value → test expression
+- `[ [` followed by value `,` → nested array
 
-### Potential Ambiguity 3: Named Args vs Positional Comparison
+### Resolved Ambiguity 4: Named Args vs Positional
 
 ```bash
-cmd foo=bar      # named arg
-cmd foo = bar    # three positional args? or error?
+cmd foo=bar            # named arg (no spaces around =)
+cmd foo = bar          # ERROR: '=' is not a valid argument
 ```
 
-Resolution: **no spaces around `=` in named args**. With spaces, it's positional args.
+**Resolution:** No spaces around `=` in named args. With spaces, `=` becomes a bare token which is an error.
 
-Actually, let's be stricter: **spaces around `=` only in `set` statements**.
+### Resolved Ambiguity 5: Flags vs Negative Numbers
 
 ```bash
-set X = "value"  # assignment (spaces required)
-cmd foo=bar      # named arg (no spaces allowed)
-cmd foo = bar    # ERROR: unexpected '=' in arguments
+cmd -123               # negative number (digit after -)
+cmd -l                 # short flag (letter after -)
+cmd --foo              # long flag
 ```
 
-This removes ambiguity entirely.
+**Resolution:** Lexer priority. `-` followed by digit → Int. `-` followed by letter → ShortFlag.
 
-### Potential Ambiguity 4: Value Types (RESOLVED: JSON-only)
-
-With JSON-only syntax, there's no ambiguity:
+### Resolved Ambiguity 6: Keywords Are Reserved
 
 ```bash
-cmd flag=true                    # ✅ bool (JSON literal)
-cmd flag=false                   # ✅ bool (JSON literal)
-cmd count=123                    # ✅ int (JSON number)
-cmd count=123.45                 # ✅ float (JSON number)
-cmd name="foo"                   # ✅ string (JSON string)
-cmd items=["a", "b"]             # ✅ array (JSON array)
-cmd config={"host": "localhost"} # ✅ object (JSON object)
+if="value"             # ERROR: 'if' is a keyword, cannot be variable name
+for item in ...        # for loop (for at statement start)
+myif="value"           # OK: 'myif' is not a keyword
 ```
 
-Invalid (not JSON):
+**Resolution:** Keywords are always keywords. They cannot be used as variable names. This is intentional to avoid ambiguity and keep the language predictable. Use different names.
+
+---
+
+## Exit Code: `$?`
+
+After any command, `$?` contains the **integer exit code** (0-255):
+
 ```bash
-cmd flag=yes       # ❌ ERROR: unexpected identifier, use true or "yes"
-cmd flag=YES       # ❌ ERROR: unexpected identifier, use true or "YES"
-cmd name=foo       # ❌ ERROR: unexpected identifier, use "foo"
-cmd config={host: "x"}  # ❌ ERROR: object keys must be quoted
+some-command
+echo $?                    # prints: 0 (success) or 1-255 (failure)
+
+if [[ $? -eq 0 ]]; then
+    echo "success"
+fi
 ```
 
-**REPL convenience**: Tab-expansion converts relaxed input to valid JSON.
-```
-会sh> cmd config={host: localhost}<TAB>
-会sh> cmd config={"host": "localhost"}
-```
+**Note:** Unlike the original design, `$?` is a simple integer, not a structured object. Use tool-specific output capture for structured results.
 
 ---
 
@@ -290,43 +360,46 @@ cmd config={host: "x"}  # ❌ ERROR: object keys must be quoted
 
 ### Category 1: Lexer Tests (Token Stream)
 
-For each token type, test:
-- Valid examples
-- Edge cases
-- Invalid examples (should error)
-
 ```
 ┌─────────────────────────────────────────────────────────────────┐
 │ Input                    │ Expected Tokens                     │
 ├─────────────────────────────────────────────────────────────────┤
-│ set X = 5                │ SET IDENT(X) EQ INT(5)              │
-│ echo "hello"             │ IDENT(echo) STRING(hello)           │
-│ echo ${X}                │ IDENT(echo) VARREF(X)               │
+│ X=5                      │ IDENT(X) EQ INT(5)                  │
+│ echo "hello"             │ IDENT(echo) DQSTRING(hello)         │
+│ echo $X                  │ IDENT(echo) SIMPLEVAR(X)            │
+│ echo ${X}                │ IDENT(echo) VARREF(${X})            │
 │ cmd a=1 b="x"            │ IDENT(cmd) IDENT(a) EQ INT(1) ...   │
 │ # comment                │ COMMENT                              │
-│ "unterminated            │ ERROR: unterminated string           │
+│ ls -l                    │ IDENT(ls) SHORTFLAG(l)              │
+│ git --force              │ IDENT(git) LONGFLAG(force)          │
+│ 'literal $x'             │ SQSTRING(literal $x)                │
+│ set -e                   │ SET SHORTFLAG(e)                    │
+│ set +e                   │ SET PLUSFLAG(e)                     │
+│ [[                       │ LBRACKET LBRACKET                   │
+│ "unterminated            │ ERROR: unterminated string          │
 └─────────────────────────────────────────────────────────────────┘
 ```
 
 ### Category 2: Parser Tests (AST Structure)
 
-For each grammar production:
-- Minimal valid example
-- Complex valid example
-- Boundary cases
-- Invalid examples (should error with good message)
-
 ```
 ┌─────────────────────────────────────────────────────────────────┐
 │ Production    │ Input              │ Expected AST              │
 ├─────────────────────────────────────────────────────────────────┤
-│ assignment    │ set X = 5          │ Assign(X, Int(5))         │
-│ assignment    │ set X = [1,2]      │ Assign(X, Array([1,2]))   │
-│ assignment    │ X = 5              │ ERROR: use 'set X = ...'  │
+│ assignment    │ X=5                │ Assign(X, Int(5))         │
+│ assignment    │ X="hello"          │ Assign(X, Str(hello))     │
+│ assignment    │ local Y=10         │ LocalAssign(Y, Int(10))   │
 │ command       │ echo "hi"          │ Cmd(echo, [Str(hi)])      │
+│ command       │ set -e             │ Cmd(set, [ShortFlag(e)])  │
+│ command       │ true               │ Cmd(true, [])             │
 │ pipeline      │ a | b | c          │ Pipe([Cmd(a),Cmd(b),...]) │
 │ named_arg     │ foo=123            │ Named(foo, Int(123))      │
-│ named_arg     │ foo = 123          │ ERROR: no spaces in arg   │
+│ flag          │ -l                 │ ShortFlag(l)              │
+│ flag          │ --force            │ LongFlag(force)           │
+│ param_exp     │ ${X:-default}      │ VarWithDefault(X, "...")  │
+│ var_length    │ ${#X}              │ VarLength(X)              │
+│ while         │ while true; do...  │ While(Lit(true), [...])   │
+│ test          │ [[ -f x ]]         │ Test(FileTest(IsFile, x)) │
 └─────────────────────────────────────────────────────────────────┘
 ```
 
@@ -345,25 +418,27 @@ Golden file tests: script + expected stdout/stderr/exit code.
 │ Script                           │ Expected                    │
 ├─────────────────────────────────────────────────────────────────┤
 │ echo "hello"                     │ stdout: hello               │
-│ set X = 5; echo ${X}             │ stdout: 5                   │
-│ echo ${UNDEFINED}                │ stderr: undefined var       │
+│ X=5; echo $X                     │ stdout: 5                   │
+│ echo $UNDEFINED                  │ stderr: undefined var       │
 │ false && echo "no"               │ stdout: (empty)             │
 │ false || echo "yes"              │ stdout: yes                 │
+│ X=${X:-default}; echo $X         │ stdout: default             │
+│ X="hello"; echo ${#X}            │ stdout: 5                   │
+│ set -e; false; echo "not here"   │ exit: 1 (never echoes)      │
 └─────────────────────────────────────────────────────────────────┘
 ```
 
 ### Category 5: Error Message Tests
 
-Every error path should have a test verifying the message is helpful.
-
 ```
 ┌─────────────────────────────────────────────────────────────────┐
 │ Input                │ Expected Error Contains                  │
 ├─────────────────────────────────────────────────────────────────┤
-│ set X = yes          │ "ambiguous value 'yes', use true or"     │
 │ echo ${X.y.z         │ "unterminated variable reference"        │
 │ tool { }             │ "expected tool name after 'tool'"        │
-│ cmd foo = bar        │ "unexpected '=' - named args use 'k=v'"  │
+│ cmd foo = bar        │ "unexpected '='"                         │
+│ break 0              │ "break level must be positive"           │
+│ [[ ]]                │ "empty test expression"                  │
 └─────────────────────────────────────────────────────────────────┘
 ```
 
@@ -374,238 +449,61 @@ Throw random bytes at the parser. It should:
 - Never hang
 - Always return `Ok(AST)` or `Err(ParseError)`
 
-Use `cargo-fuzz` or `proptest` with arbitrary byte sequences.
-
 ---
 
-## Test File Format
+## Flag Arguments
 
-For golden file tests, I propose a simple format:
+**Status:** Implemented
 
-```
-# test: name_of_test
-# description: What this tests
----
-set X = 5
-echo ${X}
----
-stdout: 5
-exit: 0
-===
-
-# test: error_undefined_var
-# expect: error
----
-echo ${NOPE}
----
-error: undefined variable 'NOPE'
-===
-```
-
-This gives us:
-- Human-readable test files
-- Easy to add new tests (copy-paste-modify)
-- Parseable by test harness
-- Self-documenting
-
----
-
-## Property-Based Testing Ideas
-
-Using `proptest` or `quickcheck`:
-
-```rust
-// Property 1: Parsing never panics
-proptest! {
-    fn parse_never_panics(input: String) {
-        let _ = parse(&input); // should return Ok or Err, never panic
-    }
-}
-
-// Property 2: Valid AST round-trips
-proptest! {
-    fn valid_ast_roundtrips(ast: Ast) {
-        let printed = pretty_print(&ast);
-        let reparsed = parse(&printed).unwrap();
-        assert_eq!(ast, reparsed);
-    }
-}
-
-// Property 3: Token stream is deterministic
-proptest! {
-    fn lexer_deterministic(input: String) {
-        let tokens1 = lex(&input);
-        let tokens2 = lex(&input);
-        assert_eq!(tokens1, tokens2);
-    }
-}
-```
-
----
-
-## Command Substitution `$(cmd)`
-
-Command substitution runs a command and returns its structured result:
-
-```bash
-# In conditions - check if command succeeded
-if $(validate input.json); then
-    echo "valid"
-fi
-
-# With field access - check specific result field
-if $(validate input.json).ok; then
-    echo "valid"
-fi
-
-# Capture result for later use
-set RESULT = $(fetch url="https://api.example.com")
-echo ${RESULT.data}
-
-# Logical operators work on expression results
-if $(check-a) && $(check-b); then
-    echo "both passed"
-fi
-
-if $(try-primary) || $(try-fallback); then
-    echo "at least one worked"
-fi
-```
-
-The `$(cmd)` expression evaluates to the command's result object (same structure as `$?`):
-- `.ok` - bool: true if exit code 0
-- `.code` - int: exit code
-- `.data` - object: parsed stdout (if JSON)
-- `.out` - string: raw stdout
-- `.err` - string: error message
-
-This design keeps conditions as pure expressions (no hidden side effects) while making
-command execution explicit. The `&&` and `||` operators work on expression results,
-avoiding bash's ambiguous statement chaining semantics.
-
-## Flag Arguments (`-x` and `--name`)
-
-**Status:** Design complete, implementation pending (L6.1)
-
-Unix tools use `-x` (short) and `--name` (long) flags extensively. kaish needs to support
-these for git, curl, and other common tools.
-
-### Current Limitation
-
-The lexer rejects `-l` because:
-- `-?[0-9]+` matches negative integers, but `-l` has no digits
-- `[a-zA-Z_][a-zA-Z0-9_-]*` matches identifiers, but can't start with `-`
-
-```bash
-ls -l           # ❌ lexer error: unexpected character '-'
-git commit -m   # ❌ lexer error
-```
-
-### Design: Flag Tokens
-
-Add two new token types:
+### Token Types
 
 ```ebnf
-SHORT_FLAG  = "-" , ALPHA , { ALPHA | DIGIT } ;   (* -l, -m, -vvv *)
-LONG_FLAG   = "--" , IDENT ;                       (* --long, --message *)
+SHORT_FLAG  = "-" , ALPHA , { ALPHA | DIGIT } ;   (* -l, -la, -vvv *)
+LONG_FLAG   = "--" , IDENT ;                       (* --force, --message *)
+PLUS_FLAG   = "+" , ALPHA , { ALPHA | DIGIT } ;   (* +e, +x - for set +e *)
+DOUBLE_DASH = "--" ;                               (* end of flags marker *)
 ```
 
-Examples:
+### Examples
+
 ```bash
 ls -l                    # SHORT_FLAG(l)
-ls -la                   # SHORT_FLAG(la) - combined short flags
-git commit -m "msg"      # SHORT_FLAG(m), STRING(msg)
+ls -la                   # SHORT_FLAG(la) - combined
+git commit -m "msg"      # SHORT_FLAG(m), DQSTRING(msg)
 git push --force         # LONG_FLAG(force)
-git commit --message="x" # LONG_FLAG(message), EQ, STRING(x)
+git commit --message="x" # LONG_FLAG(message), EQ, DQSTRING(x)
+set -e                   # SET, SHORT_FLAG(e)
+set +e                   # SET, PLUS_FLAG(e)
 ```
-
-### Parser Changes
-
-Extend argument grammar:
-
-```ebnf
-argument    = positional | named | flag_arg ;
-positional  = value ;
-named       = IDENT , "=" , value ;
-flag_arg    = SHORT_FLAG , [ value ]
-            | LONG_FLAG , [ "=" , value ]
-            ;
-```
-
-### ToolArgs Mapping
-
-Flags map to `ToolArgs` as follows:
-
-| Syntax | ToolArgs Field | Example |
-|--------|----------------|---------|
-| `-l` | `flags.insert("l")` | `ls -l` → flags={"l"} |
-| `-la` | `flags.insert("l"), flags.insert("a")` | `ls -la` → flags={"l","a"} |
-| `-m "msg"` | `named.insert("m", "msg")` | `git -m "hi"` → named={"m":"hi"} |
-| `--force` | `flags.insert("force")` | `git --force` → flags={"force"} |
-| `--message="x"` | `named.insert("message", "x")` | named={"message":"x"} |
-
-### Short Flag Value Binding
-
-Short flags followed by a value bind to that value:
-```bash
-git commit -m "message"   # -m takes "message" as its value
-curl -H "Auth: x"         # -H takes "Auth: x" as its value
-```
-
-This is **positional binding** - the flag consumes the next positional arg.
-Tools must declare which short flags take values vs are boolean.
-
-### Tool Schema Extension
-
-Tools declare flag metadata in their schema:
-
-```rust
-ToolSchema::new("git-commit", "Create a commit")
-    .flag(FlagSchema::short("m").takes_value("Commit message"))
-    .flag(FlagSchema::short("a").boolean("Stage all modified files"))
-    .flag(FlagSchema::long("amend").boolean("Amend previous commit"))
-    .flag(FlagSchema::long("message").takes_value("Commit message"))
-```
-
-Without schema info, flags are treated as boolean by default.
-
-### Git Compatibility Examples
-
-```bash
-# These should all work:
-git status
-git add "file.txt"
-git commit -m "message"
-git commit --message="message"
-git push --force
-git push -f
-git log --oneline -n 5
-git diff --staged
-git branch -d "feature"
-git checkout -b "new-branch"
-```
-
-### Implementation Plan
-
-1. **Lexer**: Add `ShortFlag(String)` and `LongFlag(String)` tokens
-2. **Parser**: Extend argument parsing to handle flag tokens
-3. **ToolArgs**: Already has `flags: HashSet<String>`, add value binding logic
-4. **Tools**: Update builtins to use new flag API (ls -l, etc.)
-5. **Schema**: Add `FlagSchema` for tool introspection
 
 ### Edge Cases
 
 | Input | Interpretation |
 |-------|----------------|
 | `--` | End of flags marker (everything after is positional) |
-| `-` | Single dash (often means stdin) - treat as positional string |
+| `-` | Single dash - treat as positional (often means stdin) |
 | `---` | Error: invalid flag syntax |
 | `-123` | Negative integer, not a flag |
 | `--foo-bar` | Long flag "foo-bar" |
+| `+e` | Plus flag (only valid after `set`) |
 
 ---
 
-## Deferred Features: Future Compatibility
+## Line Continuation
+
+A backslash at end of line continues the statement:
+
+```bash
+echo "this is a very long" \
+     "command that spans" \
+     "multiple lines"
+```
+
+The lexer produces a `LINECONT` token which is skipped, merging the lines.
+
+---
+
+## Deferred Features
 
 Explicitly not in v0.1, designed for future addition:
 
@@ -619,4 +517,13 @@ pattern       = IDENT | "{" , pattern_field , { "," , pattern_field } , "}" ;
 pattern_field = IDENT [ ":" , IDENT ] ;
 ```
 
-Unambiguous: `{` after `as=` starts a pattern (unquoted idents), not JSON object.
+Unambiguous: `{` after `as=` starts a pattern (unquoted idents), not an object.
+
+### Arithmetic Expansion
+
+Not supported. Use tools for math:
+```bash
+# NOT: $((x + 1))
+# Instead:
+RESULT=$(math "$X + 1")
+```

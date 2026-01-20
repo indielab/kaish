@@ -2716,4 +2716,198 @@ cmd < "input.txt"
             _ => unreachable!(),
         }
     }
+
+    // ═══════════════════════════════════════════════════════════════════════════
+    // Edge Case Tests: Ambiguity Resolution
+    // ═══════════════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn parse_keyword_as_variable_rejected() {
+        // Keywords CANNOT be used as variable names - this is intentional
+        // to avoid ambiguity. Use different names instead.
+        let result = parse(r#"if="value""#);
+        assert!(result.is_err(), "if= should fail - 'if' is a keyword");
+
+        let result = parse("while=true");
+        assert!(result.is_err(), "while= should fail - 'while' is a keyword");
+
+        let result = parse(r#"then="next""#);
+        assert!(result.is_err(), "then= should fail - 'then' is a keyword");
+    }
+
+    #[test]
+    fn parse_set_command_with_flag() {
+        let result = parse("set -e");
+        assert!(result.is_ok(), "failed to parse set -e: {:?}", result);
+        let program = result.unwrap();
+        match &program.statements[0] {
+            Stmt::Command(cmd) => {
+                assert_eq!(cmd.name, "set");
+                assert_eq!(cmd.args.len(), 1);
+                match &cmd.args[0] {
+                    Arg::ShortFlag(f) => assert_eq!(f, "e"),
+                    other => panic!("expected ShortFlag, got {:?}", other),
+                }
+            }
+            other => panic!("expected Command, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn parse_set_command_no_args() {
+        let result = parse("set");
+        assert!(result.is_ok(), "failed to parse set: {:?}", result);
+        let program = result.unwrap();
+        match &program.statements[0] {
+            Stmt::Command(cmd) => {
+                assert_eq!(cmd.name, "set");
+                assert_eq!(cmd.args.len(), 0);
+            }
+            other => panic!("expected Command, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn parse_set_assignment_vs_command() {
+        // set X = 5 should be assignment
+        let result = parse("set X = 5");
+        assert!(result.is_ok());
+        let program = result.unwrap();
+        assert!(matches!(&program.statements[0], Stmt::Assignment(_)));
+
+        // set -e should be command
+        let result = parse("set -e");
+        assert!(result.is_ok());
+        let program = result.unwrap();
+        assert!(matches!(&program.statements[0], Stmt::Command(_)));
+    }
+
+    #[test]
+    fn parse_true_as_command() {
+        let result = parse("true");
+        assert!(result.is_ok());
+        let program = result.unwrap();
+        match &program.statements[0] {
+            Stmt::Command(cmd) => assert_eq!(cmd.name, "true"),
+            other => panic!("expected Command(true), got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn parse_false_as_command() {
+        let result = parse("false");
+        assert!(result.is_ok());
+        let program = result.unwrap();
+        match &program.statements[0] {
+            Stmt::Command(cmd) => assert_eq!(cmd.name, "false"),
+            other => panic!("expected Command(false), got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn parse_dot_as_source_alias() {
+        let result = parse(". script.kai");
+        assert!(result.is_ok(), "failed to parse . script.kai: {:?}", result);
+        let program = result.unwrap();
+        match &program.statements[0] {
+            Stmt::Command(cmd) => {
+                assert_eq!(cmd.name, ".");
+                assert_eq!(cmd.args.len(), 1);
+            }
+            other => panic!("expected Command(.), got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn parse_source_command() {
+        let result = parse("source utils.kai");
+        assert!(result.is_ok(), "failed to parse source: {:?}", result);
+        let program = result.unwrap();
+        match &program.statements[0] {
+            Stmt::Command(cmd) => {
+                assert_eq!(cmd.name, "source");
+                assert_eq!(cmd.args.len(), 1);
+            }
+            other => panic!("expected Command(source), got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn parse_test_expr_file_test() {
+        // Paths must be quoted strings in test expressions
+        let result = parse(r#"[[ -f "/path/file" ]]"#);
+        assert!(result.is_ok(), "failed to parse file test: {:?}", result);
+    }
+
+    #[test]
+    fn parse_test_expr_comparison() {
+        let result = parse(r#"[[ $X == "value" ]]"#);
+        assert!(result.is_ok(), "failed to parse comparison test: {:?}", result);
+    }
+
+    #[test]
+    fn parse_nested_array_not_test() {
+        // [[1,2],[3,4]] should be nested array, not test expression
+        let result = parse("cmd [[1, 2], [3, 4]]");
+        assert!(result.is_ok(), "failed to parse nested array: {:?}", result);
+        let program = result.unwrap();
+        match &program.statements[0] {
+            Stmt::Command(cmd) => {
+                assert_eq!(cmd.name, "cmd");
+                match &cmd.args[0] {
+                    Arg::Positional(Expr::Literal(Value::Array(items))) => {
+                        assert_eq!(items.len(), 2);
+                    }
+                    other => panic!("expected nested array, got {:?}", other),
+                }
+            }
+            other => panic!("expected Command, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn parse_while_loop() {
+        let result = parse("while true; do echo; done");
+        assert!(result.is_ok(), "failed to parse while loop: {:?}", result);
+        let program = result.unwrap();
+        assert!(matches!(&program.statements[0], Stmt::While(_)));
+    }
+
+    #[test]
+    fn parse_break_with_level() {
+        let result = parse("break 2");
+        assert!(result.is_ok());
+        let program = result.unwrap();
+        match &program.statements[0] {
+            Stmt::Break(Some(n)) => assert_eq!(*n, 2),
+            other => panic!("expected Break(2), got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn parse_continue_with_level() {
+        let result = parse("continue 3");
+        assert!(result.is_ok());
+        let program = result.unwrap();
+        match &program.statements[0] {
+            Stmt::Continue(Some(n)) => assert_eq!(*n, 3),
+            other => panic!("expected Continue(3), got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn parse_exit_with_code() {
+        let result = parse("exit 1");
+        assert!(result.is_ok());
+        let program = result.unwrap();
+        match &program.statements[0] {
+            Stmt::Exit(Some(expr)) => {
+                match expr.as_ref() {
+                    Expr::Literal(Value::Int(n)) => assert_eq!(*n, 1),
+                    other => panic!("expected Int(1), got {:?}", other),
+                }
+            }
+            other => panic!("expected Exit(1), got {:?}", other),
+        }
+    }
 }

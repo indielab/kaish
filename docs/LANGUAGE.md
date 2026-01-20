@@ -1,4 +1,4 @@
-# kaish (会sh) Language Specification (Draft)
+# kaish (会sh) Language Specification
 
 ```
 会 (kai) = meeting, gathering, coming together
@@ -6,95 +6,106 @@ kaish = kai + sh = the gathering shell
         ksh vibes, "ai" in the middle 👀
 ```
 
-A minimal shell language designed for MCP tool orchestration.
+A Bourne-lite shell designed for MCP tool orchestration.
 Part of the Kaijutsu (会術) project — the art of gathering.
 
 ## Philosophy
 
-- **Everything is a tool** - builtins, MCP tools, same syntax
-- **Strings are easy, structure is JSON** - hybrid data model
-- **Predictable over powerful** - no dark corners
-- **Agent-friendly** - easy to generate, parse, validate
-- **Fail fast** - ambiguity is an error, not a guess
+**80% of a POSIX shell, 100% unambiguous.**
+
+- **Bourne-lite** — familiar syntax, no surprises
+- **Everything is a tool** — builtins and MCP tools use identical syntax
+- **Predictable over powerful** — no dark corners
+- **Agent-friendly** — easy to generate, parse, validate
+- **Fail fast** — ambiguity is an error, not a guess
 
 ## Syntax
 
 ### Variables
 
 ```bash
-# Both styles work - bash-style preferred
-NAME="value"                        # bash-style assignment (no spaces around =)
-local NAME = "value"                # explicit local scope (spaces allowed)
+# Assignment - bash style (no spaces around =)
+NAME="value"
+X=42
+ITEMS="one two three"
 
-X=42                                # numbers
-LIST=["a", "b", "c"]                # arrays (JSON syntax)
-OBJ={"key": "value"}                # objects (JSON syntax)
+# Local scope (explicit)
+local NAME="value"
 
-# Variable expansion - both forms work
-echo $NAME                          # simple expansion (identifiers only)
+# Both $VAR and ${VAR} work
+echo $NAME                          # simple expansion
 echo ${NAME}                        # braced expansion (equivalent)
 echo "${NAME} more text"            # interpolation in strings
 echo ${OBJ.key}                     # nested access (braces required for paths)
 echo ${LIST[0]}                     # array index (braces required)
 ```
 
-Simple `$NAME` works for plain identifiers. Use `${VAR}` for paths: `${OBJ.field}`, `${ARR[0]}`.
-No `${NAME:-default}`. No parameter expansion. No arrays-of-arrays.
+### Parameter Expansion
+
+```bash
+# Default values
+NAME=${NAME:-"default"}             # use "default" if NAME unset or empty
+
+# String length
+echo ${#NAME}                       # prints length of NAME
+
+# Positional parameters (in scripts/tools)
+echo $0                             # script/tool name
+echo $1 $2 $3                       # first three args
+echo $@                             # all args
+echo $#                             # arg count
+```
 
 ### Quoting
 
 ```bash
-echo hello                   # bare word, no quotes needed
-echo "hello world"           # double quotes for spaces
-echo "line\nbreak"           # JSON escapes work: \n \t \\ \"
-echo "value: $X"             # interpolation in double quotes
-echo "literal \${X}"         # escaped = no interpolation
+# Double quotes - interpolation works
+echo "hello world"
+echo "value: $X"
+echo "path: ${HOME}/file"
+echo "line\nbreak"                  # escapes work: \n \t \\ \"
+echo "literal \$X"                  # escaped = no interpolation
 
 # Single quotes - literal strings, no interpolation
-echo 'hello $NAME'           # prints: hello $NAME (literal)
-echo 'no escapes: \n'        # prints: no escapes: \n (literal backslash-n)
+echo 'hello $NAME'                  # prints: hello $NAME (literal)
+echo 'no escapes: \n'               # prints: no escapes: \n
 ```
 
 No `$'...'`. No backticks.
 
-### Arguments (JSON only)
+### Arguments
 
 ```bash
-# Named arguments - primitives
+# Positional args
+echo "hello" "world"
+
+# Named arguments (key=value, no spaces)
 tool arg1="value" count=10 enabled=true
 
-# Arrays - JSON syntax (quotes required)
-tool items=["one", "two", "three"]
+# Flag arguments
+ls -l                               # short flag
+ls -la                              # combined short flags
+git commit -m "message"             # short flag with value
+git push --force                    # long flag
+curl --header="Content-Type: json"  # long flag with value
 
-# Objects - JSON syntax (keys quoted)
-tool config={"host": "localhost", "port": 8080}
-
-# Nested structures
-tool data={"items": [{"id": 1}, {"id": 2}]}
-
-# Positional args work too
-echo "hello" "world"
-```
-
-**Parser is JSON-only.** REPL provides YAML→JSON expansion via Tab key.
-
-```
-会sh> tool config={host: localhost}<TAB>
-会sh> tool config={"host": "localhost"}
+# Flags with values
+cmd -o outfile                      # -o takes next arg as value
+cmd --output=outfile                # long form with =
 ```
 
 ### Pipes & Redirects
 
 ```bash
-tool-a | tool-b | tool-c     # pipe stdout → stdin
-tool > file                  # redirect stdout
-tool >> file                 # append stdout
-tool < file                  # stdin from file
-tool 2> file                 # redirect stderr
-tool &> file                 # stdout + stderr
+tool-a | tool-b | tool-c            # pipe stdout → stdin
+tool > file                         # redirect stdout
+tool >> file                        # append stdout
+tool < file                         # stdin from file
+tool 2> file                        # redirect stderr
+tool &> file                        # stdout + stderr
 ```
 
-No `2>&1`. No process substitution. No here-docs (yet?).
+No `2>&1`. No process substitution. No here-docs.
 
 ### Exit Code: `$?`
 
@@ -102,24 +113,17 @@ After any command, `$?` is an **integer exit code** (0-255), just like bash:
 
 ```bash
 some-command
-echo $?                      # prints: 0 (or non-zero on failure)
+echo $?                             # prints: 0 (or non-zero on failure)
 
 # Use in conditions
-if [[ $? == 0 ]]; then
+if [[ $? -eq 0 ]]; then
     echo "success"
 fi
 ```
 
-To capture structured output, use command substitution:
-
-```bash
-RESULT=$(api-call endpoint=/users)
-echo ${RESULT.count}         # if stdout was JSON, access fields
-```
-
 ### Statement Chaining
 
-Commands can be chained with `&&` and `||` at the statement level:
+Commands can be chained with `&&` and `||`:
 
 ```bash
 # Run cmd2 only if cmd1 succeeds (exit code 0)
@@ -142,6 +146,9 @@ Bash-style test expressions for conditionals:
 if [[ -f /path/file ]]; then echo "is file"; fi
 if [[ -d /path/dir ]]; then echo "is directory"; fi
 if [[ -e /path/any ]]; then echo "exists"; fi
+if [[ -r /path/file ]]; then echo "readable"; fi
+if [[ -w /path/file ]]; then echo "writable"; fi
+if [[ -x /path/file ]]; then echo "executable"; fi
 
 # String tests
 if [[ -z $VAR ]]; then echo "empty"; fi
@@ -152,9 +159,15 @@ if [[ $X == "value" ]]; then echo "match"; fi
 if [[ $X != "other" ]]; then echo "no match"; fi
 if [[ $NUM -gt 5 ]]; then echo "greater"; fi
 if [[ $NUM -lt 10 ]]; then echo "less"; fi
+if [[ $NUM -ge 5 ]]; then echo "greater or equal"; fi
+if [[ $NUM -le 10 ]]; then echo "less or equal"; fi
+
+# Regex matching
+if [[ $filename =~ "\.rs$" ]]; then echo "Rust file"; fi
+if [[ $input !~ "^[0-9]+$" ]]; then echo "not a number"; fi
 ```
 
-Note: `[ ]` (single brackets) is reserved for JSON arrays. Use `[[ ]]` for tests.
+Note: `[ ]` (single brackets) is not supported — use `[[ ]]` for all tests.
 
 ### Control Flow
 
@@ -168,10 +181,25 @@ else
     ...
 fi
 
-# Loops (minimal)
-for ITEM in ${LIST}; do
-    process ${ITEM}
+# For loop
+for ITEM in $LIST; do
+    process $ITEM
 done
+
+# While loop
+while CONDITION; do
+    ...
+done
+
+# Control statements
+break                               # exit innermost loop
+break 2                             # exit 2 levels of loops
+continue                            # skip to next iteration
+continue 2                          # skip in outer loop
+return                              # return from tool (exit code 0)
+return 1                            # return with specific exit code
+exit                                # exit script (exit code 0)
+exit 1                              # exit with specific code
 ```
 
 No `case`. No `select`. No arithmetic `(( ))`.
@@ -182,77 +210,56 @@ No `case`. No `select`. No arithmetic `(( ))`.
 |----------|-------------|
 | `==` | Equality |
 | `!=` | Inequality |
-| `<` | Less than |
-| `>` | Greater than |
-| `<=` | Less than or equal |
-| `>=` | Greater than or equal |
-| `=~` | Regex match (returns bool) |
-| `!~` | Regex not match (returns bool) |
-
-```bash
-# Regex matching
-if ${filename} =~ "\.rs$"; then
-    echo "Rust source file"
-fi
-
-if ${input} !~ "^[0-9]+$"; then
-    echo "Not a number"
-fi
-```
+| `-lt` | Less than (numeric) |
+| `-gt` | Greater than (numeric) |
+| `-le` | Less than or equal (numeric) |
+| `-ge` | Greater than or equal (numeric) |
+| `=~` | Regex match |
+| `!~` | Regex not match |
 
 ### Command Substitution `$(cmd)`
 
-Run a command and get its structured result as an expression:
+Run a command and capture output:
 
 ```bash
-# Check if command succeeded
+# Capture output
+NOW=$(date)
+echo "Current time: $NOW"
+
+# Use in conditions
 if $(validate input.json); then
     echo "valid"
 fi
 
-# Access specific result fields
-if $(validate input.json).ok; then
-    echo "validation passed"
-fi
-
-# Capture result for later use
-set RESULT = $(fetch url="https://api.example.com")
-echo ${RESULT.data.items[0].name}
-
-# Logical operators on command results
-if $(check-a) && $(check-b); then
-    echo "both checks passed"
-fi
-
-if $(try-primary) || $(try-fallback); then
-    echo "at least one succeeded"
-fi
+# Nested
+RESULT=$(process $(fetch $URL))
 ```
 
-The `$(cmd)` expression returns the command's result object:
-- `.ok` - bool: true if exit code 0
-- `.code` - int: exit code
-- `.data` - object: parsed stdout (if JSON)
-- `.out` - string: raw stdout
-- `.err` - string: error message
+### Error Handling
 
-**Note**: Unlike bash's `&&`/`||` statement chaining, kaish uses these as expression
-operators. This avoids ambiguity around backgrounding (`&`) and redirects.
-
-Nested command substitution is supported:
 ```bash
-set MSG = $(echo $(date))
-set RESULT = $(process $(fetch ${URL}))
+# Exit on error mode
+set -e                              # script exits on first error
+
+# Within script - check and handle
+some-command || {
+    echo "Command failed"
+    exit 1
+}
+
+# Source other scripts
+source utils.kai                    # load utilities
+. config.kai                        # dot notation also works
 ```
 
 ### Background Jobs
 
 ```bash
-slow-task &                  # run in background
-jobs                         # list jobs
-fg %1                        # foreground
-wait                         # wait for all
-wait %1 %2                   # wait for specific
+slow-task &                         # run in background
+jobs                                # list jobs
+fg %1                               # foreground
+wait                                # wait for all
+wait %1 %2                          # wait for specific
 ```
 
 ### 散・集 (San/Shū) — Scatter/Gather Parallelism
@@ -260,17 +267,17 @@ wait %1 %2                   # wait for specific
 ```bash
 # 散 (scatter) - fan out to parallel workers
 # 集 (gather) - collect results back
-cat input.txt | scatter | process-item ${ITEM} | gather > output.json
+cat input.txt | scatter | process-item $ITEM | gather > output.json
 
 # With explicit variable
-cat input.txt | scatter as=URL limit=4 | fetch url=${URL} | gather
+cat input.txt | scatter as=URL limit=4 | fetch url=$URL | gather
 
 # Options
-scatter as=VAR               # bind each item to ${VAR}
-scatter limit=N              # max parallelism (default: 8)
-gather progress=true         # show progress
-gather first=N               # take first N, cancel rest
-gather errors=FILE           # collect failures separately
+scatter as=VAR                      # bind each item to $VAR
+scatter limit=N                     # max parallelism (default: 8)
+gather progress=true                # show progress
+gather first=N                      # take first N, cancel rest
+gather errors=FILE                  # collect failures separately
 ```
 
 ## Virtual Filesystem
@@ -300,7 +307,6 @@ Everything is a tool. Builtins:
 | Tool | Description |
 |------|-------------|
 | `echo` | Output text |
-| `set` | Set variable |
 | `ls` | List directory |
 | `cd` | Change directory |
 | `pwd` | Print working directory |
@@ -312,6 +318,7 @@ Everything is a tool. Builtins:
 | `mv` | Move |
 | `grep` | Search content |
 | `jq` | JSON query |
+| `exec` | Execute external command |
 | `help` | Tool documentation |
 | `jobs` | List background jobs |
 | `wait` | Wait for jobs |
@@ -324,7 +331,6 @@ Everything is a tool. Builtins:
 | `mounts` | List VFS mount points (`--json` for JSON output) |
 | `history` | Show execution history (`--limit=N`, `--json`) |
 | `checkpoints` | List checkpoints (`--json` for JSON output) |
-| `exec` | Execute external command |
 
 MCP tools use same syntax:
 ```bash
@@ -332,19 +338,23 @@ exa.web_search query="rust"
 filesystem.read path="/etc/hosts"
 ```
 
-## What We Explicitly Don't Support
+## What's Intentionally Missing
 
-- Parameter expansion (`${VAR:-default}`, `${VAR##*/}`, etc.)
-- Arithmetic expansion `$(( ))`
-- Brace expansion `{a,b,c}`
-- Glob expansion `*.txt` (tools handle their own patterns)
-- Here-docs `<<EOF`
-- Process substitution `<(cmd)`
-- Backtick command substitution `` `cmd` `` (use `$(cmd)` instead)
-- Single bracket tests `[ ]` (reserved for JSON arrays, use `[[ ]]`)
-- Aliases
-- `eval`
-- Arrays of arrays
+These bash features are omitted because they're confusing, error-prone, or ambiguous:
+
+| Feature | Reason |
+|---------|--------|
+| Arithmetic `$(( ))` | Use tools for math |
+| Brace expansion `{a,b,c}` | Just write it out |
+| Glob expansion `*.txt` | Tools handle their own patterns |
+| Here-docs `<<EOF` | Use files or strings |
+| Process substitution `<(cmd)` | Use temp files |
+| Backtick substitution `` `cmd` `` | Use `$(cmd)` |
+| Single bracket tests `[ ]` | Use `[[ ]]` |
+| Aliases | Explicit is better |
+| `eval` | Security and predictability |
+| Arrays of arrays | Keep it simple |
+| `2>&1` fd duplication | Just use `&>` for combined output |
 
 ## User-Defined Tools
 
@@ -353,8 +363,8 @@ Tools can be defined in scripts and **re-exported over MCP**:
 ```bash
 # Define a tool with typed parameters
 tool fetch-and-summarize url:string max_length:int=500 {
-    fetch url=${url} > /scratch/content
-    summarize input=- length=${max_length} < /scratch/content
+    fetch url=$url > /scratch/content
+    summarize input=- length=$max_length < /scratch/content
 }
 
 # Use it locally
@@ -380,9 +390,9 @@ my-tools.fetch-and-summarize url="https://..."
 ```
 
 This enables:
-- **Tool composition** - build complex tools from simple ones
-- **User customization** - power users define their own toolkits
-- **Agent optimization** - bundle common patterns into single calls
+- **Tool composition** — build complex tools from simple ones
+- **User customization** — power users define their own toolkits
+- **Agent optimization** — bundle common patterns into single calls
 
 ## Execution Modes
 

@@ -4,19 +4,19 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-**kaish** (会sh — "the gathering shell") is a minimal shell language for MCP tool orchestration. Part of the [Kaijutsu](https://github.com/tobert/kaijutsu) project.
+**kaish** (会sh — "the gathering shell") is a Bourne-lite shell for MCP tool orchestration. Part of the [Kaijutsu](https://github.com/tobert/kaijutsu) project.
 
-**Status**: Design phase. Documentation is complete, implementation has not started.
+**Status**: Implementation complete through L14. All build layers are implemented.
 
-## Spirit of the Project
+## Philosophy
 
-**Agent-friendly by design.** The language exists to be generated, parsed, and validated by AI. Every syntax decision prioritizes unambiguity over convenience. Fail-fast over guess-and-hope.
+**80% of a POSIX shell, 100% unambiguous.**
 
-**Predictable over powerful.** No dark corners. If bash has a confusing edge case, kaish doesn't have that feature. The subset is intentional.
-
-**Literate, educational code.** This is a reference implementation. Types should teach. Names should explain. The parser should demonstrate how parsers work.
-
-**Collaboration is the medium.** Multiple minds — human and AI — will touch this code. Write for the contributor who follows. Leave the codebase more welcoming than you found it.
+- **Bourne-lite** — familiar syntax, no dark corners
+- **Everything is a tool** — builtins and MCP tools use identical syntax
+- **Predictable over powerful** — if bash has a confusing edge case, kaish doesn't have that feature
+- **Agent-friendly** — easy to generate, parse, validate
+- **Fail fast** — ambiguity is an error, not a guess
 
 ## Build Commands
 
@@ -109,24 +109,41 @@ crates/
 
 ### Build Strategy
 
-See `docs/BUILD.md` for the 12-layer bottom-up implementation plan.
+See `docs/BUILD.md` for the 14-layer bottom-up implementation plan. All layers are complete.
 
 ## Language Key Points
 
-- **JSON-only** for structured data (no YAML ambiguity)
-- **`${VAR}` only** — no `$VAR` form
-- **`set` keyword required** for assignment: `set X = 5`
-- **Named args** use `=`: `cmd key="value" count=10`
-- **`$?` structured result** after every command: `${?.ok}`, `${?.data}`, `${?.err}`
-- **散/集 (scatter/gather)** for parallel execution
+**Bourne-compatible syntax:**
 
-### What's Explicitly NOT Supported
+- `VAR=value` — assignment (no spaces around `=`)
+- `$VAR` and `${VAR}` — both work for expansion
+- `${VAR:-default}` — default values
+- `${#VAR}` — string length
+- `$0`-`$9`, `$@`, `$#` — positional parameters
+- `'literal'` and `"interpolated"` — both quote styles
+- `[[ ]]` — test expressions
+- `if/elif/else/fi`, `for/do/done`, `while/do/done` — control flow
+- `break`, `continue`, `return`, `exit` — control statements
+- `set -e` — exit on error mode
+- `source file` or `. file` — script sourcing
+- `-x`, `--flag` — flag arguments
+- `key=value` — named arguments
 
-Single quotes, `$VAR`, parameter expansion, arithmetic expansion, brace expansion, glob expansion (tools handle patterns), here-docs, process substitution, aliases, `eval`, arrays of arrays
+**Kaish-specific:**
+
+- 散/集 (scatter/gather) for parallel execution
+- User-defined tools with typed parameters
+- MCP tool integration
+- VFS mounts
+- Export scripts as MCP servers
+
+### What's Intentionally Missing
+
+Arithmetic `$(( ))`, brace expansion `{a,b,c}`, glob expansion `*.txt`, here-docs `<<EOF`, process substitution `<(cmd)`, backticks, aliases, `eval`, arrays of arrays
 
 ## Testing Strategy
 
-Target: **10:1 test-to-feature ratio** (~650 tests total)
+Target: **10:1 test-to-feature ratio** (~700 tests total)
 
 Test files in `tests/`:
 - `lexer/tokens.txt` — line-separated token tests

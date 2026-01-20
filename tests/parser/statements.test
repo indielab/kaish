@@ -711,3 +711,328 @@ try-primary || try-fallback || echo "failed"
 ---
 (or-chain (or-chain (cmd try-primary) (cmd try-fallback)) (cmd echo (pos (string "failed"))))
 ===
+
+# ============================================================
+# EDGE CASES: AMBIGUITY RESOLUTION
+# ============================================================
+
+# test: keyword_as_variable_rejected
+# expect: error
+# Keywords are reserved - they cannot be used as variable names
+---
+if="value"
+---
+error: 'if' is a keyword
+===
+
+# test: keyword_while_rejected
+# expect: error
+---
+while=true
+---
+error: 'while' is a keyword
+===
+
+# test: keyword_then_rejected
+# expect: error
+---
+then="next"
+---
+error: 'then' is a keyword
+===
+
+# test: non_keyword_works
+# expect: ok
+# Names that contain keywords but aren't keywords work fine
+---
+myif="value"
+---
+(assign myif (string "value") local=false)
+===
+
+# test: keyword_at_stmt_start_is_keyword
+# expect: ok
+# 'if' at statement start is keyword (as expected)
+---
+if true; then echo; fi
+---
+(if (bool true) (then (cmd echo)) (else))
+===
+
+# ============================================================
+# EDGE CASES: TEST EXPRESSIONS
+# ============================================================
+
+# test: test_expr_empty
+# expect: error
+# Empty [[ ]] is an error
+---
+[[ ]]
+---
+error: empty test expression
+===
+
+# test: test_expr_file_exists
+# expect: ok
+# Paths must be quoted strings
+---
+[[ -e "/path" ]]
+---
+(test (file-test exists (string "/path")))
+===
+
+# test: test_expr_is_file
+# expect: ok
+---
+[[ -f "/path/file" ]]
+---
+(test (file-test is-file (string "/path/file")))
+===
+
+# test: test_expr_is_dir
+# expect: ok
+---
+[[ -d "/path/dir" ]]
+---
+(test (file-test is-dir (string "/path/dir")))
+===
+
+# test: test_expr_string_empty
+# expect: ok
+---
+[[ -z $VAR ]]
+---
+(test (string-test is-empty (varref VAR)))
+===
+
+# test: test_expr_string_nonempty
+# expect: ok
+---
+[[ -n $VAR ]]
+---
+(test (string-test is-nonempty (varref VAR)))
+===
+
+# test: test_expr_comparison_eq
+# expect: ok
+---
+[[ $X == "value" ]]
+---
+(test (comparison (varref X) eq (string "value")))
+===
+
+# test: test_expr_comparison_ne
+# expect: ok
+---
+[[ $X != "other" ]]
+---
+(test (comparison (varref X) ne (string "other")))
+===
+
+# test: test_expr_comparison_gt
+# expect: ok
+---
+[[ $NUM -gt 5 ]]
+---
+(test (comparison (varref NUM) gt (int 5)))
+===
+
+# test: test_expr_comparison_lt
+# expect: ok
+---
+[[ $NUM -lt 10 ]]
+---
+(test (comparison (varref NUM) lt (int 10)))
+===
+
+# test: test_expr_comparison_ge
+# expect: ok
+---
+[[ $NUM -ge 5 ]]
+---
+(test (comparison (varref NUM) ge (int 5)))
+===
+
+# test: test_expr_comparison_le
+# expect: ok
+---
+[[ $NUM -le 10 ]]
+---
+(test (comparison (varref NUM) le (int 10)))
+===
+
+# test: test_expr_regex_match
+# expect: ok
+---
+[[ $filename =~ "\.rs$" ]]
+---
+(test (comparison (varref filename) match (string "\.rs$")))
+===
+
+# test: test_expr_regex_not_match
+# expect: ok
+---
+[[ $input !~ "^[0-9]+$" ]]
+---
+(test (comparison (varref input) not-match (string "^[0-9]+$")))
+===
+
+# test: nested_array_not_test
+# expect: ok
+# [[1,2],[3,4]] is a nested array, not a test expression
+---
+cmd [[1, 2], [3, 4]]
+---
+(cmd cmd (pos (array (array (int 1) (int 2)) (array (int 3) (int 4)))))
+===
+
+# ============================================================
+# EDGE CASES: SET COMMAND VS ASSIGNMENT
+# ============================================================
+
+# test: set_command_with_flag_e
+# expect: ok
+---
+set -e
+---
+(cmd set (shortflag e))
+===
+
+# test: set_command_with_plus_flag
+# expect: ok
+---
+set +e
+---
+(cmd set (pos (string "+e")))
+===
+
+# test: set_command_multiple_flags
+# expect: ok
+---
+set -e -u
+---
+(cmd set (shortflag e) (shortflag u))
+===
+
+# test: set_command_no_args
+# expect: ok
+---
+set
+---
+(cmd set)
+===
+
+# test: set_assignment_legacy
+# expect: ok
+# set X = value is the legacy assignment form
+---
+set X = 5
+---
+(assign X (int 5) local=false)
+===
+
+# test: set_in_chain
+# expect: ok
+---
+set -e && echo "strict mode"
+---
+(and-chain (cmd set (shortflag e)) (cmd echo (pos (string "strict mode"))))
+===
+
+# ============================================================
+# EDGE CASES: COMMAND NAMES
+# ============================================================
+
+# test: true_as_command
+# expect: ok
+---
+true
+---
+(cmd true)
+===
+
+# test: false_as_command
+# expect: ok
+---
+false
+---
+(cmd false)
+===
+
+# test: dot_as_source_alias
+# expect: ok
+---
+. script.kai
+---
+(cmd . (pos (string "script.kai")))
+===
+
+# test: source_command
+# expect: ok
+---
+source utils.kai
+---
+(cmd source (pos (string "utils.kai")))
+===
+
+# test: true_in_condition
+# expect: ok
+---
+if true; then echo "yes"; fi
+---
+(if (bool true) (then (cmd echo (pos (string "yes")))) (else))
+===
+
+# test: false_in_condition
+# expect: ok
+---
+if false; then echo "no"; fi
+---
+(if (bool false) (then (cmd echo (pos (string "no")))) (else))
+===
+
+# ============================================================
+# EDGE CASES: ARGUMENT PARSING
+# ============================================================
+
+# test: named_arg_no_spaces
+# expect: ok
+---
+cmd key=value
+---
+(cmd cmd (named key (string "value")))
+===
+
+# test: named_arg_with_spaces_error
+# expect: error
+# Spaces around = make it invalid
+---
+cmd key = value
+---
+error: unexpected '='
+===
+
+# test: long_flag_with_value
+# expect: ok
+---
+git commit --message="hello"
+---
+(cmd git (pos (string "commit")) (named message (string "hello")))
+===
+
+# test: short_flag_then_value
+# expect: ok
+# -m and "msg" are separate args (flag doesn't consume next)
+---
+git commit -m "msg"
+---
+(cmd git (pos (string "commit")) (shortflag m) (pos (string "msg")))
+===
+
+# test: double_dash_ends_flags
+# expect: ok
+---
+cmd -- -not-a-flag
+---
+(cmd cmd (pos (string "--")) (shortflag not-a-flag))
+===

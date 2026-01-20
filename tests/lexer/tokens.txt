@@ -129,9 +129,52 @@ $_private           | SIMPLEVARREF(_private)
 # comment           | COMMENT( comment)
 #                   | COMMENT()
 
+# === Flags ===
+# Short flags
+-l                  | SHORTFLAG(l)
+-a                  | SHORTFLAG(a)
+-la                 | SHORTFLAG(la)
+-vvv                | SHORTFLAG(vvv)
+
+# Long flags
+--force             | LONGFLAG(force)
+--verbose           | LONGFLAG(verbose)
+--foo-bar           | LONGFLAG(foo-bar)
+--message           | LONGFLAG(message)
+
+# Plus flags (for set +e)
++e                  | PLUSFLAG(e)
++x                  | PLUSFLAG(x)
++ex                 | PLUSFLAG(ex)
+
+# Double dash (end of flags marker)
+--                  | DOUBLEDASH
+
+# Edge case: triple dash is invalid
+---                 | ERROR: invalid flag syntax
+
+# Edge case: single dash is positional (often means stdin)
+-                   | ERROR: single dash not valid as flag
+
+# Edge case: flags vs negative numbers
+-123                | INT(-123)
+-1                  | INT(-1)
+-l                  | SHORTFLAG(l)
+-1a                 | INT(-1) IDENT(a)
+
 # === Combined Sequences ===
 set X = 5           | SET IDENT(X) EQ INT(5)
 echo "hi"           | IDENT(echo) STRING(hi)
 cmd a=1 b=2         | IDENT(cmd) IDENT(a) EQ INT(1) IDENT(b) EQ INT(2)
 a | b | c           | IDENT(a) PIPE IDENT(b) PIPE IDENT(c)
 x > file            | IDENT(x) REDIR_OUT IDENT(file)
+
+# Flag sequences
+ls -l               | IDENT(ls) SHORTFLAG(l)
+ls -la              | IDENT(ls) SHORTFLAG(la)
+git --force         | IDENT(git) LONGFLAG(force)
+git push --force    | IDENT(git) IDENT(push) LONGFLAG(force)
+set -e              | SET SHORTFLAG(e)
+set +e              | SET PLUSFLAG(e)
+set -e -u           | SET SHORTFLAG(e) SHORTFLAG(u)
+cmd -- -flag        | IDENT(cmd) DOUBLEDASH SHORTFLAG(flag)

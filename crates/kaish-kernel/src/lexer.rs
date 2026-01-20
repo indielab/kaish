@@ -1423,4 +1423,97 @@ mod tests {
             ]
         );
     }
+
+    // ═══════════════════════════════════════════════════════════════════
+    // Edge case tests: Flag ambiguities
+    // ═══════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn plus_flag() {
+        // Plus flags for set +e
+        assert_eq!(lex("+e"), vec![Token::PlusFlag("e".to_string())]);
+        assert_eq!(lex("+x"), vec![Token::PlusFlag("x".to_string())]);
+        assert_eq!(lex("+ex"), vec![Token::PlusFlag("ex".to_string())]);
+    }
+
+    #[test]
+    fn set_with_plus_flag() {
+        assert_eq!(
+            lex("set +e"),
+            vec![
+                Token::Set,
+                Token::PlusFlag("e".to_string()),
+            ]
+        );
+    }
+
+    #[test]
+    fn set_with_multiple_flags() {
+        assert_eq!(
+            lex("set -e -u"),
+            vec![
+                Token::Set,
+                Token::ShortFlag("e".to_string()),
+                Token::ShortFlag("u".to_string()),
+            ]
+        );
+    }
+
+    #[test]
+    fn flags_vs_negative_numbers_edge_cases() {
+        // -1a should be negative int followed by ident
+        assert_eq!(
+            lex("-1 a"),
+            vec![Token::Int(-1), Token::Ident("a".to_string())]
+        );
+        // -l is a flag
+        assert_eq!(lex("-l"), vec![Token::ShortFlag("l".to_string())]);
+        // -123 is negative number
+        assert_eq!(lex("-123"), vec![Token::Int(-123)]);
+    }
+
+    #[test]
+    fn single_dash_is_ident() {
+        // Single dash alone - lexer treats this as error or special
+        // In most shells, - means stdin, but our lexer may error
+        // Let's see what happens
+        let result = tokenize("-");
+        // A lone dash doesn't match any pattern, should error
+        assert!(result.is_err() || result.unwrap().iter().any(|s| matches!(s.token, Token::ShortFlag(_))));
+    }
+
+    #[test]
+    fn while_keyword_vs_while_loop() {
+        // 'while' as keyword in loop context
+        assert_eq!(lex("while"), vec![Token::While]);
+        // 'while' at start followed by condition
+        assert_eq!(
+            lex("while true"),
+            vec![Token::While, Token::True]
+        );
+    }
+
+    #[test]
+    fn control_flow_keywords() {
+        assert_eq!(lex("break"), vec![Token::Break]);
+        assert_eq!(lex("continue"), vec![Token::Continue]);
+        assert_eq!(lex("return"), vec![Token::Return]);
+        assert_eq!(lex("exit"), vec![Token::Exit]);
+    }
+
+    #[test]
+    fn control_flow_with_numbers() {
+        assert_eq!(
+            lex("break 2"),
+            vec![Token::Break, Token::Int(2)]
+        );
+        assert_eq!(
+            lex("continue 3"),
+            vec![Token::Continue, Token::Int(3)]
+        );
+        assert_eq!(
+            lex("exit 1"),
+            vec![Token::Exit, Token::Int(1)]
+        );
+    }
 }

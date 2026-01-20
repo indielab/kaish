@@ -67,81 +67,82 @@ kaish serve tools.kai --stdio   # MCP server
 ## Dependency Graph
 
 ```
-L0: Foundation
+L0: Foundation ✅
     └── Cargo workspace, kaish-schema (capnp codegen)
 
-L1: Types & Lexer
+L1: Types & Lexer ✅
     ├── AST types (ast.rs)
     ├── Token definitions (logos)
     └── Value enum
 
-L2: Parser
+L2: Parser ✅
     └── chumsky grammar → AST
 
-L3: Core Runtime
+L3: Core Runtime ✅
     ├── Expression evaluator
     ├── Variable scope
     └── ExecResult ($?)
 
-L4: REPL (Evolving)
+L4: REPL (Evolving) ✅
     ├── kaish-repl crate with rustyline
     ├── Parse → AST display mode (/ast toggle)
     ├── Expression evaluation with Scope
     └── Stub executor for commands (returns dummy $?)
 
-L5: VFS
+L5: VFS ✅
     ├── Filesystem trait
     ├── MemoryFs (/scratch)
     ├── LocalFs (/src)
     └── VfsRouter (mount points)
     └── REPL+: cat, ls on VFS paths
 
-L6: Tools
+L6: Tools ✅
     ├── Tool trait
     ├── ToolRegistry
-    └── Builtins (echo, set, cat, grep, etc.)
+    └── Builtins (echo, cat, grep, etc.)
     └── REPL+: real command execution
+    └── Flag arguments (-x, --long)
 
-L7: Pipes & Jobs
+L7: Pipes & Jobs ✅
     ├── Pipeline execution (tokio channels)
     └── Background jobs (JobManager)
     └── REPL+: pipelines, &, jobs, wait
 
-L8: MCP Client
+L8: MCP Client ✅
     ├── McpClient wrapper
     └── Tool discovery
     └── REPL+: MCP tool calls
 
-L9: 散/集 (Scatter/Gather)
+L9: 散/集 (Scatter/Gather) ✅
     ├── scatter implementation
     └── gather implementation
     └── REPL+: parallel execution
 
-L10: State & Checkpoints
+L10: State & Checkpoints ✅
     ├── SQLite integration (rusqlite)
     ├── State save/restore
     ├── Checkpoint support (distill history → summary)
     └── REPL+: session persistence
 
-L11: 核 RPC Server
+L11: 核 RPC Server ✅
     ├── Kernel struct (owns interpreter + state)
     ├── Cap'n Proto RPC server (kaish.capnp::Kernel)
     ├── Unix socket listener
     └── `kaish serve` command
 
-L12: Clients
+L12: Clients ✅
     ├── EmbeddedClient (wraps Kernel directly, for kaijutsu)
     └── IpcClient (connects via socket)
 
-L13: Frontends
+L13: Frontends ✅
     ├── Script runner (kaish script.kai)
     ├── REPL client mode (connects to kernel)
     └── MCP server mode (kaish serve tools.kai --stdio)
 
-L14: Context Generation
-    ├── context-emit command
+L14: Introspection & Context ✅
+    ├── vars, tools, mounts, history, checkpoints builtins
     ├── Walk kernel state + VFS → payload
-    └── Format options (claude, openai, raw)
+    └── JSON output options (--json)
 ```
 
 ### REPL Evolution Strategy
@@ -279,16 +280,24 @@ crates/kaish-kernel/
 // tokens.rs
 #[derive(Logos, Debug, PartialEq, Clone)]
 pub enum Token {
-    #[token("set")] Set,
+    #[token("local")] Local,
     #[token("tool")] Tool,
     #[token("if")] If,
     #[token("then")] Then,
+    #[token("elif")] Elif,
     #[token("else")] Else,
     #[token("fi")] Fi,
     #[token("for")] For,
     #[token("in")] In,
     #[token("do")] Do,
     #[token("done")] Done,
+    #[token("while")] While,
+    #[token("break")] Break,
+    #[token("continue")] Continue,
+    #[token("return")] Return,
+    #[token("exit")] Exit,
+    #[token("source")] Source,
+    #[token("set")] Set,  // for set -e
     #[token("true")] True,
     #[token("false")] False,
 
@@ -311,10 +320,25 @@ pub enum Token {
     #[token("||")] Or,
 
     #[regex(r#""([^"\\]|\\.)*""#)]
-    String,
+    DQString,
+
+    #[regex(r"'[^']*'")]
+    SQString,
 
     #[regex(r"\$\{[^}]+\}")]
     VarRef,
+
+    #[regex(r"\$[a-zA-Z_][a-zA-Z0-9_]*")]
+    SimpleVar,
+
+    #[regex(r"\$[?0-9@#]")]
+    SpecialVar,
+
+    #[regex(r"-[a-zA-Z][a-zA-Z0-9]*")]
+    ShortFlag,
+
+    #[regex(r"--[a-zA-Z][a-zA-Z0-9-]*")]
+    LongFlag,
 
     #[regex(r"[a-zA-Z_][a-zA-Z0-9_-]*")]
     Ident,
@@ -391,7 +415,7 @@ pub enum VarSegment {
 ```
 
 ### Verification:
-- Lexer tests: `set X = 5` → `[Set, Ident("X"), Eq, Int(5)]`
+- Lexer tests: `X=5` → `[Ident("X"), Eq, Int(5)]`
 - ~50 lexer tests passing
 
 ---
@@ -416,8 +440,8 @@ ariadne = "0.4"  # Pretty error reporting
 ```
 
 ### Verification:
-- `parse("set X = 5")` → `Ok(Stmt::Assignment(...))`
-- `parse("echo ${X}")` → `Ok(Stmt::Command(...))`
+- `parse("X=5")` → `Ok(Stmt::Assignment(...))`
+- `parse("echo $X")` → `Ok(Stmt::Command(...))`
 - `parse("a | b | c")` → `Ok(Stmt::Pipeline(...))`
 - ~100 parser tests passing
 
@@ -474,20 +498,20 @@ kaish-kernel = { path = "../kaish-kernel" }
 ### Initial Capabilities (L4):
 - Parse input and display AST (`/ast` toggle)
 - Evaluate expressions with persistent Scope
-- `set X = value` assignments work
+- `X=value` assignments work (bash-style)
 - Stub executor returns dummy `$?` for commands
 - `/help`, `/quit` meta-commands
 
 ### REPL Commands:
 ```
-会sh> set NAME = "Alice"
-会sh> echo "Hello ${NAME}"
-[stub] echo "Hello Alice"
-$? = { ok: true, code: 0, out: "Hello Alice" }
+会sh> NAME="Alice"
+会sh> echo "Hello $NAME"
+Hello Alice
+$? = 0
 
 会sh> /ast
 AST mode: ON
-会sh> set X = 5
+会sh> X=5
 Stmt::Assignment { name: "X", value: Literal(Int(5)) }
 
 会sh> /help
@@ -821,23 +845,23 @@ history --json    # JSON format
 ```
 
 ### Context Generation Script:
-```kaish
+```bash
 #!/usr/bin/env kaish
 # Generate AI context
-set KERNEL_CWD = $(pwd)
-set KERNEL_VARS = $(vars --json)
-set KERNEL_TOOLS = $(tools --json)
-set KERNEL_MOUNTS = $(mounts --json)
+KERNEL_CWD=$(pwd)
+KERNEL_VARS=$(vars --json)
+KERNEL_TOOLS=$(tools --json)
+KERNEL_MOUNTS=$(mounts --json)
 
 echo "# Kernel Context"
-echo "CWD: ${KERNEL_CWD}"
-echo "Variables: ${KERNEL_VARS}"
-echo "Tools: ${KERNEL_TOOLS}"
-echo "Mounts: ${KERNEL_MOUNTS}"
+echo "CWD: $KERNEL_CWD"
+echo "Variables: $KERNEL_VARS"
+echo "Tools: $KERNEL_TOOLS"
+echo "Mounts: $KERNEL_MOUNTS"
 ```
 
 ### Verification:
-- `vars` lists variables after `set X = 42`
+- `vars` lists variables after `X=42`
 - `tools --json` returns valid JSON array
 - `mounts` shows `/`, `/tmp`, `/mnt/local`
 - History/checkpoints require persistent kernel
