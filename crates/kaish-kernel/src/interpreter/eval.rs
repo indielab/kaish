@@ -105,6 +105,11 @@ impl<'a, E: Executor> Evaluator<'a, E> {
             Expr::BinaryOp { left, op, right } => self.eval_binary_op(left, *op, right),
             Expr::CommandSubst(pipeline) => self.eval_command_subst(pipeline),
             Expr::Test(test_expr) => self.eval_test(test_expr),
+            Expr::Positional(n) => self.eval_positional(*n),
+            Expr::AllArgs => self.eval_all_args(),
+            Expr::ArgCount => self.eval_arg_count(),
+            Expr::VarLength(name) => self.eval_var_length(name),
+            Expr::VarWithDefault { name, default } => self.eval_var_with_default(name, default),
         }
     }
 
@@ -207,6 +212,60 @@ impl<'a, E: Executor> Evaluator<'a, E> {
             .ok_or_else(|| EvalError::InvalidPath(format_path(path)))
     }
 
+    /// Evaluate a positional parameter ($0-$9).
+    fn eval_positional(&self, n: usize) -> EvalResult<Value> {
+        match self.scope.get_positional(n) {
+            Some(s) => Ok(Value::String(s.to_string())),
+            None => Ok(Value::String(String::new())), // Unset positional returns empty string
+        }
+    }
+
+    /// Evaluate all arguments ($@).
+    fn eval_all_args(&self) -> EvalResult<Value> {
+        let args = self.scope.all_args();
+        let exprs: Vec<Expr> = args
+            .iter()
+            .map(|s| Expr::Literal(Value::String(s.clone())))
+            .collect();
+        Ok(Value::Array(exprs))
+    }
+
+    /// Evaluate argument count ($#).
+    fn eval_arg_count(&self) -> EvalResult<Value> {
+        Ok(Value::Int(self.scope.arg_count() as i64))
+    }
+
+    /// Evaluate variable string length (${#VAR}).
+    fn eval_var_length(&self, name: &str) -> EvalResult<Value> {
+        match self.scope.get(name) {
+            Some(value) => {
+                let s = value_to_string(value);
+                Ok(Value::Int(s.len() as i64))
+            }
+            None => Ok(Value::Int(0)), // Unset variable has length 0
+        }
+    }
+
+    /// Evaluate variable with default (${VAR:-default}).
+    /// Returns the variable value if set and non-empty, otherwise the default.
+    fn eval_var_with_default(&self, name: &str, default: &str) -> EvalResult<Value> {
+        match self.scope.get(name) {
+            Some(value) => {
+                let s = value_to_string(value);
+                if s.is_empty() {
+                    // Variable is set but empty, use default
+                    Ok(Value::String(default.to_string()))
+                } else {
+                    Ok(value.clone())
+                }
+            }
+            None => {
+                // Variable is unset, use default
+                Ok(Value::String(default.to_string()))
+            }
+        }
+    }
+
     /// Evaluate an interpolated string.
     fn eval_interpolated(&mut self, parts: &[StringPart]) -> EvalResult<Value> {
         let mut result = String::new();
@@ -301,7 +360,7 @@ impl<'a, E: Executor> Evaluator<'a, E> {
 }
 
 /// Convert a Value to its string representation for interpolation.
-fn value_to_string(value: &Value) -> String {
+pub fn value_to_string(value: &Value) -> String {
     match value {
         Value::Null => "null".to_string(),
         Value::Bool(b) => b.to_string(),
@@ -312,6 +371,32 @@ fn value_to_string(value: &Value) -> String {
             // For structured values, convert to JSON
             super::result::value_to_json(value).to_string()
         }
+    }
+}
+
+/// Expand tilde (~) to home directory.
+///
+/// - `~` alone → `$HOME`
+/// - `~/path` → `$HOME/path`
+/// - Other strings are returned unchanged.
+pub fn expand_tilde(s: &str) -> String {
+    if s == "~" {
+        std::env::var("HOME").unwrap_or_else(|_| "~".to_string())
+    } else if s.starts_with("~/") {
+        match std::env::var("HOME") {
+            Ok(home) => format!("{}{}", home, &s[1..]),
+            Err(_) => s.to_string(),
+        }
+    } else {
+        s.to_string()
+    }
+}
+
+/// Convert a Value to its string representation, with tilde expansion for paths.
+pub fn value_to_string_with_tilde(value: &Value) -> String {
+    match value {
+        Value::String(s) if s.starts_with('~') => expand_tilde(s),
+        _ => value_to_string(value),
     }
 }
 
@@ -1239,5 +1324,193 @@ mod tests {
         assert_eq!(type_name(&Value::String("".into())), "string");
         assert_eq!(type_name(&Value::Array(vec![])), "array");
         assert_eq!(type_name(&Value::Object(vec![])), "object");
+    }
+
+    #[test]
+    fn expand_tilde_home() {
+        // Only test if HOME is set
+        if let Ok(home) = std::env::var("HOME") {
+            assert_eq!(expand_tilde("~"), home);
+            assert_eq!(expand_tilde("~/foo"), format!("{}/foo", home));
+            assert_eq!(expand_tilde("~/foo/bar"), format!("{}/foo/bar", home));
+        }
+    }
+
+    #[test]
+    fn expand_tilde_passthrough() {
+        // These should not be expanded
+        assert_eq!(expand_tilde("/home/user"), "/home/user");
+        assert_eq!(expand_tilde("foo~bar"), "foo~bar");
+        assert_eq!(expand_tilde("~user"), "~user"); // ~user is not supported
+        assert_eq!(expand_tilde(""), "");
+    }
+
+    #[test]
+    fn value_to_string_with_tilde_expansion() {
+        if let Ok(home) = std::env::var("HOME") {
+            let val = Value::String("~/test".into());
+            assert_eq!(value_to_string_with_tilde(&val), format!("{}/test", home));
+        }
+    }
+
+    #[test]
+    fn eval_positional_param() {
+        let mut scope = Scope::new();
+        scope.set_positional("my_tool", vec!["hello".into(), "world".into()]);
+
+        // $0 is the tool name
+        let expr = Expr::Positional(0);
+        let result = eval_expr(&expr, &mut scope).unwrap();
+        assert_eq!(result, Value::String("my_tool".into()));
+
+        // $1 is the first argument
+        let expr = Expr::Positional(1);
+        let result = eval_expr(&expr, &mut scope).unwrap();
+        assert_eq!(result, Value::String("hello".into()));
+
+        // $2 is the second argument
+        let expr = Expr::Positional(2);
+        let result = eval_expr(&expr, &mut scope).unwrap();
+        assert_eq!(result, Value::String("world".into()));
+
+        // $3 is not set, returns empty string
+        let expr = Expr::Positional(3);
+        let result = eval_expr(&expr, &mut scope).unwrap();
+        assert_eq!(result, Value::String("".into()));
+    }
+
+    #[test]
+    fn eval_all_args() {
+        let mut scope = Scope::new();
+        scope.set_positional("test", vec!["a".into(), "b".into(), "c".into()]);
+
+        let expr = Expr::AllArgs;
+        let result = eval_expr(&expr, &mut scope).unwrap();
+
+        // $@ returns an array of strings
+        match result {
+            Value::Array(items) => {
+                assert_eq!(items.len(), 3);
+                assert_eq!(items[0], Expr::Literal(Value::String("a".into())));
+                assert_eq!(items[1], Expr::Literal(Value::String("b".into())));
+                assert_eq!(items[2], Expr::Literal(Value::String("c".into())));
+            }
+            _ => panic!("expected array, got {:?}", result),
+        }
+    }
+
+    #[test]
+    fn eval_arg_count() {
+        let mut scope = Scope::new();
+        scope.set_positional("test", vec!["x".into(), "y".into()]);
+
+        let expr = Expr::ArgCount;
+        let result = eval_expr(&expr, &mut scope).unwrap();
+        assert_eq!(result, Value::Int(2));
+    }
+
+    #[test]
+    fn eval_arg_count_empty() {
+        let mut scope = Scope::new();
+
+        let expr = Expr::ArgCount;
+        let result = eval_expr(&expr, &mut scope).unwrap();
+        assert_eq!(result, Value::Int(0));
+    }
+
+    #[test]
+    fn eval_var_length_string() {
+        let mut scope = Scope::new();
+        scope.set("NAME", Value::String("hello".into()));
+
+        let expr = Expr::VarLength("NAME".into());
+        let result = eval_expr(&expr, &mut scope).unwrap();
+        assert_eq!(result, Value::Int(5));
+    }
+
+    #[test]
+    fn eval_var_length_empty_string() {
+        let mut scope = Scope::new();
+        scope.set("EMPTY", Value::String("".into()));
+
+        let expr = Expr::VarLength("EMPTY".into());
+        let result = eval_expr(&expr, &mut scope).unwrap();
+        assert_eq!(result, Value::Int(0));
+    }
+
+    #[test]
+    fn eval_var_length_unset() {
+        let mut scope = Scope::new();
+
+        // Unset variable has length 0
+        let expr = Expr::VarLength("MISSING".into());
+        let result = eval_expr(&expr, &mut scope).unwrap();
+        assert_eq!(result, Value::Int(0));
+    }
+
+    #[test]
+    fn eval_var_length_int() {
+        let mut scope = Scope::new();
+        scope.set("NUM", Value::Int(12345));
+
+        // Length of the string representation
+        let expr = Expr::VarLength("NUM".into());
+        let result = eval_expr(&expr, &mut scope).unwrap();
+        assert_eq!(result, Value::Int(5)); // "12345" has length 5
+    }
+
+    #[test]
+    fn eval_var_with_default_set() {
+        let mut scope = Scope::new();
+        scope.set("NAME", Value::String("Alice".into()));
+
+        // Variable is set, return its value
+        let expr = Expr::VarWithDefault {
+            name: "NAME".into(),
+            default: "default".into(),
+        };
+        let result = eval_expr(&expr, &mut scope).unwrap();
+        assert_eq!(result, Value::String("Alice".into()));
+    }
+
+    #[test]
+    fn eval_var_with_default_unset() {
+        let mut scope = Scope::new();
+
+        // Variable is unset, return default
+        let expr = Expr::VarWithDefault {
+            name: "MISSING".into(),
+            default: "fallback".into(),
+        };
+        let result = eval_expr(&expr, &mut scope).unwrap();
+        assert_eq!(result, Value::String("fallback".into()));
+    }
+
+    #[test]
+    fn eval_var_with_default_empty() {
+        let mut scope = Scope::new();
+        scope.set("EMPTY", Value::String("".into()));
+
+        // Variable is set but empty, return default
+        let expr = Expr::VarWithDefault {
+            name: "EMPTY".into(),
+            default: "not empty".into(),
+        };
+        let result = eval_expr(&expr, &mut scope).unwrap();
+        assert_eq!(result, Value::String("not empty".into()));
+    }
+
+    #[test]
+    fn eval_var_with_default_non_string() {
+        let mut scope = Scope::new();
+        scope.set("NUM", Value::Int(42));
+
+        // Variable is set to a non-string value, return the value
+        let expr = Expr::VarWithDefault {
+            name: "NUM".into(),
+            default: "default".into(),
+        };
+        let result = eval_expr(&expr, &mut scope).unwrap();
+        assert_eq!(result, Value::Int(42));
     }
 }

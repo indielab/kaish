@@ -94,6 +94,9 @@ pub enum Token {
     #[token("for")]
     For,
 
+    #[token("while")]
+    While,
+
     #[token("in")]
     In,
 
@@ -102,6 +105,18 @@ pub enum Token {
 
     #[token("done")]
     Done,
+
+    #[token("break")]
+    Break,
+
+    #[token("continue")]
+    Continue,
+
+    #[token("return")]
+    Return,
+
+    #[token("exit")]
+    Exit,
 
     #[token("true")]
     True,
@@ -258,6 +273,22 @@ pub enum Token {
     #[regex(r"\$[a-zA-Z_][a-zA-Z0-9_]*", lex_simple_varref)]
     SimpleVarRef(String),
 
+    /// Positional parameter: `$0` through `$9`
+    #[regex(r"\$[0-9]", lex_positional)]
+    Positional(usize),
+
+    /// All positional parameters: `$@`
+    #[token("$@")]
+    AllArgs,
+
+    /// Number of positional parameters: `$#`
+    #[token("$#")]
+    ArgCount,
+
+    /// Variable string length: `${#VAR}`
+    #[regex(r"\$\{#[a-zA-Z_][a-zA-Z0-9_]*\}", lex_var_length)]
+    VarLength(String),
+
     /// Integer literal - value is the parsed i64
     #[regex(r"-?[0-9]+", lex_int, priority = 2)]
     Int(i64),
@@ -315,6 +346,19 @@ fn lex_simple_varref(lex: &mut logos::Lexer<Token>) -> String {
     lex.slice()[1..].to_string()
 }
 
+/// Lex a positional parameter: `$1` → 1
+fn lex_positional(lex: &mut logos::Lexer<Token>) -> usize {
+    // Strip the leading `$` and parse the digit
+    lex.slice()[1..].parse().unwrap_or(0)
+}
+
+/// Lex a variable length: `${#VAR}` → "VAR"
+fn lex_var_length(lex: &mut logos::Lexer<Token>) -> String {
+    // Strip the leading `${#` and trailing `}`
+    let s = lex.slice();
+    s[3..s.len() - 1].to_string()
+}
+
 /// Lex an integer literal.
 fn lex_int(lex: &mut logos::Lexer<Token>) -> Result<i64, LexerError> {
     lex.slice().parse().map_err(|_| LexerError::InvalidNumber)
@@ -354,9 +398,14 @@ impl fmt::Display for Token {
             Token::Elif => write!(f, "elif"),
             Token::Fi => write!(f, "fi"),
             Token::For => write!(f, "for"),
+            Token::While => write!(f, "while"),
             Token::In => write!(f, "in"),
             Token::Do => write!(f, "do"),
             Token::Done => write!(f, "done"),
+            Token::Break => write!(f, "break"),
+            Token::Continue => write!(f, "continue"),
+            Token::Return => write!(f, "return"),
+            Token::Exit => write!(f, "exit"),
             Token::True => write!(f, "true"),
             Token::False => write!(f, "false"),
             Token::TypeString => write!(f, "string"),
@@ -399,6 +448,10 @@ impl fmt::Display for Token {
             Token::SingleString(s) => write!(f, "SINGLESTRING({:?})", s),
             Token::VarRef(v) => write!(f, "VARREF({})", v),
             Token::SimpleVarRef(v) => write!(f, "SIMPLEVARREF({})", v),
+            Token::Positional(n) => write!(f, "${}", n),
+            Token::AllArgs => write!(f, "$@"),
+            Token::ArgCount => write!(f, "$#"),
+            Token::VarLength(v) => write!(f, "${{#{}}}", v),
             Token::Int(n) => write!(f, "INT({})", n),
             Token::Float(n) => write!(f, "FLOAT({})", n),
             Token::Ident(s) => write!(f, "IDENT({})", s),
@@ -1317,6 +1370,45 @@ mod tests {
                 Token::Ident("NAME".to_string()),
                 Token::Eq,
                 Token::String("value".to_string())
+            ]
+        );
+    }
+
+    #[test]
+    fn positional_params() {
+        assert_eq!(lex("$0"), vec![Token::Positional(0)]);
+        assert_eq!(lex("$1"), vec![Token::Positional(1)]);
+        assert_eq!(lex("$9"), vec![Token::Positional(9)]);
+        assert_eq!(lex("$@"), vec![Token::AllArgs]);
+        assert_eq!(lex("$#"), vec![Token::ArgCount]);
+    }
+
+    #[test]
+    fn positional_in_context() {
+        assert_eq!(
+            lex("echo $1 $2"),
+            vec![
+                Token::Ident("echo".to_string()),
+                Token::Positional(1),
+                Token::Positional(2),
+            ]
+        );
+    }
+
+    #[test]
+    fn var_length() {
+        assert_eq!(lex("${#X}"), vec![Token::VarLength("X".to_string())]);
+        assert_eq!(lex("${#NAME}"), vec![Token::VarLength("NAME".to_string())]);
+        assert_eq!(lex("${#foo_bar}"), vec![Token::VarLength("foo_bar".to_string())]);
+    }
+
+    #[test]
+    fn var_length_in_context() {
+        assert_eq!(
+            lex("echo ${#NAME}"),
+            vec![
+                Token::Ident("echo".to_string()),
+                Token::VarLength("NAME".to_string()),
             ]
         );
     }

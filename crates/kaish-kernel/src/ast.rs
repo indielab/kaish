@@ -24,6 +24,16 @@ pub enum Stmt {
     If(IfStmt),
     /// Loop: `for X in items; do ...; done`
     For(ForLoop),
+    /// While loop: `while cond; do ...; done`
+    While(WhileLoop),
+    /// Break out of loop: `break` or `break N`
+    Break(Option<usize>),
+    /// Continue to next iteration: `continue` or `continue N`
+    Continue(Option<usize>),
+    /// Return from tool: `return` or `return expr`
+    Return(Option<Box<Expr>>),
+    /// Exit the script: `exit` or `exit code`
+    Exit(Option<Box<Expr>>),
     /// Tool definition: `tool name(params) { body }`
     ToolDef(ToolDef),
     /// Statement chain with `&&`: run right only if left succeeds
@@ -71,6 +81,13 @@ pub struct IfStmt {
 pub struct ForLoop {
     pub variable: String,
     pub iterable: Expr,
+    pub body: Vec<Stmt>,
+}
+
+/// While loop with condition.
+#[derive(Debug, Clone, PartialEq)]
+pub struct WhileLoop {
+    pub condition: Box<Expr>,
     pub body: Vec<Stmt>,
 }
 
@@ -155,6 +172,16 @@ pub enum Expr {
     CommandSubst(Box<Pipeline>),
     /// Test expression: `[[ -f path ]]` or `[[ $X == "value" ]]`
     Test(Box<TestExpr>),
+    /// Positional parameter: `$0` through `$9`
+    Positional(usize),
+    /// All positional arguments: `$@`
+    AllArgs,
+    /// Argument count: `$#`
+    ArgCount,
+    /// Variable string length: `${#VAR}`
+    VarLength(String),
+    /// Variable with default: `${VAR:-default}` - use default if VAR is unset or empty
+    VarWithDefault { name: String, default: String },
 }
 
 /// Test expression for `[[ ... ]]` conditionals.

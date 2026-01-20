@@ -32,7 +32,7 @@ use anyhow::{Context, Result};
 use tokio::sync::RwLock;
 
 use crate::ast::{Arg, Expr, Stmt, ToolDef, Value};
-use crate::interpreter::{eval_expr, ExecResult, Scope};
+use crate::interpreter::{eval_expr, expand_tilde, value_to_string, ControlFlow, ExecResult, Scope};
 use crate::parser::parse;
 use crate::scheduler::{JobManager, PipelineRunner};
 use crate::state::{paths as state_paths, StateStore};
@@ -240,17 +240,32 @@ impl Kernel {
             if matches!(stmt, Stmt::Empty) {
                 continue;
             }
-            result = self.execute_stmt(&stmt).await?;
+            let flow = self.execute_stmt_flow(&stmt).await?;
+            match flow {
+                ControlFlow::Normal(r) => result = r,
+                ControlFlow::Exit { code } => {
+                    // Exit terminates execution immediately
+                    return Ok(ExecResult::success(code.to_string()));
+                }
+                ControlFlow::Return { value } => {
+                    // Return at top level just returns the value
+                    result = value;
+                }
+                ControlFlow::Break { result: r, .. } | ControlFlow::Continue { result: r, .. } => {
+                    // Break/continue at top level just returns the result
+                    result = r;
+                }
+            }
         }
 
         Ok(result)
     }
 
-    /// Execute a single statement.
-    fn execute_stmt<'a>(
+    /// Execute a single statement, returning control flow information.
+    fn execute_stmt_flow<'a>(
         &'a self,
         stmt: &'a Stmt,
-    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<ExecResult>> + 'a>> {
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<ControlFlow>> + 'a>> {
         Box::pin(async move {
         match stmt {
             Stmt::Assignment(assign) => {
@@ -267,17 +282,17 @@ impl Kernel {
                     }
                 }
 
-                Ok(ExecResult::success_data(value))
+                Ok(ControlFlow::ok(ExecResult::success_data(value)))
             }
             Stmt::Command(cmd) => {
                 let result = self.execute_command(&cmd.name, &cmd.args).await?;
                 self.update_last_result(&result).await;
-                Ok(result)
+                Ok(ControlFlow::ok(result))
             }
             Stmt::Pipeline(pipeline) => {
                 let result = self.execute_pipeline(pipeline).await?;
                 self.update_last_result(&result).await;
-                Ok(result)
+                Ok(ControlFlow::ok(result))
             }
             Stmt::If(if_stmt) => {
                 let cond_value = {
@@ -291,11 +306,14 @@ impl Kernel {
                     if_stmt.else_branch.as_ref().map(|v| v.as_slice()).unwrap_or(&[])
                 };
 
-                let mut result = ExecResult::success("");
+                let mut flow = ControlFlow::ok(ExecResult::success(""));
                 for stmt in branch {
-                    result = self.execute_stmt(stmt).await?;
+                    flow = self.execute_stmt_flow(stmt).await?;
+                    if !flow.is_normal() {
+                        return Ok(flow);
+                    }
                 }
-                Ok(result)
+                Ok(flow)
             }
             Stmt::For(for_loop) => {
                 let iterable = {
@@ -305,7 +323,7 @@ impl Kernel {
 
                 let items = match iterable {
                     Value::Array(items) => items,
-                    _ => return Ok(ExecResult::failure(1, "for loop requires an array")),
+                    _ => return Ok(ControlFlow::ok(ExecResult::failure(1, "for loop requires an array"))),
                 };
 
                 let mut result = ExecResult::success("");
@@ -314,14 +332,42 @@ impl Kernel {
                     scope.push_frame();
                 }
 
-                for item in items {
+                'outer: for item in items {
                     if let Expr::Literal(value) = item {
                         {
                             let mut scope = self.scope.write().await;
                             scope.set(&for_loop.variable, value);
                         }
                         for stmt in &for_loop.body {
-                            result = self.execute_stmt(stmt).await?;
+                            let mut flow = self.execute_stmt_flow(stmt).await?;
+                            match &mut flow {
+                                ControlFlow::Normal(r) => result = r.clone(),
+                                ControlFlow::Break { .. } => {
+                                    if flow.decrement_level() {
+                                        // Break handled at this level
+                                        break 'outer;
+                                    }
+                                    // Propagate to outer loop
+                                    let mut scope = self.scope.write().await;
+                                    scope.pop_frame();
+                                    return Ok(flow);
+                                }
+                                ControlFlow::Continue { .. } => {
+                                    if flow.decrement_level() {
+                                        // Continue handled at this level
+                                        continue 'outer;
+                                    }
+                                    // Propagate to outer loop
+                                    let mut scope = self.scope.write().await;
+                                    scope.pop_frame();
+                                    return Ok(flow);
+                                }
+                                ControlFlow::Return { .. } | ControlFlow::Exit { .. } => {
+                                    let mut scope = self.scope.write().await;
+                                    scope.pop_frame();
+                                    return Ok(flow);
+                                }
+                            }
                         }
                     }
                 }
@@ -330,38 +376,125 @@ impl Kernel {
                     let mut scope = self.scope.write().await;
                     scope.pop_frame();
                 }
-                Ok(result)
+                Ok(ControlFlow::ok(result))
+            }
+            Stmt::While(while_loop) => {
+                let mut result = ExecResult::success("");
+
+                'outer: loop {
+                    // Evaluate condition
+                    let cond_value = {
+                        let mut scope = self.scope.write().await;
+                        eval_expr(&while_loop.condition, &mut scope)?
+                    };
+
+                    if !is_truthy(&cond_value) {
+                        break;
+                    }
+
+                    // Execute body
+                    for stmt in &while_loop.body {
+                        let mut flow = self.execute_stmt_flow(stmt).await?;
+                        match &mut flow {
+                            ControlFlow::Normal(r) => result = r.clone(),
+                            ControlFlow::Break { .. } => {
+                                if flow.decrement_level() {
+                                    // Break handled at this level
+                                    break 'outer;
+                                }
+                                // Propagate to outer loop
+                                return Ok(flow);
+                            }
+                            ControlFlow::Continue { .. } => {
+                                if flow.decrement_level() {
+                                    // Continue handled at this level
+                                    continue 'outer;
+                                }
+                                // Propagate to outer loop
+                                return Ok(flow);
+                            }
+                            ControlFlow::Return { .. } | ControlFlow::Exit { .. } => {
+                                return Ok(flow);
+                            }
+                        }
+                    }
+                }
+
+                Ok(ControlFlow::ok(result))
+            }
+            Stmt::Break(levels) => {
+                Ok(ControlFlow::break_n(levels.unwrap_or(1)))
+            }
+            Stmt::Continue(levels) => {
+                Ok(ControlFlow::continue_n(levels.unwrap_or(1)))
+            }
+            Stmt::Return(expr) => {
+                let value = if let Some(e) = expr {
+                    let mut scope = self.scope.write().await;
+                    let val = eval_expr(e, &mut scope)?;
+                    ExecResult::success_data(val)
+                } else {
+                    ExecResult::success("")
+                };
+                Ok(ControlFlow::return_value(value))
+            }
+            Stmt::Exit(expr) => {
+                let code = if let Some(e) = expr {
+                    let mut scope = self.scope.write().await;
+                    let val = eval_expr(e, &mut scope)?;
+                    match val {
+                        Value::Int(n) => n,
+                        _ => 0,
+                    }
+                } else {
+                    0
+                };
+                Ok(ControlFlow::exit_code(code))
             }
             Stmt::ToolDef(tool_def) => {
                 let mut user_tools = self.user_tools.write().await;
                 user_tools.insert(tool_def.name.clone(), tool_def.clone());
-                Ok(ExecResult::success(""))
+                Ok(ControlFlow::ok(ExecResult::success("")))
             }
             Stmt::AndChain { left, right } => {
                 // cmd1 && cmd2 - run cmd2 only if cmd1 succeeds (exit code 0)
-                let left_result = self.execute_stmt(left).await?;
-                self.update_last_result(&left_result).await;
-                if left_result.ok() {
-                    let right_result = self.execute_stmt(right).await?;
-                    self.update_last_result(&right_result).await;
-                    Ok(right_result)
-                } else {
-                    Ok(left_result)
+                let left_flow = self.execute_stmt_flow(left).await?;
+                match left_flow {
+                    ControlFlow::Normal(ref left_result) => {
+                        self.update_last_result(left_result).await;
+                        if left_result.ok() {
+                            let right_flow = self.execute_stmt_flow(right).await?;
+                            if let ControlFlow::Normal(ref right_result) = right_flow {
+                                self.update_last_result(right_result).await;
+                            }
+                            Ok(right_flow)
+                        } else {
+                            Ok(left_flow)
+                        }
+                    }
+                    _ => Ok(left_flow), // Propagate non-normal flow
                 }
             }
             Stmt::OrChain { left, right } => {
                 // cmd1 || cmd2 - run cmd2 only if cmd1 fails (non-zero exit code)
-                let left_result = self.execute_stmt(left).await?;
-                self.update_last_result(&left_result).await;
-                if !left_result.ok() {
-                    let right_result = self.execute_stmt(right).await?;
-                    self.update_last_result(&right_result).await;
-                    Ok(right_result)
-                } else {
-                    Ok(left_result)
+                let left_flow = self.execute_stmt_flow(left).await?;
+                match left_flow {
+                    ControlFlow::Normal(ref left_result) => {
+                        self.update_last_result(left_result).await;
+                        if !left_result.ok() {
+                            let right_flow = self.execute_stmt_flow(right).await?;
+                            if let ControlFlow::Normal(ref right_result) = right_flow {
+                                self.update_last_result(right_result).await;
+                            }
+                            Ok(right_flow)
+                        } else {
+                            Ok(left_flow)
+                        }
+                    }
+                    _ => Ok(left_flow), // Propagate non-normal flow
                 }
             }
-            Stmt::Empty => Ok(ExecResult::success("")),
+            Stmt::Empty => Ok(ControlFlow::ok(ExecResult::success(""))),
         }
         })
     }
@@ -471,11 +604,15 @@ impl Kernel {
                 Arg::Positional(expr) => {
                     let mut scope_clone = scope.clone();
                     let value = eval_expr(expr, &mut scope_clone)?;
+                    // Apply tilde expansion to string values
+                    let value = apply_tilde_expansion(value);
                     tool_args.positional.push(value);
                 }
                 Arg::Named { key, value } => {
                     let mut scope_clone = scope.clone();
                     let val = eval_expr(value, &mut scope_clone)?;
+                    // Apply tilde expansion to string values
+                    let val = apply_tilde_expansion(val);
                     tool_args.named.insert(key.clone(), val);
                 }
                 Arg::ShortFlag(name) => {
@@ -519,7 +656,14 @@ impl Kernel {
         // 2. Create fresh isolated scope
         let mut isolated_scope = Scope::new();
 
-        // 3. Bind params: named args, then positional, then defaults
+        // 3. Set up positional parameters ($0 = tool name, $1, $2, ... = positional args)
+        let positional_args: Vec<String> = tool_args.positional
+            .iter()
+            .map(|v| value_to_string(v))
+            .collect();
+        isolated_scope.set_positional(&def.name, positional_args);
+
+        // 4. Bind params: named args, then positional, then defaults
         for (pos, param) in def.params.iter().enumerate() {
             let value = if let Some(val) = tool_args.named.get(&param.name) {
                 val.clone()
@@ -539,17 +683,36 @@ impl Kernel {
             isolated_scope.set(&param.name, value);
         }
 
-        // 4. Save current scope and swap with isolated scope
+        // 5. Save current scope and swap with isolated scope
         let original_scope = {
             let mut scope = self.scope.write().await;
             std::mem::replace(&mut *scope, isolated_scope)
         };
 
-        // 5. Execute body statements
+        // 6. Execute body statements with control flow handling
         let mut result = ExecResult::success("");
         for stmt in &def.body {
-            match self.execute_stmt(stmt).await {
-                Ok(r) => result = r,
+            match self.execute_stmt_flow(stmt).await {
+                Ok(flow) => {
+                    match flow {
+                        ControlFlow::Normal(r) => result = r,
+                        ControlFlow::Return { value } => {
+                            // Return from this tool with the value
+                            result = value;
+                            break;
+                        }
+                        ControlFlow::Exit { code } => {
+                            // Exit propagates through - restore scope and return
+                            let mut scope = self.scope.write().await;
+                            *scope = original_scope;
+                            return Ok(ExecResult::failure(code, "exit"));
+                        }
+                        ControlFlow::Break { result: r, .. } | ControlFlow::Continue { result: r, .. } => {
+                            // Break/continue outside a loop in a tool - treat as normal
+                            result = r;
+                        }
+                    }
+                }
                 Err(e) => {
                     // Restore original scope on error
                     let mut scope = self.scope.write().await;
@@ -559,13 +722,13 @@ impl Kernel {
             }
         }
 
-        // 6. Restore original scope
+        // 7. Restore original scope
         {
             let mut scope = self.scope.write().await;
             *scope = original_scope;
         }
 
-        // 7. Return final result
+        // 8. Return final result
         Ok(result)
     }
 
@@ -683,6 +846,16 @@ fn is_truthy(value: &Value) -> bool {
         Value::String(s) => !s.is_empty(),
         Value::Array(a) => !a.is_empty(),
         Value::Object(o) => !o.is_empty(),
+    }
+}
+
+/// Apply tilde expansion to a value.
+///
+/// Only string values starting with `~` are expanded.
+fn apply_tilde_expansion(value: Value) -> Value {
+    match value {
+        Value::String(s) if s.starts_with('~') => Value::String(expand_tilde(&s)),
+        _ => value,
     }
 }
 
@@ -906,5 +1079,251 @@ mod tests {
 
         assert!(result.ok(), "exec failed: {}", result.err);
         assert_eq!(result.out.trim(), "hello world");
+    }
+
+    #[tokio::test]
+    async fn test_while_false_never_runs() {
+        let kernel = Kernel::transient().expect("failed to create kernel");
+
+        // A while loop with false condition should never run
+        let result = kernel
+            .execute(r#"
+                while false; do
+                    echo "should not run"
+                done
+            "#)
+            .await
+            .expect("while false failed");
+
+        assert!(result.ok());
+        assert!(result.out.is_empty(), "while false should not execute body: {}", result.out);
+    }
+
+    #[tokio::test]
+    async fn test_while_string_comparison() {
+        let kernel = Kernel::transient().expect("failed to create kernel");
+
+        // Set a flag
+        kernel.execute(r#"set FLAG = "go""#).await.expect("set failed");
+
+        // Use string comparison as condition, change flag in body
+        // condition_parser uses direct comparisons (not [[ ]])
+        // Note: Put echo last so we can check the output
+        let result = kernel
+            .execute(r#"
+                while ${FLAG} == "go"; do
+                    set FLAG = "stop"
+                    echo "running"
+                done
+            "#)
+            .await
+            .expect("while with string cmp failed");
+
+        assert!(result.ok());
+        assert!(result.out.contains("running"), "should have run once: {}", result.out);
+
+        // Verify flag was changed
+        let flag = kernel.get_var("FLAG").await;
+        assert_eq!(flag, Some(Value::String("stop".into())));
+    }
+
+    #[tokio::test]
+    async fn test_while_numeric_comparison() {
+        let kernel = Kernel::transient().expect("failed to create kernel");
+
+        // Test > comparison
+        kernel.execute("set N = 5").await.expect("set failed");
+
+        // Note: Put echo last so we can check the output
+        let result = kernel
+            .execute(r#"
+                while ${N} > 3; do
+                    set N = 3
+                    echo "N was greater"
+                done
+            "#)
+            .await
+            .expect("while with > failed");
+
+        assert!(result.ok());
+        assert!(result.out.contains("N was greater"), "should have run once: {}", result.out);
+    }
+
+    #[tokio::test]
+    async fn test_break_in_while_loop() {
+        let kernel = Kernel::transient().expect("failed to create kernel");
+
+        let result = kernel
+            .execute(r#"
+                set I = 0
+                while true; do
+                    set I = 1
+                    echo "before break"
+                    break
+                    echo "after break"
+                done
+            "#)
+            .await
+            .expect("while with break failed");
+
+        assert!(result.ok());
+        assert!(result.out.contains("before break"), "should see before break: {}", result.out);
+        assert!(!result.out.contains("after break"), "should not see after break: {}", result.out);
+
+        // Verify we exited the loop
+        let i = kernel.get_var("I").await;
+        assert_eq!(i, Some(Value::Int(1)));
+    }
+
+    #[tokio::test]
+    async fn test_continue_in_while_loop() {
+        let kernel = Kernel::transient().expect("failed to create kernel");
+
+        // Test continue in a while loop where variables persist
+        // We use string state transition: "start" -> "middle" -> "end"
+        // continue on "middle" should skip to next iteration
+        let result = kernel
+            .execute(r#"
+                set STATE = "start"
+                set AFTER_CONTINUE = "no"
+                while ${STATE} != "done"; do
+                    if ${STATE} == "start"; then
+                        set STATE = "middle"
+                        continue
+                        set AFTER_CONTINUE = "yes"
+                    fi
+                    if ${STATE} == "middle"; then
+                        set STATE = "done"
+                    fi
+                done
+            "#)
+            .await
+            .expect("while with continue failed");
+
+        assert!(result.ok());
+
+        // STATE should be "done" (we completed the loop)
+        let state = kernel.get_var("STATE").await;
+        assert_eq!(state, Some(Value::String("done".into())));
+
+        // AFTER_CONTINUE should still be "no" (continue skipped the assignment)
+        let after = kernel.get_var("AFTER_CONTINUE").await;
+        assert_eq!(after, Some(Value::String("no".into())));
+    }
+
+    #[tokio::test]
+    async fn test_break_with_level() {
+        let kernel = Kernel::transient().expect("failed to create kernel");
+
+        // Nested loop with break 2 to exit both loops
+        // We verify by checking OUTER value:
+        // - If break 2 works, OUTER stays at 1 (set before for loop)
+        // - If break 2 fails, OUTER becomes 2 (set after for loop)
+        let result = kernel
+            .execute(r#"
+                set OUTER = 0
+                while true; do
+                    set OUTER = 1
+                    for X in [1, 2]; do
+                        break 2
+                    done
+                    set OUTER = 2
+                done
+            "#)
+            .await
+            .expect("nested break failed");
+
+        assert!(result.ok());
+
+        // OUTER should be 1 (set before for loop), not 2 (would be set after for loop)
+        let outer = kernel.get_var("OUTER").await;
+        assert_eq!(outer, Some(Value::Int(1)), "break 2 should have skipped set OUTER = 2");
+    }
+
+    #[tokio::test]
+    async fn test_return_from_tool() {
+        let kernel = Kernel::transient().expect("failed to create kernel");
+
+        // Define a tool that returns early
+        kernel
+            .execute(r#"tool early_return x:int {
+                if ${x} == 1; then
+                    return 42
+                fi
+                echo "not returned"
+            }"#)
+            .await
+            .expect("tool definition failed");
+
+        // Call with x=1 should return 42
+        let result = kernel
+            .execute("early_return 1")
+            .await
+            .expect("tool call failed");
+
+        assert!(result.ok());
+        // The return value should be in the data field
+        assert_eq!(result.data, Some(Value::Int(42)));
+    }
+
+    #[tokio::test]
+    async fn test_return_without_value() {
+        let kernel = Kernel::transient().expect("failed to create kernel");
+
+        // Define a tool that returns without a value
+        kernel
+            .execute(r#"tool early_exit x:string {
+                if ${x} == "stop"; then
+                    return
+                fi
+                echo "continued"
+            }"#)
+            .await
+            .expect("tool definition failed");
+
+        // Call with x="stop" should return early
+        let result = kernel
+            .execute(r#"early_exit "stop""#)
+            .await
+            .expect("tool call failed");
+
+        assert!(result.ok());
+        assert!(result.out.is_empty() || result.out.trim().is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_exit_stops_execution() {
+        let kernel = Kernel::transient().expect("failed to create kernel");
+
+        // exit should stop further execution
+        kernel
+            .execute(r#"
+                set BEFORE = "yes"
+                exit 0
+                set AFTER = "yes"
+            "#)
+            .await
+            .expect("execution failed");
+
+        // BEFORE should be set, AFTER should not
+        let before = kernel.get_var("BEFORE").await;
+        assert_eq!(before, Some(Value::String("yes".into())));
+
+        let after = kernel.get_var("AFTER").await;
+        assert!(after.is_none(), "AFTER should not be set after exit");
+    }
+
+    #[tokio::test]
+    async fn test_exit_with_code() {
+        let kernel = Kernel::transient().expect("failed to create kernel");
+
+        // exit with code should propagate the exit code
+        let result = kernel
+            .execute("exit 42")
+            .await
+            .expect("exit failed");
+
+        // The exit code should be in the output
+        assert_eq!(result.out, "42");
     }
 }

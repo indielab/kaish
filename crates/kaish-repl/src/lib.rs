@@ -301,6 +301,50 @@ impl Repl {
                     Ok(left_result)
                 }
             }
+            Stmt::While(while_loop) => {
+                let mut output = String::new();
+                loop {
+                    let cond_value = self.eval_expr(&while_loop.condition)?;
+                    if !is_truthy(&cond_value) {
+                        break;
+                    }
+                    for stmt in &while_loop.body {
+                        if let Some(result) = self.execute_stmt(stmt)? {
+                            if !output.is_empty() {
+                                output.push('\n');
+                            }
+                            output.push_str(&result);
+                        }
+                    }
+                }
+                Ok(if output.is_empty() { None } else { Some(output) })
+            }
+            Stmt::Break(_) => {
+                // Break in REPL context - just return
+                Ok(Some("break".into()))
+            }
+            Stmt::Continue(_) => {
+                // Continue in REPL context - just return
+                Ok(Some("continue".into()))
+            }
+            Stmt::Return(expr) => {
+                // Return in REPL context - evaluate and return value if present
+                if let Some(e) = expr {
+                    let value = self.eval_expr(e)?;
+                    Ok(Some(format!("return {}", format_value(&value))))
+                } else {
+                    Ok(Some("return".into()))
+                }
+            }
+            Stmt::Exit(expr) => {
+                // Exit in REPL context - just show message
+                if let Some(e) = expr {
+                    let value = self.eval_expr(e)?;
+                    Ok(Some(format!("exit {}", format_value(&value))))
+                } else {
+                    Ok(Some("exit".into()))
+                }
+            }
             Stmt::Empty => Ok(None),
         }
     }
@@ -564,6 +608,47 @@ impl Repl {
                     }
                 };
                 Ok(Value::Bool(result))
+            }
+            Expr::Positional(n) => {
+                // Positional parameters not supported in REPL context
+                match self.exec_ctx.scope.get_positional(*n) {
+                    Some(s) => Ok(Value::String(s.to_string())),
+                    None => Ok(Value::String(String::new())),
+                }
+            }
+            Expr::AllArgs => {
+                // Return all args as array
+                let args = self.exec_ctx.scope.all_args();
+                let exprs: Vec<Expr> = args
+                    .iter()
+                    .map(|s| Expr::Literal(Value::String(s.clone())))
+                    .collect();
+                Ok(Value::Array(exprs))
+            }
+            Expr::ArgCount => {
+                Ok(Value::Int(self.exec_ctx.scope.arg_count() as i64))
+            }
+            Expr::VarLength(name) => {
+                match self.exec_ctx.scope.get(name) {
+                    Some(value) => {
+                        let s = format_value_unquoted(value);
+                        Ok(Value::Int(s.len() as i64))
+                    }
+                    None => Ok(Value::Int(0)),
+                }
+            }
+            Expr::VarWithDefault { name, default } => {
+                match self.exec_ctx.scope.get(name) {
+                    Some(value) => {
+                        let s = format_value_unquoted(value);
+                        if s.is_empty() {
+                            Ok(Value::String(default.clone()))
+                        } else {
+                            Ok(value.clone())
+                        }
+                    }
+                    None => Ok(Value::String(default.clone())),
+                }
             }
         }
     }

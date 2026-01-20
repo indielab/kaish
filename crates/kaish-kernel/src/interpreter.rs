@@ -31,10 +31,12 @@
 //! assert_eq!(result, Value::Int(42));
 //! ```
 
+mod control_flow;
 mod eval;
 mod result;
 mod scope;
 
-pub use eval::{eval_expr, EvalError, EvalResult, Evaluator, Executor, NoOpExecutor};
+pub use control_flow::ControlFlow;
+pub use eval::{eval_expr, expand_tilde, value_to_string, value_to_string_with_tilde, EvalError, EvalResult, Evaluator, Executor, NoOpExecutor};
 pub use result::{value_to_json, ExecResult};
 pub use scope::Scope;

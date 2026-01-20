@@ -21,6 +21,7 @@ mod mv;
 mod pwd;
 mod rm;
 mod scatter;
+mod unset;
 mod vars;
 mod wait;
 mod write;
@@ -51,6 +52,7 @@ pub fn register_builtins(registry: &mut ToolRegistry) {
     registry.register(pwd::Pwd);
     registry.register(rm::Rm);
     registry.register(scatter::Scatter);
+    registry.register(unset::Unset);
     registry.register(vars::Vars);
     registry.register(wait::Wait);
     registry.register(write::Write);

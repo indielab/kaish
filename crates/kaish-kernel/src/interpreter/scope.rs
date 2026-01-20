@@ -21,6 +21,10 @@ pub struct Scope {
     frames: Vec<HashMap<String, Value>>,
     /// The result of the last command execution.
     last_result: ExecResult,
+    /// Script or tool name ($0).
+    script_name: String,
+    /// Positional arguments ($1-$9, $@, $#).
+    positional: Vec<String>,
 }
 
 impl Scope {
@@ -29,6 +33,8 @@ impl Scope {
         Self {
             frames: vec![HashMap::new()],
             last_result: ExecResult::default(),
+            script_name: String::new(),
+            positional: Vec::new(),
         }
     }
 
@@ -65,6 +71,18 @@ impl Scope {
         None
     }
 
+    /// Remove a variable, searching from innermost to outermost frame.
+    ///
+    /// Returns the removed value if found, None otherwise.
+    pub fn remove(&mut self, name: &str) -> Option<Value> {
+        for frame in self.frames.iter_mut().rev() {
+            if let Some(value) = frame.remove(name) {
+                return Some(value);
+            }
+        }
+        None
+    }
+
     /// Set the last command result (accessible via `$?`).
     pub fn set_last_result(&mut self, result: ExecResult) {
         self.last_result = result;
@@ -73,6 +91,39 @@ impl Scope {
     /// Get the last command result.
     pub fn last_result(&self) -> &ExecResult {
         &self.last_result
+    }
+
+    /// Set the positional parameters ($0, $1-$9, $@, $#).
+    ///
+    /// The script_name becomes $0, and args become $1, $2, etc.
+    pub fn set_positional(&mut self, script_name: impl Into<String>, args: Vec<String>) {
+        self.script_name = script_name.into();
+        self.positional = args;
+    }
+
+    /// Get a positional parameter by index ($0-$9).
+    ///
+    /// $0 returns the script name, $1-$9 return arguments.
+    pub fn get_positional(&self, n: usize) -> Option<&str> {
+        if n == 0 {
+            if self.script_name.is_empty() {
+                None
+            } else {
+                Some(&self.script_name)
+            }
+        } else {
+            self.positional.get(n - 1).map(|s| s.as_str())
+        }
+    }
+
+    /// Get all positional arguments as a slice ($@).
+    pub fn all_args(&self) -> &[String] {
+        &self.positional
+    }
+
+    /// Get the count of positional arguments ($#).
+    pub fn arg_count(&self) -> usize {
+        self.positional.len()
     }
 
     /// Resolve a variable path like `${VAR.field[0].nested}`.
@@ -431,5 +482,47 @@ mod tests {
     fn pop_root_frame_panics() {
         let mut scope = Scope::new();
         scope.pop_frame();
+    }
+
+    #[test]
+    fn positional_params_basic() {
+        let mut scope = Scope::new();
+        scope.set_positional("my_tool", vec!["arg1".into(), "arg2".into(), "arg3".into()]);
+
+        // $0 is the script/tool name
+        assert_eq!(scope.get_positional(0), Some("my_tool"));
+        // $1, $2, $3 are the arguments
+        assert_eq!(scope.get_positional(1), Some("arg1"));
+        assert_eq!(scope.get_positional(2), Some("arg2"));
+        assert_eq!(scope.get_positional(3), Some("arg3"));
+        // $4 doesn't exist
+        assert_eq!(scope.get_positional(4), None);
+    }
+
+    #[test]
+    fn positional_params_empty() {
+        let scope = Scope::new();
+        // No positional params set
+        assert_eq!(scope.get_positional(0), None);
+        assert_eq!(scope.get_positional(1), None);
+        assert_eq!(scope.arg_count(), 0);
+        assert!(scope.all_args().is_empty());
+    }
+
+    #[test]
+    fn all_args_returns_slice() {
+        let mut scope = Scope::new();
+        scope.set_positional("test", vec!["a".into(), "b".into(), "c".into()]);
+
+        let args = scope.all_args();
+        assert_eq!(args, &["a", "b", "c"]);
+    }
+
+    #[test]
+    fn arg_count_returns_count() {
+        let mut scope = Scope::new();
+        scope.set_positional("test", vec!["one".into(), "two".into()]);
+
+        assert_eq!(scope.arg_count(), 2);
     }
 }

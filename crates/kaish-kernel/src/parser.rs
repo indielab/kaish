@@ -6,13 +6,32 @@
 use crate::ast::{
     Arg, Assignment, BinaryOp, Command, Expr, FileTestOp, ForLoop, IfStmt, ParamDef, ParamType,
     Pipeline, Program, Redirect, RedirectKind, Stmt, StringPart, StringTestOp, TestCmpOp,
-    TestExpr, ToolDef, Value, VarPath, VarSegment,
+    TestExpr, ToolDef, Value, VarPath, VarSegment, WhileLoop,
 };
 use crate::lexer::{self, Token};
 use chumsky::{input::ValueInput, prelude::*};
 
 /// Span type used throughout the parser.
 pub type Span = SimpleSpan;
+
+/// Parse a raw `${...}` string into an Expr.
+///
+/// Handles:
+/// - Simple paths: `${VAR}`, `${VAR.field}`, `${VAR[0]}`, `${?.ok}` → VarRef
+/// - Default values: `${VAR:-default}` → VarWithDefault
+fn parse_var_expr(raw: &str) -> Expr {
+    // Check for default value syntax: ${VAR:-default}
+    if let Some(colon_idx) = raw.find(":-") {
+        // Extract variable name (between ${ and :-)
+        let name = raw[2..colon_idx].to_string();
+        // Extract default value (between :- and })
+        let default = raw[colon_idx + 2..raw.len() - 1].to_string();
+        return Expr::VarWithDefault { name, default };
+    }
+
+    // Regular variable path
+    Expr::VarRef(parse_varpath(raw))
+}
 
 /// Parse a raw `${...}` string into a VarPath.
 ///
@@ -186,6 +205,30 @@ where
     recursive(|stmt| {
         let terminator = choice((just(Token::Newline), just(Token::Semi))).repeated();
 
+        // break [N] - break out of N levels of loops (default 1)
+        let break_stmt = just(Token::Break)
+            .ignore_then(
+                select! { Token::Int(n) => n as usize }.or_not()
+            )
+            .map(Stmt::Break);
+
+        // continue [N] - continue to next iteration, skipping N levels (default 1)
+        let continue_stmt = just(Token::Continue)
+            .ignore_then(
+                select! { Token::Int(n) => n as usize }.or_not()
+            )
+            .map(Stmt::Continue);
+
+        // return [expr] - return from a tool
+        let return_stmt = just(Token::Return)
+            .ignore_then(primary_expr_parser().or_not())
+            .map(|e| Stmt::Return(e.map(Box::new)));
+
+        // exit [code] - exit the script
+        let exit_stmt = just(Token::Exit)
+            .ignore_then(primary_expr_parser().or_not())
+            .map(|e| Stmt::Exit(e.map(Box::new)));
+
         // Base statement (without chaining)
         let base_statement = choice((
             just(Token::Newline).to(Stmt::Empty),
@@ -193,6 +236,11 @@ where
             tool_def_parser(stmt.clone()).map(Stmt::ToolDef),
             if_parser(stmt.clone()).map(Stmt::If),
             for_parser(stmt.clone()).map(Stmt::For),
+            while_parser(stmt.clone()).map(Stmt::While),
+            break_stmt,
+            continue_stmt,
+            return_stmt,
+            exit_stmt,
             test_expr_stmt_parser().map(|test| Stmt::Command(Command {
                 name: "test".to_string(),
                 args: vec![Arg::Positional(Expr::Test(Box::new(test)))],
@@ -482,6 +530,34 @@ where
         .boxed()
 }
 
+/// While loop: `while condition; do ...; done`
+fn while_parser<'tokens, I, S>(
+    stmt: S,
+) -> impl Parser<'tokens, I, WhileLoop, extra::Err<Rich<'tokens, Token, Span>>> + Clone
+where
+    I: ValueInput<'tokens, Token = Token, Span = Span>,
+    S: Parser<'tokens, I, Stmt, extra::Err<Rich<'tokens, Token, Span>>> + Clone + 'tokens,
+{
+    just(Token::While)
+        .ignore_then(condition_parser())
+        .then_ignore(just(Token::Semi).or_not())
+        .then_ignore(just(Token::Newline).repeated())
+        .then_ignore(just(Token::Do))
+        .then_ignore(just(Token::Newline).repeated())
+        .then(
+            stmt.repeated()
+                .collect::<Vec<_>>()
+                .map(|stmts| stmts.into_iter().filter(|s| !matches!(s, Stmt::Empty)).collect()),
+        )
+        .then_ignore(just(Token::Done))
+        .map(|(condition, body)| WhileLoop {
+            condition: Box::new(condition),
+            body,
+        })
+        .labelled("while loop")
+        .boxed()
+}
+
 /// Pipeline: `cmd | cmd | cmd [&]`
 fn pipeline_parser<'tokens, I>(
 ) -> impl Parser<'tokens, I, Pipeline, extra::Err<Rich<'tokens, Token, Span>>> + Clone
@@ -734,10 +810,19 @@ fn primary_expr_parser<'tokens, I>(
 where
     I: ValueInput<'tokens, Token = Token, Span = Span>,
 {
+    // Positional parameters: $0-$9, $@, $#, ${#VAR}
+    let positional = select! {
+        Token::Positional(n) => Expr::Positional(n),
+        Token::AllArgs => Expr::AllArgs,
+        Token::ArgCount => Expr::ArgCount,
+        Token::VarLength(name) => Expr::VarLength(name),
+    };
+
     recursive(|expr| {
         choice((
+            positional.clone(),
             cmd_subst_parser(expr.clone()),
-            var_ref_parser().map(Expr::VarRef),
+            var_expr_parser(),
             interpolated_string_parser(),
             literal_parser().map(Expr::Literal),
             // Bare identifiers become string literals (shell barewords)
@@ -748,15 +833,16 @@ where
     .boxed()
 }
 
-/// Variable reference: `${VAR}`, `${VAR.field}`, or `$VAR` (simple form).
-fn var_ref_parser<'tokens, I>(
-) -> impl Parser<'tokens, I, VarPath, extra::Err<Rich<'tokens, Token, Span>>> + Clone
+/// Variable reference: `${VAR}`, `${VAR.field}`, `${VAR:-default}`, or `$VAR` (simple form).
+/// Returns Expr directly to support both VarRef and VarWithDefault.
+fn var_expr_parser<'tokens, I>(
+) -> impl Parser<'tokens, I, Expr, extra::Err<Rich<'tokens, Token, Span>>> + Clone
 where
     I: ValueInput<'tokens, Token = Token, Span = Span>,
 {
     select! {
-        Token::VarRef(raw) => parse_varpath(&raw),
-        Token::SimpleVarRef(name) => VarPath::simple(name),
+        Token::VarRef(raw) => parse_var_expr(&raw),
+        Token::SimpleVarRef(name) => Expr::VarRef(VarPath::simple(name)),
     }
     .labelled("variable reference")
 }
