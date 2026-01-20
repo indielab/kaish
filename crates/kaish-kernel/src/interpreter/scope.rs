@@ -25,6 +25,8 @@ pub struct Scope {
     script_name: String,
     /// Positional arguments ($1-$9, $@, $#).
     positional: Vec<String>,
+    /// Error exit mode (set -e): exit on any command failure.
+    error_exit: bool,
 }
 
 impl Scope {
@@ -35,6 +37,7 @@ impl Scope {
             last_result: ExecResult::default(),
             script_name: String::new(),
             positional: Vec::new(),
+            error_exit: false,
         }
     }
 
@@ -124,6 +127,16 @@ impl Scope {
     /// Get the count of positional arguments ($#).
     pub fn arg_count(&self) -> usize {
         self.positional.len()
+    }
+
+    /// Check if error-exit mode is enabled (set -e).
+    pub fn error_exit_enabled(&self) -> bool {
+        self.error_exit
+    }
+
+    /// Set error-exit mode (set -e / set +e).
+    pub fn set_error_exit(&mut self, enabled: bool) {
+        self.error_exit = enabled;
     }
 
     /// Resolve a variable path like `${VAR.field[0].nested}`.

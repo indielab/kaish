@@ -229,9 +229,71 @@ where
             .ignore_then(primary_expr_parser().or_not())
             .map(|e| Stmt::Exit(e.map(Box::new)));
 
+        // set command: `set -e`, `set +e`, `set` (no args), `set -o pipefail`
+        // This must come BEFORE assignment_parser to handle `set -e` vs `set X = value`
+        //
+        // Strategy: Use lookahead to check what follows `set`:
+        // - If followed by a flag (-e, --long, +e): parse as set command
+        // - If followed by identifier NOT followed by =: parse as set command (e.g., `set pipefail`)
+        // - If followed by nothing (end/newline/semi): parse as set command
+        // - If followed by identifier then =: let assignment_parser handle it
+        let set_flag_arg = choice((
+            select! { Token::ShortFlag(f) => Arg::ShortFlag(f) },
+            select! { Token::LongFlag(f) => Arg::LongFlag(f) },
+            // PlusFlag for +e, +x etc. - convert to positional arg with + prefix
+            select! { Token::PlusFlag(f) => Arg::Positional(Expr::Literal(Value::String(format!("+{}", f)))) },
+        ));
+
+        // set with flags: `set -e`, `set -e -u -o pipefail`
+        let set_with_flags = just(Token::Set)
+            .then(set_flag_arg.clone())
+            .then(
+                choice((
+                    set_flag_arg,
+                    // Identifiers like 'pipefail' after -o
+                    ident_parser().map(|name| Arg::Positional(Expr::Literal(Value::String(name)))),
+                ))
+                .repeated()
+                .collect::<Vec<_>>(),
+            )
+            .map(|((_, first_arg), mut rest_args)| {
+                let mut args = vec![first_arg];
+                args.append(&mut rest_args);
+                Stmt::Command(Command {
+                    name: "set".to_string(),
+                    args,
+                    redirects: vec![],
+                })
+            });
+
+        // set with no args: `set` alone (shows settings)
+        // Must be followed by newline, semicolon, end of input, or a chaining operator (&&, ||)
+        let set_no_args = just(Token::Set)
+            .then(
+                choice((
+                    just(Token::Newline).to(()),
+                    just(Token::Semi).to(()),
+                    just(Token::And).to(()),
+                    just(Token::Or).to(()),
+                    end(),
+                ))
+                .rewind(),
+            )
+            .map(|_| Stmt::Command(Command {
+                name: "set".to_string(),
+                args: vec![],
+                redirects: vec![],
+            }));
+
+        // Try set_with_flags first (requires at least one flag)
+        // Then try set_no_args (no args, followed by terminator)
+        // If neither matches, fall through to assignment_parser
+        let set_command = set_with_flags.or(set_no_args);
+
         // Base statement (without chaining)
         let base_statement = choice((
             just(Token::Newline).to(Stmt::Empty),
+            set_command,
             assignment_parser().map(Stmt::Assignment),
             tool_def_parser(stmt.clone()).map(Stmt::ToolDef),
             if_parser(stmt.clone()).map(Stmt::If),
@@ -246,6 +308,7 @@ where
                 args: vec![Arg::Positional(Expr::Test(Box::new(test)))],
                 redirects: vec![],
             })),
+            // Note: 'true' and 'false' are handled by command_parser/pipeline_parser
             pipeline_parser().map(|p| {
                 // Unwrap single-command pipelines without background
                 if p.commands.len() == 1 && !p.background {
@@ -578,12 +641,21 @@ where
 }
 
 /// Command: `name args... [redirects...]`
+/// Command names can be identifiers, 'true', 'false', or '.' (source alias).
 fn command_parser<'tokens, I>(
 ) -> impl Parser<'tokens, I, Command, extra::Err<Rich<'tokens, Token, Span>>> + Clone
 where
     I: ValueInput<'tokens, Token = Token, Span = Span>,
 {
-    ident_parser()
+    // Command name can be an identifier, 'true', 'false', or '.' (source alias)
+    let command_name = choice((
+        ident_parser(),
+        just(Token::True).to("true".to_string()),
+        just(Token::False).to("false".to_string()),
+        just(Token::Dot).to(".".to_string()),
+    ));
+
+    command_name
         .then(arg_parser().repeated().collect::<Vec<_>>())
         .then(redirect_parser().repeated().collect::<Vec<_>>())
         .map(|((name, args), redirects)| Command {

@@ -249,6 +249,10 @@ pub enum Token {
     #[regex(r"-[a-zA-Z][a-zA-Z0-9]*", lex_short_flag, priority = 3)]
     ShortFlag(String),
 
+    /// Plus flag: `+e` or `+x` (for set +e to disable options)
+    #[regex(r"\+[a-zA-Z][a-zA-Z0-9]*", lex_plus_flag, priority = 3)]
+    PlusFlag(String),
+
     /// Double dash: `--` alone marks end of flags
     #[token("--")]
     DoubleDash,
@@ -386,6 +390,12 @@ fn lex_short_flag(lex: &mut logos::Lexer<Token>) -> String {
     lex.slice()[1..].to_string()
 }
 
+/// Lex a plus flag: `+e` → `e`, `+ex` → `ex`
+fn lex_plus_flag(lex: &mut logos::Lexer<Token>) -> String {
+    // Strip the leading `+`
+    lex.slice()[1..].to_string()
+}
+
 impl fmt::Display for Token {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
@@ -443,6 +453,7 @@ impl fmt::Display for Token {
             Token::CmdSubstStart => write!(f, "$("),
             Token::LongFlag(s) => write!(f, "--{}", s),
             Token::ShortFlag(s) => write!(f, "-{}", s),
+            Token::PlusFlag(s) => write!(f, "+{}", s),
             Token::DoubleDash => write!(f, "--"),
             Token::String(s) => write!(f, "STRING({:?})", s),
             Token::SingleString(s) => write!(f, "SINGLESTRING({:?})", s),
