@@ -5,6 +5,7 @@ members = [
     "crates/kaish-kernel",
     "crates/kaish-client",
     "crates/kaish-repl",
+    "crates/kaish-testutil",
 ]
 
 [workspace.package]

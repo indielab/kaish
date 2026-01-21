@@ -49,6 +49,7 @@ tokio-util = { workspace = true }
 
 [dev-dependencies]
 proptest = { workspace = true }
+kaish-testutil = { path = "../kaish-testutil" }
 
 [lints]
 workspace = true

@@ -636,6 +636,7 @@ dependencies = [
  "directories",
  "futures",
  "kaish-schema",
+ "kaish-testutil",
  "logos",
  "proptest",
  "regex",
@@ -670,6 +671,13 @@ version = "0.1.0"
 dependencies = [
  "capnp",
  "capnpc",
+]
+
+[[package]]
+name = "kaish-testutil"
+version = "0.1.0"
+dependencies = [
+ "kaish-kernel",
 ]
 
 [[package]]
