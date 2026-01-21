@@ -105,6 +105,23 @@ These bash features are omitted because they're confusing, error-prone, or ambig
 - Aliases, `eval` — explicit is better
 - Arrays of arrays — keep it simple
 
+## Beyond Bourne
+
+Kaish extends Bourne shell with features designed for modern tool orchestration:
+
+| Feature | POSIX/Bourne | Kaish | Rationale |
+|---------|--------------|-------|-----------|
+| **Floats** | ❌ Integer only | ✅ Native `3.14` | MCP tools return JSON with floats |
+| **Booleans** | ❌ Exit codes | ✅ Native `true`/`false` | JSON interop, clearer conditions |
+| **Objects** | ❌ | ✅ `{key: value}` | First-class JSON support |
+| **Arrays** | ❌ (bash has them) | ✅ `[1, 2, 3]` | JSON arrays, cleaner syntax |
+| **Typed params** | ❌ | ✅ `name:string` | Tool definitions with validation |
+| **Scatter/gather** | ❌ | ✅ `散/集` | Built-in parallelism |
+| **VFS** | ❌ | ✅ `/mcp/`, `/scratch/` | Unified resource access |
+| **Ambiguity errors** | ❌ Guesses | ✅ Rejects `TRUE`, `yes`, `123abc` | Agent-friendly, fail-fast |
+
+**For AI agents**: Kaish validates inputs strictly. `TRUE` and `yes` are errors (use `true`), `123abc` is rejected, `.5` requires `0.5`. This prevents common generation mistakes from silently succeeding.
+
 ## 散・集 (San/Shū) — Scatter/Gather
 
 Fan-out parallelism made easy:

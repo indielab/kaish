@@ -40,6 +40,45 @@ echo ${OBJ.key}                     # nested access (braces required for paths)
 echo ${LIST[0]}                     # array index (braces required)
 ```
 
+### Data Types
+
+Kaish has first-class support for JSON-compatible data types:
+
+```bash
+# Strings
+NAME="hello"
+PATH='/literal/path'
+
+# Integers
+COUNT=42
+OFFSET=-10
+
+# Floats (⚠️ EXTENSION: POSIX shell has integers only)
+PI=3.14159
+RATE=-0.5
+ZERO=0.0                            # must have digits on both sides of decimal
+
+# Booleans (⚠️ EXTENSION: must be lowercase)
+ENABLED=true
+DEBUG=false
+# TRUE, True, yes, Yes, no, No → ERROR (ambiguous)
+
+# Arrays
+ITEMS=[1, 2, 3]
+MIXED=["a", 42, true]
+
+# Objects
+CONFIG={host: "localhost", port: 8080}
+NESTED={user: {name: "amy", roles: ["admin"]}}
+
+# Null
+EMPTY=null
+```
+
+**Why floats?** MCP tools return JSON, which has floats. Rather than force string conversion everywhere, kaish supports them natively. The lexer validates strictly: `.5` and `5.` are errors (use `0.5` and `5.0`).
+
+**Why strict booleans?** AI agents sometimes generate `True`, `YES`, or `1` for booleans. Kaish rejects these ambiguous forms to catch mistakes early rather than silently misinterpreting intent.
+
 ### Parameter Expansion
 
 ```bash
