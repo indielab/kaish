@@ -63,12 +63,8 @@ pub fn format_stmt(stmt: &Stmt) -> String {
 /// Format an assignment as an S-expression.
 fn format_assignment(a: &Assignment) -> String {
     let value = format_expr(&a.value);
-    // Only output local=true for local assignments, nothing for regular
-    if a.local {
-        format!("(assign {} {} local=true)", a.name, value)
-    } else {
-        format!("(assign {} {})", a.name, value)
-    }
+    // Always output local attribute for clarity
+    format!("(assign {} {} local={})", a.name, value, a.local)
 }
 
 /// Format a command as an S-expression.
@@ -149,7 +145,7 @@ fn format_if(if_stmt: &IfStmt) -> String {
                 format!("(if {} {} (else {}))", cond, then_part, else_inner.join(" "))
             }
         }
-        None => format!("(if {} {})", cond, then_part),
+        None => format!("(if {} {} (else))", cond, then_part),
     }
 }
 
