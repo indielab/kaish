@@ -5,26 +5,14 @@ use kaish_testutil::lexer::{parse_lexer_tests, run_lexer_tests};
 const TOKENS_TXT: &str = include_str!("../../../tests/lexer/tokens.txt");
 
 /// Known failing lines due to design differences between test file and lexer.
-/// These are lexer bugs that are out of scope for the current test cleanup.
-///
-/// - Ambiguity checks: lexer doesn't reject TRUE/yes/no as ambiguous
-/// - Float edge cases: 0.0 displays as 0, .5 and 5. not rejected
-/// - Escape sequences: lexer produces actual characters, not escaped representations
-/// - Number-identifier edge case: 123abc not rejected
+/// All previously known failures have been fixed:
+/// - Float display: 0.0 now shows decimal point
+/// - Escape sequences: control chars now escaped for display
+/// - Ambiguity checks: TRUE/yes/no now rejected as ambiguous
+/// - Number-identifier: 123abc now rejected
+/// - Float edge cases: .5 and 5. now rejected
 const KNOWN_FAILING_LINES: &[usize] = &[
-    25,  // 123abc - lexer doesn't error, produces INT + IDENT
-    34,  // 0.0 - formatted as FLOAT(0) not FLOAT(0.0)
-    37,  // .5 - lexer produces DOT INT(5), not error
-    38,  // 5. - lexer produces INT(5) DOT, not error
-    43,  // TRUE - lexer produces IDENT(TRUE), not error
-    44,  // FALSE - lexer produces IDENT(FALSE), not error
-    45,  // True - lexer produces IDENT(True), not error
-    46,  // yes - lexer produces IDENT(yes), not error
-    47,  // no - lexer produces IDENT(no), not error
-    48,  // YES - lexer produces IDENT(YES), not error
-    49,  // NO - lexer produces IDENT(NO), not error
-    55,  // "line\nbreak" - escapes are processed to actual characters
-    56,  // "tab\there" - escapes are processed to actual characters
+    // All lexer tests now pass!
 ];
 
 #[test]

@@ -130,6 +130,14 @@ fn parse_expected_tokens(s: &str) -> Vec<String> {
     tokens
 }
 
+/// Escape control characters for display in test output.
+/// Only escapes invisible control characters, not printable chars like backslash.
+fn escape_string_for_display(s: &str) -> String {
+    s.replace('\n', "\\n")
+        .replace('\t', "\\t")
+        .replace('\r', "\\r")
+}
+
 /// Format a Token into the test file format.
 pub fn format_token(token: &Token) -> String {
     match token {
@@ -204,7 +212,7 @@ pub fn format_token(token: &Token) -> String {
         Token::DoubleDash => "DOUBLEDASH".to_string(),
 
         // Literals
-        Token::String(s) => format!("STRING({})", s),
+        Token::String(s) => format!("STRING({})", escape_string_for_display(s)),
         Token::SingleString(s) => format!("SINGLESTRING({})", s),
         Token::VarRef(s) => format!("VARREF({})", s),
         Token::SimpleVarRef(s) => format!("SIMPLEVARREF({})", s),
@@ -213,7 +221,14 @@ pub fn format_token(token: &Token) -> String {
         Token::ArgCount => "ARGCOUNT".to_string(),
         Token::VarLength(s) => format!("VARLENGTH({})", s),
         Token::Int(n) => format!("INT({})", n),
-        Token::Float(n) => format!("FLOAT({})", n),
+        Token::Float(n) => {
+            let s = n.to_string();
+            if s.contains('.') {
+                format!("FLOAT({})", s)
+            } else {
+                format!("FLOAT({}.0)", s)
+            }
+        }
 
         // Identifiers
         Token::Ident(s) => format!("IDENT({})", s),
@@ -222,6 +237,11 @@ pub fn format_token(token: &Token) -> String {
         Token::Comment => "COMMENT".to_string(),
         Token::Newline => "NEWLINE".to_string(),
         Token::LineContinuation => "LINECONT".to_string(),
+
+        // These variants should never be produced - their callbacks always return errors
+        Token::InvalidNumberIdent => "INVALID_NUMBER_IDENT".to_string(),
+        Token::InvalidFloatNoLeading => "INVALID_FLOAT_NO_LEADING".to_string(),
+        Token::InvalidFloatNoTrailing => "INVALID_FLOAT_NO_TRAILING".to_string(),
     }
 }
 

@@ -512,6 +512,22 @@ impl Kernel {
                     _ => Ok(left_flow), // Propagate non-normal flow
                 }
             }
+            Stmt::Test(test_expr) => {
+                // Evaluate the test expression by wrapping in Expr::Test
+                let expr = crate::ast::Expr::Test(Box::new(test_expr.clone()));
+                let mut scope = self.scope.write().await;
+                let value = eval_expr(&expr, &mut scope)?;
+                drop(scope);
+                let is_true = match value {
+                    crate::ast::Value::Bool(b) => b,
+                    _ => false,
+                };
+                if is_true {
+                    Ok(ControlFlow::ok(ExecResult::success("")))
+                } else {
+                    Ok(ControlFlow::ok(ExecResult::failure(1, "")))
+                }
+            }
             Stmt::Empty => Ok(ControlFlow::ok(ExecResult::success(""))),
         }
         })

@@ -36,6 +36,8 @@ pub enum Stmt {
     Exit(Option<Box<Expr>>),
     /// Tool definition: `tool name(params) { body }`
     ToolDef(ToolDef),
+    /// Test expression: `[[ -f path ]]` or `[[ $X == "value" ]]`
+    Test(TestExpr),
     /// Statement chain with `&&`: run right only if left succeeds
     AndChain { left: Box<Stmt>, right: Box<Stmt> },
     /// Statement chain with `||`: run right only if left fails

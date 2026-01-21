@@ -50,6 +50,7 @@ pub fn format_stmt(stmt: &Stmt) -> String {
             None => "(exit)".to_string(),
         },
         Stmt::ToolDef(tool) => format_tooldef(tool),
+        Stmt::Test(test_expr) => format!("(test {})", format_test_expr(test_expr)),
         Stmt::AndChain { left, right } => {
             format!("(and-chain {} {})", format_stmt(left), format_stmt(right))
         }
@@ -300,6 +301,13 @@ fn format_test_expr(test: &TestExpr) -> String {
     }
 }
 
+/// Escape control characters for display in test output.
+fn escape_for_display(s: &str) -> String {
+    s.replace('\n', "\\n")
+        .replace('\t', "\\t")
+        .replace('\r', "\\r")
+}
+
 /// Format a value as an S-expression.
 fn format_value(value: &Value) -> String {
     match value {
@@ -307,7 +315,7 @@ fn format_value(value: &Value) -> String {
         Value::Bool(b) => format!("(bool {})", b),
         Value::Int(n) => format!("(int {})", n),
         Value::Float(f) => format!("(float {})", f),
-        Value::String(s) => format!("(string \"{}\")", s),
+        Value::String(s) => format!("(string \"{}\")", escape_for_display(s)),
         Value::Array(items) => {
             if items.is_empty() {
                 "(array)".to_string()

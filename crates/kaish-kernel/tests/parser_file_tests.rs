@@ -6,35 +6,33 @@ const STATEMENTS_TEST: &str = include_str!("../../../tests/parser/statements.tes
 
 /// Known failing test names due to parser/lexer bugs that are out of scope for test cleanup.
 ///
-/// **Escape sequence processing** (lexer processes to actual characters):
-/// - assign_string_with_escapes: `\n` becomes actual newline in output
-/// - pipe_with_args: `\\.rs$` causes invalid escape sequence error
-/// - test_expr_regex_match: `\.rs$` causes invalid escape sequence error
+/// **Fixed in this session:**
+/// - Test expression parsing now produces Stmt::Test directly (16 tests)
+/// - Float display now shows decimal points (0.0 not 0)
+/// - Escape sequences displayed correctly in test output
+/// - Boolean ambiguity (TRUE, yes, no) now rejected
+/// - Number-identifier (123abc) now rejected
+/// - Float edge cases (.5, 5.) now rejected
+/// - Dots in filenames (script.kai) now work
 ///
-/// **Redirect paths** (slash `/` causes lexer errors):
+/// **Remaining issues:**
+///
+/// **Redirect paths** (slash `/` causes lexer errors - would need path token type):
 /// - redirect_stdout, redirect_append, redirect_stdin, redirect_stderr,
 ///   redirect_both, redirect_multiple, redirect_in_pipeline
 /// - test_file_exists, test_file_dir (unquoted paths `/etc/hosts`, `/tmp`)
 ///
-/// **Test expression parsing** (wraps in cmd instead of standalone):
-/// - test_string_empty, test_string_nonempty
-/// - test_comparison_eq, test_comparison_neq, test_comparison_gt, test_comparison_lt
-/// - test_expr_file_exists, test_expr_is_file, test_expr_is_dir
-/// - test_expr_string_empty, test_expr_string_nonempty
-/// - test_expr_comparison_eq, test_expr_comparison_ne
-/// - test_expr_comparison_gt, test_expr_comparison_lt, test_expr_comparison_ge, test_expr_comparison_le
+/// **Escape sequence in regex** (lexer validates escapes too strictly):
+/// - test_expr_regex_match: `\.rs$` causes invalid escape sequence error
 ///
-/// **Other parser issues**:
+/// **Condition parsing** (would need parser changes):
 /// - if_command_condition: parses identifier as string instead of command
 /// - if_comparison: parenthesized conditions `(${X} > 5)` not parsed
-/// - dot_as_source_alias, source_command: `.kai` extension causes split
+///
+/// **Other edge cases**:
 /// - named_arg_with_spaces_error: parser accepts `foo = bar` instead of erroring
 /// - double_dash_ends_flags: `--` marker not handled correctly
 const KNOWN_FAILING_TESTS: &[&str] = &[
-    // Escape sequence processing
-    "assign_string_with_escapes",
-    "pipe_with_args",
-    "test_expr_regex_match",
     // Redirect paths (slash causes lexer errors)
     "redirect_stdout",
     "redirect_append",
@@ -45,29 +43,13 @@ const KNOWN_FAILING_TESTS: &[&str] = &[
     "redirect_in_pipeline",
     "test_file_exists",
     "test_file_dir",
-    // Test expressions wrapped in cmd
-    "test_string_empty",
-    "test_string_nonempty",
-    "test_comparison_eq",
-    "test_comparison_neq",
-    "test_comparison_gt",
-    "test_comparison_lt",
-    "test_expr_file_exists",
-    "test_expr_is_file",
-    "test_expr_is_dir",
-    "test_expr_string_empty",
-    "test_expr_string_nonempty",
-    "test_expr_comparison_eq",
-    "test_expr_comparison_ne",
-    "test_expr_comparison_gt",
-    "test_expr_comparison_lt",
-    "test_expr_comparison_ge",
-    "test_expr_comparison_le",
-    // Other parser issues
+    // Escape sequences in regex patterns - lexer rejects \. as invalid
+    "pipe_with_args",
+    "test_expr_regex_match",
+    // Condition parsing
     "if_command_condition",
     "if_comparison",
-    "dot_as_source_alias",
-    "source_command",
+    // Other edge cases
     "named_arg_with_spaces_error",
     "double_dash_ends_flags",
 ];

@@ -303,11 +303,7 @@ where
             continue_stmt,
             return_stmt,
             exit_stmt,
-            test_expr_stmt_parser().map(|test| Stmt::Command(Command {
-                name: "test".to_string(),
-                args: vec![Arg::Positional(Expr::Test(Box::new(test)))],
-                redirects: vec![],
-            })),
+            test_expr_stmt_parser().map(Stmt::Test),
             // Note: 'true' and 'false' are handled by command_parser/pipeline_parser
             pipeline_parser().map(|p| {
                 // Unwrap single-command pipelines without background

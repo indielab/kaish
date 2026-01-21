@@ -345,6 +345,16 @@ impl Repl {
                     Ok(Some("exit".into()))
                 }
             }
+            Stmt::Test(test_expr) => {
+                // Evaluate the test expression
+                let expr = kaish_kernel::ast::Expr::Test(Box::new(test_expr.clone()));
+                let value = self.eval_expr(&expr)?;
+                let is_true = match value {
+                    Value::Bool(b) => b,
+                    _ => false,
+                };
+                Ok(Some(format!("test: {}", is_true)))
+            }
             Stmt::Empty => Ok(None),
         }
     }

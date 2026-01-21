@@ -38,6 +38,11 @@ pub enum LexerError {
     UnterminatedVarRef,
     InvalidEscape,
     InvalidNumber,
+    AmbiguousBoolean(String),
+    AmbiguousBooleanLike(String),
+    InvalidNumberIdent(String),
+    InvalidFloatNoLeading,
+    InvalidFloatNoTrailing,
 }
 
 impl fmt::Display for LexerError {
@@ -48,6 +53,18 @@ impl fmt::Display for LexerError {
             LexerError::UnterminatedVarRef => write!(f, "unterminated variable reference"),
             LexerError::InvalidEscape => write!(f, "invalid escape sequence"),
             LexerError::InvalidNumber => write!(f, "invalid number"),
+            LexerError::AmbiguousBoolean(s) => {
+                write!(f, "ambiguous boolean, use lowercase '{}'", s.to_lowercase())
+            }
+            LexerError::AmbiguousBooleanLike(s) => {
+                let suggest = if s.eq_ignore_ascii_case("yes") { "true" } else { "false" };
+                write!(f, "ambiguous boolean-like '{}', use '{}' or '\"{}\"'", s, suggest, s)
+            }
+            LexerError::InvalidNumberIdent(s) => {
+                write!(f, "identifier cannot start with digit: {}", s)
+            }
+            LexerError::InvalidFloatNoLeading => write!(f, "float must have leading digit"),
+            LexerError::InvalidFloatNoTrailing => write!(f, "float must have trailing digit"),
         }
     }
 }
@@ -302,11 +319,29 @@ pub enum Token {
     Float(f64),
 
     // ═══════════════════════════════════════════════════════════════════
+    // Invalid patterns (caught before valid tokens for better errors)
+    // ═══════════════════════════════════════════════════════════════════
+
+    /// Invalid: number followed by identifier characters (like 123abc)
+    #[regex(r"[0-9]+[a-zA-Z_][a-zA-Z0-9_-]*", lex_invalid_number_ident, priority = 3)]
+    InvalidNumberIdent,
+
+    /// Invalid: float without leading digit (like .5)
+    #[regex(r"\.[0-9]+", lex_invalid_float_no_leading, priority = 3)]
+    InvalidFloatNoLeading,
+
+    /// Invalid: float without trailing digit (like 5.)
+    /// Logos uses longest-match, so valid floats like 5.5 will match Float pattern instead
+    #[regex(r"[0-9]+\.", lex_invalid_float_no_trailing, priority = 2)]
+    InvalidFloatNoTrailing,
+
+    // ═══════════════════════════════════════════════════════════════════
     // Identifiers (command names, variable names, etc.)
     // ═══════════════════════════════════════════════════════════════════
 
     /// Identifier - value is the identifier string
-    #[regex(r"[a-zA-Z_][a-zA-Z0-9_-]*", lex_ident)]
+    /// Allows dots for filenames like `script.kai`
+    #[regex(r"[a-zA-Z_][a-zA-Z0-9_.-]*", lex_ident)]
     Ident(String),
 
     // ═══════════════════════════════════════════════════════════════════
@@ -373,9 +408,43 @@ fn lex_float(lex: &mut logos::Lexer<Token>) -> Result<f64, LexerError> {
     lex.slice().parse().map_err(|_| LexerError::InvalidNumber)
 }
 
-/// Lex an identifier.
-fn lex_ident(lex: &mut logos::Lexer<Token>) -> String {
-    lex.slice().to_string()
+/// Lex an invalid number-identifier pattern (like 123abc).
+/// Always returns Err to produce a lexer error instead of a token.
+fn lex_invalid_number_ident(lex: &mut logos::Lexer<Token>) -> Result<(), LexerError> {
+    Err(LexerError::InvalidNumberIdent(lex.slice().to_string()))
+}
+
+/// Lex an invalid float without leading digit (like .5).
+/// Always returns Err to produce a lexer error instead of a token.
+fn lex_invalid_float_no_leading(_lex: &mut logos::Lexer<Token>) -> Result<(), LexerError> {
+    Err(LexerError::InvalidFloatNoLeading)
+}
+
+/// Lex an invalid float without trailing digit (like 5.).
+/// Always returns Err to produce a lexer error instead of a token.
+fn lex_invalid_float_no_trailing(_lex: &mut logos::Lexer<Token>) -> Result<(), LexerError> {
+    Err(LexerError::InvalidFloatNoTrailing)
+}
+
+/// Lex an identifier, rejecting ambiguous boolean-like values.
+fn lex_ident(lex: &mut logos::Lexer<Token>) -> Result<String, LexerError> {
+    let s = lex.slice();
+
+    // Reject ambiguous boolean variants (TRUE, FALSE, True, etc.)
+    // Only lowercase 'true' and 'false' are valid booleans (handled by Token::True/False)
+    match s.to_lowercase().as_str() {
+        "true" | "false" if s != "true" && s != "false" => {
+            return Err(LexerError::AmbiguousBoolean(s.to_string()));
+        }
+        _ => {}
+    }
+
+    // Reject yes/no/YES/NO/Yes/No as ambiguous boolean-like values
+    if s.eq_ignore_ascii_case("yes") || s.eq_ignore_ascii_case("no") {
+        return Err(LexerError::AmbiguousBooleanLike(s.to_string()));
+    }
+
+    Ok(s.to_string())
 }
 
 /// Lex a long flag: `--name` → `name`
@@ -469,6 +538,10 @@ impl fmt::Display for Token {
             Token::Comment => write!(f, "COMMENT"),
             Token::Newline => write!(f, "NEWLINE"),
             Token::LineContinuation => write!(f, "LINECONT"),
+            // These variants should never be produced - their callbacks always return errors
+            Token::InvalidNumberIdent => write!(f, "INVALID_NUMBER_IDENT"),
+            Token::InvalidFloatNoLeading => write!(f, "INVALID_FLOAT_NO_LEADING"),
+            Token::InvalidFloatNoTrailing => write!(f, "INVALID_FLOAT_NO_TRAILING"),
         }
     }
 }
