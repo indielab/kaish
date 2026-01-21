@@ -4,11 +4,13 @@ use kaish_testutil::lexer::{parse_lexer_tests, run_lexer_tests};
 
 const TOKENS_TXT: &str = include_str!("../../../tests/lexer/tokens.txt");
 
-/// Known failing lines due to design differences between test file and lexer:
-/// - Token naming: lexer uses GT/LT instead of REDIR_OUT/REDIR_IN (context matters later)
-/// - Escape sequences: lexer produces actual characters, not escaped representations
+/// Known failing lines due to design differences between test file and lexer.
+/// These are lexer bugs that are out of scope for the current test cleanup.
+///
 /// - Ambiguity checks: lexer doesn't reject TRUE/yes/no as ambiguous
-/// - Float formatting: 0.0 displays as 0
+/// - Float edge cases: 0.0 displays as 0, .5 and 5. not rejected
+/// - Escape sequences: lexer produces actual characters, not escaped representations
+/// - Number-identifier edge case: 123abc not rejected
 const KNOWN_FAILING_LINES: &[usize] = &[
     25,  // 123abc - lexer doesn't error, produces INT + IDENT
     34,  // 0.0 - formatted as FLOAT(0) not FLOAT(0.0)
@@ -23,9 +25,6 @@ const KNOWN_FAILING_LINES: &[usize] = &[
     49,  // NO - lexer produces IDENT(NO), not error
     55,  // "line\nbreak" - escapes are processed to actual characters
     56,  // "tab\there" - escapes are processed to actual characters
-    103, // > - lexer produces GT, not REDIR_OUT (context-dependent)
-    105, // < - lexer produces LT, not REDIR_IN (context-dependent)
-    170, // x > file - lexer produces GT, not REDIR_OUT
 ];
 
 #[test]

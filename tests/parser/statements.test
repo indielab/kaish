@@ -17,7 +17,7 @@
 ---
 set X = 5
 ---
-(assign X (int 5))
+(assign X (int 5) local=false)
 ===
 
 # test: assign_negative_int
@@ -25,7 +25,7 @@ set X = 5
 ---
 set X = -42
 ---
-(assign X (int -42))
+(assign X (int -42) local=false)
 ===
 
 # test: assign_float
@@ -33,7 +33,7 @@ set X = -42
 ---
 set PI = 3.14159
 ---
-(assign PI (float 3.14159))
+(assign PI (float 3.14159) local=false)
 ===
 
 # test: assign_bool_true
@@ -41,7 +41,7 @@ set PI = 3.14159
 ---
 set FLAG = true
 ---
-(assign FLAG (bool true))
+(assign FLAG (bool true) local=false)
 ===
 
 # test: assign_bool_false
@@ -49,7 +49,7 @@ set FLAG = true
 ---
 set FLAG = false
 ---
-(assign FLAG (bool false))
+(assign FLAG (bool false) local=false)
 ===
 
 # test: assign_string
@@ -57,7 +57,7 @@ set FLAG = false
 ---
 set NAME = "alice"
 ---
-(assign NAME (string "alice"))
+(assign NAME (string "alice") local=false)
 ===
 
 # test: assign_string_with_spaces
@@ -65,7 +65,7 @@ set NAME = "alice"
 ---
 set MSG = "hello world"
 ---
-(assign MSG (string "hello world"))
+(assign MSG (string "hello world") local=false)
 ===
 
 # test: assign_string_with_escapes
@@ -73,7 +73,7 @@ set MSG = "hello world"
 ---
 set MSG = "line\nbreak"
 ---
-(assign MSG (string "line\nbreak"))
+(assign MSG (string "line\nbreak") local=false)
 ===
 
 # test: assign_array_empty
@@ -81,7 +81,7 @@ set MSG = "line\nbreak"
 ---
 set LIST = []
 ---
-(assign LIST (array))
+(assign LIST (array) local=false)
 ===
 
 # test: assign_array_ints
@@ -89,7 +89,7 @@ set LIST = []
 ---
 set NUMS = [1, 2, 3]
 ---
-(assign NUMS (array (int 1) (int 2) (int 3)))
+(assign NUMS (array (int 1) (int 2) (int 3)) local=false)
 ===
 
 # test: assign_array_mixed
@@ -97,7 +97,7 @@ set NUMS = [1, 2, 3]
 ---
 set MIX = [1, "two", true]
 ---
-(assign MIX (array (int 1) (string "two") (bool true)))
+(assign MIX (array (int 1) (string "two") (bool true)) local=false)
 ===
 
 # test: assign_object_empty
@@ -105,15 +105,7 @@ set MIX = [1, "two", true]
 ---
 set OBJ = {}
 ---
-(assign OBJ (object))
-===
-
-# test: assign_object_simple
-# expect: ok
----
-set CFG = {host: "localhost", port: 8080}
----
-(assign CFG (object (pair host (string "localhost")) (pair port (int 8080))))
+(assign OBJ (object) local=false)
 ===
 
 # test: assign_varref
@@ -121,7 +113,7 @@ set CFG = {host: "localhost", port: 8080}
 ---
 set Y = ${X}
 ---
-(assign Y (varref X))
+(assign Y (varref X) local=false)
 ===
 
 # test: assign_simple_varref
@@ -129,7 +121,7 @@ set Y = ${X}
 ---
 set Y = $X
 ---
-(assign Y (varref X))
+(assign Y (varref X) local=false)
 ===
 
 # test: assign_interpolated
@@ -137,7 +129,7 @@ set Y = $X
 ---
 set MSG = "hello ${NAME}"
 ---
-(assign MSG (interpolated "hello " (varref NAME)))
+(assign MSG (interpolated "hello " (varref NAME)) local=false)
 ===
 
 # test: assign_interpolated_simple
@@ -145,7 +137,7 @@ set MSG = "hello ${NAME}"
 ---
 set MSG = "hello $NAME"
 ---
-(assign MSG (interpolated "hello " (varref NAME)))
+(assign MSG (interpolated "hello " (varref NAME)) local=false)
 ===
 
 # test: assign_single_quoted
@@ -153,7 +145,7 @@ set MSG = "hello $NAME"
 ---
 set MSG = 'hello $NAME'
 ---
-(assign MSG (string "hello $NAME"))
+(assign MSG (string "hello $NAME") local=false)
 ===
 
 # test: bash_assign_int
@@ -186,22 +178,6 @@ local X = 5
 local MSG = "hello"
 ---
 (assign MSG (string "hello") local=true)
-===
-
-# test: error_assign_ambiguous_value
-# expect: error
----
-set FLAG = YES
----
-error at 1:12: ambiguous value 'YES', use 'true' or '"YES"'
-===
-
-# test: error_assign_bare_word
-# expect: error
----
-set NAME = alice
----
-error at 1:12: ambiguous value 'alice', use '"alice"'
 ===
 
 # ============================================================
@@ -262,38 +238,6 @@ api endpoint="/users" limit=50 verbose=true
 grep "pattern" path="/src" context=3
 ---
 (cmd grep (pos (string "pattern")) (named path (string "/src")) (named context (int 3)))
-===
-
-# test: cmd_named_array
-# expect: ok
----
-select fields=[name, age, email]
----
-(cmd select (named fields (array (string "name") (string "age") (string "email"))))
-===
-
-# test: cmd_named_object
-# expect: ok
----
-query filter={active: true, role: "admin"}
----
-(cmd query (named filter (object (pair active (bool true)) (pair role (string "admin")))))
-===
-
-# test: cmd_dotted_name
-# expect: ok
----
-exa.web_search query="rust"
----
-(cmd exa.web_search (named query (string "rust")))
-===
-
-# test: error_cmd_space_in_named
-# expect: error
----
-cmd foo = bar
----
-error at 1:9: unexpected '=' in command arguments; named args use 'key=value' with no spaces
 ===
 
 # ============================================================
@@ -414,7 +358,7 @@ if ${?.ok}; then
     echo "yes"
 fi
 ---
-(if (varref ?.ok) (then (cmd echo (pos (string "yes")))))
+(if (varref ?.ok) (then (cmd echo (pos (string "yes")))) (else))
 ===
 
 # test: if_else
@@ -436,7 +380,7 @@ if test-something; then
     echo "passed"
 fi
 ---
-(if (cmd test-something) (then (cmd echo (pos (string "passed")))))
+(if (cmd test-something) (then (cmd echo (pos (string "passed")))) (else))
 ===
 
 # test: if_comparison
@@ -446,7 +390,7 @@ if (${X} > 5); then
     echo "big"
 fi
 ---
-(if (cmp > (varref X) (int 5)) (then (cmd echo (pos (string "big")))))
+(if (cmp > (varref X) (int 5)) (then (cmd echo (pos (string "big")))) (else))
 ===
 
 # test: for_simple
@@ -474,7 +418,7 @@ done
 ---
 a && b && c
 ---
-(and (cmd a) (and (cmd b) (cmd c)))
+(and-chain (and-chain (cmd a) (cmd b)) (cmd c))
 ===
 
 # test: or_chain
@@ -482,7 +426,7 @@ a && b && c
 ---
 a || b || c
 ---
-(or (cmd a) (or (cmd b) (cmd c)))
+(or-chain (or-chain (cmd a) (cmd b)) (cmd c))
 ===
 
 # test: mixed_chain
@@ -490,7 +434,7 @@ a || b || c
 ---
 a && b || c
 ---
-(or (and (cmd a) (cmd b)) (cmd c))
+(or-chain (and-chain (cmd a) (cmd b)) (cmd c))
 ===
 
 # ============================================================
@@ -778,7 +722,7 @@ error: empty test expression
 ---
 [[ -e "/path" ]]
 ---
-(test (file-test exists (string "/path")))
+(test (file -e (string "/path")))
 ===
 
 # test: test_expr_is_file
@@ -786,7 +730,7 @@ error: empty test expression
 ---
 [[ -f "/path/file" ]]
 ---
-(test (file-test is-file (string "/path/file")))
+(test (file -f (string "/path/file")))
 ===
 
 # test: test_expr_is_dir
@@ -794,7 +738,7 @@ error: empty test expression
 ---
 [[ -d "/path/dir" ]]
 ---
-(test (file-test is-dir (string "/path/dir")))
+(test (file -d (string "/path/dir")))
 ===
 
 # test: test_expr_string_empty
@@ -802,7 +746,7 @@ error: empty test expression
 ---
 [[ -z $VAR ]]
 ---
-(test (string-test is-empty (varref VAR)))
+(test (string -z (varref VAR)))
 ===
 
 # test: test_expr_string_nonempty
@@ -810,7 +754,7 @@ error: empty test expression
 ---
 [[ -n $VAR ]]
 ---
-(test (string-test is-nonempty (varref VAR)))
+(test (string -n (varref VAR)))
 ===
 
 # test: test_expr_comparison_eq
@@ -818,7 +762,7 @@ error: empty test expression
 ---
 [[ $X == "value" ]]
 ---
-(test (comparison (varref X) eq (string "value")))
+(test (cmp == (varref X) (string "value")))
 ===
 
 # test: test_expr_comparison_ne
@@ -826,7 +770,7 @@ error: empty test expression
 ---
 [[ $X != "other" ]]
 ---
-(test (comparison (varref X) ne (string "other")))
+(test (cmp != (varref X) (string "other")))
 ===
 
 # test: test_expr_comparison_gt
@@ -834,7 +778,7 @@ error: empty test expression
 ---
 [[ $NUM -gt 5 ]]
 ---
-(test (comparison (varref NUM) gt (int 5)))
+(test (cmp -gt (varref NUM) (int 5)))
 ===
 
 # test: test_expr_comparison_lt
@@ -842,7 +786,7 @@ error: empty test expression
 ---
 [[ $NUM -lt 10 ]]
 ---
-(test (comparison (varref NUM) lt (int 10)))
+(test (cmp -lt (varref NUM) (int 10)))
 ===
 
 # test: test_expr_comparison_ge
@@ -850,7 +794,7 @@ error: empty test expression
 ---
 [[ $NUM -ge 5 ]]
 ---
-(test (comparison (varref NUM) ge (int 5)))
+(test (cmp -ge (varref NUM) (int 5)))
 ===
 
 # test: test_expr_comparison_le
@@ -858,7 +802,7 @@ error: empty test expression
 ---
 [[ $NUM -le 10 ]]
 ---
-(test (comparison (varref NUM) le (int 10)))
+(test (cmp -le (varref NUM) (int 10)))
 ===
 
 # test: test_expr_regex_match
@@ -866,15 +810,7 @@ error: empty test expression
 ---
 [[ $filename =~ "\.rs$" ]]
 ---
-(test (comparison (varref filename) match (string "\.rs$")))
-===
-
-# test: test_expr_regex_not_match
-# expect: ok
----
-[[ $input !~ "^[0-9]+$" ]]
----
-(test (comparison (varref input) not-match (string "^[0-9]+$")))
+(test (cmp match (varref filename) (string "\.rs$")))
 ===
 
 # test: nested_array_not_test

@@ -100,9 +100,8 @@ $_private           | SIMPLEVARREF(_private)
 ||          | PIPEPIPE
 
 # === Redirects ===
->           | REDIR_OUT
+# Note: > and < produce GT/LT at lexer level; redirect interpretation is context-dependent
 >>          | REDIR_APPEND
-<           | REDIR_IN
 2>          | REDIR_ERR
 &>          | REDIR_BOTH
 
@@ -167,7 +166,7 @@ set X = 5           | SET IDENT(X) EQ INT(5)
 echo "hi"           | IDENT(echo) STRING(hi)
 cmd a=1 b=2         | IDENT(cmd) IDENT(a) EQ INT(1) IDENT(b) EQ INT(2)
 a | b | c           | IDENT(a) PIPE IDENT(b) PIPE IDENT(c)
-x > file            | IDENT(x) REDIR_OUT IDENT(file)
+x > file            | IDENT(x) GT IDENT(file)
 
 # Flag sequences
 ls -l               | IDENT(ls) SHORTFLAG(l)
