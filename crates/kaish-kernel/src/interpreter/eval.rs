@@ -9,6 +9,7 @@
 
 use std::fmt;
 
+use crate::arithmetic;
 use crate::ast::{BinaryOp, Expr, FileTestOp, Pipeline, StringPart, StringTestOp, TestCmpOp, TestExpr, Value, VarPath};
 use std::path::Path;
 
@@ -110,7 +111,15 @@ impl<'a, E: Executor> Evaluator<'a, E> {
             Expr::ArgCount => self.eval_arg_count(),
             Expr::VarLength(name) => self.eval_var_length(name),
             Expr::VarWithDefault { name, default } => self.eval_var_with_default(name, default),
+            Expr::Arithmetic(expr_str) => self.eval_arithmetic(expr_str),
         }
+    }
+
+    /// Evaluate arithmetic expansion: `$((expr))`
+    fn eval_arithmetic(&mut self, expr_str: &str) -> EvalResult<Value> {
+        arithmetic::eval_arithmetic(expr_str, &self.scope)
+            .map(Value::Int)
+            .map_err(|e| EvalError::ArithmeticError(e.to_string()))
     }
 
     /// Evaluate a test expression `[[ ... ]]` to a boolean value.
@@ -182,27 +191,8 @@ impl<'a, E: Executor> Evaluator<'a, E> {
     }
 
     /// Evaluate a literal value.
-    ///
-    /// Arrays and objects may contain expressions that need evaluation.
     fn eval_literal(&mut self, value: &Value) -> EvalResult<Value> {
-        match value {
-            Value::Array(items) => {
-                let evaluated: Result<Vec<_>, _> = items
-                    .iter()
-                    .map(|expr| self.eval(expr).map(|v| Expr::Literal(v)))
-                    .collect();
-                Ok(Value::Array(evaluated?))
-            }
-            Value::Object(fields) => {
-                let evaluated: Result<Vec<_>, _> = fields
-                    .iter()
-                    .map(|(k, expr)| self.eval(expr).map(|v| (k.clone(), Expr::Literal(v))))
-                    .collect();
-                Ok(Value::Object(evaluated?))
-            }
-            // Primitive values are returned as-is
-            _ => Ok(value.clone()),
-        }
+        Ok(value.clone())
     }
 
     /// Evaluate a variable reference.
@@ -221,13 +211,11 @@ impl<'a, E: Executor> Evaluator<'a, E> {
     }
 
     /// Evaluate all arguments ($@).
+    ///
+    /// Returns a space-separated string of all positional arguments (POSIX-style).
     fn eval_all_args(&self) -> EvalResult<Value> {
         let args = self.scope.all_args();
-        let exprs: Vec<Expr> = args
-            .iter()
-            .map(|s| Expr::Literal(Value::String(s.clone())))
-            .collect();
-        Ok(Value::Array(exprs))
+        Ok(Value::String(args.join(" ")))
     }
 
     /// Evaluate argument count ($#).
@@ -367,10 +355,6 @@ pub fn value_to_string(value: &Value) -> String {
         Value::Int(i) => i.to_string(),
         Value::Float(f) => f.to_string(),
         Value::String(s) => s.clone(),
-        Value::Array(_) | Value::Object(_) => {
-            // For structured values, convert to JSON
-            super::result::value_to_json(value).to_string()
-        }
     }
 }
 
@@ -412,11 +396,6 @@ fn format_path(path: &VarPath) -> String {
                 }
                 result.push_str(name);
             }
-            VarSegment::Index(idx) => {
-                result.push('[');
-                result.push_str(&idx.to_string());
-                result.push(']');
-            }
         }
     }
     result.push('}');
@@ -429,7 +408,6 @@ fn format_path(path: &VarPath) -> String {
 /// - `false` → false
 /// - `0` → false
 /// - `""` → false
-/// - `[]` → false
 /// - Everything else → true
 fn is_truthy(value: &Value) -> bool {
     match value {
@@ -438,8 +416,6 @@ fn is_truthy(value: &Value) -> bool {
         Value::Int(i) => *i != 0,
         Value::Float(f) => *f != 0.0,
         Value::String(s) => !s.is_empty(),
-        Value::Array(arr) => !arr.is_empty(),
-        Value::Object(_) => true, // Objects are always truthy
     }
 }
 
@@ -454,28 +430,6 @@ fn values_equal(left: &Value, right: &Value) -> bool {
             (*a as f64 - b).abs() < f64::EPSILON
         }
         (Value::String(a), Value::String(b)) => a == b,
-        // Arrays and objects use structural equality
-        (Value::Array(a), Value::Array(b)) => {
-            a.len() == b.len()
-                && a.iter().zip(b.iter()).all(|(ae, be)| {
-                    match (ae, be) {
-                        (Expr::Literal(av), Expr::Literal(bv)) => values_equal(av, bv),
-                        _ => false,
-                    }
-                })
-        }
-        (Value::Object(a), Value::Object(b)) => {
-            a.len() == b.len()
-                && a.iter().all(|(k, ae)| {
-                    b.iter().any(|(bk, be)| {
-                        k == bk
-                            && match (ae, be) {
-                                (Expr::Literal(av), Expr::Literal(bv)) => values_equal(av, bv),
-                                _ => false,
-                            }
-                    })
-                })
-        }
         _ => false,
     }
 }
@@ -509,34 +463,26 @@ fn type_name(value: &Value) -> &'static str {
         Value::Int(_) => "int",
         Value::Float(_) => "float",
         Value::String(_) => "string",
-        Value::Array(_) => "array",
-        Value::Object(_) => "object",
     }
 }
 
 /// Convert a value to f64 for numeric comparisons.
 fn value_to_f64(value: &Value) -> f64 {
     match value {
+        Value::Null => 0.0,
         Value::Int(i) => *i as f64,
         Value::Float(f) => *f,
         Value::String(s) => s.parse::<f64>().unwrap_or(0.0),
         Value::Bool(b) => if *b { 1.0 } else { 0.0 },
-        _ => 0.0,
     }
 }
 
 /// Convert an ExecResult to a Value for command substitution return.
+///
+/// Returns the stdout (trimmed) as a string, which is bash-compatible behavior.
+/// Access to other result fields (code, err, etc.) is via ${?.field}.
 fn result_to_value(result: &ExecResult) -> Value {
-    let mut fields = vec![
-        ("code".into(), Expr::Literal(Value::Int(result.code))),
-        ("ok".into(), Expr::Literal(Value::Bool(result.ok()))),
-        ("out".into(), Expr::Literal(Value::String(result.out.clone()))),
-        ("err".into(), Expr::Literal(Value::String(result.err.clone()))),
-    ];
-    if let Some(data) = &result.data {
-        fields.push(("data".into(), Expr::Literal(data.clone())));
-    }
-    Value::Object(fields)
+    Value::String(result.out.trim_end().to_string())
 }
 
 /// Perform regex match or not-match on two values.
@@ -640,28 +586,6 @@ mod tests {
         let mut scope = Scope::new();
         let result = eval_expr(&var_expr("MISSING"), &mut scope);
         assert!(matches!(result, Err(EvalError::InvalidPath(_))));
-    }
-
-    #[test]
-    fn eval_nested_path() {
-        let mut scope = Scope::new();
-        scope.set(
-            "USER",
-            Value::Object(vec![
-                ("name".into(), Expr::Literal(Value::String("Alice".into()))),
-            ]),
-        );
-
-        let expr = Expr::VarRef(VarPath {
-            segments: vec![
-                VarSegment::Field("USER".into()),
-                VarSegment::Field("name".into()),
-            ],
-        });
-        assert_eq!(
-            eval_expr(&expr, &mut scope),
-            Ok(Value::String("Alice".into()))
-        );
     }
 
     #[test]
@@ -866,46 +790,6 @@ mod tests {
     }
 
     #[test]
-    fn eval_array_literal() {
-        let mut scope = Scope::new();
-        scope.set("X", Value::Int(10));
-
-        let expr = Expr::Literal(Value::Array(vec![
-            Expr::Literal(Value::Int(1)),
-            Expr::VarRef(VarPath::simple("X")),
-            Expr::Literal(Value::Int(3)),
-        ]));
-
-        let result = eval_expr(&expr, &mut scope).unwrap();
-        if let Value::Array(items) = result {
-            assert_eq!(items.len(), 3);
-            assert_eq!(items[1], Expr::Literal(Value::Int(10)));
-        } else {
-            panic!("expected array");
-        }
-    }
-
-    #[test]
-    fn eval_object_literal() {
-        let mut scope = Scope::new();
-        scope.set("VAL", Value::String("computed".into()));
-
-        let expr = Expr::Literal(Value::Object(vec![
-            ("static".into(), Expr::Literal(Value::Int(1))),
-            ("dynamic".into(), Expr::VarRef(VarPath::simple("VAL"))),
-        ]));
-
-        let result = eval_expr(&expr, &mut scope).unwrap();
-        if let Value::Object(fields) = result {
-            assert_eq!(fields.len(), 2);
-            let dynamic = fields.iter().find(|(k, _)| k == "dynamic").unwrap();
-            assert_eq!(dynamic.1, Expr::Literal(Value::String("computed".into())));
-        } else {
-            panic!("expected object");
-        }
-    }
-
-    #[test]
     fn is_truthy_values() {
         assert!(!is_truthy(&Value::Null));
         assert!(!is_truthy(&Value::Bool(false)));
@@ -917,9 +801,6 @@ mod tests {
         assert!(is_truthy(&Value::Float(0.1)));
         assert!(!is_truthy(&Value::String("".into())));
         assert!(is_truthy(&Value::String("x".into())));
-        assert!(!is_truthy(&Value::Array(vec![])));
-        assert!(is_truthy(&Value::Array(vec![Expr::Literal(Value::Int(1))])));
-        assert!(is_truthy(&Value::Object(vec![])));
     }
 
     #[test]
@@ -982,71 +863,6 @@ mod tests {
     // Additional comprehensive tests
 
     #[test]
-    fn eval_empty_array() {
-        let mut scope = Scope::new();
-        let expr = Expr::Literal(Value::Array(vec![]));
-        assert_eq!(eval_expr(&expr, &mut scope), Ok(Value::Array(vec![])));
-    }
-
-    #[test]
-    fn eval_empty_object() {
-        let mut scope = Scope::new();
-        let expr = Expr::Literal(Value::Object(vec![]));
-        assert_eq!(eval_expr(&expr, &mut scope), Ok(Value::Object(vec![])));
-    }
-
-    #[test]
-    fn eval_deeply_nested_object() {
-        let mut scope = Scope::new();
-        scope.set(
-            "ROOT",
-            Value::Object(vec![(
-                "level1".into(),
-                Expr::Literal(Value::Object(vec![(
-                    "level2".into(),
-                    Expr::Literal(Value::Object(vec![(
-                        "level3".into(),
-                        Expr::Literal(Value::String("deep".into())),
-                    )])),
-                )])),
-            )]),
-        );
-
-        let expr = Expr::VarRef(VarPath {
-            segments: vec![
-                VarSegment::Field("ROOT".into()),
-                VarSegment::Field("level1".into()),
-                VarSegment::Field("level2".into()),
-                VarSegment::Field("level3".into()),
-            ],
-        });
-        assert_eq!(
-            eval_expr(&expr, &mut scope),
-            Ok(Value::String("deep".into()))
-        );
-    }
-
-    #[test]
-    fn eval_array_with_variables() {
-        let mut scope = Scope::new();
-        scope.set("A", Value::Int(1));
-        scope.set("B", Value::Int(2));
-
-        let expr = Expr::Literal(Value::Array(vec![
-            Expr::VarRef(VarPath::simple("A")),
-            Expr::VarRef(VarPath::simple("B")),
-        ]));
-
-        if let Ok(Value::Array(items)) = eval_expr(&expr, &mut scope) {
-            assert_eq!(items.len(), 2);
-            assert_eq!(items[0], Expr::Literal(Value::Int(1)));
-            assert_eq!(items[1], Expr::Literal(Value::Int(2)));
-        } else {
-            panic!("expected array");
-        }
-    }
-
-    #[test]
     fn eval_negative_int() {
         let mut scope = Scope::new();
         let expr = Expr::Literal(Value::Int(-42));
@@ -1086,31 +902,6 @@ mod tests {
         assert_eq!(
             eval_expr(&expr, &mut scope),
             Ok(Value::String("prefixsuffix".into()))
-        );
-    }
-
-    #[test]
-    fn eval_interpolation_nested_path() {
-        let mut scope = Scope::new();
-        scope.set(
-            "USER",
-            Value::Object(vec![
-                ("name".into(), Expr::Literal(Value::String("Alice".into()))),
-            ]),
-        );
-
-        let expr = Expr::Interpolated(vec![
-            StringPart::Literal("Hello ".into()),
-            StringPart::Var(VarPath {
-                segments: vec![
-                    VarSegment::Field("USER".into()),
-                    VarSegment::Field("name".into()),
-                ],
-            }),
-        ]);
-        assert_eq!(
-            eval_expr(&expr, &mut scope),
-            Ok(Value::String("Hello Alice".into()))
         );
     }
 
@@ -1223,39 +1014,6 @@ mod tests {
     }
 
     #[test]
-    fn eval_array_equality() {
-        let mut scope = Scope::new();
-        let expr = Expr::BinaryOp {
-            left: Box::new(Expr::Literal(Value::Array(vec![
-                Expr::Literal(Value::Int(1)),
-                Expr::Literal(Value::Int(2)),
-            ]))),
-            op: BinaryOp::Eq,
-            right: Box::new(Expr::Literal(Value::Array(vec![
-                Expr::Literal(Value::Int(1)),
-                Expr::Literal(Value::Int(2)),
-            ]))),
-        };
-        assert_eq!(eval_expr(&expr, &mut scope), Ok(Value::Bool(true)));
-    }
-
-    #[test]
-    fn eval_array_inequality_different_length() {
-        let mut scope = Scope::new();
-        let expr = Expr::BinaryOp {
-            left: Box::new(Expr::Literal(Value::Array(vec![
-                Expr::Literal(Value::Int(1)),
-            ]))),
-            op: BinaryOp::Eq,
-            right: Box::new(Expr::Literal(Value::Array(vec![
-                Expr::Literal(Value::Int(1)),
-                Expr::Literal(Value::Int(2)),
-            ]))),
-        };
-        assert_eq!(eval_expr(&expr, &mut scope), Ok(Value::Bool(false)));
-    }
-
-    #[test]
     fn eval_float_comparison_boundary() {
         let mut scope = Scope::new();
         // 1.0 == 1.0 (exact)
@@ -1307,12 +1065,11 @@ mod tests {
     fn eval_format_path_nested() {
         let path = VarPath {
             segments: vec![
-                VarSegment::Field("OBJ".into()),
-                VarSegment::Field("field".into()),
-                VarSegment::Index(0),
+                VarSegment::Field("?".into()),
+                VarSegment::Field("code".into()),
             ],
         };
-        assert_eq!(format_path(&path), "${OBJ.field[0]}");
+        assert_eq!(format_path(&path), "${?.code}");
     }
 
     #[test]
@@ -1322,8 +1079,6 @@ mod tests {
         assert_eq!(type_name(&Value::Int(1)), "int");
         assert_eq!(type_name(&Value::Float(1.0)), "float");
         assert_eq!(type_name(&Value::String("".into())), "string");
-        assert_eq!(type_name(&Value::Array(vec![])), "array");
-        assert_eq!(type_name(&Value::Object(vec![])), "object");
     }
 
     #[test]
@@ -1387,16 +1142,8 @@ mod tests {
         let expr = Expr::AllArgs;
         let result = eval_expr(&expr, &mut scope).unwrap();
 
-        // $@ returns an array of strings
-        match result {
-            Value::Array(items) => {
-                assert_eq!(items.len(), 3);
-                assert_eq!(items[0], Expr::Literal(Value::String("a".into())));
-                assert_eq!(items[1], Expr::Literal(Value::String("b".into())));
-                assert_eq!(items[2], Expr::Literal(Value::String("c".into())));
-            }
-            _ => panic!("expected array, got {:?}", result),
-        }
+        // $@ returns a space-separated string (POSIX-style)
+        assert_eq!(result, Value::String("a b c".into()));
     }
 
     #[test]

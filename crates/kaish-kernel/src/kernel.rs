@@ -31,7 +31,8 @@ use std::sync::{Arc, Mutex};
 use anyhow::{Context, Result};
 use tokio::sync::RwLock;
 
-use crate::ast::{Arg, Expr, Stmt, ToolDef, Value};
+use crate::ast::{Arg, Stmt, ToolDef, Value};
+use crate::glob::glob_match;
 use crate::interpreter::{eval_expr, expand_tilde, value_to_string, ControlFlow, ExecResult, Scope};
 use crate::parser::parse;
 use crate::scheduler::{JobManager, PipelineRunner};
@@ -334,15 +335,21 @@ impl Kernel {
                 Ok(flow)
             }
             Stmt::For(for_loop) => {
-                let iterable = {
-                    let mut scope = self.scope.write().await;
-                    eval_expr(&for_loop.iterable, &mut scope)?
-                };
-
-                let items = match iterable {
-                    Value::Array(items) => items,
-                    _ => return Ok(ControlFlow::ok(ExecResult::failure(1, "for loop requires an array"))),
-                };
+                // Evaluate all items and collect words for iteration
+                let mut words: Vec<String> = Vec::new();
+                for item_expr in &for_loop.items {
+                    let item = {
+                        let mut scope = self.scope.write().await;
+                        eval_expr(item_expr, &mut scope)?
+                    };
+                    // POSIX-style: word-split string values
+                    match &item {
+                        Value::String(s) => {
+                            words.extend(s.split_whitespace().map(String::from));
+                        }
+                        _ => words.push(value_to_string(&item)),
+                    }
+                }
 
                 let mut result = ExecResult::success("");
                 {
@@ -350,41 +357,39 @@ impl Kernel {
                     scope.push_frame();
                 }
 
-                'outer: for item in items {
-                    if let Expr::Literal(value) = item {
-                        {
-                            let mut scope = self.scope.write().await;
-                            scope.set(&for_loop.variable, value);
-                        }
-                        for stmt in &for_loop.body {
-                            let mut flow = self.execute_stmt_flow(stmt).await?;
-                            match &mut flow {
-                                ControlFlow::Normal(r) => result = r.clone(),
-                                ControlFlow::Break { .. } => {
-                                    if flow.decrement_level() {
-                                        // Break handled at this level
-                                        break 'outer;
-                                    }
-                                    // Propagate to outer loop
-                                    let mut scope = self.scope.write().await;
-                                    scope.pop_frame();
-                                    return Ok(flow);
+                'outer: for word in words {
+                    {
+                        let mut scope = self.scope.write().await;
+                        scope.set(&for_loop.variable, Value::String(word));
+                    }
+                    for stmt in &for_loop.body {
+                        let mut flow = self.execute_stmt_flow(stmt).await?;
+                        match &mut flow {
+                            ControlFlow::Normal(r) => result = r.clone(),
+                            ControlFlow::Break { .. } => {
+                                if flow.decrement_level() {
+                                    // Break handled at this level
+                                    break 'outer;
                                 }
-                                ControlFlow::Continue { .. } => {
-                                    if flow.decrement_level() {
-                                        // Continue handled at this level
-                                        continue 'outer;
-                                    }
-                                    // Propagate to outer loop
-                                    let mut scope = self.scope.write().await;
-                                    scope.pop_frame();
-                                    return Ok(flow);
+                                // Propagate to outer loop
+                                let mut scope = self.scope.write().await;
+                                scope.pop_frame();
+                                return Ok(flow);
+                            }
+                            ControlFlow::Continue { .. } => {
+                                if flow.decrement_level() {
+                                    // Continue handled at this level
+                                    continue 'outer;
                                 }
-                                ControlFlow::Return { .. } | ControlFlow::Exit { .. } => {
-                                    let mut scope = self.scope.write().await;
-                                    scope.pop_frame();
-                                    return Ok(flow);
-                                }
+                                // Propagate to outer loop
+                                let mut scope = self.scope.write().await;
+                                scope.pop_frame();
+                                return Ok(flow);
+                            }
+                            ControlFlow::Return { .. } | ControlFlow::Exit { .. } => {
+                                let mut scope = self.scope.write().await;
+                                scope.pop_frame();
+                                return Ok(flow);
                             }
                         }
                     }
@@ -439,6 +444,36 @@ impl Kernel {
                 }
 
                 Ok(ControlFlow::ok(result))
+            }
+            Stmt::Case(case_stmt) => {
+                // Evaluate the expression to match against
+                let match_value = {
+                    let mut scope = self.scope.write().await;
+                    let value = eval_expr(&case_stmt.expr, &mut scope)?;
+                    value_to_string(&value)
+                };
+
+                // Try each branch until we find a match
+                for branch in &case_stmt.branches {
+                    let matched = branch.patterns.iter().any(|pattern| {
+                        glob_match(pattern, &match_value)
+                    });
+
+                    if matched {
+                        // Execute the branch body
+                        let mut result = ControlFlow::ok(ExecResult::success(""));
+                        for stmt in &branch.body {
+                            result = self.execute_stmt_flow(stmt).await?;
+                            if !result.is_normal() {
+                                return Ok(result);
+                            }
+                        }
+                        return Ok(result);
+                    }
+                }
+
+                // No match - return success with empty output (like bash)
+                Ok(ControlFlow::ok(ExecResult::success("")))
             }
             Stmt::Break(levels) => {
                 Ok(ControlFlow::break_n(levels.unwrap_or(1)))
@@ -987,8 +1022,6 @@ fn is_truthy(value: &Value) -> bool {
         Value::Int(i) => *i != 0,
         Value::Float(f) => *f != 0.0,
         Value::String(s) => !s.is_empty(),
-        Value::Array(a) => !a.is_empty(),
-        Value::Object(o) => !o.is_empty(),
     }
 }
 
@@ -1213,10 +1246,31 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_function_keyword_alias() {
+        let kernel = Kernel::transient().expect("failed to create kernel");
+
+        // Define using 'function' keyword (alias for 'tool')
+        kernel
+            .execute(r#"function greet name:string { echo "Hello, ${name}!" }"#)
+            .await
+            .expect("function definition failed");
+
+        // Call the function
+        let result = kernel
+            .execute(r#"greet name="World""#)
+            .await
+            .expect("function call failed");
+
+        assert!(result.ok(), "greet failed: {}", result.err);
+        assert_eq!(result.out.trim(), "Hello, World!");
+    }
+
+    #[tokio::test]
     async fn test_exec_builtin() {
         let kernel = Kernel::transient().expect("failed to create kernel");
+        // argv is now a space-separated string or JSON array string
         let result = kernel
-            .execute(r#"exec command="/bin/echo" argv=["hello", "world"]"#)
+            .execute(r#"exec command="/bin/echo" argv="hello world""#)
             .await
             .expect("exec failed");
 
@@ -1367,7 +1421,7 @@ mod tests {
                 set OUTER = 0
                 while true; do
                     set OUTER = 1
-                    for X in [1, 2]; do
+                    for X in "1 2"; do
                         break 2
                     done
                     set OUTER = 2
@@ -1768,5 +1822,190 @@ set AFTER = "yes"'"#)
 
         // Note: This test depends on whether error exit is checked within source
         // Currently our implementation checks per-statement in the main kernel
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════════
+    // Case Statement Tests
+    // ═══════════════════════════════════════════════════════════════════════════
+
+    #[tokio::test]
+    async fn test_case_simple_match() {
+        let kernel = Kernel::transient().expect("failed to create kernel");
+
+        let result = kernel
+            .execute(r#"
+                case "hello" in
+                    hello) echo "matched hello" ;;
+                    world) echo "matched world" ;;
+                esac
+            "#)
+            .await
+            .expect("case failed");
+
+        assert!(result.ok());
+        assert_eq!(result.out.trim(), "matched hello");
+    }
+
+    #[tokio::test]
+    async fn test_case_wildcard_match() {
+        let kernel = Kernel::transient().expect("failed to create kernel");
+
+        let result = kernel
+            .execute(r#"
+                case "main.rs" in
+                    "*.py") echo "Python" ;;
+                    "*.rs") echo "Rust" ;;
+                    "*") echo "Unknown" ;;
+                esac
+            "#)
+            .await
+            .expect("case failed");
+
+        assert!(result.ok());
+        assert_eq!(result.out.trim(), "Rust");
+    }
+
+    #[tokio::test]
+    async fn test_case_default_match() {
+        let kernel = Kernel::transient().expect("failed to create kernel");
+
+        let result = kernel
+            .execute(r#"
+                case "unknown.xyz" in
+                    "*.py") echo "Python" ;;
+                    "*.rs") echo "Rust" ;;
+                    "*") echo "Default" ;;
+                esac
+            "#)
+            .await
+            .expect("case failed");
+
+        assert!(result.ok());
+        assert_eq!(result.out.trim(), "Default");
+    }
+
+    #[tokio::test]
+    async fn test_case_no_match() {
+        let kernel = Kernel::transient().expect("failed to create kernel");
+
+        // Case with no default branch and no match
+        let result = kernel
+            .execute(r#"
+                case "nope" in
+                    "yes") echo "yes" ;;
+                    "no") echo "no" ;;
+                esac
+            "#)
+            .await
+            .expect("case failed");
+
+        assert!(result.ok());
+        assert!(result.out.is_empty(), "no match should produce empty output");
+    }
+
+    #[tokio::test]
+    async fn test_case_with_variable() {
+        let kernel = Kernel::transient().expect("failed to create kernel");
+
+        kernel.execute(r#"set LANG = "rust""#).await.expect("set failed");
+
+        let result = kernel
+            .execute(r#"
+                case ${LANG} in
+                    python) echo "snake" ;;
+                    rust) echo "crab" ;;
+                    go) echo "gopher" ;;
+                esac
+            "#)
+            .await
+            .expect("case failed");
+
+        assert!(result.ok());
+        assert_eq!(result.out.trim(), "crab");
+    }
+
+    #[tokio::test]
+    async fn test_case_multiple_patterns() {
+        let kernel = Kernel::transient().expect("failed to create kernel");
+
+        let result = kernel
+            .execute(r#"
+                case "yes" in
+                    "y"|"yes"|"Y"|"YES") echo "affirmative" ;;
+                    "n"|"no"|"N"|"NO") echo "negative" ;;
+                esac
+            "#)
+            .await
+            .expect("case failed");
+
+        assert!(result.ok());
+        assert_eq!(result.out.trim(), "affirmative");
+    }
+
+    #[tokio::test]
+    async fn test_case_glob_question_mark() {
+        let kernel = Kernel::transient().expect("failed to create kernel");
+
+        let result = kernel
+            .execute(r#"
+                case "test1" in
+                    "test?") echo "matched test?" ;;
+                    "*") echo "default" ;;
+                esac
+            "#)
+            .await
+            .expect("case failed");
+
+        assert!(result.ok());
+        assert_eq!(result.out.trim(), "matched test?");
+    }
+
+    #[tokio::test]
+    async fn test_case_char_class() {
+        let kernel = Kernel::transient().expect("failed to create kernel");
+
+        let result = kernel
+            .execute(r#"
+                case "Yes" in
+                    "[Yy]*") echo "yes-like" ;;
+                    "[Nn]*") echo "no-like" ;;
+                esac
+            "#)
+            .await
+            .expect("case failed");
+
+        assert!(result.ok());
+        assert_eq!(result.out.trim(), "yes-like");
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════════
+    // Read Builtin Tests
+    // ═══════════════════════════════════════════════════════════════════════════
+
+    #[tokio::test]
+    async fn test_read_from_pipeline() {
+        let kernel = Kernel::transient().expect("failed to create kernel");
+
+        // Pipe input to read
+        let result = kernel
+            .execute(r#"echo "Alice" | read NAME; echo "Hello, ${NAME}""#)
+            .await
+            .expect("read pipeline failed");
+
+        assert!(result.ok(), "read failed: {}", result.err);
+        assert!(result.out.contains("Hello, Alice"), "output: {}", result.out);
+    }
+
+    #[tokio::test]
+    async fn test_read_multiple_vars_from_pipeline() {
+        let kernel = Kernel::transient().expect("failed to create kernel");
+
+        let result = kernel
+            .execute(r#"echo "John Doe 42" | read FIRST LAST AGE; echo "${FIRST} is ${AGE}""#)
+            .await
+            .expect("read pipeline failed");
+
+        assert!(result.ok(), "read failed: {}", result.err);
+        assert!(result.out.contains("John is 42"), "output: {}", result.out);
     }
 }

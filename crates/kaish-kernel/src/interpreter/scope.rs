@@ -7,7 +7,7 @@
 
 use std::collections::HashMap;
 
-use crate::ast::{Expr, Value, VarPath, VarSegment};
+use crate::ast::{Value, VarPath, VarSegment};
 
 use super::result::ExecResult;
 
@@ -139,9 +139,10 @@ impl Scope {
         self.error_exit = enabled;
     }
 
-    /// Resolve a variable path like `${VAR.field[0].nested}`.
+    /// Resolve a variable path like `${VAR}` or `${?.field}`.
     ///
     /// Returns None if the path cannot be resolved.
+    /// Field access is only supported for the special `$?` variable.
     pub fn resolve_path(&self, path: &VarPath) -> Option<Value> {
         if path.segments.is_empty() {
             return None;
@@ -150,76 +151,43 @@ impl Scope {
         // Get the root variable name
         let root_name = match &path.segments[0] {
             VarSegment::Field(name) => name,
-            VarSegment::Index(_) => return None, // Path must start with a name
         };
 
         // Special case: $? (last result)
-        let root_value = if root_name == "?" {
-            // $? returns the full result as an object, but we handle
-            // field access specially in the remaining path resolution
+        if root_name == "?" {
             return self.resolve_result_path(&path.segments[1..]);
-        } else {
-            self.get(root_name)?.clone()
-        };
+        }
 
-        // Resolve remaining path segments
-        self.resolve_value_path(root_value, &path.segments[1..])
+        // For regular variables, only simple access is supported
+        if path.segments.len() > 1 {
+            return None; // No nested field access for regular variables
+        }
+
+        self.get(root_name).cloned()
     }
 
     /// Resolve path segments on the last result ($?).
     ///
     /// `$?` alone returns the exit code as an integer (0-255).
-    /// For structured result access, use command substitution: `RESULT=$(cmd); ${RESULT.field}`
+    /// `${?.code}`, `${?.ok}`, `${?.out}`, `${?.err}` access specific fields.
     fn resolve_result_path(&self, segments: &[VarSegment]) -> Option<Value> {
         if segments.is_empty() {
             // $? alone returns just the exit code as an integer (bash-compatible)
             return Some(Value::Int(self.last_result.code));
         }
 
-        // Allow ${?.code}, ${?.ok}, etc. for backward compatibility (but $? alone is int)
+        // Allow ${?.code}, ${?.ok}, etc.
         let field_name = match &segments[0] {
             VarSegment::Field(name) => name,
-            VarSegment::Index(_) => return None,
         };
 
+        // Only single-level field access on $?
+        if segments.len() > 1 {
+            return None;
+        }
+
         // Get the field value from the result
-        let field_value = self.last_result.get_field(field_name)?;
-
-        // Continue resolving remaining segments
-        self.resolve_value_path(field_value, &segments[1..])
-    }
-
-    /// Resolve path segments on a value.
-    fn resolve_value_path(&self, value: Value, segments: &[VarSegment]) -> Option<Value> {
-        if segments.is_empty() {
-            return Some(value);
-        }
-
-        let next_value = match (&value, &segments[0]) {
-            // Object field access: ${obj.field}
-            (Value::Object(fields), VarSegment::Field(name)) => {
-                fields
-                    .iter()
-                    .find(|(k, _)| k == name)
-                    .and_then(|(_, expr)| self.expr_to_value(expr))
-            }
-            // Array index: ${arr[0]}
-            (Value::Array(items), VarSegment::Index(idx)) => {
-                items.get(*idx).and_then(|expr| self.expr_to_value(expr))
-            }
-            // Cannot index into other types
-            _ => None,
-        }?;
-
-        self.resolve_value_path(next_value, &segments[1..])
-    }
-
-    /// Convert an Expr to a Value (only for literals).
-    fn expr_to_value(&self, expr: &Expr) -> Option<Value> {
-        match expr {
-            Expr::Literal(v) => Some(v.clone()),
-            _ => None, // Other expr types need evaluation
-        }
+        self.last_result.get_field(field_name)
     }
 
     /// Check if a variable exists in any frame.
@@ -317,82 +285,6 @@ mod tests {
     }
 
     #[test]
-    fn resolve_object_field() {
-        let mut scope = Scope::new();
-        scope.set(
-            "USER",
-            Value::Object(vec![
-                ("name".into(), Expr::Literal(Value::String("Bob".into()))),
-                ("age".into(), Expr::Literal(Value::Int(30))),
-            ]),
-        );
-
-        let path = VarPath {
-            segments: vec![
-                VarSegment::Field("USER".into()),
-                VarSegment::Field("name".into()),
-            ],
-        };
-        assert_eq!(
-            scope.resolve_path(&path),
-            Some(Value::String("Bob".into()))
-        );
-    }
-
-    #[test]
-    fn resolve_array_index() {
-        let mut scope = Scope::new();
-        scope.set(
-            "ITEMS",
-            Value::Array(vec![
-                Expr::Literal(Value::String("first".into())),
-                Expr::Literal(Value::String("second".into())),
-            ]),
-        );
-
-        let path = VarPath {
-            segments: vec![
-                VarSegment::Field("ITEMS".into()),
-                VarSegment::Index(1),
-            ],
-        };
-        assert_eq!(
-            scope.resolve_path(&path),
-            Some(Value::String("second".into()))
-        );
-    }
-
-    #[test]
-    fn resolve_nested_path() {
-        let mut scope = Scope::new();
-        scope.set(
-            "DATA",
-            Value::Object(vec![(
-                "users".into(),
-                Expr::Literal(Value::Array(vec![
-                    Expr::Literal(Value::Object(vec![
-                        ("name".into(), Expr::Literal(Value::String("Alice".into()))),
-                    ])),
-                ])),
-            )]),
-        );
-
-        // ${DATA.users[0].name}
-        let path = VarPath {
-            segments: vec![
-                VarSegment::Field("DATA".into()),
-                VarSegment::Field("users".into()),
-                VarSegment::Index(0),
-                VarSegment::Field("name".into()),
-            ],
-        };
-        assert_eq!(
-            scope.resolve_path(&path),
-            Some(Value::String("Alice".into()))
-        );
-    }
-
-    #[test]
     fn resolve_last_result_ok() {
         let mut scope = Scope::new();
         scope.set_last_result(ExecResult::success("output"));
@@ -425,15 +317,21 @@ mod tests {
         let mut scope = Scope::new();
         scope.set_last_result(ExecResult::success(r#"{"count": 5}"#));
 
-        // ${?.data.count}
+        // ${?.data} - only single-level field access is supported on $?
         let path = VarPath {
             segments: vec![
                 VarSegment::Field("?".into()),
                 VarSegment::Field("data".into()),
-                VarSegment::Field("count".into()),
             ],
         };
-        assert_eq!(scope.resolve_path(&path), Some(Value::Int(5)));
+        // data is now a JSON string, not a nested object
+        let result = scope.resolve_path(&path);
+        assert!(result.is_some());
+        if let Some(Value::String(s)) = result {
+            assert!(s.contains("count"));
+        } else {
+            panic!("expected string data");
+        }
     }
 
     #[test]
@@ -446,23 +344,6 @@ mod tests {
             segments: vec![
                 VarSegment::Field("X".into()),
                 VarSegment::Field("invalid".into()),
-            ],
-        };
-        assert_eq!(scope.resolve_path(&path), None);
-    }
-
-    #[test]
-    fn resolve_out_of_bounds_index_returns_none() {
-        let mut scope = Scope::new();
-        scope.set(
-            "ARR",
-            Value::Array(vec![Expr::Literal(Value::Int(1))]),
-        );
-
-        let path = VarPath {
-            segments: vec![
-                VarSegment::Field("ARR".into()),
-                VarSegment::Index(99),
             ],
         };
         assert_eq!(scope.resolve_path(&path), None);

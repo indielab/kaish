@@ -121,7 +121,9 @@ impl Default for ExecResult {
     }
 }
 
-/// Convert serde_json::Value to our AST Value type.
+/// Convert serde_json::Value to our AST Value.
+///
+/// Arrays and objects are stringified - use `jq` to extract values.
 fn json_to_value(json: serde_json::Value) -> Value {
     match json {
         serde_json::Value::Null => Value::Null,
@@ -136,15 +138,9 @@ fn json_to_value(json: serde_json::Value) -> Value {
             }
         }
         serde_json::Value::String(s) => Value::String(s),
-        serde_json::Value::Array(arr) => {
-            Value::Array(arr.into_iter().map(|v| crate::ast::Expr::Literal(json_to_value(v))).collect())
-        }
-        serde_json::Value::Object(obj) => {
-            Value::Object(
-                obj.into_iter()
-                    .map(|(k, v)| (k, crate::ast::Expr::Literal(json_to_value(v))))
-                    .collect(),
-            )
+        // Arrays and objects are stored as JSON strings
+        serde_json::Value::Array(_) | serde_json::Value::Object(_) => {
+            Value::String(json.to_string())
         }
     }
 }
@@ -161,32 +157,6 @@ pub fn value_to_json(value: &Value) -> serde_json::Value {
                 .unwrap_or(serde_json::Value::Null)
         }
         Value::String(s) => serde_json::Value::String(s.clone()),
-        Value::Array(arr) => {
-            serde_json::Value::Array(
-                arr.iter()
-                    .filter_map(|e| {
-                        if let crate::ast::Expr::Literal(v) = e {
-                            Some(value_to_json(v))
-                        } else {
-                            None
-                        }
-                    })
-                    .collect(),
-            )
-        }
-        Value::Object(obj) => {
-            serde_json::Value::Object(
-                obj.iter()
-                    .filter_map(|(k, e)| {
-                        if let crate::ast::Expr::Literal(v) = e {
-                            Some((k.clone(), value_to_json(v)))
-                        } else {
-                            None
-                        }
-                    })
-                    .collect(),
-            )
-        }
     }
 }
 
@@ -213,14 +183,12 @@ mod tests {
 
     #[test]
     fn json_stdout_is_parsed() {
+        // JSON objects/arrays are stored as JSON strings
         let result = ExecResult::success(r#"{"count": 42, "items": ["a", "b"]}"#);
         assert!(result.data.is_some());
         let data = result.data.unwrap();
-        if let Value::Object(fields) = data {
-            assert_eq!(fields.len(), 2);
-        } else {
-            panic!("expected object");
-        }
+        // Objects are stored as stringified JSON
+        assert!(matches!(data, Value::String(_)));
     }
 
     #[test]
@@ -265,9 +233,7 @@ mod tests {
 
     #[test]
     fn success_data_creates_result_with_value() {
-        let value = Value::Object(vec![
-            ("name".into(), crate::ast::Expr::Literal(Value::String("test".into()))),
-        ]);
+        let value = Value::String("test data".into());
         let result = ExecResult::success_data(value.clone());
         assert!(result.ok());
         assert_eq!(result.data, Some(value));
