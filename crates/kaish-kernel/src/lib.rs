@@ -12,7 +12,9 @@
 //! - **MCP**: Model Context Protocol client for external tools
 //! - **State**: SQLite-backed persistence for kernel state
 
+pub mod arithmetic;
 pub mod ast;
+pub mod glob;
 pub mod interpreter;
 pub mod kernel;
 pub mod lexer;
