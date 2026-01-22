@@ -71,64 +71,198 @@ tool summarize url:string max_words:int=200 {
 # $ kaish serve my-tools.kai --stdio
 ```
 
-## What Works
+---
 
-| Feature | Status | Notes |
-|---------|--------|-------|
-| Variables | ✅ | `VAR=value`, `local VAR=value` |
-| Expansion | ✅ | `$VAR`, `${VAR}`, `${?.field}` (exit status fields) |
-| Parameter expansion | ✅ | `${VAR:-default}`, `${#VAR}` |
-| Single quotes | ✅ | Literal strings, no interpolation |
-| Double quotes | ✅ | Interpolation with `$VAR` |
-| Test expressions | ✅ | `[[ -f file ]]`, `[[ $X == "y" ]]` |
-| Control flow | ✅ | `if/elif/else/fi`, `for/do/done`, `while/do/done` |
-| Control statements | ✅ | `break`, `continue`, `return`, `exit` |
-| Chaining | ✅ | `&&`, `||` |
-| Positional params | ✅ | `$0`-`$9`, `$@`, `$#` |
-| Flags | ✅ | `-l`, `--force`, `--message="x"` |
-| Pipes & redirects | ✅ | `|`, `>`, `>>`, `<`, `2>`, `&>` |
-| Background jobs | ✅ | `&`, `jobs`, `wait`, `fg` |
-| Script sourcing | ✅ | `source file.kai`, `. file.kai` |
-| Error mode | ✅ | `set -e` (exit on error) |
-| Scatter/gather | ✅ | `散/集` parallelism |
-| MCP integration | ✅ | Call MCP tools, export scripts as servers |
+## Language Reference
 
-## What's Intentionally Missing
+### Variables & Data Types
 
-These bash features are omitted because they're confusing, error-prone, or ambiguous:
+```bash
+# Assignment - bash style (no spaces around =)
+NAME="value"
+local NAME="value"              # local scope
 
-- Arithmetic `$(( ))` — use tools for math (SC2004)
-- Brace expansion `{a,b,c}` — just write it out (SC1083)
-- Glob expansion `*.txt` — tools handle their own patterns (SC2035)
-- Here-docs `<<EOF` — use files or strings
-- Process substitution `<(cmd)` — use temp files
-- Backtick substitution `` `cmd` `` — use `$(cmd)` (SC2006)
-- Single bracket tests `[ ]` — use `[[ ]]` (SC2039)
-- Aliases, `eval` — explicit is better
-- Complex data types — JSON strings + `jq` instead
+# Data types
+COUNT=42                        # integer
+PI=3.14159                      # float (extension)
+ENABLED=true                    # boolean (extension)
+ITEMS="one two three"           # string (space-separated for iteration)
+DATA='{"key": "value"}'         # JSON stored as string
 
-## Beyond Bourne
+# Both $VAR and ${VAR} work
+echo $NAME
+echo ${NAME}
+echo "${NAME} more text"
+```
 
-Kaish extends Bourne shell with features designed for modern tool orchestration.
+**Why floats?** MCP tools return JSON, which has floats. Kaish supports them natively.
 
-**Design principle:** If ShellCheck would warn about it in bash, kaish doesn't have that feature. This eliminates entire classes of bugs:
-- No word splitting → SC2086, SC2046 warnings impossible
-- No glob expansion → SC2035, SC2144 warnings impossible
-- No backticks → SC2006 warnings impossible
+**Why strict booleans?** Only `true`/`false` are valid. `TRUE`, `Yes`, `1` are errors — catches AI generation mistakes early.
 
-See [docs/SHELLCHECK.md](docs/SHELLCHECK.md) for the full mapping.
+### Parameter Expansion
 
-| Feature | POSIX/Bourne | Kaish | Rationale |
-|---------|--------------|-------|-----------|
-| **Floats** | ❌ Integer only | ✅ Native `3.14` | MCP tools return JSON with floats |
-| **Booleans** | ❌ Exit codes | ✅ Native `true`/`false` | JSON interop, clearer conditions |
-| **JSON strings** | ❌ | ✅ `'{"key": "value"}'` | Store JSON, process with `jq` |
-| **Typed params** | ❌ | ✅ `name:string` | Tool definitions with validation |
-| **Scatter/gather** | ❌ | ✅ `散/集` | Built-in parallelism |
-| **VFS** | ❌ | ✅ `/mcp/`, `/scratch/` | Unified resource access |
-| **Ambiguity errors** | ❌ Guesses | ✅ Rejects `TRUE`, `yes`, `123abc` | Agent-friendly, fail-fast |
+```bash
+NAME=${NAME:-"default"}         # use "default" if NAME unset or empty
+echo ${#NAME}                   # string length
 
-**For AI agents**: Kaish validates inputs strictly. `TRUE` and `yes` are errors (use `true`), `123abc` is rejected, `.5` requires `0.5`. This prevents common generation mistakes from silently succeeding.
+# Positional parameters
+echo $0                         # script/tool name
+echo $1 $2 $3                   # first three args
+echo $@                         # all args
+echo $#                         # arg count
+echo $?                         # exit code of last command (0-255)
+```
+
+### Quoting
+
+```bash
+# Double quotes - interpolation works
+echo "hello $NAME"
+echo "line\nbreak"              # escapes: \n \t \\ \"
+echo "literal \$X"              # escaped = no interpolation
+
+# Single quotes - literal strings, no interpolation
+echo 'hello $NAME'              # prints: hello $NAME
+```
+
+### Arguments
+
+```bash
+# Positional
+echo "hello" "world"
+
+# Named (key=value, no spaces)
+tool arg1="value" count=10 enabled=true
+
+# Flags
+ls -l                           # short flag
+ls -la                          # combined short flags
+git commit -m "message"         # short flag with value
+git push --force                # long flag
+curl --header="Content-Type: json"  # long flag with value
+```
+
+### Pipes & Redirects
+
+```bash
+tool-a | tool-b | tool-c        # pipe stdout → stdin
+tool > file                     # redirect stdout
+tool >> file                    # append stdout
+tool < file                     # stdin from file
+tool 2> file                    # redirect stderr
+tool &> file                    # stdout + stderr
+```
+
+### Statement Chaining
+
+```bash
+cmd1 && cmd2                    # run cmd2 only if cmd1 succeeds
+cmd1 || cmd2                    # run cmd2 only if cmd1 fails
+mkdir /tmp/work && cd /tmp/work && init-project
+```
+
+### Test Expressions
+
+```bash
+# File tests
+[[ -f /path/file ]]             # is file
+[[ -d /path/dir ]]              # is directory
+[[ -e /path/any ]]              # exists
+[[ -r /path/file ]]             # readable
+[[ -w /path/file ]]             # writable
+[[ -x /path/file ]]             # executable
+
+# String tests
+[[ -z $VAR ]]                   # empty
+[[ -n $VAR ]]                   # non-empty
+
+# Comparisons
+[[ $X == "value" ]]             # equality
+[[ $X != "other" ]]             # inequality
+[[ $NUM -gt 5 ]]                # greater than
+[[ $NUM -lt 10 ]]               # less than
+[[ $NUM -ge 5 ]]                # greater or equal
+[[ $NUM -le 10 ]]               # less or equal
+[[ $filename =~ "\.rs$" ]]      # regex match
+[[ $input !~ "^[0-9]+$" ]]      # regex not match
+```
+
+Note: `[ ]` (single brackets) is not supported — use `[[ ]]` for all tests.
+
+### Control Flow
+
+```bash
+# Conditional
+if CONDITION; then
+    ...
+elif OTHER_CONDITION; then
+    ...
+else
+    ...
+fi
+
+# For loop
+for ITEM in "one two three"; do
+    process $ITEM
+done
+
+# While loop
+while CONDITION; do
+    ...
+done
+
+# Case statement
+case $VAR in
+    hello) echo "matched hello" ;;
+    "*.rs") echo "Rust file" ;;
+    "y"|"yes") echo "yes" ;;
+    "*") echo "default" ;;
+esac
+
+# Control statements
+break                           # exit innermost loop
+break 2                         # exit 2 levels
+continue                        # skip to next iteration
+return                          # return from tool
+return 1                        # return with exit code
+exit                            # exit script
+exit 1                          # exit with code
+```
+
+### Command Substitution
+
+```bash
+NOW=$(date)
+echo "Current time: $NOW"
+
+RESULT=$(process $(fetch $URL))  # nested
+```
+
+### Error Handling
+
+```bash
+set -e                          # exit on first error
+
+some-command || {
+    echo "Command failed"
+    exit 1
+}
+
+source utils.kai                # load utilities
+. config.kai                    # dot notation also works
+```
+
+### Background Jobs
+
+```bash
+slow-task &                     # run in background
+jobs                            # list jobs
+fg %1                           # foreground
+wait                            # wait for all
+wait %1 %2                      # wait for specific
+```
+
+---
 
 ## 散・集 (San/Shū) — Scatter/Gather
 
@@ -173,6 +307,28 @@ $ kaish serve my-tools.kai --stdio
 
 Now Claude Code (or any MCP client) can call your user-defined tools directly.
 
+---
+
+## User-Defined Tools
+
+```bash
+# Define a tool with typed parameters
+tool fetch-and-summarize url:string max_length:int=500 {
+    fetch url=$url > /scratch/content
+    summarize input=- length=$max_length < /scratch/content
+}
+
+# Or use 'function' keyword (bash-compatible alias)
+function greet name:string {
+    echo "Hello, ${name}!"
+}
+
+# Type annotations: string, int, float, bool
+# Default values with =
+```
+
+---
+
 ## Builtin Tools
 
 | Tool | Description |
@@ -203,6 +359,66 @@ Now Claude Code (or any MCP client) can call your user-defined tools directly.
 | `history` | Show execution history |
 | `checkpoints` | List checkpoints |
 
+---
+
+## What's Intentionally Missing
+
+These bash features are omitted because they're confusing, error-prone, or ambiguous:
+
+| Feature | Reason | ShellCheck |
+|---------|--------|------------|
+| Arithmetic `$(( ))` | Use tools for math | SC2004 |
+| Brace expansion `{a,b,c}` | Just write it out | SC1083 |
+| Glob expansion `*.txt` | Tools handle their own patterns | SC2035 |
+| Here-docs `<<EOF` | Use files or strings | — |
+| Process substitution `<(cmd)` | Use temp files | — |
+| Backtick substitution `` `cmd` `` | Use `$(cmd)` | SC2006 |
+| Single bracket tests `[ ]` | Use `[[ ]]` | SC2039 |
+| Aliases, `eval` | Explicit is better | SC2091 |
+| `2>&1` fd duplication | Use `&>` for combined output | SC2069 |
+
+---
+
+## ShellCheck Alignment
+
+**The Bourne-compatible subset of kaish passes `shellcheck --enable=all`.**
+
+Features that ShellCheck warns about (word splitting, glob expansion, backticks) don't exist in kaish. This eliminates entire classes of bugs at the language level.
+
+### Warnings Impossible to Trigger
+
+| SC Code | Warning | Kaish Approach |
+|---------|---------|----------------|
+| SC2006 | Use `$()` instead of backticks | Backticks don't exist |
+| SC2086 | Double quote to prevent word splitting | No word splitting |
+| SC2046 | Quote this to prevent word splitting | `$(cmd)` returns single value |
+| SC2035 | Use `./*` so globs don't expand | No glob expansion |
+| SC2039 | Use `[[ ]]` in POSIX sh | Only `[[ ]]` exists |
+| SC1083 | Escape literal braces | No brace expansion |
+
+### Why This Matters
+
+**For humans:** Skills transfer from bash. Features ShellCheck warns against don't exist.
+
+**For AI agents:** Can't generate word-splitting bugs. Strict validation catches mistakes early.
+
+**Extensions are explicit:** Floats, typed params, scatter/gather, MCP tools — clearly distinct syntax, outside ShellCheck's scope.
+
+---
+
+## Beyond Bourne
+
+| Feature | POSIX/Bourne | Kaish | Rationale |
+|---------|--------------|-------|-----------|
+| **Floats** | Integer only | Native `3.14` | MCP tools return JSON with floats |
+| **Booleans** | Exit codes | Native `true`/`false` | JSON interop, clearer conditions |
+| **Typed params** | None | `name:string` | Tool definitions with validation |
+| **Scatter/gather** | None | `散/集` | Built-in parallelism |
+| **VFS** | None | `/mcp/`, `/scratch/` | Unified resource access |
+| **Strict validation** | Guesses | Rejects `TRUE`, `yes`, `123abc` | Agent-friendly, fail-fast |
+
+---
+
 ## Architecture
 
 ```
@@ -230,11 +446,11 @@ Now Claude Code (or any MCP client) can call your user-defined tools directly.
 └─────────────────────────────────────────────────────────────────────┘
 ```
 
-The 核 (kaku/kernel) is the unit of execution. Frontends (REPL, script runner, MCP server) connect via:
+The 核 (kaku/kernel) is the unit of execution. Frontends connect via:
 - **Embedded** — direct in-process (for Kaijutsu)
 - **IPC** — Unix sockets with Cap'n Proto RPC
 
-State is persisted in SQLite (WAL mode) for crash recovery and incremental updates.
+State is persisted in SQLite (WAL mode) for crash recovery.
 
 ## Status
 
@@ -242,12 +458,8 @@ State is persisted in SQLite (WAL mode) for crash recovery and incremental updat
 
 ## Documentation
 
-- [Language Specification](docs/LANGUAGE.md) — syntax, semantics, examples
-- [Formal Grammar](docs/GRAMMAR.md) — EBNF, ambiguity analysis, test categories
-- [ShellCheck Alignment](docs/SHELLCHECK.md) — SC code mapping, design rationale
+- [Formal Grammar](docs/GRAMMAR.md) — EBNF, ambiguity analysis
 - [Architecture](docs/ARCHITECTURE.md) — 核 design, crate structure, protocols
-- [Build Plan](docs/BUILD.md) — 14-layer bottom-up implementation
-- [Testing Strategy](docs/TESTING.md) — 10:1 test-to-feature ratio target
 - [漢字 Reference](docs/kanji.md) — kanji vocabulary for the project
 - [Examples](examples/) — annotated scripts
 

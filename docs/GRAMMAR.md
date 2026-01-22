@@ -170,7 +170,7 @@ var_ref     = "${" , var_path , "}"                  (* ${VAR}, ${VAR.field}, ${
             | "$#"                                   (* arg count *)
             ;
 
-var_path    = IDENT , { "." , IDENT } ;  (* only $? supports field access *)
+var_path    = IDENT ;
 POSITIONAL  = "0" | "1" | "2" | "3" | "4" | "5" | "6" | "7" | "8" | "9" ;
 
 (* Parameter expansion *)
@@ -493,38 +493,3 @@ echo "this is a very long" \
 
 The lexer produces a `LINECONT` token which is skipped, merging the lines.
 
----
-
-## Deferred Features
-
-Explicitly not in v0.1, designed for future addition:
-
-### Arithmetic Expansion
-
-Not currently supported. Use tools for math:
-```bash
-# NOT: $((x + 1))
-# Instead:
-RESULT=$(math "$X + 1")
-```
-
-### Case Statements
-
-May be added for pattern matching:
-```bash
-case $VAR in
-    pattern1) commands ;;
-    pattern2) commands ;;
-    *) default ;;
-esac
-```
-
-### Here-docs
-
-Multi-line string input:
-```bash
-cat <<EOF
-multi-line
-content
-EOF
-```

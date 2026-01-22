@@ -23,8 +23,8 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 The Bourne-compatible subset of kaish should pass `shellcheck --enable=all`.
 When implementing features, verify they don't introduce constructs ShellCheck
-would warn about. Extensions (floats, objects, MCP tools) are outside
-ShellCheck's scope and clearly marked.
+would warn about. Extensions (floats, typed params, MCP tools, scatter/gather)
+are outside ShellCheck's scope and clearly marked.
 
 ## Build Commands
 
@@ -116,9 +116,6 @@ crates/
 └── kaish-mcp/       # MCP server frontend
 ```
 
-### Build Strategy
-
-See `docs/BUILD.md` for the 14-layer bottom-up implementation plan. All layers are complete.
 
 ## Language Key Points
 
@@ -148,7 +145,7 @@ See `docs/BUILD.md` for the 14-layer bottom-up implementation plan. All layers a
 
 ### What's Intentionally Missing
 
-Arithmetic `$(( ))`, brace expansion `{a,b,c}`, glob expansion `*.txt`, here-docs `<<EOF`, process substitution `<(cmd)`, backticks, aliases, `eval`, arrays of arrays
+Arithmetic `$(( ))`, brace expansion `{a,b,c}`, glob expansion `*.txt`, here-docs `<<EOF`, process substitution `<(cmd)`, backticks, aliases, `eval`
 
 ## Testing Strategy
 
@@ -163,12 +160,9 @@ Test files in `tests/`:
 
 | File | Purpose |
 |------|---------|
-| `docs/LANGUAGE.md` | Full language specification |
+| `README.md` | Language reference, syntax, builtins, ShellCheck alignment |
 | `docs/GRAMMAR.md` | EBNF grammar, ambiguity analysis |
-| `docs/SHELLCHECK.md` | ShellCheck alignment, SC code mapping |
 | `docs/ARCHITECTURE.md` | Kernel design, crate structure, protocols |
-| `docs/BUILD.md` | Layered build plan, dependencies |
-| `docs/TESTING.md` | Testing strategy and requirements |
 | `docs/kanji.md` | Kanji vocabulary for the project |
 
 ## Schema Files

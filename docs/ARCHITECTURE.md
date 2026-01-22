@@ -470,9 +470,8 @@ pub enum Value {
     Int(i64),
     Float(f64),
     Bool(bool),
-    Array(Vec<Value>),
-    Object(BTreeMap<String, Value>),
-    VarRef(VarPath),               // ${foo.bar[0]}
+    Null,
+    VarRef(String),                // $VAR or ${VAR}
     Interpolated(Vec<StringPart>), // "hello ${name}"
 }
 
@@ -729,15 +728,3 @@ kaish context-emit --format=openai --include=/mnt/project --since=checkpoint:lat
 
 This is the mechanism by which AI "attaches" to a kernel — context is generated fresh from kernel state + VFS, not stored.
 
-## Next Steps
-
-1. **Bootstrap**: `cargo new kaish`, set up workspace
-2. **Lexer**: Define tokens with logos
-3. **Parser**: AST types, basic grammar with chumsky
-4. **Minimal interpreter**: Variable assignment, echo, simple pipes
-5. **VFS**: Memory backend, mount routing
-6. **Builtins**: ls, cat, grep with VFS
-7. **MCP integration**: Client wrapper, tool discovery
-8. **Scatter/gather**: The 会 magic
-9. **Server mode**: MCP export
-10. **REPL**: Line editing, history, 会sh> prompt
