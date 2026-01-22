@@ -16,8 +16,18 @@ Part of the Kaijutsu (会術) project — the art of gathering.
 - **Bourne-lite** — familiar syntax, no surprises
 - **Everything is a tool** — builtins and MCP tools use identical syntax
 - **Predictable over powerful** — no dark corners
+- **ShellCheck-clean** — the Bourne subset passes `shellcheck --enable=all`
 - **Agent-friendly** — easy to generate, parse, validate
 - **Fail fast** — ambiguity is an error, not a guess
+
+### ShellCheck Alignment
+
+Kaish's Bourne subset is designed to pass `shellcheck --enable=all`. Features
+that ShellCheck warns about (word splitting, glob expansion, backticks) are
+not implemented. This means code that parses in kaish won't trigger ShellCheck
+warnings when the Bourne-compatible subset is extracted.
+
+See [SHELLCHECK.md](SHELLCHECK.md) for detailed rule mapping.
 
 ## Syntax
 
@@ -36,18 +46,17 @@ local NAME="value"
 echo $NAME                          # simple expansion
 echo ${NAME}                        # braced expansion (equivalent)
 echo "${NAME} more text"            # interpolation in strings
-echo ${OBJ.key}                     # nested access (braces required for paths)
-echo ${LIST[0]}                     # array index (braces required)
 ```
 
 ### Data Types
 
-Kaish has first-class support for JSON-compatible data types:
+Kaish has simple, JSON-compatible data types:
 
 ```bash
 # Strings
 NAME="hello"
 PATH='/literal/path'
+ITEMS="one two three"               # space-separated for iteration
 
 # Integers
 COUNT=42
@@ -63,17 +72,15 @@ ENABLED=true
 DEBUG=false
 # TRUE, True, yes, Yes, no, No → ERROR (ambiguous)
 
-# Arrays
-ITEMS=[1, 2, 3]
-MIXED=["a", 42, true]
-
-# Objects
-CONFIG={host: "localhost", port: 8080}
-NESTED={user: {name: "amy", roles: ["admin"]}}
-
 # Null
 EMPTY=null
+
+# JSON (stored as strings, processed with jq)
+DATA='{"name": "alice", "count": 42}'
+NAME=$(echo $DATA | jq -r '.name')
 ```
+
+**Why not arrays/objects?** MCP tools return JSON which is stored as strings and processed with `jq`. This follows the familiar `curl | jq` pattern. For complex data manipulation, use Rhai scripts.
 
 **Why floats?** MCP tools return JSON, which has floats. Rather than force string conversion everywhere, kaish supports them natively. The lexer validates strictly: `.5` and `5.` are errors (use `0.5` and `5.0`).
 
@@ -220,15 +227,29 @@ else
     ...
 fi
 
-# For loop
-for ITEM in $LIST; do
+# For loop (POSIX word-splitting)
+for ITEM in "one two three"; do      # iterates over: one, two, three
     process $ITEM
+done
+
+# Or with variables
+ITEMS="alpha beta gamma"
+for ITEM in $ITEMS; do
+    echo $ITEM
 done
 
 # While loop
 while CONDITION; do
     ...
 done
+
+# Case statement (pattern matching)
+case $VAR in
+    hello) echo "matched hello" ;;
+    "*.rs") echo "Rust file" ;;    # glob patterns in quotes
+    "y"|"yes") echo "yes" ;;       # multiple patterns
+    "*") echo "default" ;;         # wildcard default
+esac
 
 # Control statements
 break                               # exit innermost loop
@@ -241,7 +262,7 @@ exit                                # exit script (exit code 0)
 exit 1                              # exit with specific code
 ```
 
-No `case`. No `select`. No arithmetic `(( ))`.
+No `select`. No arithmetic `(( ))`.
 
 ### Comparison Operators
 
@@ -381,23 +402,23 @@ filesystem.read path="/etc/hosts"
 
 These bash features are omitted because they're confusing, error-prone, or ambiguous:
 
-| Feature | Reason |
-|---------|--------|
-| Arithmetic `$(( ))` | Use tools for math |
-| Brace expansion `{a,b,c}` | Just write it out |
-| Glob expansion `*.txt` | Tools handle their own patterns |
-| Here-docs `<<EOF` | Use files or strings |
-| Process substitution `<(cmd)` | Use temp files |
-| Backtick substitution `` `cmd` `` | Use `$(cmd)` |
-| Single bracket tests `[ ]` | Use `[[ ]]` |
-| Aliases | Explicit is better |
-| `eval` | Security and predictability |
-| Arrays of arrays | Keep it simple |
-| `2>&1` fd duplication | Just use `&>` for combined output |
+| Feature | Reason | ShellCheck |
+|---------|--------|------------|
+| Arithmetic `$(( ))` | Use tools for math | SC2004 |
+| Brace expansion `{a,b,c}` | Just write it out | SC1083 |
+| Glob expansion `*.txt` | Tools handle their own patterns | SC2035 |
+| Here-docs `<<EOF` | Use files or strings | — |
+| Process substitution `<(cmd)` | Use temp files | — |
+| Backtick substitution `` `cmd` `` | Use `$(cmd)` | SC2006 |
+| Single bracket tests `[ ]` | Use `[[ ]]` | SC2039 |
+| Aliases | Explicit is better | — |
+| `eval` | Security and predictability | SC2091 |
+| Arrays of arrays | Keep it simple | — |
+| `2>&1` fd duplication | Just use `&>` for combined output | SC2069 |
 
 ## User-Defined Tools
 
-Tools can be defined in scripts and **re-exported over MCP**:
+Tools can be defined in scripts and **re-exported over MCP**. The `function` keyword can be used as an alias for `tool` (for bash users):
 
 ```bash
 # Define a tool with typed parameters
@@ -406,13 +427,18 @@ tool fetch-and-summarize url:string max_length:int=500 {
     summarize input=- length=$max_length < /scratch/content
 }
 
+# Or use 'function' keyword (bash-compatible alias)
+function greet name:string {
+    echo "Hello, ${name}!"
+}
+
 # Use it locally
 fetch-and-summarize url="https://example.com"
 
 # Or export the script as an MCP server (see below)
 ```
 
-Type annotations: `string`, `int`, `float`, `bool`, `array`, `object`
+Type annotations: `string`, `int`, `float`, `bool`
 Default values with `=`.
 
 ### MCP Export (The Prestige ✨)
@@ -471,4 +497,5 @@ Explicitly not in v0.1, may add later:
 - Here-docs `<<EOF`
 - Glob expansion in paths
 - Process substitution `<(cmd)`
-- Object destructuring in scatter (`scatter as={id, url}`)
+- Arithmetic expansion `$(( ))`
+- `case` statements

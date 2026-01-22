@@ -12,12 +12,19 @@ This document defines kaish syntax in a way that's:
 ```bash
 NAME="value"           # assignment (bash-style)
 local NAME="value"     # scoped assignment
-tool NAME ...          # tool def starts with 'tool'
+tool NAME ...          # tool def starts with 'tool' or 'function'
 if COND ...            # conditional starts with 'if'
 while COND ...         # while loop starts with 'while'
 for VAR ...            # for loop starts with 'for'
 IDENT ...              # command starts with identifier
 ```
+
+**ShellCheck Validation:** The grammar is designed so that valid kaish code
+(excluding extensions) would pass `shellcheck --enable=all`. Constructs that
+trigger ShellCheck warnings are not part of the grammar:
+- No unquoted variable expansion contexts that could word-split
+- No glob-sensitive contexts
+- No deprecated syntax (backticks, single-bracket tests)
 
 ### 2. Explicit Delimiters
 
@@ -65,6 +72,7 @@ base_statement = set_command                          (* set -e, set +e *)
                | if_stmt
                | for_stmt
                | while_stmt
+               | case_stmt
                | control_stmt
                | test_expr_stmt                       (* [[ ... ]] as statement *)
                | pipeline
@@ -89,7 +97,7 @@ assignment  = IDENT , "=" , value                    (* NAME="value" - no spaces
             | "set" , IDENT , "=" , value            (* set NAME = value - legacy form *)
             ;
 
-tool_def    = "tool" , IDENT , { param_def } , "{" , { statement } , "}" ;
+tool_def    = ( "tool" | "function" ) , IDENT , { param_def } , "{" , { statement } , "}" ;
 param_def   = IDENT , ":" , TYPE , [ "=" , literal ] ;
 
 if_stmt     = "if" , condition , ";" , "then" , { statement } ,
@@ -99,6 +107,10 @@ if_stmt     = "if" , condition , ";" , "then" , { statement } ,
 for_stmt    = "for" , IDENT , "in" , value , [ ";" ] , "do" , { statement } , "done" ;
 
 while_stmt  = "while" , condition , [ ";" ] , "do" , { statement } , "done" ;
+
+case_stmt   = "case" , value , "in" , { case_branch } , "esac" ;
+case_branch = [ "(" ] , case_patterns , ")" , { statement } , ";;" ;
+case_patterns = STRING , { "|" , STRING } ;          (* glob patterns supported: *, ?, [...] *)
 
 control_stmt = "break" , [ INT ]                     (* break [n] - exit n loop levels *)
              | "continue" , [ INT ]                  (* continue [n] - skip n levels *)
@@ -146,8 +158,6 @@ value       = literal
 literal     = INT
             | FLOAT
             | BOOL
-            | array
-            | object
             ;
 
 cmd_subst   = "$(" , pipeline , ")" ;
@@ -160,7 +170,7 @@ var_ref     = "${" , var_path , "}"                  (* ${VAR}, ${VAR.field}, ${
             | "$#"                                   (* arg count *)
             ;
 
-var_path    = IDENT , { "." , IDENT | "[" , INT , "]" } ;
+var_path    = IDENT , { "." , IDENT } ;  (* only $? supports field access *)
 POSITIONAL  = "0" | "1" | "2" | "3" | "4" | "5" | "6" | "7" | "8" | "9" ;
 
 (* Parameter expansion *)
@@ -174,8 +184,6 @@ string      = DQSTRING                               (* "..." - interpolation *)
             ;
 
 (* Test expressions [[ ... ]] *)
-(* NOTE: [[ is parsed as two LBracket tokens, not a single token,
- * to avoid ambiguity with nested arrays like [[1,2],[3,4]] *)
 test_expr_stmt = "[" , "[" , test_condition , "]" , "]" ;
 test_condition = file_test | string_test | comparison ;
 file_test   = FILE_OP , value ;                      (* [[ -f path ]] *)
@@ -185,10 +193,6 @@ comparison  = value , CMP_OP , value ;               (* [[ $X == "y" ]] *)
 FILE_OP     = "-e" | "-f" | "-d" | "-r" | "-w" | "-x" ;
 STRING_OP   = "-z" | "-n" ;
 CMP_OP      = "==" | "!=" | "-gt" | "-lt" | "-ge" | "-le" | "=~" | "!~" ;
-
-array       = "[" , [ value , { "," , value } ] , "]" ;
-object      = "{" , [ pair , { "," , pair } ] , "}" ;
-pair        = STRING , ":" , value ;
 
 (* === Redirects === *)
 
@@ -241,7 +245,7 @@ SET         = "set" ;
 (* SOURCE and DOT are identifiers that command_parser accepts *)
 
 (* Type keywords *)
-TYPE        = "string" | "int" | "float" | "bool" | "array" | "object" ;
+TYPE        = "string" | "int" | "float" | "bool" ;
 
 (* Literals *)
 BOOL        = "true" | "false" ;
@@ -288,27 +292,15 @@ set X = 5              # assignment (IDENT '=' follows)
 - If terminator (newline, `;`, `&&`, `||`, EOF) → parse as command with no args
 - If IDENT followed by `=` → parse as assignment
 
-### Resolved Ambiguity 2: Object vs Tool Body
+### Resolved Ambiguity 2: Tool Body vs Brace in Arguments
 
 ```bash
 tool foo { ... }           # after 'tool IDENT', brace = body
-cmd config={"k": "v"}      # after '=', brace = object literal
 ```
 
-**Resolution:** Context-dependent. After `tool IDENT`, `{` opens a body.
+**Resolution:** `{` after `tool IDENT` starts a tool body.
 
-### Resolved Ambiguity 3: `[[` Test vs Nested Array
-
-```bash
-[[ -f file ]]              # test expression
-[[1, 2], [3, 4]]           # nested array
-```
-
-**Resolution:** `[[` is lexed as two `[` tokens. Parser distinguishes:
-- `[ [` followed by `-flag` or value `CMP_OP` value → test expression
-- `[ [` followed by value `,` → nested array
-
-### Resolved Ambiguity 4: Named Args vs Positional
+### Resolved Ambiguity 3: Named Args vs Positional
 
 ```bash
 cmd foo=bar            # named arg (no spaces around =)
@@ -507,23 +499,32 @@ The lexer produces a `LINECONT` token which is skipped, merging the lines.
 
 Explicitly not in v0.1, designed for future addition:
 
-### Object Destructuring in Scatter
-
-Current: `scatter as=VAR`
-Future: `scatter as={id, url}` or `scatter as={id: ID, url: URL}`
-
-```ebnf
-pattern       = IDENT | "{" , pattern_field , { "," , pattern_field } , "}" ;
-pattern_field = IDENT [ ":" , IDENT ] ;
-```
-
-Unambiguous: `{` after `as=` starts a pattern (unquoted idents), not an object.
-
 ### Arithmetic Expansion
 
-Not supported. Use tools for math:
+Not currently supported. Use tools for math:
 ```bash
 # NOT: $((x + 1))
 # Instead:
 RESULT=$(math "$X + 1")
+```
+
+### Case Statements
+
+May be added for pattern matching:
+```bash
+case $VAR in
+    pattern1) commands ;;
+    pattern2) commands ;;
+    *) default ;;
+esac
+```
+
+### Here-docs
+
+Multi-line string input:
+```bash
+cat <<EOF
+multi-line
+content
+EOF
 ```
