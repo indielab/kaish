@@ -15,6 +15,7 @@ A Bourne-lite shell for MCP tool orchestration. Part of the [Kaijutsu](https://g
 - **Bourne-lite** — familiar syntax, no surprises
 - **Everything is a tool** — builtins and MCP tools use identical syntax
 - **Predictable over powerful** — if bash has a confusing edge case, kaish doesn't have that feature
+- **ShellCheck-clean** — the Bourne subset passes `shellcheck --enable=all`
 - **Agent-friendly** — easy to generate, parse, validate
 - **Fail fast** — ambiguity is an error, not a guess
 
@@ -75,7 +76,7 @@ tool summarize url:string max_words:int=200 {
 | Feature | Status | Notes |
 |---------|--------|-------|
 | Variables | ✅ | `VAR=value`, `local VAR=value` |
-| Expansion | ✅ | `$VAR`, `${VAR}`, `${VAR.field}`, `${VAR[0]}` |
+| Expansion | ✅ | `$VAR`, `${VAR}`, `${?.field}` (exit status fields) |
 | Parameter expansion | ✅ | `${VAR:-default}`, `${#VAR}` |
 | Single quotes | ✅ | Literal strings, no interpolation |
 | Double quotes | ✅ | Interpolation with `$VAR` |
@@ -96,25 +97,32 @@ tool summarize url:string max_words:int=200 {
 
 These bash features are omitted because they're confusing, error-prone, or ambiguous:
 
-- Arithmetic `$(( ))` — use tools for math
-- Brace expansion `{a,b,c}` — just write it out
-- Glob expansion `*.txt` — tools handle their own patterns
+- Arithmetic `$(( ))` — use tools for math (SC2004)
+- Brace expansion `{a,b,c}` — just write it out (SC1083)
+- Glob expansion `*.txt` — tools handle their own patterns (SC2035)
 - Here-docs `<<EOF` — use files or strings
 - Process substitution `<(cmd)` — use temp files
-- Backtick substitution `` `cmd` `` — use `$(cmd)`
+- Backtick substitution `` `cmd` `` — use `$(cmd)` (SC2006)
+- Single bracket tests `[ ]` — use `[[ ]]` (SC2039)
 - Aliases, `eval` — explicit is better
-- Arrays of arrays — keep it simple
+- Complex data types — JSON strings + `jq` instead
 
 ## Beyond Bourne
 
-Kaish extends Bourne shell with features designed for modern tool orchestration:
+Kaish extends Bourne shell with features designed for modern tool orchestration.
+
+**Design principle:** If ShellCheck would warn about it in bash, kaish doesn't have that feature. This eliminates entire classes of bugs:
+- No word splitting → SC2086, SC2046 warnings impossible
+- No glob expansion → SC2035, SC2144 warnings impossible
+- No backticks → SC2006 warnings impossible
+
+See [docs/SHELLCHECK.md](docs/SHELLCHECK.md) for the full mapping.
 
 | Feature | POSIX/Bourne | Kaish | Rationale |
 |---------|--------------|-------|-----------|
 | **Floats** | ❌ Integer only | ✅ Native `3.14` | MCP tools return JSON with floats |
 | **Booleans** | ❌ Exit codes | ✅ Native `true`/`false` | JSON interop, clearer conditions |
-| **Objects** | ❌ | ✅ `{key: value}` | First-class JSON support |
-| **Arrays** | ❌ (bash has them) | ✅ `[1, 2, 3]` | JSON arrays, cleaner syntax |
+| **JSON strings** | ❌ | ✅ `'{"key": "value"}'` | Store JSON, process with `jq` |
 | **Typed params** | ❌ | ✅ `name:string` | Tool definitions with validation |
 | **Scatter/gather** | ❌ | ✅ `散/集` | Built-in parallelism |
 | **VFS** | ❌ | ✅ `/mcp/`, `/scratch/` | Unified resource access |
@@ -236,6 +244,7 @@ State is persisted in SQLite (WAL mode) for crash recovery and incremental updat
 
 - [Language Specification](docs/LANGUAGE.md) — syntax, semantics, examples
 - [Formal Grammar](docs/GRAMMAR.md) — EBNF, ambiguity analysis, test categories
+- [ShellCheck Alignment](docs/SHELLCHECK.md) — SC code mapping, design rationale
 - [Architecture](docs/ARCHITECTURE.md) — 核 design, crate structure, protocols
 - [Build Plan](docs/BUILD.md) — 14-layer bottom-up implementation
 - [Testing Strategy](docs/TESTING.md) — 10:1 test-to-feature ratio target

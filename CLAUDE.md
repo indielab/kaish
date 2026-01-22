@@ -15,8 +15,16 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 - **Bourne-lite** — familiar syntax, no dark corners
 - **Everything is a tool** — builtins and MCP tools use identical syntax
 - **Predictable over powerful** — if bash has a confusing edge case, kaish doesn't have that feature
+- **ShellCheck-clean** — the Bourne subset passes `shellcheck --enable=all`
 - **Agent-friendly** — easy to generate, parse, validate
 - **Fail fast** — ambiguity is an error, not a guess
+
+### ShellCheck-Clean Design
+
+The Bourne-compatible subset of kaish should pass `shellcheck --enable=all`.
+When implementing features, verify they don't introduce constructs ShellCheck
+would warn about. Extensions (floats, objects, MCP tools) are outside
+ShellCheck's scope and clearly marked.
 
 ## Build Commands
 
@@ -29,6 +37,7 @@ cargo test -p kaish-kernel --lib parser  # Parser tests only
 cargo test --features proptest -- --ignored  # Property tests
 cargo tarpaulin --out Html --output-dir coverage/  # Coverage
 cargo +nightly fuzz run parser -- -max_len=4096    # Fuzz (nightly)
+./scripts/shellcheck-bourne-subset.sh    # Validate ShellCheck alignment
 ```
 
 If Cap'n Proto schema changes don't trigger rebuilds:
@@ -156,6 +165,7 @@ Test files in `tests/`:
 |------|---------|
 | `docs/LANGUAGE.md` | Full language specification |
 | `docs/GRAMMAR.md` | EBNF grammar, ambiguity analysis |
+| `docs/SHELLCHECK.md` | ShellCheck alignment, SC code mapping |
 | `docs/ARCHITECTURE.md` | Kernel design, crate structure, protocols |
 | `docs/BUILD.md` | Layered build plan, dependencies |
 | `docs/TESTING.md` | Testing strategy and requirements |
