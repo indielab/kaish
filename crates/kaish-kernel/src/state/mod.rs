@@ -850,11 +850,6 @@ fn serialize_value(value: &Value) -> Result<(String, Option<String>, Option<Vec<
         Value::Int(i) => ("int", i.to_string()),
         Value::Float(f) => ("float", f.to_string()),
         Value::String(s) => ("string", s.clone()),
-        Value::Array(_) | Value::Object(_) => {
-            let json = value_to_json(value);
-            let json_str = serde_json::to_string(&json)?;
-            ("json", json_str)
-        }
     };
 
     // Split at 1KB threshold
@@ -888,10 +883,8 @@ fn deserialize_value(type_name: &str, small: Option<&str>, blob: Option<&[u8]>) 
     Ok(value)
 }
 
-/// Convert a kaish Value to serde_json::Value (only literal expressions).
+/// Convert a kaish Value to serde_json::Value.
 fn value_to_json(value: &Value) -> serde_json::Value {
-    use crate::ast::Expr;
-
     match value {
         Value::Null => serde_json::Value::Null,
         Value::Bool(b) => serde_json::Value::Bool(*b),
@@ -902,39 +895,13 @@ fn value_to_json(value: &Value) -> serde_json::Value {
                 .unwrap_or(serde_json::Value::Null)
         }
         Value::String(s) => serde_json::Value::String(s.clone()),
-        Value::Array(items) => {
-            let arr: Vec<serde_json::Value> = items
-                .iter()
-                .filter_map(|expr| {
-                    if let Expr::Literal(v) = expr {
-                        Some(value_to_json(v))
-                    } else {
-                        None // Skip non-literal expressions
-                    }
-                })
-                .collect();
-            serde_json::Value::Array(arr)
-        }
-        Value::Object(fields) => {
-            let obj: serde_json::Map<String, serde_json::Value> = fields
-                .iter()
-                .filter_map(|(k, expr)| {
-                    if let Expr::Literal(v) = expr {
-                        Some((k.clone(), value_to_json(v)))
-                    } else {
-                        None // Skip non-literal expressions
-                    }
-                })
-                .collect();
-            serde_json::Value::Object(obj)
-        }
     }
 }
 
 /// Convert serde_json::Value to a kaish Value.
+///
+/// Arrays and objects are stored as JSON strings.
 fn json_to_value(json: &serde_json::Value) -> Value {
-    use crate::ast::Expr;
-
     match json {
         serde_json::Value::Null => Value::Null,
         serde_json::Value::Bool(b) => Value::Bool(*b),
@@ -948,19 +915,9 @@ fn json_to_value(json: &serde_json::Value) -> Value {
             }
         }
         serde_json::Value::String(s) => Value::String(s.clone()),
-        serde_json::Value::Array(arr) => {
-            let items: Vec<Expr> = arr
-                .iter()
-                .map(|v| Expr::Literal(json_to_value(v)))
-                .collect();
-            Value::Array(items)
-        }
-        serde_json::Value::Object(obj) => {
-            let fields: Vec<(String, Expr)> = obj
-                .iter()
-                .map(|(k, v)| (k.clone(), Expr::Literal(json_to_value(v))))
-                .collect();
-            Value::Object(fields)
+        // Arrays and objects are stored as JSON strings
+        serde_json::Value::Array(_) | serde_json::Value::Object(_) => {
+            Value::String(json.to_string())
         }
     }
 }
@@ -1168,83 +1125,61 @@ mod tests {
     }
 
     #[test]
-    fn test_array_value_roundtrip() {
-        use crate::ast::Expr;
-
+    fn test_json_array_string_roundtrip() {
         let store = StateStore::in_memory().expect("store");
 
-        let array = Value::Array(vec![
-            Expr::Literal(Value::Int(1)),
-            Expr::Literal(Value::String("two".into())),
-            Expr::Literal(Value::Bool(true)),
-        ]);
+        // Arrays are now stored as JSON strings
+        let array = Value::String(r#"[1,"two",true]"#.into());
 
         store.set_variable("ARR", &array).expect("set");
         let loaded = store.get_variable("ARR").expect("get").expect("exists");
 
-        // Verify it's an array with 3 elements
-        if let Value::Array(items) = loaded {
-            assert_eq!(items.len(), 3);
-            assert_eq!(items[0], Expr::Literal(Value::Int(1)));
-            assert_eq!(items[1], Expr::Literal(Value::String("two".into())));
-            assert_eq!(items[2], Expr::Literal(Value::Bool(true)));
+        // Verify it's a string containing the JSON array
+        if let Value::String(s) = loaded {
+            assert!(s.contains("1"));
+            assert!(s.contains("two"));
+            assert!(s.contains("true"));
         } else {
-            panic!("expected array, got {:?}", loaded);
+            panic!("expected string, got {:?}", loaded);
         }
     }
 
     #[test]
-    fn test_object_value_roundtrip() {
-        use crate::ast::Expr;
-
+    fn test_json_object_string_roundtrip() {
         let store = StateStore::in_memory().expect("store");
 
-        let obj = Value::Object(vec![
-            ("name".into(), Expr::Literal(Value::String("Alice".into()))),
-            ("age".into(), Expr::Literal(Value::Int(30))),
-            ("active".into(), Expr::Literal(Value::Bool(true))),
-        ]);
+        // Objects are now stored as JSON strings
+        let obj = Value::String(r#"{"name":"Alice","age":30,"active":true}"#.into());
 
         store.set_variable("USER", &obj).expect("set");
         let loaded = store.get_variable("USER").expect("get").expect("exists");
 
-        // Verify it's an object with the right fields
-        if let Value::Object(fields) = loaded {
-            assert_eq!(fields.len(), 3);
-            // Note: JSON object iteration order may vary, so check by content
-            let names: Vec<&str> = fields.iter().map(|(k, _)| k.as_str()).collect();
-            assert!(names.contains(&"name"));
-            assert!(names.contains(&"age"));
-            assert!(names.contains(&"active"));
+        // Verify it's a string containing the JSON object
+        if let Value::String(s) = loaded {
+            assert!(s.contains("Alice"));
+            assert!(s.contains("30"));
+            assert!(s.contains("active"));
         } else {
-            panic!("expected object, got {:?}", loaded);
+            panic!("expected string, got {:?}", loaded);
         }
     }
 
     #[test]
-    fn test_nested_value_roundtrip() {
-        use crate::ast::Expr;
-
+    fn test_nested_json_string_roundtrip() {
         let store = StateStore::in_memory().expect("store");
 
-        // Nested structure: { "users": [{ "name": "Bob" }] }
-        let nested = Value::Object(vec![
-            ("users".into(), Expr::Literal(Value::Array(vec![
-                Expr::Literal(Value::Object(vec![
-                    ("name".into(), Expr::Literal(Value::String("Bob".into()))),
-                ])),
-            ]))),
-        ]);
+        // Nested structure: { "users": [{ "name": "Bob" }] } as JSON string
+        let nested = Value::String(r#"{"users":[{"name":"Bob"}]}"#.into());
 
         store.set_variable("DATA", &nested).expect("set");
         let loaded = store.get_variable("DATA").expect("get").expect("exists");
 
         // Just verify it roundtrips without panic
-        if let Value::Object(fields) = loaded {
-            assert_eq!(fields.len(), 1);
-            assert_eq!(fields[0].0, "users");
+        if let Value::String(s) = loaded {
+            assert!(s.contains("users"));
+            assert!(s.contains("Bob"));
         } else {
-            panic!("expected object");
+            panic!("expected string");
         }
     }
 
@@ -1264,13 +1199,10 @@ mod tests {
 
     #[test]
     fn test_last_result_with_data() {
-        use crate::ast::Expr;
-
         let store = StateStore::in_memory().expect("store");
 
-        let data = Value::Object(vec![
-            ("count".into(), Expr::Literal(Value::Int(42))),
-        ]);
+        // Data is now a JSON string
+        let data = Value::String(r#"{"count":42}"#.into());
 
         let result = ExecResult {
             code: 0,

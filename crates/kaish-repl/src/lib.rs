@@ -252,25 +252,30 @@ impl Repl {
                 Ok(if output.is_empty() { None } else { Some(output) })
             }
             Stmt::For(for_loop) => {
-                let iterable = self.eval_expr(&for_loop.iterable)?;
-                let items = match iterable {
-                    Value::Array(items) => items,
-                    _ => return Ok(Some("Error: for loop requires an array".into())),
-                };
+                // Evaluate all items and collect words for iteration
+                let mut words: Vec<String> = Vec::new();
+                for item_expr in &for_loop.items {
+                    let item = self.eval_expr(item_expr)?;
+                    // POSIX-style word splitting
+                    match &item {
+                        Value::String(s) => {
+                            words.extend(s.split_whitespace().map(String::from));
+                        }
+                        _ => words.push(format_value_unquoted(&item)),
+                    }
+                }
 
                 self.exec_ctx.scope.push_frame();
                 let mut output = String::new();
 
-                for item in items {
-                    if let Expr::Literal(value) = item {
-                        self.exec_ctx.scope.set(&for_loop.variable, value);
-                        for stmt in &for_loop.body {
-                            if let Some(result) = self.execute_stmt(stmt)? {
-                                if !output.is_empty() {
-                                    output.push('\n');
-                                }
-                                output.push_str(&result);
+                for word in words {
+                    self.exec_ctx.scope.set(&for_loop.variable, Value::String(word));
+                    for stmt in &for_loop.body {
+                        if let Some(result) = self.execute_stmt(stmt)? {
+                            if !output.is_empty() {
+                                output.push('\n');
                             }
+                            output.push_str(&result);
                         }
                     }
                 }
@@ -318,6 +323,38 @@ impl Repl {
                     }
                 }
                 Ok(if output.is_empty() { None } else { Some(output) })
+            }
+            Stmt::Case(case_stmt) => {
+                // Evaluate the expression to match against
+                let match_value = {
+                    let value = self.eval_expr(&case_stmt.expr)?;
+                    // Use unquoted format for matching - quotes would break pattern matching
+                    format_value_unquoted(&value)
+                };
+
+                // Try each branch until we find a match
+                for branch in &case_stmt.branches {
+                    let matched = branch.patterns.iter().any(|pattern| {
+                        kaish_kernel::glob::glob_match(pattern, &match_value)
+                    });
+
+                    if matched {
+                        // Execute the branch body
+                        let mut output = String::new();
+                        for stmt in &branch.body {
+                            if let Some(result) = self.execute_stmt(stmt)? {
+                                if !output.is_empty() {
+                                    output.push('\n');
+                                }
+                                output.push_str(&result);
+                            }
+                        }
+                        return Ok(if output.is_empty() { None } else { Some(output) });
+                    }
+                }
+
+                // No match - return nothing (like bash)
+                Ok(None)
             }
             Stmt::Break(_) => {
                 // Break in REPL context - just return
@@ -627,13 +664,9 @@ impl Repl {
                 }
             }
             Expr::AllArgs => {
-                // Return all args as array
+                // Return all args as space-separated string (POSIX-style)
                 let args = self.exec_ctx.scope.all_args();
-                let exprs: Vec<Expr> = args
-                    .iter()
-                    .map(|s| Expr::Literal(Value::String(s.clone())))
-                    .collect();
-                Ok(Value::Array(exprs))
+                Ok(Value::String(args.join(" ")))
             }
             Expr::ArgCount => {
                 Ok(Value::Int(self.exec_ctx.scope.arg_count() as i64))
@@ -660,27 +693,16 @@ impl Repl {
                     None => Ok(Value::String(default.clone())),
                 }
             }
+            Expr::Arithmetic(expr_str) => {
+                kaish_kernel::arithmetic::eval_arithmetic(expr_str, &self.exec_ctx.scope)
+                    .map(Value::Int)
+                    .map_err(|e| anyhow::anyhow!("arithmetic error: {}", e))
+            }
         }
     }
 
     fn eval_literal(&mut self, value: &Value) -> Result<Value> {
-        match value {
-            Value::Array(items) => {
-                let evaluated: Result<Vec<_>> = items
-                    .iter()
-                    .map(|expr| self.eval_expr_inner(expr).map(|v| Expr::Literal(v)))
-                    .collect();
-                Ok(Value::Array(evaluated?))
-            }
-            Value::Object(fields) => {
-                let evaluated: Result<Vec<_>> = fields
-                    .iter()
-                    .map(|(k, expr)| self.eval_expr_inner(expr).map(|v| (k.clone(), Expr::Literal(v))))
-                    .collect();
-                Ok(Value::Object(evaluated?))
-            }
-            _ => Ok(value.clone()),
-        }
+        Ok(value.clone())
     }
 
     /// Handle a meta-command (starts with /).
@@ -790,33 +812,6 @@ fn format_value(value: &Value) -> String {
         Value::Int(i) => i.to_string(),
         Value::Float(f) => f.to_string(),
         Value::String(s) => format!("\"{}\"", s),
-        Value::Array(items) => {
-            let formatted: Vec<String> = items
-                .iter()
-                .filter_map(|e| {
-                    if let Expr::Literal(v) = e {
-                        Some(format_value(v))
-                    } else {
-                        Some("<expr>".to_string())
-                    }
-                })
-                .collect();
-            format!("[{}]", formatted.join(", "))
-        }
-        Value::Object(fields) => {
-            let formatted: Vec<String> = fields
-                .iter()
-                .map(|(k, e)| {
-                    let v = if let Expr::Literal(v) = e {
-                        format_value(v)
-                    } else {
-                        "<expr>".to_string()
-                    };
-                    format!("\"{}\": {}", k, v)
-                })
-                .collect();
-            format!("{{{}}}", formatted.join(", "))
-        }
     }
 }
 
@@ -856,8 +851,6 @@ fn is_truthy(value: &Value) -> bool {
         Value::Int(i) => *i != 0,
         Value::Float(f) => *f != 0.0,
         Value::String(s) => !s.is_empty(),
-        Value::Array(arr) => !arr.is_empty(),
-        Value::Object(_) => true,
     }
 }
 
@@ -905,18 +898,9 @@ fn value_to_f64(value: &Value) -> f64 {
     }
 }
 
-/// Convert an ExecResult to a Value.
+/// Convert an ExecResult to a Value (bash-compatible: return stdout string).
 fn result_to_value(result: &ExecResult) -> Value {
-    let mut fields = vec![
-        ("code".into(), Expr::Literal(Value::Int(result.code))),
-        ("ok".into(), Expr::Literal(Value::Bool(result.ok()))),
-        ("out".into(), Expr::Literal(Value::String(result.out.clone()))),
-        ("err".into(), Expr::Literal(Value::String(result.err.clone()))),
-    ];
-    if let Some(data) = &result.data {
-        fields.push(("data".into(), Expr::Literal(data.clone())));
-    }
-    Value::Object(fields)
+    Value::String(result.out.trim_end().to_string())
 }
 
 const HELP_TEXT: &str = r#"会sh — kaish REPL (Layer 10: State & Persistence)

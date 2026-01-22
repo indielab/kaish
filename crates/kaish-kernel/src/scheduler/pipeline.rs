@@ -231,27 +231,9 @@ fn eval_simple_expr(expr: &Expr, ctx: &ExecContext) -> Option<Value> {
     }
 }
 
-/// Evaluate a literal value, recursively evaluating nested expressions.
-fn eval_literal(value: &Value, ctx: &ExecContext) -> Value {
-    match value {
-        Value::Array(items) => {
-            let evaluated: Vec<_> = items
-                .iter()
-                .filter_map(|e| eval_simple_expr(e, ctx).map(|v| Expr::Literal(v)))
-                .collect();
-            Value::Array(evaluated)
-        }
-        Value::Object(fields) => {
-            let evaluated: Vec<_> = fields
-                .iter()
-                .filter_map(|(k, e)| {
-                    eval_simple_expr(e, ctx).map(|v| (k.clone(), Expr::Literal(v)))
-                })
-                .collect();
-            Value::Object(evaluated)
-        }
-        _ => value.clone(),
-    }
+/// Evaluate a literal value.
+fn eval_literal(value: &Value, _ctx: &ExecContext) -> Value {
+    value.clone()
 }
 
 /// Convert a value to a string for interpolation.
@@ -262,8 +244,6 @@ fn value_to_string(value: &Value) -> String {
         Value::Int(i) => i.to_string(),
         Value::Float(f) => f.to_string(),
         Value::String(s) => s.clone(),
-        Value::Array(_) => "[array]".to_string(),
-        Value::Object(_) => "{object}".to_string(),
     }
 }
 

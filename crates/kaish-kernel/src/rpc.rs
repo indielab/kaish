@@ -488,28 +488,12 @@ fn set_value(builder: &mut value::Builder<'_>, value: &Value) {
         Value::Int(i) => builder.set_int(*i),
         Value::Float(f) => builder.set_float(*f),
         Value::String(s) => builder.set_string(s),
-        Value::Array(items) => {
-            let mut list = builder.reborrow().init_array(items.len() as u32);
-            for (i, item) in items.iter().enumerate() {
-                if let crate::ast::Expr::Literal(v) = item {
-                    set_value(&mut list.reborrow().get(i as u32), v);
-                }
-            }
-        }
-        Value::Object(fields) => {
-            let mut list = builder.reborrow().init_object(fields.len() as u32);
-            for (i, (key, val_expr)) in fields.iter().enumerate() {
-                let mut entry = list.reborrow().get(i as u32);
-                entry.set_key(key);
-                if let crate::ast::Expr::Literal(v) = val_expr {
-                    set_value(&mut entry.init_value(), v);
-                }
-            }
-        }
     }
 }
 
 /// Read a kaish Value from a Cap'n Proto Value.
+///
+/// Arrays and objects are serialized as JSON strings.
 fn read_value(reader: &value::Reader<'_>) -> Result<Value, capnp::Error> {
     use value::Which;
     match reader.which()? {
@@ -523,27 +507,62 @@ fn read_value(reader: &value::Reader<'_>) -> Result<Value, capnp::Error> {
             Ok(Value::String(string.to_string()))
         }
         Which::Array(arr) => {
+            // Convert array to JSON string
             let arr = arr?;
-            let items: Result<Vec<_>, _> = arr
-                .iter()
-                .map(|v| read_value(&v).map(|v| crate::ast::Expr::Literal(v)))
-                .collect();
-            Ok(Value::Array(items?))
+            let items: Result<Vec<_>, _> = arr.iter().map(|v| read_value_to_json(&v)).collect();
+            let json_array = serde_json::Value::Array(items?);
+            Ok(Value::String(json_array.to_string()))
         }
         Which::Object(obj) => {
+            // Convert object to JSON string
             let obj = obj?;
-            let mut fields = Vec::new();
+            let mut map = serde_json::Map::new();
             for kv in obj.iter() {
                 let key_text = kv.get_key()?;
                 let key = key_text.to_str().map_err(|e| capnp::Error::failed(format!("invalid utf8: {}", e)))?.to_string();
-                let val = read_value(&kv.get_value()?)?;
-                fields.push((key, crate::ast::Expr::Literal(val)));
+                let val = read_value_to_json(&kv.get_value()?)?;
+                map.insert(key, val);
             }
-            Ok(Value::Object(fields))
+            Ok(Value::String(serde_json::Value::Object(map).to_string()))
         }
         Which::Blob(_) => {
             // Blobs are not directly representable as Value
             Err(capnp::Error::failed("blob values not supported".into()))
         }
+    }
+}
+
+/// Helper to convert Cap'n Proto Value to serde_json::Value
+fn read_value_to_json(reader: &value::Reader<'_>) -> Result<serde_json::Value, capnp::Error> {
+    use value::Which;
+    match reader.which()? {
+        Which::Null(()) => Ok(serde_json::Value::Null),
+        Which::Bool(b) => Ok(serde_json::Value::Bool(b)),
+        Which::Int(i) => Ok(serde_json::Value::Number(i.into())),
+        Which::Float(f) => Ok(serde_json::Number::from_f64(f)
+            .map(serde_json::Value::Number)
+            .unwrap_or(serde_json::Value::Null)),
+        Which::String(s) => {
+            let text = s?;
+            let string = text.to_str().map_err(|e| capnp::Error::failed(format!("invalid utf8: {}", e)))?;
+            Ok(serde_json::Value::String(string.to_string()))
+        }
+        Which::Array(arr) => {
+            let arr = arr?;
+            let items: Result<Vec<_>, _> = arr.iter().map(|v| read_value_to_json(&v)).collect();
+            Ok(serde_json::Value::Array(items?))
+        }
+        Which::Object(obj) => {
+            let obj = obj?;
+            let mut map = serde_json::Map::new();
+            for kv in obj.iter() {
+                let key_text = kv.get_key()?;
+                let key = key_text.to_str().map_err(|e| capnp::Error::failed(format!("invalid utf8: {}", e)))?.to_string();
+                let val = read_value_to_json(&kv.get_value()?)?;
+                map.insert(key, val);
+            }
+            Ok(serde_json::Value::Object(map))
+        }
+        Which::Blob(_) => Err(capnp::Error::failed("blob values not supported".into())),
     }
 }

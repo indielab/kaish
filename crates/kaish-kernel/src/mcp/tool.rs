@@ -195,22 +195,5 @@ fn value_to_json(value: &Value) -> serde_json::Value {
             .map(serde_json::Value::Number)
             .unwrap_or(serde_json::Value::Null),
         Value::String(s) => serde_json::Value::String(s.clone()),
-        Value::Array(items) => {
-            // Array contains Expr, not Value - for now, just represent as strings
-            serde_json::Value::Array(
-                items
-                    .iter()
-                    .map(|_| serde_json::Value::String("[expr]".to_string()))
-                    .collect(),
-            )
-        }
-        Value::Object(fields) => {
-            // Object contains (String, Expr) pairs - for now, represent keys
-            let mut obj = serde_json::Map::new();
-            for (key, _) in fields {
-                obj.insert(key.clone(), serde_json::Value::String("[expr]".to_string()));
-            }
-            serde_json::Value::Object(obj)
-        }
     }
 }
