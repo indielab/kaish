@@ -193,7 +193,6 @@ impl KernelClient for IpcClient {
 // ============================================================
 
 use kaish_schema::value;
-use kaish_kernel::ast::Expr;
 
 /// Convert a kaish Value to a Cap'n Proto Value.
 fn set_value(builder: &mut value::Builder<'_>, value: &Value) {
@@ -203,28 +202,12 @@ fn set_value(builder: &mut value::Builder<'_>, value: &Value) {
         Value::Int(i) => builder.set_int(*i),
         Value::Float(f) => builder.set_float(*f),
         Value::String(s) => builder.set_string(s),
-        Value::Array(items) => {
-            let mut list = builder.reborrow().init_array(items.len() as u32);
-            for (i, item) in items.iter().enumerate() {
-                if let Expr::Literal(v) = item {
-                    set_value(&mut list.reborrow().get(i as u32), v);
-                }
-            }
-        }
-        Value::Object(fields) => {
-            let mut list = builder.reborrow().init_object(fields.len() as u32);
-            for (i, (key, val_expr)) in fields.iter().enumerate() {
-                let mut entry = list.reborrow().get(i as u32);
-                entry.set_key(key);
-                if let Expr::Literal(v) = val_expr {
-                    set_value(&mut entry.init_value(), v);
-                }
-            }
-        }
     }
 }
 
 /// Read a kaish Value from a Cap'n Proto Value.
+///
+/// Arrays and objects from the wire are converted to JSON strings.
 fn read_value(reader: &value::Reader<'_>) -> ClientResult<Value> {
     use value::Which;
     match reader.which()? {
@@ -239,29 +222,46 @@ fn read_value(reader: &value::Reader<'_>) -> ClientResult<Value> {
             })?;
             Ok(Value::String(string.to_string()))
         }
+        // Convert arrays to JSON string
         Which::Array(arr) => {
             let arr = arr?;
-            let items: Result<Vec<_>, _> = arr
+            let items: Result<Vec<serde_json::Value>, _> = arr
                 .iter()
-                .map(|v| read_value(&v).map(|v| Expr::Literal(v)))
+                .map(|v| read_value(&v).map(|v| value_to_json(&v)))
                 .collect();
-            Ok(Value::Array(items?))
+            let json = serde_json::Value::Array(items?);
+            Ok(Value::String(json.to_string()))
         }
+        // Convert objects to JSON string
         Which::Object(obj) => {
             let obj = obj?;
-            let mut fields = Vec::new();
+            let mut map = serde_json::Map::new();
             for kv in obj.iter() {
                 let key_text = kv.get_key()?;
                 let key = key_text.to_str().map_err(|e| {
                     ClientError::Rpc(capnp::Error::failed(format!("invalid utf8: {}", e)))
                 })?.to_string();
                 let val = read_value(&kv.get_value()?)?;
-                fields.push((key, Expr::Literal(val)));
+                map.insert(key, value_to_json(&val));
             }
-            Ok(Value::Object(fields))
+            let json = serde_json::Value::Object(map);
+            Ok(Value::String(json.to_string()))
         }
         Which::Blob(_) => {
             Err(ClientError::Rpc(capnp::Error::failed("blob values not supported".into())))
         }
+    }
+}
+
+/// Convert a kaish Value to serde_json::Value.
+fn value_to_json(value: &Value) -> serde_json::Value {
+    match value {
+        Value::Null => serde_json::Value::Null,
+        Value::Bool(b) => serde_json::Value::Bool(*b),
+        Value::Int(i) => serde_json::Value::Number((*i).into()),
+        Value::Float(f) => serde_json::Number::from_f64(*f)
+            .map(serde_json::Value::Number)
+            .unwrap_or(serde_json::Value::Null),
+        Value::String(s) => serde_json::Value::String(s.clone()),
     }
 }

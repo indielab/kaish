@@ -19,6 +19,9 @@ async-trait = { workspace = true }
 thiserror = { workspace = true }
 anyhow = { workspace = true }
 
+# JSON
+serde_json = { workspace = true }
+
 # Logging
 tracing = { workspace = true }
 
