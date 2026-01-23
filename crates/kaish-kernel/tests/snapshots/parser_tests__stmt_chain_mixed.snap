@@ -1,0 +1,5 @@
+---
+source: crates/kaish-kernel/tests/parser_tests.rs
+expression: sexpr
+---
+(or-chain (or-chain (cmd try-primary) (cmd try-fallback)) (cmd echo (pos (string "failed"))))

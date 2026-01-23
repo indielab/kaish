@@ -1,0 +1,5 @@
+---
+source: crates/kaish-kernel/tests/parser_tests.rs
+expression: sexpr
+---
+(assign myif (string "value") local=false)

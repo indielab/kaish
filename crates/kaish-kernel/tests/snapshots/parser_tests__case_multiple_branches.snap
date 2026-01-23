@@ -1,0 +1,5 @@
+---
+source: crates/kaish-kernel/tests/parser_tests.rs
+expression: sexpr
+---
+(case (varref X) ((branch "foo" ((cmd echo (pos (string "foo"))))) (branch "bar" ((cmd echo (pos (string "bar")))))))

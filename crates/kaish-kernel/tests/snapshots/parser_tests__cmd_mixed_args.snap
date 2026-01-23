@@ -1,0 +1,5 @@
+---
+source: crates/kaish-kernel/tests/parser_tests.rs
+expression: sexpr
+---
+(cmd grep (pos (string "pattern")) (named path (string "/src")) (named context (int 3)))

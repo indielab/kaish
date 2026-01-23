@@ -1,0 +1,5 @@
+---
+source: crates/kaish-kernel/tests/parser_tests.rs
+expression: sexpr
+---
+(tooldef greet ((param name string)) ((cmd echo (pos (interpolated "hello " (varref name))))))

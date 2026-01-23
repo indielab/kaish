@@ -1,0 +1,5 @@
+---
+source: crates/kaish-kernel/tests/parser_tests.rs
+expression: sexpr
+---
+(and-chain (cmd set (shortflag e)) (cmd echo (pos (string "strict mode"))))

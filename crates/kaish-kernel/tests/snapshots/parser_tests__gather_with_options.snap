@@ -1,0 +1,5 @@
+---
+source: crates/kaish-kernel/tests/parser_tests.rs
+expression: sexpr
+---
+(pipeline (cmd cat (pos (string "input"))) (cmd scatter) (cmd process) (cmd gather (named progress (bool true)) (named errors (string "/tmp/err"))))

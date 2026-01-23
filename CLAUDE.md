@@ -32,12 +32,13 @@ are outside ShellCheck's scope and clearly marked.
 cargo build                              # Build workspace
 cargo build -p kaish-kernel              # Build specific crate
 cargo test --all                         # Run all tests
-cargo test -p kaish-kernel --lib lexer   # Lexer tests only
-cargo test -p kaish-kernel --lib parser  # Parser tests only
+cargo test -p kaish-kernel --test lexer_tests   # Lexer tests only
+cargo test -p kaish-kernel --test parser_tests  # Parser tests only
+cargo insta test                         # Run snapshot tests
+cargo insta test --check                 # CI mode (fails on pending snapshots)
 cargo test --features proptest -- --ignored  # Property tests
 cargo tarpaulin --out Html --output-dir coverage/  # Coverage
 cargo +nightly fuzz run parser -- -max_len=4096    # Fuzz (nightly)
-./scripts/shellcheck-bourne-subset.sh    # Validate ShellCheck alignment
 ```
 
 If Cap'n Proto schema changes don't trigger rebuilds:
@@ -149,12 +150,20 @@ Arithmetic `$(( ))`, brace expansion `{a,b,c}`, glob expansion `*.txt`, here-doc
 
 ## Testing Strategy
 
-Target: **10:1 test-to-feature ratio** (~700 tests total)
+Uses **rstest** for parameterized tests and **insta** for snapshot testing.
 
-Test files in `tests/`:
-- `lexer/tokens.txt` — line-separated token tests
-- `parser/*.test` — markdown-like format with expected AST
-- `eval/*.test` — scripts with expected stdout/stderr/exit
+Test files in `crates/kaish-kernel/tests/`:
+- `lexer_tests.rs` — rstest parameterized lexer tests (~123 tests)
+- `parser_tests.rs` — insta snapshot tests for AST output (~83 tests, 16 ignored)
+- `eval_tests.rs` — rstest eval tests (all ignored until interpreter ready)
+- `snapshots/*.snap` — insta snapshot files for parser tests
+
+Snapshot workflow:
+```bash
+cargo insta test           # Run tests, create .snap.new for changes
+cargo insta review         # Interactive review of pending snapshots
+cargo insta accept         # Accept all pending snapshots
+```
 
 ## Key Documentation
 

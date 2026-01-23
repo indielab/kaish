@@ -1,0 +1,5 @@
+---
+source: crates/kaish-kernel/tests/parser_tests.rs
+expression: sexpr
+---
+(case (string "test.rs") ((branch "*.py" ((cmd echo (pos (string "Python"))))) (branch "*.rs" ((cmd echo (pos (string "Rust")))))))

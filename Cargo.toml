@@ -5,7 +5,6 @@ members = [
     "crates/kaish-kernel",
     "crates/kaish-client",
     "crates/kaish-repl",
-    "crates/kaish-testutil",
 ]
 
 [workspace.package]
@@ -62,6 +61,8 @@ directories = "5"
 
 # Testing
 proptest = "1"
+rstest = "0.23"
+insta = "1.42"
 
 [workspace.lints.rust]
 unsafe_code = "forbid"

@@ -1,0 +1,5 @@
+---
+source: crates/kaish-kernel/tests/parser_tests.rs
+expression: sexpr
+---
+(case (string "hello") ((branch "hello" ((cmd echo (pos (string "matched")))))))
