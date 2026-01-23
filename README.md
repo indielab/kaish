@@ -29,8 +29,8 @@ GREETING="Hello"
 CONFIG='{"host": "localhost", "port": 8080}'
 
 # Both $VAR and ${VAR} work
-echo "$GREETING, world! 🦀"
-echo "Host: ${CONFIG}"
+echo "$GREETING, world!"
+echo "Config: ${CONFIG}"
 
 # Control flow
 if [[ -f config.json ]]; then
@@ -43,12 +43,7 @@ fi
 
 # Loops
 for item in $ITEMS; do
-    process $item
-done
-
-while [[ $RETRIES -gt 0 ]]; do
-    try-operation && break
-    RETRIES=$((RETRIES - 1))
+    echo "Processing: $item"
 done
 
 # Parameter expansion
@@ -59,16 +54,12 @@ echo "Length: ${#NAME}"      # string length
 exa.web_search query="rust parser combinators"
 
 # 散/集 (san/shū) — scatter/gather parallelism
-cat urls.txt | scatter as=URL limit=4 | fetch url=$URL | gather > results.json
+cat urls.txt | scatter as=URL limit=4 | process-url url=$URL | gather > results.json
 
-# User-defined tools can be exported as MCP servers
-tool summarize url:string max_words:int=200 {
-    fetch url=$url > /scratch/content
-    llm.summarize input=- words=$max_words < /scratch/content
+# User-defined tools
+tool greet name:string {
+    echo "Hello, ${name}!"
 }
-
-# Export this script as an MCP server
-# $ kaish serve my-tools.kai --stdio
 ```
 
 ---
@@ -158,7 +149,7 @@ tool &> file                    # stdout + stderr
 ```bash
 cmd1 && cmd2                    # run cmd2 only if cmd1 succeeds
 cmd1 || cmd2                    # run cmd2 only if cmd1 fails
-mkdir /tmp/work && cd /tmp/work && init-project
+mkdir /tmp/work && cd /tmp/work && echo "ready"
 ```
 
 ### Test Expressions
@@ -203,7 +194,7 @@ fi
 
 # For loop
 for ITEM in "one two three"; do
-    process $ITEM
+    echo $ITEM
 done
 
 # While loop
@@ -235,7 +226,7 @@ exit 1                          # exit with code
 NOW=$(date)
 echo "Current time: $NOW"
 
-RESULT=$(process $(fetch $URL))  # nested
+RESULT=$(cat file.json | jq ".name")
 ```
 
 ### Error Handling
@@ -257,7 +248,6 @@ source utils.kai                # load utilities
 ```bash
 slow-task &                     # run in background
 jobs                            # list jobs
-fg %1                           # foreground
 wait                            # wait for all
 wait %1 %2                      # wait for specific
 ```
@@ -273,11 +263,11 @@ Fan-out parallelism made easy:
 # 集 (gather) - collect results back
 cat items.txt | scatter as=ITEM limit=8 | process $ITEM | gather > results.json
 
-# With progress and error handling
+# With progress
 cat big_list.txt \
     | scatter as=ID limit=4 \
-    | risky-operation id=$ID \
-    | gather progress=true errors=/scratch/failed.json
+    | slow-operation id=$ID \
+    | gather progress=true
 ```
 
 ## Virtual Filesystem
@@ -285,27 +275,13 @@ cat big_list.txt \
 Paths resolve through VFS abstraction:
 
 ```
-/bin/              → available tools (ls /bin/exa)
+/bin/              → available tools
 /src/              → mounted local paths
 /scratch/          → in-memory temp storage
 /mcp/<server>/     → MCP server resources
 ```
 
-```bash
-mount local:/home/amy/project /src
-mount local:/home/amy/project /src-ro readonly=true
-mount memory: /scratch
-```
-
-## MCP Export (The Prestige ✨)
-
-Any kaish script can be exposed as an MCP server:
-
-```bash
-$ kaish serve my-tools.kai --stdio
-```
-
-Now Claude Code (or any MCP client) can call your user-defined tools directly.
+VFS mounts are configured programmatically via the kernel API.
 
 ---
 
@@ -313,9 +289,11 @@ Now Claude Code (or any MCP client) can call your user-defined tools directly.
 
 ```bash
 # Define a tool with typed parameters
-tool fetch-and-summarize url:string max_length:int=500 {
-    fetch url=$url > /scratch/content
-    summarize input=- length=$max_length < /scratch/content
+tool process-item id:string verbose:bool=false {
+    if [[ $verbose == true ]]; then
+        echo "Processing: $id"
+    fi
+    # ... tool body
 }
 
 # Or use 'function' keyword (bash-compatible alias)
@@ -338,6 +316,7 @@ function greet name:string {
 | `cd` | Change directory |
 | `pwd` | Print working directory |
 | `cat` | Read file |
+| `read` | Read from stdin |
 | `write` | Write to file |
 | `mkdir` | Create directory |
 | `rm` | Remove file |
@@ -347,6 +326,8 @@ function greet name:string {
 | `jq` | JSON query |
 | `exec` | Execute external command |
 | `help` | Tool documentation |
+| `set` | Set shell options (`set -e`) |
+| `unset` | Unset variables |
 | `jobs` | List background jobs |
 | `wait` | Wait for jobs |
 | `scatter` | 散 — Parallel fan-out |
@@ -424,15 +405,15 @@ Features that ShellCheck warns about (word splitting, glob expansion, backticks)
 ```
 ┌─────────────────────────────────────────────────────────────────────┐
 │                          Frontends                                  │
-│  ┌─────────┐  ┌─────────┐  ┌─────────┐  ┌─────────────────────────┐ │
-│  │  REPL   │  │ Script  │  │   MCP   │  │     Kaijutsu /          │ │
-│  │         │  │ Runner  │  │ Server  │  │     Embedded            │ │
-│  └────┬────┘  └────┬────┘  └────┬────┘  └───────────┬─────────────┘ │
-└───────┼────────────┼────────────┼───────────────────┼───────────────┘
-        │            │            │                   │
-        └────────────┴─────┬──────┴───────────────────┘
-                           │
-                           ▼
+│  ┌─────────────┐  ┌─────────────┐  ┌─────────────────────────────┐  │
+│  │    REPL     │  │   Script    │  │     Kaijutsu / Embedded     │  │
+│  │             │  │   Runner    │  │                             │  │
+│  └──────┬──────┘  └──────┬──────┘  └─────────────┬───────────────┘  │
+└─────────┼────────────────┼───────────────────────┼──────────────────┘
+          │                │                       │
+          └────────────────┴───────┬───────────────┘
+                                   │
+                                   ▼
 ┌─────────────────────────────────────────────────────────────────────┐
 │                    会sh 核 (Kaku) — Kernel                          │
 │  ┌────────────────────────────────────────────────────────────────┐ │
@@ -452,16 +433,11 @@ The 核 (kaku/kernel) is the unit of execution. Frontends connect via:
 
 State is persisted in SQLite (WAL mode) for crash recovery.
 
-## Status
-
-**Implementation complete through L14.** All layers from the build plan are implemented.
-
 ## Documentation
 
 - [Formal Grammar](docs/GRAMMAR.md) — EBNF, ambiguity analysis
 - [Architecture](docs/ARCHITECTURE.md) — 核 design, crate structure, protocols
 - [漢字 Reference](docs/kanji.md) — kanji vocabulary for the project
-- [Examples](examples/) — annotated scripts
 
 ## Schema
 
