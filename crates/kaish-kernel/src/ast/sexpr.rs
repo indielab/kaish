@@ -92,6 +92,7 @@ fn format_arg(arg: &Arg) -> String {
         Arg::Named { key, value } => format!("(named {} {})", key, format_expr(value)),
         Arg::ShortFlag(f) => format!("(shortflag {})", f),
         Arg::LongFlag(f) => format!("(longflag {})", f),
+        Arg::DoubleDash => "(doubledash)".to_string(),
     }
 }
 
@@ -250,6 +251,10 @@ pub fn format_expr(expr: &Expr) -> String {
                 .map(|p| match p {
                     StringPart::Literal(s) => format!("\"{}\"", s),
                     StringPart::Var(path) => format!("(varref {})", format_varpath(path)),
+                    StringPart::VarWithDefault { name, default } => {
+                        format!("(vardefault {} \"{}\")", name, default)
+                    }
+                    StringPart::VarLength(name) => format!("(varlength {})", name),
                 })
                 .collect();
             format!("(interpolated {})", parts_str.join(" "))

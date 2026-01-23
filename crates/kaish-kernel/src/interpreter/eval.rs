@@ -266,6 +266,14 @@ impl<'a, E: Executor> Evaluator<'a, E> {
                     })?;
                     result.push_str(&value_to_string(&value));
                 }
+                StringPart::VarWithDefault { name, default } => {
+                    let value = self.eval_var_with_default(name, default)?;
+                    result.push_str(&value_to_string(&value));
+                }
+                StringPart::VarLength(name) => {
+                    let value = self.eval_var_length(name)?;
+                    result.push_str(&value_to_string(&value));
+                }
             }
         }
         Ok(Value::String(result))
