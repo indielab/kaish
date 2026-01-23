@@ -359,6 +359,14 @@ pub enum Token {
     InvalidFloatNoTrailing,
 
     // ═══════════════════════════════════════════════════════════════════
+    // Paths (absolute paths starting with /)
+    // ═══════════════════════════════════════════════════════════════════
+
+    /// Absolute path: `/tmp/out`, `/etc/hosts`, etc.
+    #[regex(r"/[a-zA-Z0-9_./+-]*", lex_path)]
+    Path(String),
+
+    // ═══════════════════════════════════════════════════════════════════
     // Identifiers (command names, variable names, etc.)
     // ═══════════════════════════════════════════════════════════════════
 
@@ -488,6 +496,11 @@ fn lex_plus_flag(lex: &mut logos::Lexer<Token>) -> String {
     lex.slice()[1..].to_string()
 }
 
+/// Lex an absolute path: `/tmp/out` → `/tmp/out`
+fn lex_path(lex: &mut logos::Lexer<Token>) -> String {
+    lex.slice().to_string()
+}
+
 impl fmt::Display for Token {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
@@ -564,6 +577,7 @@ impl fmt::Display for Token {
             Token::VarLength(v) => write!(f, "${{#{}}}", v),
             Token::Int(n) => write!(f, "INT({})", n),
             Token::Float(n) => write!(f, "FLOAT({})", n),
+            Token::Path(s) => write!(f, "PATH({})", s),
             Token::Ident(s) => write!(f, "IDENT({})", s),
             Token::Comment => write!(f, "COMMENT"),
             Token::Newline => write!(f, "NEWLINE"),
@@ -635,6 +649,7 @@ impl Token {
                 | Token::VarRef(_)
                 | Token::SimpleVarRef(_)
                 | Token::CmdSubstStart
+                | Token::Path(_)
         )
     }
 }
@@ -1018,7 +1033,12 @@ pub fn parse_string_literal(source: &str) -> Result<String, LexerError> {
                         .ok_or(LexerError::InvalidEscape)?;
                     result.push(ch);
                 }
-                _ => return Err(LexerError::InvalidEscape),
+                // Unknown escapes: preserve the backslash (for regex patterns like `\.`)
+                Some(next) => {
+                    result.push('\\');
+                    result.push(next);
+                }
+                None => return Err(LexerError::InvalidEscape),
             }
         } else {
             result.push(ch);

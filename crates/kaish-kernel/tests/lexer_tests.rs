@@ -110,8 +110,9 @@ fn format_token(token: &Token) -> String {
             }
         }
 
-        // Identifiers
+        // Identifiers and paths
         Token::Ident(s) => format!("IDENT({})", s),
+        Token::Path(s) => format!("PATH({})", s),
 
         // Structural
         Token::Comment => "COMMENT".to_string(),
