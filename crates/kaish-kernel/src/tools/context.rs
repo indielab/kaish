@@ -3,6 +3,7 @@
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
+use crate::backend::{KernelBackend, LocalBackend};
 use crate::interpreter::Scope;
 use crate::scheduler::JobManager;
 use crate::state::StateStore;
@@ -12,10 +13,14 @@ use super::traits::ToolSchema;
 
 /// Execution context passed to tools.
 ///
-/// Provides access to the VFS, scope, and other kernel state.
+/// Provides access to the backend (for file operations and tool dispatch),
+/// scope, and other kernel state.
 pub struct ExecContext {
-    /// Virtual filesystem.
-    pub vfs: Arc<VfsRouter>,
+    /// Kernel backend for I/O operations.
+    ///
+    /// This is the preferred way to access filesystem operations.
+    /// Use `backend.read()`, `backend.write()`, etc.
+    pub backend: Arc<dyn KernelBackend>,
     /// Variable scope.
     pub scope: Scope,
     /// Current working directory (VFS path).
@@ -34,10 +39,12 @@ pub struct ExecContext {
 }
 
 impl ExecContext {
-    /// Create a new execution context.
+    /// Create a new execution context with a VFS (uses LocalBackend).
+    ///
+    /// This is the traditional constructor for backward compatibility.
     pub fn new(vfs: Arc<VfsRouter>) -> Self {
         Self {
-            vfs,
+            backend: Arc::new(LocalBackend::new(vfs)),
             scope: Scope::new(),
             cwd: PathBuf::from("/"),
             prev_cwd: None,
@@ -48,10 +55,38 @@ impl ExecContext {
         }
     }
 
-    /// Create a context with a specific scope.
+    /// Create a new execution context with a custom backend.
+    pub fn with_backend(backend: Arc<dyn KernelBackend>) -> Self {
+        Self {
+            backend,
+            scope: Scope::new(),
+            cwd: PathBuf::from("/"),
+            prev_cwd: None,
+            stdin: None,
+            tool_schemas: Vec::new(),
+            job_manager: None,
+            state_store: None,
+        }
+    }
+
+    /// Create a context with a specific scope (uses LocalBackend).
     pub fn with_scope(vfs: Arc<VfsRouter>, scope: Scope) -> Self {
         Self {
-            vfs,
+            backend: Arc::new(LocalBackend::new(vfs)),
+            scope,
+            cwd: PathBuf::from("/"),
+            prev_cwd: None,
+            stdin: None,
+            tool_schemas: Vec::new(),
+            job_manager: None,
+            state_store: None,
+        }
+    }
+
+    /// Create a context with a custom backend and scope.
+    pub fn with_backend_and_scope(backend: Arc<dyn KernelBackend>, scope: Scope) -> Self {
+        Self {
+            backend,
             scope,
             cwd: PathBuf::from("/"),
             prev_cwd: None,
