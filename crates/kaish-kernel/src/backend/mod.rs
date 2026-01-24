@@ -29,6 +29,7 @@ use serde_json::Value as JsonValue;
 use std::path::Path;
 use thiserror::Error;
 
+use crate::interpreter::{value_to_json, ExecResult};
 use crate::tools::{ExecContext, ToolArgs, ToolSchema};
 use crate::vfs::MountInfo;
 
@@ -93,6 +94,14 @@ pub struct ConflictError {
 /// support compare-and-set (CAS) via optional `expected` field.
 /// If `expected` is Some, the operation fails with ConflictError if the
 /// current content at that position doesn't match.
+///
+/// # Line Ending Normalization
+///
+/// Line-based operations (`InsertLine`, `DeleteLine`, `ReplaceLine`) normalize
+/// line endings to Unix-style (`\n`). Files with `\r\n` (Windows) line endings
+/// will be converted to `\n` after a line-based patch. This is intentional for
+/// kaish's Unix-first design. Use byte-based operations (`Insert`, `Delete`,
+/// `Replace`) to preserve original line endings.
 #[derive(Debug, Clone)]
 pub enum PatchOp {
     /// Insert content at byte offset.
@@ -271,6 +280,23 @@ impl ToolResult {
     /// Check if the tool execution succeeded.
     pub fn ok(&self) -> bool {
         self.code == 0
+    }
+}
+
+impl From<ExecResult> for ToolResult {
+    fn from(exec: ExecResult) -> Self {
+        // Saturating cast: codes outside i32 range clamp to i32::MIN/MAX
+        let code = exec.code.clamp(i32::MIN as i64, i32::MAX as i64) as i32;
+
+        // Convert ast::Value to serde_json::Value if present
+        let data = exec.data.map(|v| value_to_json(&v));
+
+        Self {
+            code,
+            stdout: exec.out,
+            stderr: exec.err,
+            data,
+        }
     }
 }
 
