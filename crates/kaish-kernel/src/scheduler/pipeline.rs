@@ -272,6 +272,9 @@ fn find_scatter_gather(commands: &[Command]) -> Option<(usize, usize)> {
 /// Run a pipeline sequentially without scatter/gather detection.
 ///
 /// This is used internally by ScatterGatherRunner to avoid recursion.
+/// Note: The `tools` parameter is kept for API compatibility but tool dispatch
+/// now goes through `ctx.backend.call_tool()`.
+#[allow(unused_variables)]
 pub async fn run_sequential_pipeline(
     tools: &Arc<ToolRegistry>,
     commands: &[Command],
@@ -300,14 +303,6 @@ pub async fn run_sequential_pipeline(
             _ => {}
         }
 
-        // Look up tool
-        let tool = match tools.get(&cmd.name) {
-            Some(t) => t,
-            None => {
-                return ExecResult::failure(127, format!("{}: command not found", cmd.name));
-            }
-        };
-
         // Build tool args
         let tool_args = build_tool_args(&cmd.args, ctx);
 
@@ -316,8 +311,12 @@ pub async fn run_sequential_pipeline(
             ctx.set_stdin(input);
         }
 
-        // Execute
-        last_result = tool.execute(tool_args, ctx).await;
+        // Execute via backend (clone Arc to avoid borrow conflict)
+        let backend = ctx.backend.clone();
+        last_result = match backend.call_tool(&cmd.name, tool_args, ctx).await {
+            Ok(result) => ExecResult::from_output(result.code as i64, result.stdout, result.stderr),
+            Err(e) => ExecResult::failure(127, e.to_string()),
+        };
 
         // If command failed, stop the pipeline
         if !last_result.ok() {
