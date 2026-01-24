@@ -7,9 +7,11 @@
 
 use std::sync::Arc;
 
+use std::collections::HashMap;
+
 use crate::ast::{Arg, Command, Expr, Value};
 use crate::interpreter::ExecResult;
-use crate::tools::{ExecContext, ToolArgs, ToolRegistry};
+use crate::tools::{ExecContext, ToolArgs, ToolRegistry, ToolSchema};
 
 use super::scatter::{
     parse_gather_options, parse_scatter_options, ScatterGatherRunner,
@@ -70,8 +72,11 @@ impl PipelineRunner {
         let post_gather = &commands[gather_idx + 1..];
 
         // Parse options from scatter and gather commands
-        let scatter_opts = parse_scatter_options(&build_tool_args(&scatter_cmd.args, ctx));
-        let gather_opts = parse_gather_options(&build_tool_args(&gather_cmd.args, ctx));
+        // These are builtins with simple key=value syntax, no schema-driven parsing needed
+        let scatter_schema = self.tools.get("scatter").map(|t| t.schema());
+        let gather_schema = self.tools.get("gather").map(|t| t.schema());
+        let scatter_opts = parse_scatter_options(&build_tool_args(&scatter_cmd.args, ctx, scatter_schema.as_ref()));
+        let gather_opts = parse_gather_options(&build_tool_args(&gather_cmd.args, ctx, gather_schema.as_ref()));
 
         // Run with ScatterGatherRunner
         let runner = ScatterGatherRunner::new(self.tools.clone());
@@ -101,8 +106,9 @@ impl PipelineRunner {
             _ => {}
         }
 
-        // Build tool args
-        let tool_args = build_tool_args(&cmd.args, ctx);
+        // Build tool args with schema-aware parsing
+        let schema = self.tools.get(&cmd.name).map(|t| t.schema());
+        let tool_args = build_tool_args(&cmd.args, ctx, schema.as_ref());
 
         // Set stdin if provided
         if let Some(input) = stdin {
@@ -130,8 +136,9 @@ impl PipelineRunner {
         let mut last_result = ExecResult::success("");
 
         for (i, cmd) in commands.iter().enumerate() {
-            // Build tool args
-            let tool_args = build_tool_args(&cmd.args, ctx);
+            // Build tool args with schema-aware parsing
+            let schema = self.tools.get(&cmd.name).map(|t| t.schema());
+            let tool_args = build_tool_args(&cmd.args, ctx, schema.as_ref());
 
             // Set stdin from previous command's stdout
             if let Some(input) = current_stdin.take() {
@@ -160,15 +167,60 @@ impl PipelineRunner {
     }
 }
 
-/// Build ToolArgs from AST Args, evaluating expressions.
-pub fn build_tool_args(args: &[Arg], ctx: &ExecContext) -> ToolArgs {
-    let mut tool_args = ToolArgs::new();
+/// Extract parameter types from a tool schema.
+///
+/// Returns a map from param name → param type (e.g., "verbose" → "bool", "output" → "string").
+fn schema_param_types(schema: &ToolSchema) -> HashMap<&str, &str> {
+    schema
+        .params
+        .iter()
+        .map(|p| (p.name.as_str(), p.param_type.as_str()))
+        .collect()
+}
 
-    for arg in args {
+/// Check if a type is considered boolean.
+fn is_bool_type(param_type: &str) -> bool {
+    matches!(param_type.to_lowercase().as_str(), "bool" | "boolean")
+}
+
+/// Build ToolArgs from AST Args, evaluating expressions.
+///
+/// If a schema is provided, uses it to determine argument types:
+/// - For `--flag` where schema says type is non-bool: consume next positional as value
+/// - For `--flag` where schema says type is bool (or unknown): treat as boolean flag
+///
+/// This enables natural shell syntax like `mcp_tool --query "test" --limit 10`.
+pub fn build_tool_args(args: &[Arg], ctx: &ExecContext, schema: Option<&ToolSchema>) -> ToolArgs {
+    let mut tool_args = ToolArgs::new();
+    let param_types = schema.map(schema_param_types).unwrap_or_default();
+
+    // Track which positional indices have been consumed as flag values
+    let mut consumed_positionals: std::collections::HashSet<usize> = std::collections::HashSet::new();
+    let mut past_double_dash = false;
+
+    // First pass: find positional args and their indices
+    let mut positional_indices: Vec<(usize, &Expr)> = Vec::new();
+    for (i, arg) in args.iter().enumerate() {
+        if let Arg::Positional(expr) = arg {
+            positional_indices.push((i, expr));
+        }
+    }
+
+    // Second pass: process all args
+    let mut i = 0;
+    while i < args.len() {
+        let arg = &args[i];
+
         match arg {
+            Arg::DoubleDash => {
+                past_double_dash = true;
+            }
             Arg::Positional(expr) => {
-                if let Some(value) = eval_simple_expr(expr, ctx) {
-                    tool_args.positional.push(value);
+                // Check if this positional was consumed by a preceding flag
+                if !consumed_positionals.contains(&i) {
+                    if let Some(value) = eval_simple_expr(expr, ctx) {
+                        tool_args.positional.push(value);
+                    }
                 }
             }
             Arg::Named { key, value } => {
@@ -177,18 +229,55 @@ pub fn build_tool_args(args: &[Arg], ctx: &ExecContext) -> ToolArgs {
                 }
             }
             Arg::ShortFlag(name) => {
-                // Expand combined flags like -la
-                for c in name.chars() {
-                    tool_args.flags.insert(c.to_string());
+                if past_double_dash {
+                    // After --, treat as positional (though parser wouldn't emit this)
+                    tool_args.positional.push(Value::String(format!("-{name}")));
+                } else {
+                    // Expand combined flags like -la
+                    for c in name.chars() {
+                        tool_args.flags.insert(c.to_string());
+                    }
                 }
             }
             Arg::LongFlag(name) => {
-                tool_args.flags.insert(name.clone());
-            }
-            Arg::DoubleDash => {
-                // Marker for end of flags - no action needed
+                if past_double_dash {
+                    // After --, treat as positional (though parser wouldn't emit this)
+                    tool_args.positional.push(Value::String(format!("--{name}")));
+                } else {
+                    // Look up type in schema
+                    let is_bool = param_types
+                        .get(name.as_str())
+                        .map(|t| is_bool_type(t))
+                        .unwrap_or(true); // Unknown params default to bool (backward compat)
+
+                    if is_bool {
+                        // Boolean flag - just add to flags set
+                        tool_args.flags.insert(name.clone());
+                    } else {
+                        // Non-bool flag - try to consume next positional as value
+                        // Look for the next positional arg after this flag
+                        let next_positional = positional_indices
+                            .iter()
+                            .find(|(idx, _)| *idx > i && !consumed_positionals.contains(idx));
+
+                        if let Some((pos_idx, expr)) = next_positional {
+                            if let Some(value) = eval_simple_expr(expr, ctx) {
+                                tool_args.named.insert(name.clone(), value);
+                                consumed_positionals.insert(*pos_idx);
+                            } else {
+                                // Expression didn't evaluate - treat as bool flag
+                                tool_args.flags.insert(name.clone());
+                            }
+                        } else {
+                            // No positional available - treat as bool flag
+                            // (Could be an error, but we're lenient for compatibility)
+                            tool_args.flags.insert(name.clone());
+                        }
+                    }
+                }
             }
         }
+        i += 1;
     }
 
     tool_args
@@ -272,9 +361,7 @@ fn find_scatter_gather(commands: &[Command]) -> Option<(usize, usize)> {
 /// Run a pipeline sequentially without scatter/gather detection.
 ///
 /// This is used internally by ScatterGatherRunner to avoid recursion.
-/// Note: The `tools` parameter is kept for API compatibility but tool dispatch
-/// now goes through `ctx.backend.call_tool()`.
-#[allow(unused_variables)]
+/// The `tools` parameter is used for schema lookup to enable schema-aware argument parsing.
 pub async fn run_sequential_pipeline(
     tools: &Arc<ToolRegistry>,
     commands: &[Command],
@@ -303,8 +390,9 @@ pub async fn run_sequential_pipeline(
             _ => {}
         }
 
-        // Build tool args
-        let tool_args = build_tool_args(&cmd.args, ctx);
+        // Build tool args with schema-aware parsing
+        let schema = tools.get(&cmd.name).map(|t| t.schema());
+        let tool_args = build_tool_args(&cmd.args, ctx, schema.as_ref());
 
         // Set stdin from previous command's stdout
         if let Some(input) = current_stdin.take() {
@@ -697,5 +785,244 @@ mod tests {
 
         assert!(result.ok());
         assert_eq!(call_count.load(Ordering::SeqCst), 3, "call_tool should be invoked for each command");
+    }
+
+    // === Schema-Aware Argument Parsing Tests ===
+
+    use crate::tools::{ParamSchema, ToolSchema};
+
+    fn make_test_schema() -> ToolSchema {
+        ToolSchema::new("test-tool", "A test tool for schema-aware parsing")
+            .param(ParamSchema::required("query", "string", "Search query"))
+            .param(ParamSchema::optional("limit", "int", Value::Int(10), "Max results"))
+            .param(ParamSchema::optional("verbose", "bool", Value::Bool(false), "Verbose output"))
+            .param(ParamSchema::optional("output", "string", Value::String("stdout".into()), "Output destination"))
+    }
+
+    fn make_minimal_ctx() -> ExecContext {
+        let mut vfs = VfsRouter::new();
+        vfs.mount("/", MemoryFs::new());
+        ExecContext::new(Arc::new(vfs))
+    }
+
+    #[test]
+    fn test_schema_aware_string_arg() {
+        // --query "test" should become named: {"query": "test"}
+        let args = vec![
+            Arg::LongFlag("query".to_string()),
+            Arg::Positional(Expr::Literal(Value::String("test".to_string()))),
+        ];
+        let schema = make_test_schema();
+        let ctx = make_minimal_ctx();
+
+        let tool_args = build_tool_args(&args, &ctx, Some(&schema));
+
+        assert!(tool_args.flags.is_empty(), "No flags should be set");
+        assert!(tool_args.positional.is_empty(), "No positionals - consumed by --query");
+        assert_eq!(
+            tool_args.named.get("query"),
+            Some(&Value::String("test".to_string())),
+            "--query should consume 'test' as its value"
+        );
+    }
+
+    #[test]
+    fn test_schema_aware_bool_flag() {
+        // --verbose should remain a flag since schema says bool
+        let args = vec![
+            Arg::LongFlag("verbose".to_string()),
+        ];
+        let schema = make_test_schema();
+        let ctx = make_minimal_ctx();
+
+        let tool_args = build_tool_args(&args, &ctx, Some(&schema));
+
+        assert!(tool_args.flags.contains("verbose"), "--verbose should be a flag");
+        assert!(tool_args.named.is_empty(), "No named args");
+        assert!(tool_args.positional.is_empty(), "No positionals");
+    }
+
+    #[test]
+    fn test_schema_aware_mixed() {
+        // mcp_tool file.txt --output out.txt --verbose
+        // Should produce: positional: ["file.txt"], named: {"output": "out.txt"}, flags: {"verbose"}
+        let args = vec![
+            Arg::Positional(Expr::Literal(Value::String("file.txt".to_string()))),
+            Arg::LongFlag("output".to_string()),
+            Arg::Positional(Expr::Literal(Value::String("out.txt".to_string()))),
+            Arg::LongFlag("verbose".to_string()),
+        ];
+        let schema = make_test_schema();
+        let ctx = make_minimal_ctx();
+
+        let tool_args = build_tool_args(&args, &ctx, Some(&schema));
+
+        assert_eq!(tool_args.positional, vec![Value::String("file.txt".to_string())]);
+        assert_eq!(
+            tool_args.named.get("output"),
+            Some(&Value::String("out.txt".to_string()))
+        );
+        assert!(tool_args.flags.contains("verbose"));
+    }
+
+    #[test]
+    fn test_schema_aware_multiple_string_args() {
+        // --query "test" --output "result.json" --verbose --limit 5
+        let args = vec![
+            Arg::LongFlag("query".to_string()),
+            Arg::Positional(Expr::Literal(Value::String("test".to_string()))),
+            Arg::LongFlag("output".to_string()),
+            Arg::Positional(Expr::Literal(Value::String("result.json".to_string()))),
+            Arg::LongFlag("verbose".to_string()),
+            Arg::LongFlag("limit".to_string()),
+            Arg::Positional(Expr::Literal(Value::Int(5))),
+        ];
+        let schema = make_test_schema();
+        let ctx = make_minimal_ctx();
+
+        let tool_args = build_tool_args(&args, &ctx, Some(&schema));
+
+        assert!(tool_args.positional.is_empty(), "All positionals consumed");
+        assert_eq!(
+            tool_args.named.get("query"),
+            Some(&Value::String("test".to_string()))
+        );
+        assert_eq!(
+            tool_args.named.get("output"),
+            Some(&Value::String("result.json".to_string()))
+        );
+        assert_eq!(
+            tool_args.named.get("limit"),
+            Some(&Value::Int(5))
+        );
+        assert!(tool_args.flags.contains("verbose"));
+    }
+
+    #[test]
+    fn test_schema_aware_double_dash() {
+        // --output out.txt -- --this-is-data
+        // After --, everything is positional
+        let args = vec![
+            Arg::LongFlag("output".to_string()),
+            Arg::Positional(Expr::Literal(Value::String("out.txt".to_string()))),
+            Arg::DoubleDash,
+            Arg::Positional(Expr::Literal(Value::String("--this-is-data".to_string()))),
+        ];
+        let schema = make_test_schema();
+        let ctx = make_minimal_ctx();
+
+        let tool_args = build_tool_args(&args, &ctx, Some(&schema));
+
+        assert_eq!(
+            tool_args.named.get("output"),
+            Some(&Value::String("out.txt".to_string()))
+        );
+        // After --, the --this-is-data is treated as a positional (it's a Positional in the args)
+        assert_eq!(
+            tool_args.positional,
+            vec![Value::String("--this-is-data".to_string())]
+        );
+    }
+
+    #[test]
+    fn test_no_schema_fallback() {
+        // Without schema, all --flags are treated as bool flags
+        let args = vec![
+            Arg::LongFlag("query".to_string()),
+            Arg::Positional(Expr::Literal(Value::String("test".to_string()))),
+        ];
+        let ctx = make_minimal_ctx();
+
+        let tool_args = build_tool_args(&args, &ctx, None);
+
+        // Without schema, --query is a flag and "test" is a positional
+        assert!(tool_args.flags.contains("query"), "--query should be a flag");
+        assert_eq!(
+            tool_args.positional,
+            vec![Value::String("test".to_string())],
+            "'test' should be a positional"
+        );
+    }
+
+    #[test]
+    fn test_unknown_flag_in_schema() {
+        // --unknown-flag value should treat --unknown-flag as bool (not in schema)
+        let args = vec![
+            Arg::LongFlag("unknown".to_string()),
+            Arg::Positional(Expr::Literal(Value::String("value".to_string()))),
+        ];
+        let schema = make_test_schema();
+        let ctx = make_minimal_ctx();
+
+        let tool_args = build_tool_args(&args, &ctx, Some(&schema));
+
+        // Unknown flag defaults to bool behavior
+        assert!(tool_args.flags.contains("unknown"));
+        assert_eq!(
+            tool_args.positional,
+            vec![Value::String("value".to_string())]
+        );
+    }
+
+    #[test]
+    fn test_named_args_unchanged() {
+        // key=value syntax should work regardless of schema
+        let args = vec![
+            Arg::Named {
+                key: "query".to_string(),
+                value: Expr::Literal(Value::String("test".to_string())),
+            },
+            Arg::LongFlag("verbose".to_string()),
+        ];
+        let schema = make_test_schema();
+        let ctx = make_minimal_ctx();
+
+        let tool_args = build_tool_args(&args, &ctx, Some(&schema));
+
+        assert_eq!(
+            tool_args.named.get("query"),
+            Some(&Value::String("test".to_string()))
+        );
+        assert!(tool_args.flags.contains("verbose"));
+    }
+
+    #[test]
+    fn test_short_flags_unchanged() {
+        // Short flags -la should expand regardless of schema
+        let args = vec![
+            Arg::ShortFlag("la".to_string()),
+            Arg::Positional(Expr::Literal(Value::String("file.txt".to_string()))),
+        ];
+        let schema = make_test_schema();
+        let ctx = make_minimal_ctx();
+
+        let tool_args = build_tool_args(&args, &ctx, Some(&schema));
+
+        assert!(tool_args.flags.contains("l"));
+        assert!(tool_args.flags.contains("a"));
+        assert_eq!(
+            tool_args.positional,
+            vec![Value::String("file.txt".to_string())]
+        );
+    }
+
+    #[test]
+    fn test_flag_at_end_no_value() {
+        // --output at end with no value available - treat as flag (lenient)
+        let args = vec![
+            Arg::Positional(Expr::Literal(Value::String("file.txt".to_string()))),
+            Arg::LongFlag("output".to_string()),
+        ];
+        let schema = make_test_schema();
+        let ctx = make_minimal_ctx();
+
+        let tool_args = build_tool_args(&args, &ctx, Some(&schema));
+
+        // output expects a value but none available after it, so it becomes a flag
+        assert!(tool_args.flags.contains("output"));
+        assert_eq!(
+            tool_args.positional,
+            vec![Value::String("file.txt".to_string())]
+        );
     }
 }
