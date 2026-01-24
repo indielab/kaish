@@ -24,6 +24,12 @@ mod local;
 
 pub use local::LocalBackend;
 
+#[cfg(test)]
+pub mod testing;
+
+#[cfg(test)]
+pub use testing::MockBackend;
+
 use async_trait::async_trait;
 use serde_json::Value as JsonValue;
 use std::path::Path;
@@ -398,6 +404,9 @@ pub trait KernelBackend: Send + Sync {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use super::testing::MockBackend;
+    use std::sync::atomic::Ordering;
+    use std::sync::Arc;
 
     #[test]
     fn test_backend_error_from_io_error() {
@@ -443,5 +452,29 @@ mod tests {
         let bytes = ReadRange::bytes(100, 50);
         assert_eq!(bytes.offset, Some(100));
         assert_eq!(bytes.limit, Some(50));
+    }
+
+    #[tokio::test]
+    async fn test_mock_backend_call_tool_routing() {
+        let (backend, call_count) = MockBackend::new();
+        let backend: Arc<dyn KernelBackend> = Arc::new(backend);
+        let mut ctx = ExecContext::with_backend(backend.clone());
+
+        // Verify initial count is 0
+        assert_eq!(call_count.load(Ordering::SeqCst), 0);
+
+        // Call tool through backend
+        let args = ToolArgs::new();
+        let result = backend.call_tool("test-tool", args, &mut ctx).await.unwrap();
+
+        // Verify call was routed through backend
+        assert_eq!(call_count.load(Ordering::SeqCst), 1);
+        assert!(result.ok());
+        assert!(result.stdout.contains("mock executed: test-tool"));
+
+        // Call again to verify count increments
+        let args = ToolArgs::new();
+        backend.call_tool("another-tool", args, &mut ctx).await.unwrap();
+        assert_eq!(call_count.load(Ordering::SeqCst), 2);
     }
 }

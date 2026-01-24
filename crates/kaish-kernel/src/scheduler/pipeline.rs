@@ -648,4 +648,54 @@ mod tests {
         assert!(result.out.contains("test1"));
         assert!(result.out.contains("test2"));
     }
+
+    // === Backend Routing Tests ===
+
+    #[tokio::test]
+    async fn test_pipeline_routes_through_backend() {
+        use crate::backend::testing::MockBackend;
+        use std::sync::atomic::Ordering;
+
+        // Create mock backend
+        let (backend, call_count) = MockBackend::new();
+        let backend: std::sync::Arc<dyn crate::backend::KernelBackend> = std::sync::Arc::new(backend);
+
+        // Create context with mock backend
+        let mut ctx = crate::tools::ExecContext::with_backend(backend);
+
+        // Create a dummy tool registry (not used since backend intercepts)
+        let tools = std::sync::Arc::new(ToolRegistry::new());
+        let runner = PipelineRunner::new(tools);
+
+        // Single command should route through backend
+        let cmd = make_cmd("test-tool", vec!["arg1"]);
+        let result = runner.run(&[cmd], &mut ctx).await;
+
+        assert!(result.ok(), "Mock backend should return success");
+        assert_eq!(call_count.load(Ordering::SeqCst), 1, "call_tool should be invoked once");
+        assert!(result.out.contains("mock executed"), "Output should be from mock backend");
+    }
+
+    #[tokio::test]
+    async fn test_multi_command_pipeline_routes_through_backend() {
+        use crate::backend::testing::MockBackend;
+        use std::sync::atomic::Ordering;
+
+        let (backend, call_count) = MockBackend::new();
+        let backend: std::sync::Arc<dyn crate::backend::KernelBackend> = std::sync::Arc::new(backend);
+        let mut ctx = crate::tools::ExecContext::with_backend(backend);
+
+        let tools = std::sync::Arc::new(ToolRegistry::new());
+        let runner = PipelineRunner::new(tools);
+
+        // Pipeline with 3 commands
+        let cmd1 = make_cmd("tool1", vec![]);
+        let cmd2 = make_cmd("tool2", vec![]);
+        let cmd3 = make_cmd("tool3", vec![]);
+
+        let result = runner.run(&[cmd1, cmd2, cmd3], &mut ctx).await;
+
+        assert!(result.ok());
+        assert_eq!(call_count.load(Ordering::SeqCst), 3, "call_tool should be invoked for each command");
+    }
 }
