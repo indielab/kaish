@@ -104,12 +104,12 @@ impl Repl {
         // Mount root as memory fs (for now)
         vfs.mount("/", MemoryFs::new());
 
-        // Create execution context starting at /mnt/local
-        let mut exec_ctx = ExecContext::new(Arc::new(vfs));
-        exec_ctx.set_cwd(PathBuf::from("/mnt/local"));
-
-        // Wrap tools in Arc and set schemas on context for introspection
+        // Wrap tools in Arc
         let tools = Arc::new(tools);
+
+        // Create execution context with VFS and tools for backend dispatch
+        let mut exec_ctx = ExecContext::with_vfs_and_tools(Arc::new(vfs), tools.clone());
+        exec_ctx.set_cwd(PathBuf::from("/mnt/local"));
         exec_ctx.set_tool_schemas(tools.schemas());
 
         // Create job manager and add to context
@@ -805,6 +805,11 @@ impl Repl {
                 kaish_kernel::arithmetic::eval_arithmetic(expr_str, &self.exec_ctx.scope)
                     .map(Value::Int)
                     .map_err(|e| anyhow::anyhow!("arithmetic error: {}", e))
+            }
+            Expr::Command(cmd) => {
+                // Execute command and check exit code for truthiness
+                let result = self.execute_command(&cmd.name, &cmd.args)?;
+                Ok(Value::Bool(result.code == 0))
             }
         }
     }

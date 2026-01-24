@@ -7,6 +7,7 @@ use crate::backend::{KernelBackend, LocalBackend};
 use crate::interpreter::Scope;
 use crate::scheduler::JobManager;
 use crate::state::StateStore;
+use crate::tools::ToolRegistry;
 use crate::vfs::VfsRouter;
 
 use super::traits::ToolSchema;
@@ -39,12 +40,30 @@ pub struct ExecContext {
 }
 
 impl ExecContext {
-    /// Create a new execution context with a VFS (uses LocalBackend).
+    /// Create a new execution context with a VFS (uses LocalBackend without tools).
     ///
-    /// This is the traditional constructor for backward compatibility.
+    /// This constructor is for backward compatibility and tests that don't need tool dispatch.
+    /// For full tool support, use `with_vfs_and_tools`.
     pub fn new(vfs: Arc<VfsRouter>) -> Self {
         Self {
             backend: Arc::new(LocalBackend::new(vfs)),
+            scope: Scope::new(),
+            cwd: PathBuf::from("/"),
+            prev_cwd: None,
+            stdin: None,
+            tool_schemas: Vec::new(),
+            job_manager: None,
+            state_store: None,
+        }
+    }
+
+    /// Create a new execution context with VFS and tool registry.
+    ///
+    /// This is the preferred constructor for full kaish operation where
+    /// tools need to be dispatched through the backend.
+    pub fn with_vfs_and_tools(vfs: Arc<VfsRouter>, tools: Arc<ToolRegistry>) -> Self {
+        Self {
+            backend: Arc::new(LocalBackend::with_tools(vfs, tools)),
             scope: Scope::new(),
             cwd: PathBuf::from("/"),
             prev_cwd: None,
@@ -69,7 +88,24 @@ impl ExecContext {
         }
     }
 
-    /// Create a context with a specific scope (uses LocalBackend).
+    /// Create a context with VFS, tools, and a specific scope.
+    pub fn with_vfs_tools_and_scope(vfs: Arc<VfsRouter>, tools: Arc<ToolRegistry>, scope: Scope) -> Self {
+        Self {
+            backend: Arc::new(LocalBackend::with_tools(vfs, tools)),
+            scope,
+            cwd: PathBuf::from("/"),
+            prev_cwd: None,
+            stdin: None,
+            tool_schemas: Vec::new(),
+            job_manager: None,
+            state_store: None,
+        }
+    }
+
+    /// Create a context with a specific scope (uses LocalBackend without tools).
+    ///
+    /// For tests that don't need tool dispatch. For full tool support,
+    /// use `with_vfs_tools_and_scope`.
     pub fn with_scope(vfs: Arc<VfsRouter>, scope: Scope) -> Self {
         Self {
             backend: Arc::new(LocalBackend::new(vfs)),

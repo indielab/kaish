@@ -192,8 +192,8 @@ impl Kernel {
             config.cwd
         };
 
-        // Create execution context
-        let mut exec_ctx = ExecContext::new(vfs.clone());
+        // Create execution context with VFS and tools for backend dispatch
+        let mut exec_ctx = ExecContext::with_vfs_and_tools(vfs.clone(), tools.clone());
         exec_ctx.set_cwd(cwd);
         exec_ctx.set_job_manager(jobs.clone());
         exec_ctx.set_tool_schemas(tools.schemas());

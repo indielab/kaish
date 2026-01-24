@@ -101,17 +101,6 @@ impl PipelineRunner {
             _ => {}
         }
 
-        // Look up tool
-        let tool = match self.tools.get(&cmd.name) {
-            Some(t) => t,
-            None => {
-                return ExecResult::failure(
-                    127,
-                    format!("{}: command not found", cmd.name),
-                );
-            }
-        };
-
         // Build tool args
         let tool_args = build_tool_args(&cmd.args, ctx);
 
@@ -120,8 +109,12 @@ impl PipelineRunner {
             ctx.set_stdin(input);
         }
 
-        // Execute
-        tool.execute(tool_args, ctx).await
+        // Execute via backend (clone Arc to avoid borrow conflict)
+        let backend = ctx.backend.clone();
+        match backend.call_tool(&cmd.name, tool_args, ctx).await {
+            Ok(result) => ExecResult::from_output(result.code as i64, result.stdout, result.stderr),
+            Err(e) => ExecResult::failure(127, e.to_string()),
+        }
     }
 
     /// Run a multi-command pipeline.
@@ -137,20 +130,6 @@ impl PipelineRunner {
         let mut last_result = ExecResult::success("");
 
         for (i, cmd) in commands.iter().enumerate() {
-            // Clone context for this command (we need separate stdin per command)
-            // For now, we'll just update stdin on the shared context
-
-            // Look up tool
-            let tool = match self.tools.get(&cmd.name) {
-                Some(t) => t,
-                None => {
-                    return ExecResult::failure(
-                        127,
-                        format!("{}: command not found", cmd.name),
-                    );
-                }
-            };
-
             // Build tool args
             let tool_args = build_tool_args(&cmd.args, ctx);
 
@@ -159,8 +138,12 @@ impl PipelineRunner {
                 ctx.set_stdin(input);
             }
 
-            // Execute
-            last_result = tool.execute(tool_args, ctx).await;
+            // Execute via backend (clone Arc to avoid borrow conflict)
+            let backend = ctx.backend.clone();
+            last_result = match backend.call_tool(&cmd.name, tool_args, ctx).await {
+                Ok(result) => ExecResult::from_output(result.code as i64, result.stdout, result.stderr),
+                Err(e) => ExecResult::failure(127, e.to_string()),
+            };
 
             // If command failed, stop the pipeline
             if !last_result.ok() {
@@ -371,13 +354,14 @@ mod tests {
     async fn make_runner_and_ctx() -> (PipelineRunner, ExecContext) {
         let mut tools = ToolRegistry::new();
         register_builtins(&mut tools);
-        let runner = PipelineRunner::new(Arc::new(tools));
+        let tools = Arc::new(tools);
+        let runner = PipelineRunner::new(tools.clone());
 
         let mut vfs = VfsRouter::new();
         let mem = MemoryFs::new();
         mem.write(Path::new("test.txt"), b"hello\nworld\nfoo").await.unwrap();
         vfs.mount("/", mem);
-        let ctx = ExecContext::new(Arc::new(vfs));
+        let ctx = ExecContext::with_vfs_and_tools(Arc::new(vfs), tools);
 
         (runner, ctx)
     }

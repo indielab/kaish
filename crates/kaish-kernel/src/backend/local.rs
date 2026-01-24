@@ -4,7 +4,6 @@
 //! It delegates file operations to VfsRouter and tool dispatch to ToolRegistry.
 
 use async_trait::async_trait;
-use serde_json::Value as JsonValue;
 use std::path::Path;
 use std::sync::Arc;
 use std::time::UNIX_EPOCH;
@@ -13,7 +12,7 @@ use super::{
     BackendError, BackendResult, ConflictError, EntryInfo, KernelBackend, PatchOp, ReadRange,
     ToolInfo, ToolResult, WriteMode,
 };
-use crate::tools::ToolRegistry;
+use crate::tools::{ExecContext, ToolArgs, ToolRegistry};
 use crate::vfs::{EntryType, Filesystem, MountInfo, VfsRouter};
 
 /// Local backend implementation using VfsRouter and ToolRegistry.
@@ -373,14 +372,28 @@ impl KernelBackend for LocalBackend {
     // Tool Dispatch
     // ═══════════════════════════════════════════════════════════════════════════
 
-    async fn call_tool(&self, name: &str, _args: JsonValue) -> BackendResult<ToolResult> {
-        // For now, LocalBackend doesn't dispatch external tools through this interface.
-        // Tool dispatch is handled by the Kernel directly through ToolRegistry.
-        // This method is reserved for future MCP tool integration.
-        Err(BackendError::ToolNotFound(format!(
-            "external tool dispatch not yet supported: {}",
-            name
-        )))
+    async fn call_tool(
+        &self,
+        name: &str,
+        args: ToolArgs,
+        ctx: &mut ExecContext,
+    ) -> BackendResult<ToolResult> {
+        let registry = self.tools.as_ref().ok_or_else(|| {
+            BackendError::ToolNotFound(format!("no tool registry configured for: {}", name))
+        })?;
+
+        let tool = registry.get(name).ok_or_else(|| {
+            BackendError::ToolNotFound(format!("{}: command not found", name))
+        })?;
+
+        // Execute the tool and convert ExecResult to ToolResult
+        let exec_result = tool.execute(args, ctx).await;
+        Ok(ToolResult {
+            code: exec_result.code as i32,
+            stdout: exec_result.out,
+            stderr: exec_result.err,
+            data: None,
+        })
     }
 
     async fn list_tools(&self) -> BackendResult<Vec<ToolInfo>> {

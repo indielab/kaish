@@ -29,7 +29,7 @@ use serde_json::Value as JsonValue;
 use std::path::Path;
 use thiserror::Error;
 
-use crate::tools::ToolSchema;
+use crate::tools::{ExecContext, ToolArgs, ToolSchema};
 use crate::vfs::MountInfo;
 
 /// Result type for backend operations.
@@ -337,8 +337,17 @@ pub trait KernelBackend: Send + Sync {
     // Tool Dispatch
     // ═══════════════════════════════════════════════════════════════════════════
 
-    /// Call an external tool (MCP or system command).
-    async fn call_tool(&self, name: &str, args: JsonValue) -> BackendResult<ToolResult>;
+    /// Call a tool by name with the given arguments and execution context.
+    ///
+    /// For local backends, this executes the tool directly via ToolRegistry.
+    /// For remote backends (e.g., kaijutsu), this may serialize the call
+    /// and forward it to the parent process.
+    async fn call_tool(
+        &self,
+        name: &str,
+        args: ToolArgs,
+        ctx: &mut ExecContext,
+    ) -> BackendResult<ToolResult>;
 
     /// List available external tools.
     async fn list_tools(&self) -> BackendResult<Vec<ToolInfo>>;
