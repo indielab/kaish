@@ -436,8 +436,8 @@ These bash features are omitted because they're confusing, error-prone, or ambig
 | Feature | Reason | ShellCheck |
 |---------|--------|------------|
 | Arithmetic `$(( ))` | Use tools for math | SC2004 |
-| Brace expansion `{a,b,c}` | Just write it out | SC1083 |
-| Glob expansion `*.txt` | Tools handle their own patterns | SC2035 |
+| Shell brace expansion `echo {a,b,c}` | Tools support globs with braces internally | SC1083 |
+| Shell glob expansion `*.txt` | Tools handle their own patterns | SC2035 |
 | Here-docs `<<EOF` | Use files or strings | — |
 | Process substitution `<(cmd)` | Use temp files | — |
 | Backtick substitution `` `cmd` `` | Use `$(cmd)` | SC2006 |
@@ -462,7 +462,7 @@ Features that ShellCheck warns about (word splitting, glob expansion, backticks)
 | SC2046 | Quote this to prevent word splitting | `$(cmd)` returns single value |
 | SC2035 | Use `./*` so globs don't expand | No glob expansion |
 | SC2039 | Use `[[ ]]` in POSIX sh | Only `[[ ]]` exists |
-| SC1083 | Escape literal braces | No brace expansion |
+| SC1083 | Escape literal braces | No shell-level brace expansion (tools handle internally) |
 
 ### Why This Matters
 
