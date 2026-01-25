@@ -49,6 +49,12 @@ rustyline = "15"
 # Pattern matching (grep)
 regex = "1"
 
+# Text diffing
+similar = "2"
+
+# Git operations
+git2 = "0.19"
+
 # Date/time (date)
 chrono = "0.4"
 
