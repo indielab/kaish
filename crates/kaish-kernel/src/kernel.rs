@@ -2364,14 +2364,15 @@ AFTER="yes"'"#)
         let kernel = Kernel::transient().expect("failed to create kernel");
 
         // Create two directories with same-named script
+        // Note: using "myscript" not "test" to avoid conflict with test builtin
         kernel.execute(r#"mkdir "/first""#).await.ok();
         kernel.execute(r#"mkdir "/second""#).await.ok();
         kernel
-            .execute(r#"write "/first/test.kai" 'echo "from first"'"#)
+            .execute(r#"write "/first/myscript.kai" 'echo "from first"'"#)
             .await
             .expect("write failed");
         kernel
-            .execute(r#"write "/second/test.kai" 'echo "from second"'"#)
+            .execute(r#"write "/second/myscript.kai" 'echo "from second"'"#)
             .await
             .expect("write failed");
 
@@ -2380,7 +2381,7 @@ AFTER="yes"'"#)
 
         // Should find first one
         let result = kernel
-            .execute("test")
+            .execute("myscript")
             .await
             .expect("script execution failed");
 
