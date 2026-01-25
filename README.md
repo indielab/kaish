@@ -373,6 +373,8 @@ Scripts execute in isolated scope with positional parameters, just like function
 | Tool | Description |
 |------|-------------|
 | `grep` | Search content |
+| `sed` | Stream editor for transformations |
+| `awk` | Pattern scanning and text processing |
 | `cut` | Extract fields/columns |
 | `tr` | Translate characters |
 | `sort` | Sort lines |
