@@ -333,7 +333,7 @@ impl Tool for Tree {
             if content.is_empty() {
                 format!("{}/", root_name)
             } else if tree.children.len() == 1 {
-                let (name, _) = tree.children.iter().next().unwrap();
+                let (name, _) = tree.children.iter().next().expect("children not empty");
                 // If there's only one top-level entry, don't wrap in braces
                 if name == &root_name {
                     format!("{}/{{{}}}", root_name, content)

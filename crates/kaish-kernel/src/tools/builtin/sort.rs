@@ -134,12 +134,12 @@ fn compare_lines(
         Some(k) if k > 0 => {
             let delim = delimiter.unwrap_or(" \t");
             let split_a: Vec<&str> = if delim.len() == 1 {
-                a.split(delim.chars().next().unwrap()).collect()
+                a.split(delim.chars().next().expect("delimiter not empty")).collect()
             } else {
                 a.split_whitespace().collect()
             };
             let split_b: Vec<&str> = if delim.len() == 1 {
-                b.split(delim.chars().next().unwrap()).collect()
+                b.split(delim.chars().next().expect("delimiter not empty")).collect()
             } else {
                 b.split_whitespace().collect()
             };

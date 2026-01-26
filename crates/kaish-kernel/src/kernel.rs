@@ -964,7 +964,7 @@ impl Kernel {
             let scope = self.scope.read().await;
             scope
                 .get("PATH")
-                .map(|v| value_to_string(v))
+                .map(value_to_string)
                 .unwrap_or_else(|| "/bin".to_string())
         };
 

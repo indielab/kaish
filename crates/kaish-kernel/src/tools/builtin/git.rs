@@ -16,7 +16,6 @@
 //! ```
 
 use async_trait::async_trait;
-use std::path::PathBuf;
 
 use crate::ast::Value;
 use crate::interpreter::ExecResult;

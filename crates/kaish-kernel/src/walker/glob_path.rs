@@ -10,7 +10,7 @@
 use std::path::Path;
 use thiserror::Error;
 
-use crate::glob::{expand_braces, glob_match};
+use crate::glob::glob_match;
 
 /// Errors when parsing glob patterns.
 #[derive(Debug, Clone, Error)]
@@ -209,13 +209,6 @@ impl GlobPath {
         // Use glob_match which handles brace expansion
         glob_match(pattern, component)
     }
-}
-
-/// Convenience function to expand braces in a pattern.
-///
-/// Re-exported from the glob module for convenience.
-pub fn expand_pattern(pattern: &str) -> Vec<String> {
-    expand_braces(pattern)
 }
 
 #[cfg(test)]

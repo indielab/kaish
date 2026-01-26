@@ -108,7 +108,7 @@ impl Tool for Find {
         let mtime_filter = args
             .get_named("mtime")
             .or_else(|| args.get_positional(usize::MAX))
-            .and_then(|v| parse_relative_int(v));
+            .and_then(parse_relative_int);
 
         // Parse -size
         let size_filter = args

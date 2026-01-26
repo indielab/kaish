@@ -274,12 +274,15 @@ impl kernel::Server for KernelImpl {
     }
 
     /// Shutdown the kernel.
+    ///
+    /// Currently logs the request and returns success. Actual process termination
+    /// is handled by the calling frontend (REPL, MCP server) after receiving the
+    /// successful response.
     fn shutdown(
         &mut self,
         _params: kernel::ShutdownParams,
         _results: kernel::ShutdownResults,
     ) -> capnp::capability::Promise<(), capnp::Error> {
-        // TODO: Signal shutdown
         tracing::info!("Kernel shutdown requested via RPC");
         capnp::capability::Promise::ok(())
     }

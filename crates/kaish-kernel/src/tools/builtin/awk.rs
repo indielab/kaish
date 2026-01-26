@@ -99,15 +99,15 @@ impl Tool for Awk {
         }
 
         // Handle -v assignments
-        if let Some(var_assign) = args.get_string("var", usize::MAX) {
-            if let Some((name, value)) = var_assign.split_once('=') {
-                runtime.set_var(name.trim(), AwkValue::String(value.to_string()));
-            }
+        if let Some(var_assign) = args.get_string("var", usize::MAX)
+            && let Some((name, value)) = var_assign.split_once('=')
+        {
+            runtime.set_var(name.trim(), AwkValue::String(value.to_string()));
         }
-        if let Some(var_assign) = args.get_string("v", usize::MAX) {
-            if let Some((name, value)) = var_assign.split_once('=') {
-                runtime.set_var(name.trim(), AwkValue::String(value.to_string()));
-            }
+        if let Some(var_assign) = args.get_string("v", usize::MAX)
+            && let Some((name, value)) = var_assign.split_once('=')
+        {
+            runtime.set_var(name.trim(), AwkValue::String(value.to_string()));
         }
 
         // Execute
@@ -445,7 +445,7 @@ impl<'a> AwkLexer<'a> {
                 self.advance();
                 // Handle exponent sign
                 if (c == 'e' || c == 'E') && self.peek().is_some_and(|c| c == '+' || c == '-') {
-                    s.push(self.advance().unwrap());
+                    s.push(self.advance().expect("peeked char exists"));
                 }
             } else {
                 break;
@@ -554,7 +554,7 @@ impl<'a> AwkLexer<'a> {
     }
 
     fn scan_operator(&mut self) -> Result<Token, String> {
-        let c = self.advance().unwrap();
+        let c = self.advance().expect("scan_operator called after peek");
         let tok = match c {
             '+' => {
                 if self.peek() == Some('+') {
@@ -961,23 +961,23 @@ impl AwkParser {
         self.expect(&Token::LParen)?;
 
         // Check for for-in: for (var in array)
-        if let Token::Ident(name) = self.peek().clone() {
-            if self.peek_ahead(1) == &Token::In {
-                self.advance(); // var
-                self.advance(); // in
-                if let Token::Ident(arr) = self.peek().clone() {
-                    self.advance();
-                    self.expect(&Token::RParen)?;
-                    self.skip_newlines();
-                    let body = if self.peek() == &Token::LBrace {
-                        self.parse_action()?
-                    } else {
-                        vec![self.parse_statement()?]
-                    };
-                    return Ok(Stmt::ForIn(name, arr, body));
+        if let Token::Ident(name) = self.peek().clone()
+            && self.peek_ahead(1) == &Token::In
+        {
+            self.advance(); // var
+            self.advance(); // in
+            if let Token::Ident(arr) = self.peek().clone() {
+                self.advance();
+                self.expect(&Token::RParen)?;
+                self.skip_newlines();
+                let body = if self.peek() == &Token::LBrace {
+                    self.parse_action()?
                 } else {
-                    return Err("expected array name after 'in'".to_string());
-                }
+                    vec![self.parse_statement()?]
+                };
+                return Ok(Stmt::ForIn(name, arr, body));
+            } else {
+                return Err("expected array name after 'in'".to_string());
             }
         }
 

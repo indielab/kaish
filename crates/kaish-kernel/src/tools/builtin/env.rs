@@ -107,7 +107,7 @@ impl Tool for Env {
         }
 
         // Execute command with modified environment
-        let cmd_idx = command_start.unwrap();
+        let cmd_idx = command_start.expect("command position found");
         let command = match &args.positional[cmd_idx] {
             Value::String(s) => s.clone(),
             other => value_to_string(other),

@@ -217,10 +217,10 @@ pub fn build_tool_args(args: &[Arg], ctx: &ExecContext, schema: Option<&ToolSche
             }
             Arg::Positional(expr) => {
                 // Check if this positional was consumed by a preceding flag
-                if !consumed_positionals.contains(&i) {
-                    if let Some(value) = eval_simple_expr(expr, ctx) {
-                        tool_args.positional.push(value);
-                    }
+                if !consumed_positionals.contains(&i)
+                    && let Some(value) = eval_simple_expr(expr, ctx)
+                {
+                    tool_args.positional.push(value);
                 }
             }
             Arg::Named { key, value } => {

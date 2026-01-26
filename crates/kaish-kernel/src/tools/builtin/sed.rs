@@ -289,7 +289,7 @@ fn parse_command(cmd: &str) -> Result<Command, String> {
         return Err("missing command".to_string());
     }
 
-    let first = cmd.chars().next().unwrap();
+    let first = cmd.chars().next().expect("command string not empty");
 
     match first {
         's' => parse_substitute(&cmd[1..]),
@@ -499,7 +499,7 @@ fn address_matches(
 /// Substitute first match, handling capture groups.
 fn substitute_first(pattern: &Regex, text: &str, replacement: &str) -> String {
     if let Some(captures) = pattern.captures(text) {
-        let mat = captures.get(0).unwrap();
+        let mat = captures.get(0).expect("capture group 0 always exists");
         let expanded = expand_replacement(replacement, &captures);
         format!("{}{}{}", &text[..mat.start()], expanded, &text[mat.end()..])
     } else {
@@ -513,7 +513,7 @@ fn substitute_all(pattern: &Regex, text: &str, replacement: &str) -> String {
     let mut last_end = 0;
 
     for captures in pattern.captures_iter(text) {
-        let mat = captures.get(0).unwrap();
+        let mat = captures.get(0).expect("capture group 0 always exists");
         result.push_str(&text[last_end..mat.start()]);
         result.push_str(&expand_replacement(replacement, &captures));
         last_end = mat.end();

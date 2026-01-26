@@ -353,15 +353,15 @@ impl KernelBackend for LocalBackend {
         if recursive {
             // For recursive removal, we need to check if it's a directory
             // and remove contents first
-            if let Ok(meta) = self.vfs.stat(path).await {
-                if meta.is_dir {
-                    // List and remove children
-                    if let Ok(entries) = self.vfs.list(path).await {
-                        for entry in entries {
-                            let child_path = path.join(&entry.name);
-                            // Recursive call using Box::pin to handle async recursion
-                            Box::pin(self.remove(&child_path, true)).await?;
-                        }
+            if let Ok(meta) = self.vfs.stat(path).await
+                && meta.is_dir
+            {
+                // List and remove children
+                if let Ok(entries) = self.vfs.list(path).await {
+                    for entry in entries {
+                        let child_path = path.join(&entry.name);
+                        // Recursive call using Box::pin to handle async recursion
+                        Box::pin(self.remove(&child_path, true)).await?;
                     }
                 }
             }

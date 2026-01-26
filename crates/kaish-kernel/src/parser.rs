@@ -74,9 +74,9 @@ fn parse_interpolated_string(s: &str) -> Vec<StringPart> {
                 }
 
                 // Parse the content for special syntax
-                let part = if var_content.starts_with('#') {
+                let part = if let Some(name) = var_content.strip_prefix('#') {
                     // Variable length: ${#VAR}
-                    StringPart::VarLength(var_content[1..].to_string())
+                    StringPart::VarLength(name.to_string())
                 } else if let Some(colon_idx) = var_content.find(":-") {
                     // Variable with default: ${VAR:-default}
                     let name = var_content[..colon_idx].to_string();
