@@ -1,23 +1,24 @@
 # CLAUDE.md
 
-This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+This file provides guidance to models when working with in this repository.
 
 ## Project Overview
 
-**kaish** (会sh — "the gathering shell") is a Bourne-lite shell for MCP tool orchestration. Part of the [Kaijutsu](https://github.com/tobert/kaijutsu) project.
+**kaish** (会sh — "the gathering shell") is an 80/20 implementation of `sh` for MCP tool orchestration.
+
+Part of the [Kaijutsu](https://github.com/tobert/kaijutsu) project.
 
 **Status**: Implementation complete through L14. All build layers are implemented.
 
 ## Philosophy
 
-**80% of a POSIX shell, 100% unambiguous.**
+**80% of a POSIX/Bourne/bash shell, 100% unambiguous.**
 
 - **Bourne-lite** — familiar syntax, no dark corners
-- **Everything is a tool** — builtins and MCP tools use identical syntax
 - **Predictable over powerful** — if bash has a confusing edge case, kaish doesn't have that feature
 - **ShellCheck-clean** — the Bourne subset passes `shellcheck --enable=all`
-- **Agent-friendly** — easy to generate, parse, validate
-- **Fail fast** — ambiguity is an error, not a guess
+- **Agent-friendly** — easy to predict and validate
+- **Fail fast** — ambiguity is an error. does not guess
 
 ### ShellCheck-Clean Design
 
@@ -51,17 +52,17 @@ cargo clean -p kaish-schema && cargo build -p kaish-schema
 ### Error Handling
 
 - Use `anyhow::Result` for fallible operations
-- Never use `unwrap()` — propagate with `?`
+- Avoid `unwrap()` — propagate with `?`
 - Add context: `.context("what we were trying to do")`
-- Never discard errors with `let _ =`
+- Never discard errors.
+   - If an error can never happen in practice it can be hidden, but the program must panic on the outside case.
+   - When an error is explicitly ignored, it must have a comment saying so.
 
 ### Code Style
 
-- Correctness and clarity over performance
-- No summary comments — code should be self-explanatory
 - Comments only for non-obvious "why"
 - Avoid `mod.rs` — use `src/module_name.rs`
-- Full words for names, no abbreviations
+- Full words for names, avoid abbreviations
 - Prefer newtypes over primitives: `struct JobId(Uuid)` not `Uuid`
 - Use enums for states and variants
 - Define traits for shared capabilities
@@ -75,12 +76,14 @@ let state = tokio::task::block_in_place(|| self.state.blocking_write());
 
 ### Version Control
 
-- **Never `git add .` or `git add -A`** — always explicit paths
+- **always add files by name**
 - Review with `git status` before and after staging
 - Use `git diff --staged` before committing
 - Run `cargo test` before committing
 
 ### Commit Attribution
+
+Models should include attribution for themselves.
 
 ```
 Co-Authored-By: Claude <claude@anthropic.com>
@@ -146,16 +149,16 @@ crates/
 
 ### What's Intentionally Missing
 
-Arithmetic `$(( ))`, brace expansion `{a,b,c}`, glob expansion `*.txt`, here-docs `<<EOF`, process substitution `<(cmd)`, backticks, aliases, `eval`
+Arithmetic `$(( ))`, process substitution `<(cmd)`, backticks, aliases, `eval`
 
 ## Testing Strategy
 
 Uses **rstest** for parameterized tests and **insta** for snapshot testing.
 
 Test files in `crates/kaish-kernel/tests/`:
-- `lexer_tests.rs` — rstest parameterized lexer tests (~123 tests)
-- `parser_tests.rs` — insta snapshot tests for AST output (~83 tests, 16 ignored)
-- `eval_tests.rs` — rstest eval tests (all ignored until interpreter ready)
+- `lexer_tests.rs` — rstest parameterized lexer tests
+- `parser_tests.rs` — insta snapshot tests for AST output
+- `eval_tests.rs` — rstest eval tests
 - `snapshots/*.snap` — insta snapshot files for parser tests
 
 Snapshot workflow:
