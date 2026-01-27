@@ -44,8 +44,8 @@ cat urls.txt | grep "https" | head -10 > filtered.txt
 # MCP tools look like CLI commands
 exa:web_search --query "rust parser combinators"
 
-# Find files with globstar
-files **/*.rs --exclude='*_test.rs'
+# Expand glob patterns to file paths
+glob **/*.rs --exclude='*_test.rs'
 
 # Parallel execution with scatter/gather
 cat items.txt | scatter as=ITEM limit=4 | process $ITEM | gather

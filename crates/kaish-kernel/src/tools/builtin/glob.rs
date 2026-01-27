@@ -1,4 +1,4 @@
-//! files — Find files matching a glob pattern.
+//! glob — Expand glob patterns to matching file paths.
 
 use async_trait::async_trait;
 
@@ -7,17 +7,17 @@ use crate::interpreter::ExecResult;
 use crate::tools::{ExecContext, ParamSchema, Tool, ToolArgs, ToolSchema};
 use crate::walker::{EntryTypes, FileWalker, GlobPath, IncludeExclude, WalkOptions};
 
-/// Files tool: find files matching a glob pattern.
-pub struct Files;
+/// Glob tool: expand glob patterns to matching file paths.
+pub struct Glob;
 
 #[async_trait]
-impl Tool for Files {
+impl Tool for Glob {
     fn name(&self) -> &str {
-        "files"
+        "glob"
     }
 
     fn schema(&self) -> ToolSchema {
-        ToolSchema::new("files", "Find files matching a glob pattern")
+        ToolSchema::new("glob", "Expand glob patterns to matching file paths")
             .param(ParamSchema::required(
                 "pattern",
                 "string",
@@ -71,15 +71,15 @@ impl Tool for Files {
                 Value::Null,
                 "Exclude pattern (can be repeated) (--exclude)",
             ))
-            .example("Find all Rust files", "files **/*.rs")
-            .example("Find in specific directory", "files src/**/*.rs")
-            .example("Multiple extensions", "files **/*.{rs,go,py}")
-            .example("With depth limit", "files **/*.rs -d 3")
-            .example("Include hidden files", "files **/*.rs -a")
-            .example("Null-separated for xargs", "files **/*.rs -0")
+            .example("Find all Rust files", "glob **/*.rs")
+            .example("Find in specific directory", "glob src/**/*.rs")
+            .example("Multiple extensions", "glob **/*.{rs,go,py}")
+            .example("With depth limit", "glob **/*.rs -d 3")
+            .example("Include hidden files", "glob **/*.rs -a")
+            .example("Null-separated for xargs", "glob **/*.rs -0")
             .example(
                 "Exclude test files",
-                "files **/*.rs --exclude='*_test.rs'",
+                "glob **/*.rs --exclude='*_test.rs'",
             )
     }
 
@@ -87,13 +87,13 @@ impl Tool for Files {
         // Get the pattern
         let pattern = match args.get_string("pattern", 0) {
             Some(p) => p,
-            None => return ExecResult::failure(1, "files: missing pattern argument"),
+            None => return ExecResult::failure(1, "glob: missing pattern argument"),
         };
 
         // Parse the glob pattern
         let glob = match GlobPath::new(&pattern) {
             Ok(g) => g,
-            Err(e) => return ExecResult::failure(1, format!("files: invalid pattern: {}", e)),
+            Err(e) => return ExecResult::failure(1, format!("glob: invalid pattern: {}", e)),
         };
 
         // Start from current working directory
@@ -171,7 +171,7 @@ impl Tool for Files {
         // Collect results
         let paths = match walker.collect().await {
             Ok(p) => p,
-            Err(e) => return ExecResult::failure(1, format!("files: {}", e)),
+            Err(e) => return ExecResult::failure(1, format!("glob: {}", e)),
         };
 
         // Format output
@@ -240,12 +240,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_files_basic() {
+    async fn test_glob_basic() {
         let mut ctx = make_ctx().await;
         let mut args = ToolArgs::new();
         args.positional.push(Value::String("**/*.rs".into()));
 
-        let result = Files.execute(args, &mut ctx).await;
+        let result = Glob.execute(args, &mut ctx).await;
         assert!(result.ok());
         assert!(result.out.contains("main.rs"));
         assert!(result.out.contains("lib.rs"));
@@ -254,12 +254,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_files_scoped() {
+    async fn test_glob_scoped() {
         let mut ctx = make_ctx().await;
         let mut args = ToolArgs::new();
         args.positional.push(Value::String("src/**/*.rs".into()));
 
-        let result = Files.execute(args, &mut ctx).await;
+        let result = Glob.execute(args, &mut ctx).await;
         assert!(result.ok());
         assert!(result.out.contains("main.rs"));
         assert!(result.out.contains("lib.rs"));
@@ -267,34 +267,34 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_files_json() {
+    async fn test_glob_json() {
         let mut ctx = make_ctx().await;
         let mut args = ToolArgs::new();
         args.positional.push(Value::String("**/*.rs".into()));
         args.flags.insert("j".to_string());
 
-        let result = Files.execute(args, &mut ctx).await;
+        let result = Glob.execute(args, &mut ctx).await;
         assert!(result.ok());
         assert!(result.out.starts_with('['));
         assert!(result.out.ends_with(']'));
     }
 
     #[tokio::test]
-    async fn test_files_exclude() {
+    async fn test_glob_exclude() {
         let mut ctx = make_ctx().await;
         let mut args = ToolArgs::new();
         args.positional.push(Value::String("**/*.rs".into()));
         args.named
             .insert("exclude".to_string(), Value::String("*_test.rs".into()));
 
-        let result = Files.execute(args, &mut ctx).await;
+        let result = Glob.execute(args, &mut ctx).await;
         assert!(result.ok());
         assert!(result.out.contains("main.rs"));
         assert!(!result.out.contains("main_test.rs"));
     }
 
     #[tokio::test]
-    async fn test_files_hidden() {
+    async fn test_glob_hidden() {
         let mut ctx = make_ctx().await;
         let mut args = ToolArgs::new();
         args.positional.push(Value::String("*".into()));
@@ -302,17 +302,17 @@ mod tests {
         args.named
             .insert("no_ignore".to_string(), Value::Bool(true));
 
-        let result = Files.execute(args, &mut ctx).await;
+        let result = Glob.execute(args, &mut ctx).await;
         assert!(result.ok());
         assert!(result.out.contains(".hidden"));
     }
 
     #[tokio::test]
-    async fn test_files_no_pattern() {
+    async fn test_glob_no_pattern() {
         let mut ctx = make_ctx().await;
         let args = ToolArgs::new();
 
-        let result = Files.execute(args, &mut ctx).await;
+        let result = Glob.execute(args, &mut ctx).await;
         assert!(!result.ok());
         assert!(result.err.contains("missing pattern"));
     }

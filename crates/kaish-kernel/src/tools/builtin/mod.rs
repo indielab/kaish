@@ -17,7 +17,7 @@ mod echo;
 mod env;
 mod exec;
 mod export;
-mod files;
+mod glob;
 mod find;
 mod gather;
 mod git;
@@ -78,7 +78,7 @@ pub fn register_builtins(registry: &mut ToolRegistry) {
     registry.register(env::Env);
     registry.register(exec::Exec);
     registry.register(export::Export);
-    registry.register(files::Files);
+    registry.register(glob::Glob);
     registry.register(find::Find);
     registry.register(gather::Gather);
     registry.register(git::Git);
