@@ -115,6 +115,3 @@ cargo build --release
 
 MIT
 
----
-
-*"The gathering shell" — orchestrating AI tools should feel like conducting a symphony, not wrestling with syntax.*
