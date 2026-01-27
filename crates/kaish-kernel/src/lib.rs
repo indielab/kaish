@@ -9,7 +9,6 @@
 //! - **VFS**: Virtual filesystem with mount points
 //! - **Tools**: Tool trait, registry, and builtin commands
 //! - **Scheduler**: Pipeline execution and background job management
-//! - **MCP**: Model Context Protocol client for external tools
 //! - **Paths**: XDG-compliant path helpers
 
 pub mod arithmetic;
@@ -19,7 +18,6 @@ pub mod glob;
 pub mod interpreter;
 pub mod kernel;
 pub mod lexer;
-pub mod mcp;
 pub mod parser;
 pub mod paths;
 pub mod rpc;

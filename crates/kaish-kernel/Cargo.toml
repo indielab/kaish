@@ -41,9 +41,6 @@ jaq-core = { workspace = true }
 jaq-std = { workspace = true }
 jaq-json = { workspace = true }
 
-# MCP client (L8)
-rmcp = { workspace = true }
-
 # XDG paths
 directories = { workspace = true }
 

@@ -115,11 +115,12 @@ Kernel (核)
 crates/
 ├── kaish-schema/    # Cap'n Proto codegen from schema/kaish.capnp
 ├── kaish-kernel/    # Core: lexer, parser, interpreter, tools, VFS, validator
+├── kaish-mcp/       # MCP client integration (consuming external MCP tools)
 ├── kaish-client/    # Client implementations (embedded, IPC)
 └── kaish-repl/      # Interactive REPL with rustyline
 ```
 
-**Note:** MCP server frontend (kaish-mcp) is planned but not yet implemented. The kernel includes MCP *client* integration for consuming external MCP tools.
+**Note:** MCP *server* functionality (exporting kaish tools as MCP) is planned for a future phase. The `kaish-mcp` crate currently provides MCP *client* integration for consuming external MCP tools.
 
 
 ## Language Key Points

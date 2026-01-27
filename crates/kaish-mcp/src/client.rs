@@ -10,28 +10,7 @@ use rmcp::ClientHandler;
 use tokio::process::Command;
 use tokio::sync::Mutex;
 
-/// Configuration for connecting to an MCP server.
-#[derive(Debug, Clone)]
-pub struct McpConfig {
-    /// Human-readable name for this server.
-    pub name: String,
-    /// Transport configuration.
-    pub transport: McpTransport,
-}
-
-/// Transport type for MCP connection.
-#[derive(Debug, Clone)]
-pub enum McpTransport {
-    /// Stdio transport via child process.
-    Stdio {
-        /// Command to execute.
-        command: String,
-        /// Arguments to pass.
-        args: Vec<String>,
-        /// Environment variables.
-        env: Vec<(String, String)>,
-    },
-}
+use crate::config::{McpConfig, McpTransport};
 
 /// Minimal client handler that does nothing.
 ///
@@ -124,15 +103,17 @@ impl McpClient {
             return Ok(tools.clone());
         }
 
-        let service = self.service.lock().await;
-        let service = service
-            .as_ref()
-            .context("Not connected to MCP server")?;
+        let tools = {
+            let service = self.service.lock().await;
+            let service = service
+                .as_ref()
+                .context("Not connected to MCP server")?;
 
-        let tools = service
-            .list_all_tools()
-            .await
-            .map_err(|e| anyhow::anyhow!("Failed to list tools: {}", e))?;
+            service
+                .list_all_tools()
+                .await
+                .map_err(|e| anyhow::anyhow!("Failed to list tools: {}", e))?
+        };
 
         // Cache the tools
         *self.tools.lock().await = Some(tools.clone());

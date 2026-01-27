@@ -1,6 +1,6 @@
-//! MCP (Model Context Protocol) client integration.
+//! MCP (Model Context Protocol) integration for kaish.
 //!
-//! This module provides integration with MCP servers, allowing kaish to
+//! This crate provides MCP client functionality, allowing kaish to
 //! discover and call tools exposed by external MCP servers.
 //!
 //! # Architecture
@@ -15,7 +15,7 @@
 //! # Usage
 //!
 //! ```ignore
-//! use kaish_kernel::mcp::{McpClient, McpConfig, McpTransport};
+//! use kaish_mcp::{McpClient, McpConfig, McpTransport, register_mcp_tools};
 //! use kaish_kernel::tools::ToolRegistry;
 //!
 //! // Create and connect to an MCP server
@@ -34,17 +34,19 @@
 //! register_mcp_tools(&client, &mut registry).await?;
 //! ```
 
-mod client;
-mod tool;
+pub mod client;
+pub mod config;
+pub mod wrapper;
 
 use std::sync::Arc;
 
 use anyhow::Result;
 
-use crate::tools::ToolRegistry;
+use kaish_kernel::tools::ToolRegistry;
 
-pub use client::{McpClient, McpConfig, McpTransport, shared_client, stdio_client};
-pub use tool::McpToolWrapper;
+pub use client::{shared_client, stdio_client, McpClient};
+pub use config::{McpConfig, McpTransport};
+pub use wrapper::McpToolWrapper;
 
 /// Register all tools from an MCP client into a ToolRegistry.
 ///

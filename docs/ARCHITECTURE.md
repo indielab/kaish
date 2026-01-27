@@ -103,7 +103,6 @@ kaish/
 │   │       │   ├── registry.rs # Tool lookup & dispatch
 │   │       │   ├── traits.rs   # Tool trait definition
 │   │       │   ├── context.rs  # Execution context
-│   │       │   ├── mcp.rs      # MCP client wrapper
 │   │       │   └── builtin/    # Built-in tools (echo, ls, grep, jq, etc.)
 │   │       │
 │   │       ├── validator/      # Pre-execution validation (1,200+ lines)
@@ -134,11 +133,15 @@ kaish/
 │   │       │   ├── filter.rs
 │   │       │   └── ignore.rs   # .gitignore support
 │   │       │
-│   │       ├── paths.rs        # XDG path helpers
-│   │       │
-│   │       └── mcp/            # MCP client integration (400+ lines)
-│   │           ├── mod.rs
-│   │           └── client.rs   # External MCP server connection
+│   │       └── paths.rs        # XDG path helpers
+│   │
+│   ├── kaish-mcp/              # MCP integration (separate crate, ~400 lines)
+│   │   ├── Cargo.toml
+│   │   └── src/
+│   │       ├── lib.rs          # Re-exports, register_mcp_tools()
+│   │       ├── config.rs       # McpConfig, McpTransport
+│   │       ├── client.rs       # McpClient (rmcp wrapper)
+│   │       └── wrapper.rs      # McpToolWrapper (implements Tool trait)
 │   │
 │   ├── kaish-client/           # Client trait + implementations (~585 lines)
 │   │   ├── Cargo.toml
@@ -163,7 +166,7 @@ kaish/
     └── snapshots/              # Insta snapshot files
 ```
 
-**Note:** `kaish-mcp` (MCP server frontend to export kaish tools as MCP) is planned but not yet implemented. The kernel includes MCP *client* integration for consuming external MCP tools.
+**Note:** `kaish-mcp` provides MCP *client* integration for consuming external MCP tools. MCP *server* functionality (exporting kaish tools as MCP) is planned for a future phase.
 
 ## 核 Architecture
 
@@ -485,7 +488,7 @@ The shebang (`#!/usr/bin/env kaish`) is handled by the OS — it invokes our bin
 
 ## MCP Server Mode: The Prestige (Planned)
 
-> **Status:** This feature is planned but not yet implemented. The `kaish-mcp` crate does not exist yet.
+> **Status:** The MCP *client* is implemented in `kaish-mcp`. MCP *server* mode (exporting kaish tools) is planned.
 
 The vision: `kaish serve tools.kai` would:
 

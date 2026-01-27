@@ -5,11 +5,11 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use rmcp::model::{RawContent, ResourceContents, Tool as McpTool};
 
-use crate::ast::Value;
-use crate::interpreter::ExecResult;
-use crate::tools::{ExecContext, ParamSchema, Tool, ToolArgs, ToolSchema};
+use kaish_kernel::ast::Value;
+use kaish_kernel::interpreter::ExecResult;
+use kaish_kernel::tools::{ExecContext, ParamSchema, Tool, ToolArgs, ToolSchema};
 
-use super::client::McpClient;
+use crate::client::McpClient;
 
 /// Wraps an MCP tool as a kaish Tool.
 ///
