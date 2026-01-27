@@ -13,8 +13,73 @@
 //!
 //! This differs from traditional shells where `$?` is just an integer exit code.
 //! In kaish, we capture the full context: exit code, stdout, parsed data, and errors.
+//!
+//! # Display Hints
+//!
+//! Commands can return display hints to indicate how output should be formatted
+//! for different audiences (humans vs. models):
+//!
+//! - `DisplayHint::None` — Use raw `out` as-is
+//! - `DisplayHint::Formatted` — Pre-rendered output for both audiences
+//! - `DisplayHint::Table` — Tabular data, REPL handles column layout
+//! - `DisplayHint::Tree` — Tree structure, REPL chooses format style
 
 use crate::ast::Value;
+
+/// Display hint for command output.
+///
+/// Tools can specify how their output should be formatted for different audiences:
+/// - **Humans** → Pretty columns, colors, traditional tree
+/// - **Models** → Token-efficient compact formats (brace notation, JSON)
+#[derive(Debug, Clone, Default, PartialEq)]
+pub enum DisplayHint {
+    /// No special formatting - use raw `out` as-is.
+    #[default]
+    None,
+
+    /// Pre-rendered output for both audiences.
+    Formatted {
+        /// Pretty format for humans (TTY).
+        user: String,
+        /// Compact format for models/piping.
+        model: String,
+    },
+
+    /// Tabular data - REPL handles column layout.
+    Table {
+        /// Optional column headers.
+        headers: Option<Vec<String>>,
+        /// Table rows (each row is a vector of cell values).
+        rows: Vec<Vec<String>>,
+        /// Entry metadata for coloring (is_dir, is_executable, etc.).
+        entry_types: Option<Vec<EntryType>>,
+    },
+
+    /// Tree structure - REPL chooses traditional vs compact.
+    Tree {
+        /// Root directory name.
+        root: String,
+        /// Tree structure as JSON for flexible rendering.
+        structure: serde_json::Value,
+        /// Pre-rendered traditional format (for human display).
+        traditional: String,
+        /// Pre-rendered compact format (for model/piped display).
+        compact: String,
+    },
+}
+
+/// Entry type for colorizing file listings.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EntryType {
+    /// Regular file.
+    File,
+    /// Directory.
+    Directory,
+    /// Executable file.
+    Executable,
+    /// Symbolic link.
+    Symlink,
+}
 
 /// The result of executing a command or pipeline.
 ///
@@ -28,12 +93,14 @@ use crate::ast::Value;
 pub struct ExecResult {
     /// Exit code. 0 means success.
     pub code: i64,
-    /// Raw standard output as a string.
+    /// Raw standard output as a string (canonical for pipes).
     pub out: String,
     /// Raw standard error as a string.
     pub err: String,
     /// Parsed JSON data from stdout, if stdout was valid JSON.
     pub data: Option<Value>,
+    /// Display hint for formatting output.
+    pub hint: DisplayHint,
 }
 
 impl ExecResult {
@@ -46,6 +113,7 @@ impl ExecResult {
             out,
             err: String::new(),
             data,
+            hint: DisplayHint::default(),
         }
     }
 
@@ -57,6 +125,7 @@ impl ExecResult {
             out,
             err: String::new(),
             data: Some(data),
+            hint: DisplayHint::default(),
         }
     }
 
@@ -67,6 +136,7 @@ impl ExecResult {
             out: String::new(),
             err: err.into(),
             data: None,
+            hint: DisplayHint::default(),
         }
     }
 
@@ -83,6 +153,103 @@ impl ExecResult {
             out,
             err: stderr.into(),
             data,
+            hint: DisplayHint::default(),
+        }
+    }
+
+    /// Create a successful result with dual display formats.
+    ///
+    /// Use this when the tool can pre-render output for both audiences:
+    /// - `user` — Pretty format for interactive TTY (colors, columns)
+    /// - `model` — Compact format for models/piping (token-efficient)
+    pub fn success_formatted(user: impl Into<String>, model: impl Into<String>) -> Self {
+        let model_str = model.into();
+        Self {
+            code: 0,
+            out: model_str.clone(), // Use model format as canonical output for pipes
+            err: String::new(),
+            data: None,
+            hint: DisplayHint::Formatted {
+                user: user.into(),
+                model: model_str,
+            },
+        }
+    }
+
+    /// Create a successful result with table data for smart column layout.
+    ///
+    /// The REPL will format this as columns for TTY or one-per-line for piped output.
+    pub fn success_table(
+        rows: Vec<Vec<String>>,
+        entry_types: Option<Vec<EntryType>>,
+    ) -> Self {
+        // Build canonical output (one entry per line, first column only)
+        let out = rows.iter()
+            .filter_map(|row| row.first())
+            .cloned()
+            .collect::<Vec<_>>()
+            .join("\n");
+        Self {
+            code: 0,
+            out,
+            err: String::new(),
+            data: None,
+            hint: DisplayHint::Table {
+                headers: None,
+                rows,
+                entry_types,
+            },
+        }
+    }
+
+    /// Create a successful result with table data including headers.
+    pub fn success_table_with_headers(
+        headers: Vec<String>,
+        rows: Vec<Vec<String>>,
+        entry_types: Option<Vec<EntryType>>,
+    ) -> Self {
+        // Build canonical output (one entry per line, first column only)
+        let out = rows.iter()
+            .filter_map(|row| row.first())
+            .cloned()
+            .collect::<Vec<_>>()
+            .join("\n");
+        Self {
+            code: 0,
+            out,
+            err: String::new(),
+            data: None,
+            hint: DisplayHint::Table {
+                headers: Some(headers),
+                rows,
+                entry_types,
+            },
+        }
+    }
+
+    /// Create a successful result with tree structure for format selection.
+    ///
+    /// - `root` — Root directory name
+    /// - `structure` — Tree as JSON for flexible rendering
+    /// - `traditional` — Pre-rendered traditional format with box-drawing
+    /// - `compact` — Pre-rendered compact brace notation
+    pub fn success_tree(
+        root: String,
+        structure: serde_json::Value,
+        traditional: String,
+        compact: String,
+    ) -> Self {
+        Self {
+            code: 0,
+            out: compact.clone(), // Use compact format as canonical for pipes
+            err: String::new(),
+            data: None,
+            hint: DisplayHint::Tree {
+                root,
+                structure,
+                traditional,
+                compact,
+            },
         }
     }
 
@@ -237,5 +404,114 @@ mod tests {
         let result = ExecResult::success_data(value.clone());
         assert!(result.ok());
         assert_eq!(result.data, Some(value));
+    }
+
+    // --- Tests for DisplayHint and new constructors ---
+
+    #[test]
+    fn default_hint_is_none() {
+        let result = ExecResult::success("test");
+        assert_eq!(result.hint, DisplayHint::None);
+    }
+
+    #[test]
+    fn success_formatted_sets_hint() {
+        let result = ExecResult::success_formatted("pretty output", "compact");
+        assert!(result.ok());
+        // Canonical output is the model format
+        assert_eq!(result.out, "compact");
+        match result.hint {
+            DisplayHint::Formatted { user, model } => {
+                assert_eq!(user, "pretty output");
+                assert_eq!(model, "compact");
+            }
+            _ => panic!("Expected Formatted hint"),
+        }
+    }
+
+    #[test]
+    fn success_table_sets_hint() {
+        let rows = vec![
+            vec!["file1.txt".to_string()],
+            vec!["file2.txt".to_string()],
+        ];
+        let types = vec![EntryType::File, EntryType::Directory];
+        let result = ExecResult::success_table(rows.clone(), Some(types.clone()));
+
+        assert!(result.ok());
+        // Canonical output is names joined by newlines
+        assert_eq!(result.out, "file1.txt\nfile2.txt");
+        match result.hint {
+            DisplayHint::Table { headers, rows: r, entry_types } => {
+                assert!(headers.is_none());
+                assert_eq!(r.len(), 2);
+                assert_eq!(entry_types, Some(types));
+            }
+            _ => panic!("Expected Table hint"),
+        }
+    }
+
+    #[test]
+    fn success_table_with_headers_sets_hint() {
+        let headers = vec!["Name".to_string(), "Size".to_string()];
+        let rows = vec![
+            vec!["foo.rs".to_string(), "1024".to_string()],
+            vec!["bar.rs".to_string(), "2048".to_string()],
+        ];
+        let result = ExecResult::success_table_with_headers(
+            headers.clone(),
+            rows.clone(),
+            None,
+        );
+
+        assert!(result.ok());
+        // Canonical output uses first column
+        assert_eq!(result.out, "foo.rs\nbar.rs");
+        match result.hint {
+            DisplayHint::Table { headers: h, rows: r, entry_types } => {
+                assert_eq!(h, Some(headers));
+                assert_eq!(r.len(), 2);
+                assert!(entry_types.is_none());
+            }
+            _ => panic!("Expected Table hint"),
+        }
+    }
+
+    #[test]
+    fn success_tree_sets_hint() {
+        let structure = serde_json::json!({"src": {"main.rs": null}});
+        let result = ExecResult::success_tree(
+            "myproject".to_string(),
+            structure.clone(),
+            "myproject/\n└── src/\n    └── main.rs".to_string(),
+            "myproject/{src/{main.rs}}".to_string(),
+        );
+
+        assert!(result.ok());
+        // Canonical output is compact format
+        assert_eq!(result.out, "myproject/{src/{main.rs}}");
+        match result.hint {
+            DisplayHint::Tree { root, structure: s, traditional, compact } => {
+                assert_eq!(root, "myproject");
+                assert_eq!(s, structure);
+                assert!(traditional.contains("└──"));
+                assert!(compact.contains("{"));
+            }
+            _ => panic!("Expected Tree hint"),
+        }
+    }
+
+    #[test]
+    fn entry_type_variants() {
+        // Just verify the enum variants exist and are distinct
+        assert_ne!(EntryType::File, EntryType::Directory);
+        assert_ne!(EntryType::Directory, EntryType::Executable);
+        assert_ne!(EntryType::Executable, EntryType::Symlink);
+    }
+
+    #[test]
+    fn display_hint_default_is_none() {
+        let hint: DisplayHint = Default::default();
+        assert_eq!(hint, DisplayHint::None);
     }
 }

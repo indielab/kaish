@@ -12,6 +12,26 @@ use crate::vfs::VfsRouter;
 
 use super::traits::ToolSchema;
 
+/// Output context determines how command output should be formatted.
+///
+/// Different contexts prefer different output formats:
+/// - **Interactive** — Pretty columns, colors, traditional tree (TTY/REPL)
+/// - **Piped** — Raw output for pipeline processing
+/// - **Model** — Token-efficient compact formats (MCP server / agent context)
+/// - **Script** — Non-interactive script execution
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum OutputContext {
+    /// Interactive TTY/REPL - use human-friendly format with colors.
+    #[default]
+    Interactive,
+    /// Output to another command - use raw output for pipes.
+    Piped,
+    /// MCP server / agent context - use token-efficient model format.
+    Model,
+    /// Non-interactive script - use raw output.
+    Script,
+}
+
 /// Execution context passed to tools.
 ///
 /// Provides access to the backend (for file operations and tool dispatch),

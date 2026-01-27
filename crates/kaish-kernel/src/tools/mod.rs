@@ -19,6 +19,6 @@ mod registry;
 mod traits;
 
 pub use builtin::register_builtins;
-pub use context::ExecContext;
+pub use context::{ExecContext, OutputContext};
 pub use registry::ToolRegistry;
 pub use traits::{Tool, ToolArgs, ToolSchema, ParamSchema};

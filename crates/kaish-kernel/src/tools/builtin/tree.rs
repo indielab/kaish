@@ -300,52 +300,51 @@ impl Tool for Tree {
             }
         }
 
-        // Format output
-        let output = if json_output {
-            serde_json::to_string(&tree.to_json()).unwrap_or_else(|_| "{}".to_string())
-        } else if traditional {
-            // Traditional tree format with box-drawing characters
-            let root_name = Path::new(&path)
-                .file_name()
-                .map(|s| s.to_string_lossy().to_string())
-                .unwrap_or_else(|| ".".to_string());
+        // Get root name for formatting
+        let root_name = Path::new(&path)
+            .file_name()
+            .map(|s| s.to_string_lossy().to_string())
+            .unwrap_or_else(|| ".".to_string());
 
-            let mut output = format!("{}/\n", root_name);
-            tree.format_traditional("", false, &mut output);
-            output.trim_end().to_string()
-        } else if flat {
-            let root_name = Path::new(&path)
-                .file_name()
-                .map(|s| s.to_string_lossy().to_string())
-                .unwrap_or_else(|| ".".to_string());
+        // Handle explicit format requests
+        if json_output {
+            let output = serde_json::to_string(&tree.to_json()).unwrap_or_else(|_| "{}".to_string());
+            return ExecResult::success(output);
+        }
 
+        if flat {
             let mut output = format!("{}/\n", root_name);
             tree.format_flat(&root_name, 1, &mut output);
-            output.trim_end().to_string()
-        } else {
-            // Compact brace notation (default) - token efficient!
-            let root_name = Path::new(&path)
-                .file_name()
-                .map(|s| s.to_string_lossy().to_string())
-                .unwrap_or_else(|| ".".to_string());
+            return ExecResult::success(output.trim_end().to_string());
+        }
 
-            let content = tree.format_compact();
-            if content.is_empty() {
-                format!("{}/", root_name)
-            } else if tree.children.len() == 1 {
-                let (name, _) = tree.children.iter().next().expect("children not empty");
-                // If there's only one top-level entry, don't wrap in braces
-                if name == &root_name {
-                    format!("{}/{{{}}}", root_name, content)
-                } else {
-                    format!("{}/{{{}}}", root_name, content)
-                }
-            } else {
-                format!("{}/{{{}}}", root_name, content)
-            }
+        if traditional {
+            let mut output = format!("{}/\n", root_name);
+            tree.format_traditional("", false, &mut output);
+            return ExecResult::success(output.trim_end().to_string());
+        }
+
+        // Default: return Tree hint with both formats pre-rendered
+        // Generate traditional format
+        let mut traditional_output = format!("{}/\n", root_name);
+        tree.format_traditional("", false, &mut traditional_output);
+        let traditional_str = traditional_output.trim_end().to_string();
+
+        // Generate compact format
+        let content = tree.format_compact();
+        let compact_str = if content.is_empty() {
+            format!("{}/", root_name)
+        } else {
+            format!("{}/{{{}}}", root_name, content)
         };
 
-        ExecResult::success(output)
+        // Return with Tree hint for smart formatting
+        ExecResult::success_tree(
+            root_name,
+            tree.to_json(),
+            traditional_str,
+            compact_str,
+        )
     }
 }
 
@@ -448,5 +447,47 @@ mod tests {
         assert!(result.out.contains("lib/") || result.out.contains("lib"));
         // utils.rs is at depth 2, should not appear
         // (actually depends on how we count - lib/ is at depth 1, utils.rs at depth 2)
+    }
+
+    #[tokio::test]
+    async fn test_tree_returns_tree_hint() {
+        use crate::interpreter::DisplayHint;
+
+        let mut ctx = make_ctx().await;
+        let mut args = ToolArgs::new();
+        args.positional.push(Value::String("/src".into()));
+
+        let result = Tree.execute(args, &mut ctx).await;
+        assert!(result.ok());
+
+        // Default tree (no flags) should return Tree hint
+        match &result.hint {
+            DisplayHint::Tree { root, structure, traditional, compact } => {
+                assert_eq!(root, "src");
+                // Structure should be valid JSON
+                assert!(structure.is_object() || structure.is_null());
+                // Traditional should have box-drawing characters
+                assert!(traditional.contains("├") || traditional.contains("└") || traditional.contains("src/"));
+                // Compact should use brace notation
+                assert!(compact.contains("{") || compact.contains("src/"));
+            }
+            _ => panic!("Expected Tree hint for default tree output, got {:?}", result.hint),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_tree_explicit_flag_returns_no_hint() {
+        use crate::interpreter::DisplayHint;
+
+        let mut ctx = make_ctx().await;
+        let mut args = ToolArgs::new();
+        args.positional.push(Value::String("/src".into()));
+        args.flags.insert("traditional".to_string());
+
+        let result = Tree.execute(args, &mut ctx).await;
+        assert!(result.ok());
+
+        // Explicit format flags should return None hint (plain text)
+        assert_eq!(result.hint, DisplayHint::None);
     }
 }

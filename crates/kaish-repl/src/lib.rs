@@ -13,6 +13,9 @@
 //! - SQLite-backed session persistence
 //! - Introspection builtins: `vars`, `tools`, `mounts`, `history`, `checkpoints`
 //! - Meta-commands: `/help`, `/quit`, `/ast`, `/scope`, `/cwd`, `/jobs`, `/tools`, `/state`
+//! - Smart output formatting with DisplayHints for human vs. model audiences
+
+pub mod format;
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -934,7 +937,24 @@ fn format_value_unquoted(value: &Value) -> String {
 }
 
 /// Format an ExecResult for display.
+///
+/// Uses display hints when available, otherwise falls back to status+output format.
 fn format_result(result: &ExecResult) -> String {
+    use kaish_kernel::interpreter::DisplayHint;
+
+    // If there's a display hint, use the formatter
+    if !matches!(result.hint, DisplayHint::None) {
+        let context = format::detect_context();
+        let formatted = format::format_output(result, context);
+
+        // For failures, append error info
+        if !result.ok() && !result.err.is_empty() {
+            return format!("{}\n✗ code={} err=\"{}\"", formatted, result.code, result.err);
+        }
+        return formatted;
+    }
+
+    // No display hint - use classic status format
     let status = if result.ok() { "✓" } else { "✗" };
     let mut output = format!("{} code={}", status, result.code);
 

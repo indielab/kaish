@@ -6,7 +6,7 @@ use std::path::Path;
 
 use crate::ast::Value;
 use crate::backend::EntryInfo;
-use crate::interpreter::ExecResult;
+use crate::interpreter::{EntryType, ExecResult};
 use crate::tools::{ExecContext, ParamSchema, Tool, ToolArgs, ToolSchema};
 use crate::walker::IgnoreFilter;
 
@@ -187,8 +187,43 @@ impl Ls {
                     return ExecResult::success("");
                 }
 
-                let lines = format_entries(&filtered, long_format, human_readable);
-                ExecResult::success(lines.join("\n"))
+                // Build table data and entry types for coloring
+                let entry_types: Vec<EntryType> = filtered
+                    .iter()
+                    .map(entry_info_to_type)
+                    .collect();
+
+                let rows: Vec<Vec<String>> = if long_format {
+                    // Name first (for canonical output), then type and size
+                    filtered
+                        .iter()
+                        .map(|e| {
+                            let type_char = if e.is_dir { "d" } else { "-" };
+                            let size_str = if human_readable {
+                                format_human_size(e.size)
+                            } else {
+                                format!("{:>8}", e.size)
+                            };
+                            vec![e.name.clone(), type_char.to_string(), size_str]
+                        })
+                        .collect()
+                } else {
+                    // Single column - just names
+                    filtered
+                        .iter()
+                        .map(|e| vec![e.name.clone()])
+                        .collect()
+                };
+
+                if long_format {
+                    ExecResult::success_table_with_headers(
+                        vec!["Name".to_string(), "Type".to_string(), "Size".to_string()],
+                        rows,
+                        Some(entry_types),
+                    )
+                } else {
+                    ExecResult::success_table(rows, Some(entry_types))
+                }
             }
             Err(e) => ExecResult::failure(1, format!("ls: {}: {}", path, e)),
         }
@@ -293,7 +328,19 @@ fn filter_and_sort(entries: Vec<EntryInfo>, show_all: bool, sort_opts: &SortOpti
     filtered
 }
 
-/// Format entries for output.
+/// Convert EntryInfo to EntryType for coloring.
+fn entry_info_to_type(entry: &EntryInfo) -> EntryType {
+    if entry.is_dir {
+        EntryType::Directory
+    } else if entry.permissions.map(|p| p & 0o111 != 0).unwrap_or(false) {
+        // Has execute permission
+        EntryType::Executable
+    } else {
+        EntryType::File
+    }
+}
+
+/// Format entries for output (used by recursive listing).
 fn format_entries(entries: &[EntryInfo], long_format: bool, human_readable: bool) -> Vec<String> {
     if long_format {
         entries
@@ -386,12 +433,20 @@ mod tests {
 
         let result = Ls.execute(args, &mut ctx).await;
         assert!(result.ok());
-        // Format is now: type  size  name
+        // Canonical output contains names (first column)
         assert!(result.out.contains("subdir"));
         assert!(result.out.contains("file1.txt"));
-        // Check type indicators
-        assert!(result.out.contains("d  "));
-        assert!(result.out.contains("-  "));
+        // Check the hint has table data
+        use crate::interpreter::DisplayHint;
+        match &result.hint {
+            DisplayHint::Table { rows, headers, .. } => {
+                assert!(headers.is_some());
+                assert!(!rows.is_empty());
+                // Rows have name, type, size columns
+                assert!(rows.iter().any(|r| r.len() == 3));
+            }
+            _ => panic!("Expected Table hint for long format"),
+        }
     }
 
     #[tokio::test]
@@ -496,5 +551,31 @@ mod tests {
         assert!(result.out.contains("main.rs"));
         // Should show nested directories
         assert!(result.out.contains("lib"));
+    }
+
+    #[test]
+    fn test_entry_info_to_type_directory() {
+        let entry = EntryInfo::directory("mydir");
+        assert_eq!(entry_info_to_type(&entry), EntryType::Directory);
+    }
+
+    #[test]
+    fn test_entry_info_to_type_file() {
+        let entry = EntryInfo::file("test.txt", 100);
+        assert_eq!(entry_info_to_type(&entry), EntryType::File);
+    }
+
+    #[test]
+    fn test_entry_info_to_type_executable() {
+        let mut entry = EntryInfo::file("script.sh", 100);
+        entry.permissions = Some(0o755); // rwxr-xr-x
+        assert_eq!(entry_info_to_type(&entry), EntryType::Executable);
+    }
+
+    #[test]
+    fn test_entry_info_to_type_file_no_execute() {
+        let mut entry = EntryInfo::file("data.txt", 100);
+        entry.permissions = Some(0o644); // rw-r--r--
+        assert_eq!(entry_info_to_type(&entry), EntryType::File);
     }
 }

@@ -16,7 +16,7 @@ use tokio::net::UnixStream;
 use tokio_util::compat::TokioAsyncReadCompatExt;
 
 use kaish_kernel::ast::Value;
-use kaish_kernel::interpreter::ExecResult;
+use kaish_kernel::interpreter::{DisplayHint, ExecResult};
 use kaish_schema::kernel;
 
 use crate::traits::{ClientError, ClientResult, KernelClient};
@@ -103,6 +103,7 @@ impl KernelClient for IpcClient {
             } else {
                 None
             },
+            hint: DisplayHint::default(),
         })
     }
 

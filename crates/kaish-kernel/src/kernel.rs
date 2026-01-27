@@ -34,7 +34,7 @@ use tokio::sync::RwLock;
 use crate::ast::{Arg, Stmt, ToolDef, Value};
 use crate::backend::KernelBackend;
 use crate::glob::glob_match;
-use crate::interpreter::{eval_expr, expand_tilde, value_to_string, ControlFlow, ExecResult, Scope};
+use crate::interpreter::{eval_expr, expand_tilde, value_to_string, ControlFlow, DisplayHint, ExecResult, Scope};
 use crate::parser::parse;
 use crate::scheduler::{JobManager, PipelineRunner};
 use crate::state::{paths as state_paths, HistoryEntry, StateStore};
@@ -841,6 +841,7 @@ impl Kernel {
             out: accumulated_out,
             err: accumulated_err,
             data: last_data,
+            hint: DisplayHint::default(),
         };
 
         // 4. Restore original positional parameters
