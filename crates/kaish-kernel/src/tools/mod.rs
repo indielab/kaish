@@ -21,4 +21,4 @@ mod traits;
 pub use builtin::register_builtins;
 pub use context::{ExecContext, OutputContext};
 pub use registry::ToolRegistry;
-pub use traits::{Tool, ToolArgs, ToolSchema, ParamSchema};
+pub use traits::{validate_against_schema, Tool, ToolArgs, ToolSchema, ParamSchema};

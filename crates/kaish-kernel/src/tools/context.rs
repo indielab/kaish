@@ -52,6 +52,8 @@ pub struct ExecContext {
     pub stdin: Option<String>,
     /// Tool schemas for help command.
     pub tool_schemas: Vec<ToolSchema>,
+    /// Tool registry reference (for tools that need to inspect available tools).
+    pub tools: Option<Arc<ToolRegistry>>,
     /// Job manager for background jobs (optional).
     pub job_manager: Option<Arc<JobManager>>,
     /// State store for history and checkpoints (optional).
@@ -72,6 +74,7 @@ impl ExecContext {
             prev_cwd: None,
             stdin: None,
             tool_schemas: Vec::new(),
+            tools: None,
             job_manager: None,
             state_store: None,
         }
@@ -83,12 +86,13 @@ impl ExecContext {
     /// tools need to be dispatched through the backend.
     pub fn with_vfs_and_tools(vfs: Arc<VfsRouter>, tools: Arc<ToolRegistry>) -> Self {
         Self {
-            backend: Arc::new(LocalBackend::with_tools(vfs, tools)),
+            backend: Arc::new(LocalBackend::with_tools(vfs, tools.clone())),
             scope: Scope::new(),
             cwd: PathBuf::from("/"),
             prev_cwd: None,
             stdin: None,
             tool_schemas: Vec::new(),
+            tools: Some(tools),
             job_manager: None,
             state_store: None,
         }
@@ -103,6 +107,7 @@ impl ExecContext {
             prev_cwd: None,
             stdin: None,
             tool_schemas: Vec::new(),
+            tools: None,
             job_manager: None,
             state_store: None,
         }
@@ -111,12 +116,13 @@ impl ExecContext {
     /// Create a context with VFS, tools, and a specific scope.
     pub fn with_vfs_tools_and_scope(vfs: Arc<VfsRouter>, tools: Arc<ToolRegistry>, scope: Scope) -> Self {
         Self {
-            backend: Arc::new(LocalBackend::with_tools(vfs, tools)),
+            backend: Arc::new(LocalBackend::with_tools(vfs, tools.clone())),
             scope,
             cwd: PathBuf::from("/"),
             prev_cwd: None,
             stdin: None,
             tool_schemas: Vec::new(),
+            tools: Some(tools),
             job_manager: None,
             state_store: None,
         }
@@ -134,6 +140,7 @@ impl ExecContext {
             prev_cwd: None,
             stdin: None,
             tool_schemas: Vec::new(),
+            tools: None,
             job_manager: None,
             state_store: None,
         }
@@ -148,6 +155,7 @@ impl ExecContext {
             prev_cwd: None,
             stdin: None,
             tool_schemas: Vec::new(),
+            tools: None,
             job_manager: None,
             state_store: None,
         }
@@ -156,6 +164,11 @@ impl ExecContext {
     /// Set the available tool schemas (for help command).
     pub fn set_tool_schemas(&mut self, schemas: Vec<ToolSchema>) {
         self.tool_schemas = schemas;
+    }
+
+    /// Set the tool registry reference.
+    pub fn set_tools(&mut self, tools: Arc<ToolRegistry>) {
+        self.tools = Some(tools);
     }
 
     /// Set the job manager for background job tracking.

@@ -32,49 +32,49 @@ impl Tool for Ls {
                 "bool",
                 Value::Bool(false),
                 "Use long format with details (-l)",
-            ))
+            ).with_aliases(["-l"]))
             .param(ParamSchema::optional(
                 "all",
                 "bool",
                 Value::Bool(false),
                 "Show hidden files starting with . (-a)",
-            ))
+            ).with_aliases(["-a", "-A"]))
             .param(ParamSchema::optional(
                 "one",
                 "bool",
                 Value::Bool(false),
                 "One entry per line (-1)",
-            ))
+            ).with_aliases(["-1"]))
             .param(ParamSchema::optional(
                 "human",
                 "bool",
                 Value::Bool(false),
                 "Human-readable sizes (-h)",
-            ))
+            ).with_aliases(["-h"]))
             .param(ParamSchema::optional(
                 "sort_time",
                 "bool",
                 Value::Bool(false),
                 "Sort by modification time (-t)",
-            ))
+            ).with_aliases(["-t"]))
             .param(ParamSchema::optional(
                 "reverse",
                 "bool",
                 Value::Bool(false),
                 "Reverse sort order (-r)",
-            ))
+            ).with_aliases(["-r"]))
             .param(ParamSchema::optional(
                 "sort_size",
                 "bool",
                 Value::Bool(false),
                 "Sort by file size (-S)",
-            ))
+            ).with_aliases(["-S"]))
             .param(ParamSchema::optional(
                 "recursive",
                 "bool",
                 Value::Bool(false),
                 "List subdirectories recursively (-R)",
-            ))
+            ).with_aliases(["-R"]))
             .example("List current directory", "ls")
             .example("Show hidden files with details", "ls -la /path")
             .example("Sort by size, largest first", "ls -lS /path")

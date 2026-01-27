@@ -25,13 +25,13 @@ impl Tool for Rm {
                 "bool",
                 Value::Bool(false),
                 "Remove directories and their contents recursively (-r)",
-            ))
+            ).with_aliases(["-r", "-R"]))
             .param(ParamSchema::optional(
                 "force",
                 "bool",
                 Value::Bool(false),
                 "Ignore nonexistent files, never prompt (-f)",
-            ))
+            ).with_aliases(["-f"]))
     }
 
     async fn execute(&self, args: ToolArgs, ctx: &mut ExecContext) -> ExecResult {

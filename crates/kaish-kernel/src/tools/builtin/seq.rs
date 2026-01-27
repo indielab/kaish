@@ -4,7 +4,8 @@ use async_trait::async_trait;
 
 use crate::ast::Value;
 use crate::interpreter::ExecResult;
-use crate::tools::{ExecContext, ParamSchema, Tool, ToolArgs, ToolSchema};
+use crate::tools::{ExecContext, ParamSchema, Tool, ToolArgs, ToolSchema, validate_against_schema};
+use crate::validator::{IssueCode, ValidationIssue};
 
 /// Seq tool: print a sequence of numbers.
 pub struct Seq;
@@ -39,13 +40,46 @@ impl Tool for Seq {
                 "string",
                 Value::String("\n".into()),
                 "Separator between numbers (-s)",
-            ))
+            ).with_aliases(["-s"]))
             .param(ParamSchema::optional(
                 "width",
                 "bool",
                 Value::Bool(false),
                 "Equalize width by padding with zeros (-w)",
-            ))
+            ).with_aliases(["-w"]))
+    }
+
+    fn validate(&self, args: &ToolArgs) -> Vec<ValidationIssue> {
+        let mut issues = validate_against_schema(args, &self.schema());
+
+        // Check for zero increment (infinite loop)
+        // seq FIRST INCREMENT LAST has increment at position 1 when 3 args provided
+        if args.positional.len() == 3 {
+            if let Some(Value::Int(0)) = args.positional.get(1) {
+                issues.push(ValidationIssue::error(
+                    IssueCode::SeqZeroIncrement,
+                    "seq: increment cannot be zero (would cause infinite loop)",
+                ));
+            } else if let Some(Value::Float(f)) = args.positional.get(1) {
+                if *f == 0.0 {
+                    issues.push(ValidationIssue::error(
+                        IssueCode::SeqZeroIncrement,
+                        "seq: increment cannot be zero (would cause infinite loop)",
+                    ));
+                }
+            } else if let Some(Value::String(s)) = args.positional.get(1) {
+                if let Ok(n) = s.parse::<f64>() {
+                    if n == 0.0 {
+                        issues.push(ValidationIssue::error(
+                            IssueCode::SeqZeroIncrement,
+                            "seq: increment cannot be zero (would cause infinite loop)",
+                        ));
+                    }
+                }
+            }
+        }
+
+        issues
     }
 
     async fn execute(&self, args: ToolArgs, _ctx: &mut ExecContext) -> ExecResult {

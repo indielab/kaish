@@ -6,7 +6,8 @@ use std::path::{Path, PathBuf};
 
 use crate::ast::Value;
 use crate::interpreter::ExecResult;
-use crate::tools::{ExecContext, ParamSchema, Tool, ToolArgs, ToolSchema};
+use crate::tools::{ExecContext, ParamSchema, Tool, ToolArgs, ToolSchema, validate_against_schema};
+use crate::validator::{IssueCode, ValidationIssue};
 use crate::walker::{FileWalker, GlobPath, IncludeExclude, WalkOptions};
 
 /// Grep tool: search for patterns in text.
@@ -36,85 +37,85 @@ impl Tool for Grep {
                 "bool",
                 Value::Bool(false),
                 "Case-insensitive matching (-i)",
-            ))
+            ).with_aliases(["-i"]))
             .param(ParamSchema::optional(
                 "line_number",
                 "bool",
                 Value::Bool(false),
                 "Prefix output with line numbers (-n)",
-            ))
+            ).with_aliases(["-n"]))
             .param(ParamSchema::optional(
                 "invert",
                 "bool",
                 Value::Bool(false),
                 "Select non-matching lines (-v)",
-            ))
+            ).with_aliases(["-v"]))
             .param(ParamSchema::optional(
                 "count",
                 "bool",
                 Value::Bool(false),
                 "Only print count of matching lines (-c)",
-            ))
+            ).with_aliases(["-c"]))
             .param(ParamSchema::optional(
                 "only_matching",
                 "bool",
                 Value::Bool(false),
                 "Print only the matched parts (-o)",
-            ))
+            ).with_aliases(["-o"]))
             .param(ParamSchema::optional(
                 "after_context",
                 "int",
                 Value::Null,
                 "Print NUM lines after match (-A)",
-            ))
+            ).with_aliases(["-A"]))
             .param(ParamSchema::optional(
                 "before_context",
                 "int",
                 Value::Null,
                 "Print NUM lines before match (-B)",
-            ))
+            ).with_aliases(["-B"]))
             .param(ParamSchema::optional(
                 "context",
                 "int",
                 Value::Null,
                 "Print NUM lines before and after match (-C)",
-            ))
+            ).with_aliases(["-C"]))
             .param(ParamSchema::optional(
                 "quiet",
                 "bool",
                 Value::Bool(false),
                 "Quiet mode, only return exit code (-q)",
-            ))
+            ).with_aliases(["-q"]))
             .param(ParamSchema::optional(
                 "files_with_matches",
                 "bool",
                 Value::Bool(false),
                 "Print only filenames with matches (-l)",
-            ))
+            ).with_aliases(["-l"]))
             .param(ParamSchema::optional(
                 "word_regexp",
                 "bool",
                 Value::Bool(false),
                 "Match whole words only (-w)",
-            ))
+            ).with_aliases(["-w"]))
             .param(ParamSchema::optional(
                 "recursive",
                 "bool",
                 Value::Bool(false),
                 "Search directories recursively (-r)",
-            ))
+            ).with_aliases(["-r", "-R"]))
             .param(ParamSchema::optional(
                 "include",
                 "string",
                 Value::Null,
                 "Include only files matching pattern (--include)",
-            ))
+            ).with_aliases(["--include"]))
             .param(ParamSchema::optional(
                 "exclude",
                 "string",
                 Value::Null,
                 "Exclude files matching pattern (--exclude)",
-            ))
+            ).with_aliases(["--exclude"]))
             .example("Search for pattern in file", "grep pattern file.txt")
             .example("Case-insensitive search", "grep -i ERROR log.txt")
             .example("Show line numbers", "grep -n TODO *.rs")
@@ -122,6 +123,25 @@ impl Tool for Grep {
             .example("Context around matches", "grep -C 2 error log.txt")
             .example("Recursive search", "grep -r TODO src/")
             .example("With file filter", "grep -rn TODO . --include='*.rs'")
+    }
+
+    fn validate(&self, args: &ToolArgs) -> Vec<ValidationIssue> {
+        let mut issues = validate_against_schema(args, &self.schema());
+
+        // Check if the regex pattern is valid
+        if let Some(pattern) = args.get_string("pattern", 0) {
+            // Don't validate if pattern looks dynamic (contains shell expansion markers)
+            if !pattern.contains("<dynamic>") {
+                if let Err(e) = regex::Regex::new(&pattern) {
+                    issues.push(ValidationIssue::error(
+                        IssueCode::InvalidRegex,
+                        format!("grep: invalid regex pattern: {}", e),
+                    ).with_suggestion("check regex syntax at https://docs.rs/regex"));
+                }
+            }
+        }
+
+        issues
     }
 
     async fn execute(&self, args: ToolArgs, ctx: &mut ExecContext) -> ExecResult {

@@ -24,6 +24,7 @@ pub mod parser;
 pub mod rpc;
 pub mod scheduler;
 pub mod state;
+pub mod validator;
 pub mod tools;
 pub mod vfs;
 pub mod walker;

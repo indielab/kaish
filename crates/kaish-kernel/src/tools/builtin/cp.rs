@@ -26,19 +26,19 @@ impl Tool for Cp {
                 "bool",
                 Value::Bool(false),
                 "Copy directories recursively (-r)",
-            ))
+            ).with_aliases(["-r", "-R"]))
             .param(ParamSchema::optional(
                 "no_clobber",
                 "bool",
                 Value::Bool(false),
                 "Do not overwrite existing files (-n)",
-            ))
+            ).with_aliases(["-n"]))
             .param(ParamSchema::optional(
                 "preserve",
                 "bool",
                 Value::Bool(false),
                 "Preserve file attributes (-p)",
-            ))
+            ).with_aliases(["-p"]))
     }
 
     async fn execute(&self, args: ToolArgs, ctx: &mut ExecContext) -> ExecResult {

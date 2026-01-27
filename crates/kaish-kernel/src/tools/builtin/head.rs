@@ -29,13 +29,13 @@ impl Tool for Head {
                 "int",
                 Value::Int(10),
                 "Number of lines to output (-n)",
-            ))
+            ).with_aliases(["-n"]))
             .param(ParamSchema::optional(
                 "bytes",
                 "int",
                 Value::Null,
                 "Number of bytes to output (-c), overrides lines",
-            ))
+            ).with_aliases(["-c"]))
             .example("First 10 lines (default)", "head file.txt")
             .example("First 5 lines", "head -n 5 file.txt")
             .example("First 100 bytes", "head -c 100 file.txt")

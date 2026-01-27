@@ -39,6 +39,7 @@ use crate::parser::parse;
 use crate::scheduler::{JobManager, PipelineRunner};
 use crate::state::{paths as state_paths, HistoryEntry, StateStore};
 use crate::tools::{register_builtins, ExecContext, ToolArgs, ToolRegistry};
+use crate::validator::{Severity, Validator};
 use crate::vfs::{LocalFs, MemoryFs, VfsRouter};
 
 /// Configuration for kernel initialization.
@@ -54,6 +55,12 @@ pub struct KernelConfig {
     pub local_root: Option<PathBuf>,
     /// Initial working directory.
     pub cwd: PathBuf,
+    /// Whether to skip pre-execution validation.
+    ///
+    /// When false (default), scripts are validated before execution to catch
+    /// errors early. Set to true to skip validation for performance or to
+    /// allow dynamic/external commands.
+    pub skip_validation: bool,
 }
 
 impl Default for KernelConfig {
@@ -64,6 +71,7 @@ impl Default for KernelConfig {
             mount_local: true,
             local_root: None,
             cwd: PathBuf::from("/"),
+            skip_validation: false,
         }
     }
 }
@@ -77,6 +85,7 @@ impl KernelConfig {
             mount_local: true,
             local_root: None,
             cwd: PathBuf::from("/"),
+            skip_validation: false,
         }
     }
 
@@ -88,7 +97,14 @@ impl KernelConfig {
             mount_local: true,
             local_root: None,
             cwd: PathBuf::from("/"),
+            skip_validation: false,
         }
+    }
+
+    /// Skip pre-execution validation.
+    pub fn with_skip_validation(mut self, skip: bool) -> Self {
+        self.skip_validation = skip;
+        self
     }
 }
 
@@ -116,6 +132,8 @@ pub struct Kernel {
     /// Persistent state store (optional).
     /// Wrapped in Mutex because rusqlite Connection is not Sync.
     state: Option<Arc<Mutex<StateStore>>>,
+    /// Whether to skip pre-execution validation.
+    skip_validation: bool,
 }
 
 impl Kernel {
@@ -183,6 +201,7 @@ impl Kernel {
             runner,
             exec_ctx: RwLock::new(exec_ctx),
             state,
+            skip_validation: config.skip_validation,
         })
     }
 
@@ -244,6 +263,7 @@ impl Kernel {
         exec_ctx.set_cwd(cwd);
         exec_ctx.set_job_manager(jobs.clone());
         exec_ctx.set_tool_schemas(tools.schemas());
+        exec_ctx.set_tools(tools.clone());
         exec_ctx.state_store = state.clone();
 
         Ok(Self {
@@ -256,6 +276,7 @@ impl Kernel {
             runner,
             exec_ctx: RwLock::new(exec_ctx),
             state,
+            skip_validation: config.skip_validation,
         })
     }
 
@@ -279,6 +300,33 @@ impl Kernel {
                 .join("; ");
             anyhow::anyhow!("parse error: {}", msg)
         })?;
+
+        // Pre-execution validation
+        if !self.skip_validation {
+            let user_tools = self.user_tools.read().await;
+            let validator = Validator::new(&self.tools, &*user_tools);
+            let issues = validator.validate(&program);
+
+            // Collect errors (warnings are logged but don't prevent execution)
+            let errors: Vec<_> = issues
+                .iter()
+                .filter(|i| i.severity == Severity::Error)
+                .collect();
+
+            if !errors.is_empty() {
+                let error_msg = errors
+                    .iter()
+                    .map(|e| e.format(input))
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                return Err(anyhow::anyhow!("validation failed:\n{}", error_msg));
+            }
+
+            // Log warnings via tracing (trace level to avoid noise)
+            for warning in issues.iter().filter(|i| i.severity == Severity::Warning) {
+                tracing::trace!("validation: {}", warning.format(input));
+            }
+        }
 
         let mut result = ExecResult::success("");
 

@@ -24,7 +24,7 @@ impl Tool for Cat {
                 "bool",
                 Value::Bool(false),
                 "Number output lines (-n)",
-            ))
+            ).with_aliases(["-n"]))
     }
 
     async fn execute(&self, args: ToolArgs, ctx: &mut ExecContext) -> ExecResult {

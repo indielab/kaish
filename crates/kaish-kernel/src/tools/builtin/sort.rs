@@ -30,31 +30,31 @@ impl Tool for Sort {
                 "bool",
                 Value::Bool(false),
                 "Sort numerically (-n)",
-            ))
+            ).with_aliases(["-n"]))
             .param(ParamSchema::optional(
                 "reverse",
                 "bool",
                 Value::Bool(false),
                 "Reverse the sort order (-r)",
-            ))
+            ).with_aliases(["-r"]))
             .param(ParamSchema::optional(
                 "key",
                 "int",
                 Value::Null,
                 "Sort by field number, 1-indexed (-k)",
-            ))
+            ).with_aliases(["-k"]))
             .param(ParamSchema::optional(
                 "delimiter",
                 "string",
                 Value::Null,
                 "Field delimiter (-t)",
-            ))
+            ).with_aliases(["-t"]))
             .param(ParamSchema::optional(
                 "unique",
                 "bool",
                 Value::Bool(false),
                 "Output only unique lines (-u)",
-            ))
+            ).with_aliases(["-u"]))
             .example("Alphabetical sort", "sort names.txt")
             .example("Numeric sort", "sort -n numbers.txt")
             .example("Reverse sort", "sort -r file.txt")

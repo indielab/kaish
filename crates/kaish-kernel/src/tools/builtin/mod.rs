@@ -53,6 +53,7 @@ mod tree;
 mod true_false;
 mod uniq;
 mod unset;
+mod validate;
 mod vars;
 mod wait;
 mod wc;
@@ -119,6 +120,7 @@ pub fn register_builtins(registry: &mut ToolRegistry) {
     registry.register(true_false::False);
     registry.register(uniq::Uniq);
     registry.register(unset::Unset);
+    registry.register(validate::Validate);
     registry.register(vars::Vars);
     registry.register(wait::Wait);
     registry.register(wc::Wc);

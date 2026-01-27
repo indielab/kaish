@@ -39,29 +39,29 @@ impl Tool for Diff {
                 "Second file to compare",
             ))
             .param(ParamSchema::optional(
-                "u",
+                "unified",
                 "bool",
                 Value::Bool(false),
                 "Output unified diff format (default)",
-            ))
+            ).with_aliases(["-u"]))
             .param(ParamSchema::optional(
-                "q",
+                "quiet",
                 "bool",
                 Value::Bool(false),
                 "Quiet mode: only report if files differ",
-            ))
+            ).with_aliases(["-q"]))
             .param(ParamSchema::optional(
                 "color",
                 "bool",
                 Value::Bool(false),
                 "Colorize output",
-            ))
+            ).with_aliases(["--color"]))
             .param(ParamSchema::optional(
                 "context",
                 "int",
                 Value::Int(3),
                 "Lines of context (default: 3)",
-            ))
+            ).with_aliases(["-C"]))
     }
 
     async fn execute(&self, args: ToolArgs, ctx: &mut ExecContext) -> ExecResult {

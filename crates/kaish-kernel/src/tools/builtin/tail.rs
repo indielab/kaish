@@ -29,13 +29,13 @@ impl Tool for Tail {
                 "int",
                 Value::Int(10),
                 "Number of lines to output (-n)",
-            ))
+            ).with_aliases(["-n"]))
             .param(ParamSchema::optional(
                 "bytes",
                 "int",
                 Value::Null,
                 "Number of bytes to output (-c), overrides lines",
-            ))
+            ).with_aliases(["-c"]))
             .example("Last 10 lines (default)", "tail file.txt")
             .example("Last 20 lines", "tail -n 20 log.txt")
             .example("Last 1000 bytes", "tail -c 1000 file.txt")

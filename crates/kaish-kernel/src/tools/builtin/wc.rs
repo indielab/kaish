@@ -29,25 +29,25 @@ impl Tool for Wc {
                 "bool",
                 Value::Bool(false),
                 "Print line count only (-l)",
-            ))
+            ).with_aliases(["-l"]))
             .param(ParamSchema::optional(
                 "words",
                 "bool",
                 Value::Bool(false),
                 "Print word count only (-w)",
-            ))
+            ).with_aliases(["-w"]))
             .param(ParamSchema::optional(
                 "chars",
                 "bool",
                 Value::Bool(false),
                 "Print character count only (-m)",
-            ))
+            ).with_aliases(["-m"]))
             .param(ParamSchema::optional(
                 "bytes",
                 "bool",
                 Value::Bool(false),
                 "Print byte count only (-c)",
-            ))
+            ).with_aliases(["-c"]))
             .example("Count all (lines, words, bytes)", "wc file.txt")
             .example("Count lines only", "wc -l file.txt")
             .example("Count words from stdin", "echo 'hello world' | wc -w")
