@@ -73,12 +73,18 @@ fn compile_filter(filter_str: &str) -> Result<Filter, String> {
     Ok(filter)
 }
 
-/// Execute a compiled jq filter on JSON input.
+/// Execute a compiled jq filter on JSON input (string).
+#[allow(dead_code)]
 fn execute_filter(filter: &Filter, input: &str, raw_output: bool) -> Result<String, String> {
     // Parse input JSON
     let json: serde_json::Value = serde_json::from_str(input)
         .map_err(|e| format!("jq: invalid JSON input: {}", e))?;
 
+    execute_filter_json(filter, json, raw_output)
+}
+
+/// Execute a compiled jq filter on pre-parsed JSON.
+fn execute_filter_json(filter: &Filter, json: serde_json::Value, raw_output: bool) -> Result<String, String> {
     // Convert serde_json::Value to jaq_json::Val
     let input_val = json_to_val(json);
 
@@ -166,6 +172,28 @@ fn format_json(val: &Val) -> String {
     serde_json::to_string_pretty(&val_to_json(val)).unwrap_or_default()
 }
 
+/// Convert ast::Value to serde_json::Value for jq processing.
+///
+/// This is smarter than the generic value_to_json because it handles the case
+/// where Value::String contains serialized JSON (objects/arrays are stored
+/// as stringified JSON in ast::Value).
+fn ast_value_to_json(value: &Value) -> serde_json::Value {
+    match value {
+        Value::Null => serde_json::Value::Null,
+        Value::Bool(b) => serde_json::Value::Bool(*b),
+        Value::Int(i) => serde_json::Value::Number((*i).into()),
+        Value::Float(f) => {
+            serde_json::Number::from_f64(*f)
+                .map(serde_json::Value::Number)
+                .unwrap_or(serde_json::Value::Null)
+        }
+        Value::String(s) => {
+            // Try to parse as JSON first - ExecResult stores objects/arrays as JSON strings
+            serde_json::from_str(s).unwrap_or_else(|_| serde_json::Value::String(s.clone()))
+        }
+    }
+}
+
 /// Convert jaq Val to serde_json Value.
 fn val_to_json(val: &Val) -> serde_json::Value {
     match val {
@@ -240,30 +268,51 @@ impl Tool for JqNative {
         let raw_output = args.has_flag("raw") || args.has_flag("r");
         let _compact = args.has_flag("compact") || args.has_flag("c");
 
-        // Get input: from path (named or positional[1]) or stdin
-        let input = if let Some(path) = args.get_string("path", 1) {
+        // Get input JSON: check for pre-parsed structured data first (fast path),
+        // then fall back to reading from file or parsing stdin text
+        let input_json: serde_json::Value = if let Some(path) = args.get_string("path", 1) {
             if !path.is_empty() {
-                // Read from backend
+                // Read from backend - path takes precedence over stdin
                 let resolved = ctx.resolve_path(&path);
                 match ctx.backend.read(Path::new(&resolved), None).await {
-                    Ok(bytes) => String::from_utf8_lossy(&bytes).into_owned(),
+                    Ok(bytes) => {
+                        let text = String::from_utf8_lossy(&bytes);
+                        match serde_json::from_str(&text) {
+                            Ok(json) => json,
+                            Err(e) => return ExecResult::failure(1, format!("jq: invalid JSON in {}: {}", path, e)),
+                        }
+                    }
                     Err(e) => {
                         return ExecResult::failure(1, format!("jq: failed to read {}: {}", path, e))
                     }
                 }
+            } else if let Some(data) = ctx.take_stdin_data() {
+                // Fast path: use pre-parsed structured data from pipeline
+                ast_value_to_json(&data)
+            } else if let Some(text) = ctx.take_stdin() {
+                // Fallback: parse stdin text as JSON
+                match serde_json::from_str(&text) {
+                    Ok(json) => json,
+                    Err(e) => return ExecResult::failure(1, format!("jq: invalid JSON input: {}", e)),
+                }
             } else {
-                ctx.take_stdin().unwrap_or_default()
+                return ExecResult::failure(1, "jq: no input provided");
+            }
+        } else if let Some(data) = ctx.take_stdin_data() {
+            // Fast path: use pre-parsed structured data from pipeline
+            ast_value_to_json(&data)
+        } else if let Some(text) = ctx.take_stdin() {
+            // Fallback: parse stdin text as JSON
+            match serde_json::from_str(&text) {
+                Ok(json) => json,
+                Err(e) => return ExecResult::failure(1, format!("jq: invalid JSON input: {}", e)),
             }
         } else {
-            ctx.take_stdin().unwrap_or_default()
+            return ExecResult::failure(1, "jq: no input provided");
         };
 
-        if input.is_empty() {
-            return ExecResult::failure(1, "jq: no input provided");
-        }
-
-        // Execute filter
-        match execute_filter(&filter, &input, raw_output) {
+        // Execute filter with the JSON input
+        match execute_filter_json(&filter, input_json, raw_output) {
             Ok(output) => ExecResult::success(output),
             Err(e) => ExecResult::failure(1, e),
         }

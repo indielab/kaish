@@ -3,6 +3,7 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use crate::ast::Value;
 use crate::backend::{KernelBackend, LocalBackend};
 use crate::interpreter::Scope;
 use crate::scheduler::JobManager;
@@ -49,6 +50,9 @@ pub struct ExecContext {
     pub prev_cwd: Option<PathBuf>,
     /// Standard input for the tool (from pipeline).
     pub stdin: Option<String>,
+    /// Structured data from pipeline (pre-parsed JSON from previous command).
+    /// Tools can check this before parsing stdin to avoid redundant JSON parsing.
+    pub stdin_data: Option<Value>,
     /// Tool schemas for help command.
     pub tool_schemas: Vec<ToolSchema>,
     /// Tool registry reference (for tools that need to inspect available tools).
@@ -69,6 +73,7 @@ impl ExecContext {
             cwd: PathBuf::from("/"),
             prev_cwd: None,
             stdin: None,
+            stdin_data: None,
             tool_schemas: Vec::new(),
             tools: None,
             job_manager: None,
@@ -86,6 +91,7 @@ impl ExecContext {
             cwd: PathBuf::from("/"),
             prev_cwd: None,
             stdin: None,
+            stdin_data: None,
             tool_schemas: Vec::new(),
             tools: Some(tools),
             job_manager: None,
@@ -100,6 +106,7 @@ impl ExecContext {
             cwd: PathBuf::from("/"),
             prev_cwd: None,
             stdin: None,
+            stdin_data: None,
             tool_schemas: Vec::new(),
             tools: None,
             job_manager: None,
@@ -114,6 +121,7 @@ impl ExecContext {
             cwd: PathBuf::from("/"),
             prev_cwd: None,
             stdin: None,
+            stdin_data: None,
             tool_schemas: Vec::new(),
             tools: Some(tools),
             job_manager: None,
@@ -131,6 +139,7 @@ impl ExecContext {
             cwd: PathBuf::from("/"),
             prev_cwd: None,
             stdin: None,
+            stdin_data: None,
             tool_schemas: Vec::new(),
             tools: None,
             job_manager: None,
@@ -145,6 +154,7 @@ impl ExecContext {
             cwd: PathBuf::from("/"),
             prev_cwd: None,
             stdin: None,
+            stdin_data: None,
             tool_schemas: Vec::new(),
             tools: None,
             job_manager: None,
@@ -174,6 +184,23 @@ impl ExecContext {
     /// Get stdin, consuming it.
     pub fn take_stdin(&mut self) -> Option<String> {
         self.stdin.take()
+    }
+
+    /// Set both text stdin and structured data.
+    ///
+    /// Use this when passing output through a pipeline where the previous
+    /// command produced structured data (e.g., JSON from MCP tools).
+    pub fn set_stdin_with_data(&mut self, text: String, data: Option<Value>) {
+        self.stdin = Some(text);
+        self.stdin_data = data;
+    }
+
+    /// Take structured data if available, consuming it.
+    ///
+    /// Tools can use this to avoid re-parsing JSON that was already parsed
+    /// by a previous command in the pipeline.
+    pub fn take_stdin_data(&mut self) -> Option<Value> {
+        self.stdin_data.take()
     }
 
     /// Resolve a path relative to cwd.

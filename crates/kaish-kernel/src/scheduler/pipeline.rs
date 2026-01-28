@@ -237,6 +237,7 @@ impl PipelineRunner {
         // A more sophisticated implementation would use tokio::spawn for true parallelism
 
         let mut current_stdin: Option<String> = None;
+        let mut current_data: Option<Value> = None;
         let mut last_result = ExecResult::success("");
 
         for (i, cmd) in commands.iter().enumerate() {
@@ -248,8 +249,9 @@ impl PipelineRunner {
             setup_stdin_redirects(cmd, ctx);
 
             // Set stdin from previous command's stdout (overrides redirect stdin)
+            // Also pass structured data if available from previous command
             if let Some(input) = current_stdin.take() {
-                ctx.set_stdin(input);
+                ctx.set_stdin_with_data(input, current_data.take());
             }
 
             // Execute via backend (clone Arc to avoid borrow conflict)
@@ -267,9 +269,10 @@ impl PipelineRunner {
                 return last_result;
             }
 
-            // Pass stdout to next command's stdin (unless this is the last command)
+            // Pass stdout and structured data to next command's stdin (unless last command)
             if i < commands.len() - 1 {
                 current_stdin = Some(last_result.out.clone());
+                current_data = last_result.data.clone();
             }
         }
 
@@ -493,6 +496,7 @@ pub async fn run_sequential_pipeline(
     }
 
     let mut current_stdin: Option<String> = ctx.take_stdin();
+    let mut current_data: Option<Value> = ctx.take_stdin_data();
     let mut last_result = ExecResult::success("");
 
     for (i, cmd) in commands.iter().enumerate() {
@@ -502,6 +506,7 @@ pub async fn run_sequential_pipeline(
                 last_result = ExecResult::success("");
                 if i < commands.len() - 1 {
                     current_stdin = Some(last_result.out.clone());
+                    current_data = last_result.data.clone();
                 }
                 continue;
             }
@@ -519,8 +524,9 @@ pub async fn run_sequential_pipeline(
         setup_stdin_redirects(cmd, ctx);
 
         // Set stdin from previous command's stdout (overrides redirect stdin)
+        // Also pass structured data if available from previous command
         if let Some(input) = current_stdin.take() {
-            ctx.set_stdin(input);
+            ctx.set_stdin_with_data(input, current_data.take());
         }
 
         // Execute via backend (clone Arc to avoid borrow conflict)
@@ -538,9 +544,10 @@ pub async fn run_sequential_pipeline(
             return last_result;
         }
 
-        // Pass stdout to next command's stdin (unless this is the last command)
+        // Pass stdout and structured data to next command's stdin (unless last command)
         if i < commands.len() - 1 {
             current_stdin = Some(last_result.out.clone());
+            current_data = last_result.data.clone();
         }
     }
 
