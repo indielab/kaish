@@ -57,11 +57,55 @@ cat items.txt | scatter as=ITEM limit=4 | process $ITEM | gather
 |---------|-------------|
 | **Bourne-compatible** | Variables, pipes, control flow, functions — familiar syntax |
 | **50+ builtins** | ls, grep, find, jq, git, diff, patch, and more |
-| **MCP integration** | External tools appear as commands with schema-driven CLI translation |
+| **MCP bridge** | Both client and server — script and orchestrate MCP tools |
 | **Virtual filesystem** | Unified access to local files, memory, and git repos |
 | **Scatter/gather** | Built-in parallelism with 散/集 |
 | **Pre-validation** | Catch errors before execution with `validate` |
 | **Embeddable** | Library-first design for integration into larger systems |
+
+## MCP Integration
+
+kaish acts as both MCP **client** and **server**, making it ideal for orchestrating multiple MCP tools:
+
+```
+┌─────────────────┐     ┌─────────────────┐     ┌─────────────────┐
+│  Claude Code    │     │     kaish       │     │  MCP Servers    │
+│  or other MCP   │────▶│                 │────▶│  (git, fs, etc) │
+│  client         │     │  filter, join,  │     │                 │
+└─────────────────┘     │  transform      │     └─────────────────┘
+                        └─────────────────┘
+```
+
+**As MCP Server** — Use kaish from Claude Code or any MCP client:
+
+```json
+{
+  "mcpServers": {
+    "kaish": {
+      "command": "kaish-mcp"
+    }
+  }
+}
+```
+
+Then execute scripts directly:
+
+```bash
+# From Claude Code, kaish appears as a tool
+mcp__kaish__execute('git status | grep modified')
+```
+
+**As MCP Client** — Call external MCP tools from kaish scripts:
+
+```bash
+# MCP tools appear as namespaced commands
+exa:web_search --query "rust error handling"
+
+# Pipe MCP results through standard tools
+github:list_issues --repo="foo/bar" | jq '.[] | .title'
+```
+
+**Why both?** Scripts can wrap, filter, and combine results from multiple MCPs — turning kaish into a programmable MCP orchestration layer.
 
 ## Architecture
 
