@@ -4,6 +4,7 @@ members = [
     "crates/kaish-schema",
     "crates/kaish-kernel",
     "crates/kaish-mcp",
+    "crates/kaish-mcp-server",
     "crates/kaish-client",
     "crates/kaish-repl",
 ]
