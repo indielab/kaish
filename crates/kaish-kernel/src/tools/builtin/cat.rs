@@ -28,12 +28,24 @@ impl Tool for Cat {
     }
 
     async fn execute(&self, args: ToolArgs, ctx: &mut ExecContext) -> ExecResult {
-        // Support multiple files from positional args
+        let number_lines = args.has_flag("number") || args.has_flag("n");
+
+        // If no files specified, read from stdin (like POSIX cat)
         if args.positional.is_empty() {
+            if let Some(stdin) = ctx.take_stdin() {
+                if number_lines {
+                    let numbered = stdin
+                        .lines()
+                        .enumerate()
+                        .map(|(i, line)| format!("{:6}\t{}", i + 1, line))
+                        .collect::<Vec<_>>()
+                        .join("\n");
+                    return ExecResult::success(numbered);
+                }
+                return ExecResult::success(stdin);
+            }
             return ExecResult::failure(1, "cat: missing path argument");
         }
-
-        let number_lines = args.has_flag("number") || args.has_flag("n");
         let mut all_content = String::new();
         let mut line_num = 1;
 
@@ -125,13 +137,38 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_cat_no_arg() {
+    async fn test_cat_no_arg_no_stdin() {
         let mut ctx = make_ctx().await;
         let args = ToolArgs::new();
 
         let result = Cat.execute(args, &mut ctx).await;
         assert!(!result.ok());
         assert!(result.err.contains("missing"));
+    }
+
+    #[tokio::test]
+    async fn test_cat_from_stdin() {
+        let mut ctx = make_ctx().await;
+        ctx.set_stdin("hello from stdin".to_string());
+        let args = ToolArgs::new();
+
+        let result = Cat.execute(args, &mut ctx).await;
+        assert!(result.ok());
+        assert_eq!(result.out, "hello from stdin");
+    }
+
+    #[tokio::test]
+    async fn test_cat_from_stdin_with_line_numbers() {
+        let mut ctx = make_ctx().await;
+        ctx.set_stdin("line1\nline2\nline3".to_string());
+        let mut args = ToolArgs::new();
+        args.flags.insert("n".to_string());
+
+        let result = Cat.execute(args, &mut ctx).await;
+        assert!(result.ok());
+        assert!(result.out.contains("1\tline1"));
+        assert!(result.out.contains("2\tline2"));
+        assert!(result.out.contains("3\tline3"));
     }
 
     #[tokio::test]
