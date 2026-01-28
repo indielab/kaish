@@ -9,6 +9,7 @@ use std::sync::Arc;
 
 use std::collections::HashMap;
 
+use crate::arithmetic;
 use crate::ast::{Arg, Command, Expr, Redirect, RedirectKind, Value};
 use crate::interpreter::ExecResult;
 use crate::tools::{ExecContext, ToolArgs, ToolRegistry, ToolSchema};
@@ -441,6 +442,12 @@ fn eval_simple_expr(expr: &Expr, ctx: &ExecContext) -> Option<Value> {
                     }
                     crate::ast::StringPart::ArgCount => {
                         result.push_str(&ctx.scope.arg_count().to_string());
+                    }
+                    crate::ast::StringPart::Arithmetic(expr) => {
+                        // Evaluate arithmetic in pipeline context
+                        if let Ok(value) = arithmetic::eval_arithmetic(expr, &ctx.scope) {
+                            result.push_str(&value.to_string());
+                        }
                     }
                 }
             }

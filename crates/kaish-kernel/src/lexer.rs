@@ -969,7 +969,27 @@ pub fn tokenize(source: &str) -> Result<Vec<Spanned<Token>>, Vec<Spanned<LexerEr
                         }
                     }
         }
-        final_tokens.push(tokens[i].clone());
+
+        // Check for arithmetic markers inside string content
+        let token = if let Token::String(ref s) = tokens[i].token {
+            // Check if string contains any arithmetic markers
+            let mut new_content = s.clone();
+            for (marker, expr) in &arithmetics {
+                if new_content.contains(marker) {
+                    // Replace marker with the special format that parse_interpolated_string can detect
+                    // Use ${__ARITH:expr__} format so it gets parsed as StringPart::Arithmetic
+                    new_content = new_content.replace(marker, &format!("${{__ARITH:{}__}}", expr));
+                }
+            }
+            if new_content != *s {
+                Spanned::new(Token::String(new_content), tokens[i].span.clone())
+            } else {
+                tokens[i].clone()
+            }
+        } else {
+            tokens[i].clone()
+        };
+        final_tokens.push(token);
         i += 1;
     }
 

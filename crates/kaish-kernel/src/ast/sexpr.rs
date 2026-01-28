@@ -259,6 +259,7 @@ pub fn format_expr(expr: &Expr) -> String {
                     StringPart::Positional(n) => format!("(positional {})", n),
                     StringPart::AllArgs => "(allargs)".to_string(),
                     StringPart::ArgCount => "(argcount)".to_string(),
+                    StringPart::Arithmetic(expr) => format!("(arith \"{}\")", expr),
                 })
                 .collect();
             format!("(interpolated {})", parts_str.join(" "))

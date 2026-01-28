@@ -335,6 +335,8 @@ pub enum StringPart {
     AllArgs,
     /// Argument count: `$#`
     ArgCount,
+    /// Arithmetic expansion: `$((expr))`
+    Arithmetic(String),
 }
 
 /// Binary operators.

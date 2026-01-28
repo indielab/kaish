@@ -352,6 +352,7 @@ impl<'a> Validator<'a> {
             StringPart::VarWithDefault { .. } => {}
             StringPart::VarLength(name) => self.check_var_defined(name),
             StringPart::Positional(_) | StringPart::AllArgs | StringPart::ArgCount => {}
+            StringPart::Arithmetic(_) => {} // Arithmetic expressions are validated at eval time
         }
     }
 

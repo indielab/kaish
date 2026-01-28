@@ -323,9 +323,22 @@ impl<'a, E: Executor> Evaluator<'a, E> {
                     let value = self.eval_arg_count()?;
                     result.push_str(&value_to_string(&value));
                 }
+                StringPart::Arithmetic(expr) => {
+                    // Parse and evaluate the arithmetic expression
+                    let value = self.eval_arithmetic_string(expr)?;
+                    result.push_str(&value_to_string(&value));
+                }
             }
         }
         Ok(Value::String(result))
+    }
+
+    /// Evaluate an arithmetic string expression (from `$((expr))` in interpolation).
+    fn eval_arithmetic_string(&mut self, expr: &str) -> EvalResult<Value> {
+        // Use the existing arithmetic evaluator
+        arithmetic::eval_arithmetic(expr, self.scope)
+            .map(Value::Int)
+            .map_err(|e| EvalError::ArithmeticError(e.to_string()))
     }
 
     /// Evaluate a binary operation.

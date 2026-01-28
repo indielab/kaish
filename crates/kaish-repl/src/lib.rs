@@ -579,6 +579,12 @@ impl Repl {
                         kaish_kernel::ast::StringPart::ArgCount => {
                             result.push_str(&self.exec_ctx.scope.arg_count().to_string());
                         }
+                        kaish_kernel::ast::StringPart::Arithmetic(expr) => {
+                            // Evaluate arithmetic in REPL context
+                            if let Ok(value) = kaish_kernel::arithmetic::eval_arithmetic(expr, &self.exec_ctx.scope) {
+                                result.push_str(&value.to_string());
+                            }
+                        }
                     }
                 }
                 Ok(Value::String(result))
