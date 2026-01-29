@@ -38,6 +38,13 @@ async fn apply_redirects(
                     result.err.clear();
                 }
             }
+            RedirectKind::MergeStdout => {
+                // 1>&2 or >&2 - append stdout to stderr
+                if !result.out.is_empty() {
+                    result.err.push_str(&result.out);
+                    result.out.clear();
+                }
+            }
             RedirectKind::StdoutOverwrite => {
                 if let Some(path) = eval_redirect_target(&redir.target, ctx) {
                     if let Err(e) = tokio::fs::write(&path, &result.out).await {

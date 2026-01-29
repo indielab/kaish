@@ -183,6 +183,8 @@ pub enum RedirectKind {
     Both,
     /// `2>&1` merge stderr into stdout
     MergeStderr,
+    /// `1>&2` or `>&2` merge stdout into stderr
+    MergeStdout,
 }
 
 /// An expression that evaluates to a value.
@@ -399,6 +401,7 @@ impl fmt::Display for RedirectKind {
             RedirectKind::Stderr => write!(f, "2>"),
             RedirectKind::Both => write!(f, "&>"),
             RedirectKind::MergeStderr => write!(f, "2>&1"),
+            RedirectKind::MergeStdout => write!(f, "1>&2"),
         }
     }
 }

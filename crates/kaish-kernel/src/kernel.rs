@@ -325,7 +325,13 @@ impl Kernel {
                 let value = self.eval_expr_async(&assign.value).await
                     .context("failed to evaluate assignment")?;
                 let mut scope = self.scope.write().await;
-                scope.set(&assign.name, value.clone());
+                if assign.local {
+                    // local: set in innermost (current function) frame
+                    scope.set(&assign.name, value.clone());
+                } else {
+                    // non-local: update existing or create in root frame
+                    scope.set_global(&assign.name, value.clone());
+                }
                 drop(scope);
 
                 // Assignments don't produce output (like sh)
@@ -360,10 +366,8 @@ impl Kernel {
                 Ok(ControlFlow::ok(result))
             }
             Stmt::If(if_stmt) => {
-                let cond_value = {
-                    let mut scope = self.scope.write().await;
-                    eval_expr(&if_stmt.condition, &mut scope)?
-                };
+                // Use async evaluator to support command substitution in conditions
+                let cond_value = self.eval_expr_async(&if_stmt.condition).await?;
 
                 let branch = if is_truthy(&cond_value) {
                     &if_stmt.then_branch
@@ -382,12 +386,10 @@ impl Kernel {
             }
             Stmt::For(for_loop) => {
                 // Evaluate all items and collect words for iteration
+                // Use async evaluator to support command substitution like $(echo "a b c")
                 let mut words: Vec<String> = Vec::new();
                 for item_expr in &for_loop.items {
-                    let item = {
-                        let mut scope = self.scope.write().await;
-                        eval_expr(item_expr, &mut scope)?
-                    };
+                    let item = self.eval_expr_async(item_expr).await?;
                     // POSIX-style: word-split string values
                     match &item {
                         Value::String(s) => {
@@ -451,11 +453,8 @@ impl Kernel {
                 let mut result = ExecResult::success("");
 
                 'outer: loop {
-                    // Evaluate condition
-                    let cond_value = {
-                        let mut scope = self.scope.write().await;
-                        eval_expr(&while_loop.condition, &mut scope)?
-                    };
+                    // Evaluate condition - use async to support command substitution
+                    let cond_value = self.eval_expr_async(&while_loop.condition).await?;
 
                     if !is_truthy(&cond_value) {
                         break;
@@ -528,14 +527,28 @@ impl Kernel {
                 Ok(ControlFlow::continue_n(levels.unwrap_or(1)))
             }
             Stmt::Return(expr) => {
-                let value = if let Some(e) = expr {
+                // return [N] - N becomes the exit code, NOT stdout
+                // Shell semantics: return sets exit code, doesn't produce output
+                let result = if let Some(e) = expr {
                     let mut scope = self.scope.write().await;
                     let val = eval_expr(e, &mut scope)?;
-                    ExecResult::success_data(val)
+                    // Convert value to exit code
+                    let code = match val {
+                        Value::Int(n) => n,
+                        Value::Bool(b) => if b { 0 } else { 1 },
+                        _ => 0,
+                    };
+                    ExecResult {
+                        code,
+                        out: String::new(),
+                        err: String::new(),
+                        data: None,
+                        hint: DisplayHint::default(),
+                    }
                 } else {
                     ExecResult::success("")
                 };
-                Ok(ControlFlow::return_value(value))
+                Ok(ControlFlow::return_value(result))
             }
             Stmt::Exit(expr) => {
                 let code = if let Some(e) = expr {
@@ -688,12 +701,8 @@ impl Kernel {
             }
         };
 
-        // Build arguments
-        let tool_args = {
-            let scope = self.scope.read().await;
-            let ctx = self.exec_ctx.read().await;
-            self.build_args(args, &scope, &ctx)?
-        };
+        // Build arguments (async to support command substitution)
+        let tool_args = self.build_args_async(args).await?;
 
         // Execute
         let mut ctx = self.exec_ctx.write().await;
@@ -714,21 +723,21 @@ impl Kernel {
     }
 
     /// Build tool arguments from AST args.
-    fn build_args(&self, args: &[Arg], scope: &Scope, _ctx: &ExecContext) -> Result<ToolArgs> {
+    ///
+    /// Uses async evaluation to support command substitution in arguments.
+    async fn build_args_async(&self, args: &[Arg]) -> Result<ToolArgs> {
         let mut tool_args = ToolArgs::new();
 
         for arg in args {
             match arg {
                 Arg::Positional(expr) => {
-                    let mut scope_clone = scope.clone();
-                    let value = eval_expr(expr, &mut scope_clone)?;
+                    let value = self.eval_expr_async(expr).await?;
                     // Apply tilde expansion to string values
                     let value = apply_tilde_expansion(value);
                     tool_args.positional.push(value);
                 }
                 Arg::Named { key, value } => {
-                    let mut scope_clone = scope.clone();
-                    let val = eval_expr(value, &mut scope_clone)?;
+                    let val = self.eval_expr_async(value).await?;
                     // Apply tilde expansion to string values
                     let val = apply_tilde_expansion(val);
                     tool_args.named.insert(key.clone(), val);
@@ -936,19 +945,22 @@ impl Kernel {
         scope.set_last_result(result.clone());
     }
 
-    /// Execute a user-defined function with shared scope (sh-compatible).
+    /// Execute a user-defined function with local variable scoping.
     ///
-    /// Functions execute in the current scope and can read/modify parent variables.
-    /// Only positional parameters ($0, $1, etc.) are saved and restored.
+    /// Functions push a new scope frame for local variables. Variables declared
+    /// with `local` are scoped to the function; other assignments modify outer
+    /// scopes (or create in root if new).
     async fn execute_user_tool(&self, def: ToolDef, args: &[Arg]) -> Result<ExecResult> {
-        // 1. Build function args from AST args (using current scope for evaluation)
-        let tool_args = {
-            let scope = self.scope.read().await;
-            let ctx = self.exec_ctx.read().await;
-            self.build_args(args, &scope, &ctx)?
-        };
+        // 1. Build function args from AST args (async to support command substitution)
+        let tool_args = self.build_args_async(args).await?;
 
-        // 2. Save current positional parameters and set new ones for this function
+        // 2. Push a new scope frame for local variables
+        {
+            let mut scope = self.scope.write().await;
+            scope.push_frame();
+        }
+
+        // 3. Save current positional parameters and set new ones for this function
         let saved_positional = {
             let mut scope = self.scope.write().await;
             let saved = scope.save_positional();
@@ -989,8 +1001,9 @@ impl Kernel {
                             break;
                         }
                         ControlFlow::Exit { code } => {
-                            // Exit propagates through - restore positional params and return
+                            // Exit propagates through - pop frame, restore positional params and return
                             let mut scope = self.scope.write().await;
+                            scope.pop_frame();
                             scope.set_positional(saved_positional.0.clone(), saved_positional.1.clone());
                             return Ok(ExecResult::failure(code, "exit"));
                         }
@@ -1004,8 +1017,9 @@ impl Kernel {
                     }
                 }
                 Err(e) => {
-                    // Restore positional params on error
+                    // Pop frame and restore positional params on error
                     let mut scope = self.scope.write().await;
+                    scope.pop_frame();
                     scope.set_positional(saved_positional.0.clone(), saved_positional.1.clone());
                     return Err(e);
                 }
@@ -1020,9 +1034,10 @@ impl Kernel {
             hint: DisplayHint::default(),
         };
 
-        // 4. Restore original positional parameters
+        // 4. Pop scope frame and restore original positional parameters
         {
             let mut scope = self.scope.write().await;
+            scope.pop_frame();
             scope.set_positional(saved_positional.0, saved_positional.1);
         }
 
@@ -1036,17 +1051,12 @@ impl Kernel {
     /// allowing the sourced script to set variables and modify shell state.
     async fn execute_source(&self, args: &[Arg]) -> Result<ExecResult> {
         // Get the file path from the first positional argument
-        let path = {
-            let scope = self.scope.read().await;
-            let ctx = self.exec_ctx.read().await;
-            let tool_args = self.build_args(args, &scope, &ctx)?;
-
-            match tool_args.positional.first() {
-                Some(Value::String(s)) => s.clone(),
-                Some(v) => value_to_string(v),
-                None => {
-                    return Ok(ExecResult::failure(1, "source: missing filename"));
-                }
+        let tool_args = self.build_args_async(args).await?;
+        let path = match tool_args.positional.first() {
+            Some(Value::String(s)) => s.clone(),
+            Some(v) => value_to_string(v),
+            None => {
+                return Ok(ExecResult::failure(1, "source: missing filename"));
             }
         };
 
@@ -1199,12 +1209,8 @@ impl Kernel {
                 }
             };
 
-            // Build tool_args from args
-            let tool_args = {
-                let scope = self.scope.read().await;
-                let ctx = self.exec_ctx.read().await;
-                self.build_args(args, &scope, &ctx)?
-            };
+            // Build tool_args from args (async for command substitution support)
+            let tool_args = self.build_args_async(args).await?;
 
             // Create isolated scope (like user tools)
             let mut isolated_scope = Scope::new();
@@ -1844,15 +1850,17 @@ mod tests {
             .await
             .expect("function definition failed");
 
-        // Call with arg=1 should return 42
+        // Call with arg=1 should return with exit code 42
+        // (POSIX shell behavior: return N sets exit code, doesn't output N)
         let result = kernel
             .execute("early_return 1")
             .await
             .expect("function call failed");
 
-        assert!(result.ok());
-        // The return value should be in the data field
-        assert_eq!(result.data, Some(Value::Int(42)));
+        // Exit code should be 42 (non-zero, so not ok())
+        assert_eq!(result.code, 42);
+        // Output should be empty (we returned before echo)
+        assert!(result.out.is_empty());
     }
 
     #[tokio::test]

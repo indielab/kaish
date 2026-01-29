@@ -54,6 +54,8 @@ fn format_token(token: &Token) -> String {
         Token::LtEq => "LEQ".to_string(),
         Token::GtGt => "REDIR_APPEND".to_string(),
         Token::StderrToStdout => "REDIR_MERGE".to_string(),
+        Token::StdoutToStderr => "REDIR_STDOUT_TO_STDERR".to_string(),
+        Token::StdoutToStderr2 => "REDIR_STDOUT_TO_STDERR".to_string(),
         Token::Stderr => "REDIR_ERR".to_string(),
         Token::Both => "REDIR_BOTH".to_string(),
         Token::HereDocStart => "HEREDOC_START".to_string(),

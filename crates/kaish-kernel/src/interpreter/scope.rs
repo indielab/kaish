@@ -69,9 +69,33 @@ impl Scope {
     }
 
     /// Set a variable in the current (innermost) frame.
+    ///
+    /// Use this for `local` variable declarations.
     pub fn set(&mut self, name: impl Into<String>, value: Value) {
         if let Some(frame) = self.frames.last_mut() {
             frame.insert(name.into(), value);
+        }
+    }
+
+    /// Set a variable with global semantics (shell default).
+    ///
+    /// If the variable exists in any frame, update it there.
+    /// Otherwise, create it in the outermost (root) frame.
+    /// Use this for non-local variable assignments.
+    pub fn set_global(&mut self, name: impl Into<String>, value: Value) {
+        let name = name.into();
+
+        // Search from innermost to outermost to find existing variable
+        for frame in self.frames.iter_mut().rev() {
+            if frame.contains_key(&name) {
+                frame.insert(name, value);
+                return;
+            }
+        }
+
+        // Variable doesn't exist - create in root frame (index 0)
+        if let Some(frame) = self.frames.first_mut() {
+            frame.insert(name, value);
         }
     }
 

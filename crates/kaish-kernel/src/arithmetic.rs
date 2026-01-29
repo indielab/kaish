@@ -172,10 +172,44 @@ impl<'a> ArithParser<'a> {
                 }
             }
             Some('$') => {
-                // $VAR or ${VAR} syntax
+                // $VAR, ${VAR}, $?, $$, ${?}, ${$} syntax
                 self.advance(); // consume '$'
+
+                // Special case: $? (last exit code)
+                if self.peek() == Some('?') {
+                    self.advance(); // consume '?'
+                    return Ok(self.scope.last_result().code);
+                }
+
+                // Special case: $$ (current PID)
+                if self.peek() == Some('$') {
+                    self.advance(); // consume second '$'
+                    return Ok(self.scope.pid() as i64);
+                }
+
                 let var_name = if self.peek() == Some('{') {
                     self.advance(); // consume '{'
+
+                    // Special case: ${?} (last exit code, braced form)
+                    if self.peek() == Some('?') {
+                        self.advance(); // consume '?'
+                        if self.peek() != Some('}') {
+                            bail!("expected '}}' after ${{?}} in arithmetic");
+                        }
+                        self.advance(); // consume '}'
+                        return Ok(self.scope.last_result().code);
+                    }
+
+                    // Special case: ${$} (current PID, braced form)
+                    if self.peek() == Some('$') {
+                        self.advance(); // consume '$'
+                        if self.peek() != Some('}') {
+                            bail!("expected '}}' after ${{$}} in arithmetic");
+                        }
+                        self.advance(); // consume '}'
+                        return Ok(self.scope.pid() as i64);
+                    }
+
                     let name = self.parse_identifier()?;
                     if self.peek() != Some('}') {
                         bail!("expected '}}' after variable name in arithmetic");

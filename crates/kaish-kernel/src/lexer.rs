@@ -195,6 +195,12 @@ pub enum Token {
     #[token("2>&1")]
     StderrToStdout,
 
+    #[token("1>&2")]
+    StdoutToStderr,
+
+    #[token(">&2")]
+    StdoutToStderr2,
+
     #[token("2>")]
     Stderr,
 
@@ -550,6 +556,8 @@ impl fmt::Display for Token {
             Token::LtEq => write!(f, "<="),
             Token::GtGt => write!(f, ">>"),
             Token::StderrToStdout => write!(f, "2>&1"),
+            Token::StdoutToStderr => write!(f, "1>&2"),
+            Token::StdoutToStderr2 => write!(f, ">&2"),
             Token::Stderr => write!(f, "2>"),
             Token::Both => write!(f, "&>"),
             Token::HereDocStart => write!(f, "<<"),

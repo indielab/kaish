@@ -17,9 +17,20 @@ pub type Span = SimpleSpan;
 /// Parse a raw `${...}` string into an Expr.
 ///
 /// Handles:
+/// - Special variables: `${?}` → LastExitCode, `${$}` → CurrentPid
 /// - Simple paths: `${VAR}`, `${VAR.field}`, `${VAR[0]}`, `${?.ok}` → VarRef
 /// - Default values: `${VAR:-default}` → VarWithDefault
 fn parse_var_expr(raw: &str) -> Expr {
+    // Special case: ${?} is the last exit code (same as $?)
+    if raw == "${?}" {
+        return Expr::LastExitCode;
+    }
+
+    // Special case: ${$} is the current PID (same as $$)
+    if raw == "${$}" {
+        return Expr::CurrentPid;
+    }
+
     // Check for default value syntax: ${VAR:-default}
     if let Some(colon_idx) = raw.find(":-") {
         // Extract variable name (between ${ and :-)
@@ -952,7 +963,18 @@ where
             target: Expr::Literal(Value::Null),
         });
 
-    choice((heredoc_redirect, merge_stderr_redirect, regular_redirect))
+    // Merge stdout to stderr: 1>&2 or >&2 (no target needed - implicit)
+    let merge_stdout_redirect = choice((
+        just(Token::StdoutToStderr),
+        just(Token::StdoutToStderr2),
+    ))
+    .map(|_| Redirect {
+        kind: RedirectKind::MergeStdout,
+        // Target is unused for MergeStdout, but we need something
+        target: Expr::Literal(Value::Null),
+    });
+
+    choice((heredoc_redirect, merge_stderr_redirect, merge_stdout_redirect, regular_redirect))
         .labelled("redirect")
         .boxed()
 }
