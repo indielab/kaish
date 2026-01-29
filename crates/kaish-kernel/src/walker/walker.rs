@@ -122,9 +122,9 @@ impl<'a> FileWalker<'a> {
 
     /// Collect all matching paths.
     pub async fn collect(mut self) -> anyhow::Result<Vec<PathBuf>> {
-        // Set up ignore filter
-        let ignore_filter = if self.options.respect_gitignore {
-            let filter = self
+        // Set up base ignore filter
+        let base_filter = if self.options.respect_gitignore {
+            let mut filter = self
                 .ignore_filter
                 .take()
                 .unwrap_or_else(IgnoreFilter::with_defaults);
@@ -135,24 +135,19 @@ impl<'a> FileWalker<'a> {
                 if let Ok(gitignore) =
                     IgnoreFilter::from_gitignore(&gitignore_path, self.backend).await
                 {
-                    // For now, just use the gitignore (we'll merge later)
-                    Some(gitignore)
-                } else {
-                    Some(filter)
+                    filter.merge(&gitignore);
                 }
-            } else {
-                Some(filter)
             }
+            Some(filter)
         } else {
             self.ignore_filter.take()
         };
 
-        self.ignore_filter = ignore_filter;
-
         let mut results = Vec::new();
-        let mut stack = vec![(self.root.clone(), 0usize)];
+        // Stack now carries: (directory, depth, ignore_filter for this dir)
+        let mut stack = vec![(self.root.clone(), 0usize, base_filter.clone())];
 
-        while let Some((dir, depth)) = stack.pop() {
+        while let Some((dir, depth, current_filter)) = stack.pop() {
             // Check max depth
             if let Some(max) = self.options.max_depth {
                 if depth > max {
@@ -175,7 +170,7 @@ impl<'a> FileWalker<'a> {
                 }
 
                 // Check ignore filter
-                if let Some(ref filter) = self.ignore_filter {
+                if let Some(ref filter) = current_filter {
                     let relative = self.relative_path(&full_path);
                     if filter.is_ignored(&relative, entry.is_dir) {
                         continue;
@@ -201,8 +196,28 @@ impl<'a> FileWalker<'a> {
                 }
 
                 if entry.is_dir {
-                    // Queue directory for recursion
-                    stack.push((full_path.clone(), depth + 1));
+                    // Check for nested .gitignore in this directory
+                    let child_filter = if self.options.respect_gitignore {
+                        let gitignore_path = full_path.join(".gitignore");
+                        if self.backend.exists(&gitignore_path).await {
+                            if let Ok(nested_gitignore) =
+                                IgnoreFilter::from_gitignore(&gitignore_path, self.backend).await
+                            {
+                                // Merge with parent filter
+                                current_filter.as_ref().map(|f| f.merged_with(&nested_gitignore))
+                                    .or(Some(nested_gitignore))
+                            } else {
+                                current_filter.clone()
+                            }
+                        } else {
+                            current_filter.clone()
+                        }
+                    } else {
+                        current_filter.clone()
+                    };
+
+                    // Queue directory for recursion with its filter
+                    stack.push((full_path.clone(), depth + 1, child_filter));
 
                     // Yield directory if wanted
                     if self.options.entry_types.dirs && self.matches_pattern(&full_path) {
@@ -420,5 +435,50 @@ mod tests {
 
         assert!(files.iter().any(|p| p.ends_with("main.rs")));
         assert!(!files.iter().any(|p| p.ends_with("main_test.rs")));
+    }
+
+    #[tokio::test]
+    async fn test_walk_nested_gitignore() {
+        // Create a filesystem with nested .gitignore files
+        let mut vfs = VfsRouter::new();
+        let mem = MemoryFs::new();
+
+        // Root structure
+        mem.mkdir(Path::new("src")).await.unwrap();
+        mem.mkdir(Path::new("src/subdir")).await.unwrap();
+        mem.write(Path::new("root.rs"), b"root").await.unwrap();
+        mem.write(Path::new("src/main.rs"), b"main").await.unwrap();
+        mem.write(Path::new("src/ignored.log"), b"log").await.unwrap();
+        mem.write(Path::new("src/subdir/util.rs"), b"util").await.unwrap();
+        mem.write(Path::new("src/subdir/local_ignore.txt"), b"ignored").await.unwrap();
+
+        // Root .gitignore ignores .log files
+        mem.write(Path::new(".gitignore"), b"*.log").await.unwrap();
+
+        // Nested .gitignore in src/subdir ignores .txt files
+        mem.write(Path::new("src/subdir/.gitignore"), b"*.txt").await.unwrap();
+
+        vfs.mount("/", mem);
+        let backend = crate::LocalBackend::new(Arc::new(vfs));
+
+        let walker = FileWalker::new(&backend, "/")
+            .with_options(WalkOptions {
+                respect_gitignore: true,
+                include_hidden: true,
+                ..Default::default()
+            });
+
+        let files = walker.collect().await.unwrap();
+
+        // Regular files should be present
+        assert!(files.iter().any(|p| p.ends_with("root.rs")));
+        assert!(files.iter().any(|p| p.ends_with("main.rs")));
+        assert!(files.iter().any(|p| p.ends_with("util.rs")));
+
+        // .log files should be ignored (from root .gitignore)
+        assert!(!files.iter().any(|p| p.ends_with("ignored.log")));
+
+        // .txt files in subdir should be ignored (from nested .gitignore)
+        assert!(!files.iter().any(|p| p.ends_with("local_ignore.txt")));
     }
 }

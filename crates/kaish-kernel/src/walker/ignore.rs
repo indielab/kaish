@@ -219,6 +219,23 @@ impl IgnoreFilter {
     pub fn is_name_ignored(&self, name: &str, is_dir: bool) -> bool {
         self.is_ignored(Path::new(name), is_dir)
     }
+
+    /// Merge another filter's rules into this one.
+    ///
+    /// The other filter's rules are added after (and thus take precedence over)
+    /// this filter's rules.
+    pub fn merge(&mut self, other: &IgnoreFilter) {
+        self.rules.extend(other.rules.iter().cloned());
+    }
+
+    /// Create a new filter by merging this filter with another.
+    ///
+    /// Returns a new filter with the combined rules (other's rules take precedence).
+    pub fn merged_with(&self, other: &IgnoreFilter) -> IgnoreFilter {
+        let mut merged = self.clone();
+        merged.merge(other);
+        merged
+    }
 }
 
 #[cfg(test)]
