@@ -376,10 +376,28 @@ impl GitVfs {
     }
 
     /// Checkout a branch or commit.
+    ///
+    /// If `force` is true, overwrites local changes. If false, fails if there
+    /// are uncommitted changes that would be overwritten.
     pub fn checkout(&self, target: &str) -> Result<(), GitError> {
+        self.checkout_with_options(target, true)
+    }
+
+    /// Checkout with explicit force option.
+    ///
+    /// If `force` is false, checkout will fail if there are uncommitted changes
+    /// that would be overwritten by the checkout.
+    pub fn checkout_with_options(&self, target: &str, force: bool) -> Result<(), GitError> {
         let repo = self.repo.lock().map_err(|_| {
             GitError::from_str("failed to acquire repository lock")
         })?;
+
+        let mut checkout_opts = git2::build::CheckoutBuilder::new();
+        if force {
+            checkout_opts.force();
+        } else {
+            checkout_opts.safe();
+        }
 
         // Try as branch first
         let reference = match repo.find_branch(target, git2::BranchType::Local) {
@@ -389,9 +407,7 @@ impl GitVfs {
                 let obj = repo.revparse_single(target)?;
                 let commit = obj.peel_to_commit()?;
                 repo.set_head_detached(commit.id())?;
-                repo.checkout_head(Some(
-                    git2::build::CheckoutBuilder::new().force(),
-                ))?;
+                repo.checkout_head(Some(&mut checkout_opts))?;
                 return Ok(());
             }
         };
@@ -400,7 +416,7 @@ impl GitVfs {
             GitError::from_str("invalid reference name")
         })?)?;
 
-        repo.checkout_head(Some(git2::build::CheckoutBuilder::new().force()))?;
+        repo.checkout_head(Some(&mut checkout_opts))?;
         Ok(())
     }
 }
