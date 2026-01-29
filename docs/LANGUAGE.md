@@ -387,3 +387,41 @@ Features that ShellCheck warns about (word splitting, glob expansion, backticks)
 | **VFS** | None | `/scratch/`, `/mnt/`, `/git/` | Unified resource access |
 | **Pre-validation** | None | `validate` builtin | Catch errors before execution |
 | **Strict validation** | Guesses | Rejects `TRUE`, `yes`, `123abc` | Agent-friendly, fail-fast |
+
+## Known Limitations
+
+These are documented limitations of the current implementation:
+
+### Preprocessing
+
+- **Context-unaware** — The preprocessor replaces arithmetic `$(( ))` and heredoc markers before parsing. This means escape sequences or special characters inside these constructs may behave unexpectedly if they look like outer-level syntax. This is an 80/20 tradeoff for implementation simplicity.
+
+### Validator
+
+- **Lexical scoping** — The validator uses static analysis with ShellCheck-like strictness. It may warn about variables that would be defined at runtime if the definition isn't lexically visible. This is intentional—better to be strict than miss errors.
+
+### Builtins
+
+- **`set` only supports `-e`** — Unlike bash, only `set -e` (exit on error) is implemented. Other set options are not supported.
+- **`ps` is Linux-only** — The process listing builtin reads from `/proc` and only works on Linux systems.
+- **`git` requires real filesystem** — The git builtin operates on the actual filesystem, not the VFS. It won't work with memory-backed or remote VFS mounts.
+- **`head`/`tail -c` counts UTF-8 characters** — Unlike POSIX which specifies bytes, `-c` in kaish counts Unicode characters. This is intentional for safer text handling.
+
+### Execution
+
+- **Scatter results in completion order** — The 散 (scatter) construct returns results in the order jobs complete, not input order. This is inherent to parallel execution—first done, first returned.
+- **Command substitution in redirect targets** — Constructs like `cmd > $(...)` are not supported. Evaluate the target path separately first.
+
+### RPC/IPC
+
+- **`spawn_local` requires LocalSet** — IPC clients use tokio's `spawn_local` and must be run within a tokio `LocalSet`. This is a consequence of the Cap'n Proto RPC design.
+- **RPC shutdown is advisory** — Calling `shutdown()` on the RPC interface requests shutdown but doesn't guarantee immediate termination.
+
+### Performance
+
+- **Globstar `**` can be slow** — Deep directory trees with `**/*.rs` patterns may take time due to exponential matching. Consider using more specific prefixes.
+
+### Build/Development
+
+- **chumsky parser from git** — The parser combinator library is sourced from git rather than crates.io to get unreleased features.
+- **Fuzz tests require nightly** — The fuzz testing infrastructure requires Rust nightly compiler.
