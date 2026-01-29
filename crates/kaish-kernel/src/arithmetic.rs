@@ -2,6 +2,7 @@
 //!
 //! Supports:
 //! - Integer arithmetic: `+`, `-`, `*`, `/`, `%`
+//! - Comparison operators: `>`, `<`, `>=`, `<=`, `==`, `!=` (return 1 or 0)
 //! - Parentheses for grouping: `(expr)`
 //! - Variable references: `$VAR` or bare `VAR`
 //! - Integer literals
@@ -28,7 +29,7 @@ use anyhow::{bail, Context, Result};
 /// ```
 pub fn eval_arithmetic(expr: &str, scope: &Scope) -> Result<i64> {
     let mut parser = ArithParser::new(expr, scope);
-    let result = parser.parse_expr()?;
+    let result = parser.parse_comparison()?;
     parser.expect_end()?;
     Ok(result)
 }
@@ -68,6 +69,12 @@ impl<'a> ArithParser<'a> {
         Some(ch)
     }
 
+    /// Peek at the character n positions ahead (0 = current after whitespace skip).
+    fn peek_ahead(&mut self, n: usize) -> Option<char> {
+        self.skip_whitespace();
+        self.input[self.pos..].chars().nth(n)
+    }
+
     fn expect_end(&mut self) -> Result<()> {
         self.skip_whitespace();
         if self.pos < self.input.len() {
@@ -75,6 +82,57 @@ impl<'a> ArithParser<'a> {
                   &self.input[self.pos..]);
         }
         Ok(())
+    }
+
+    /// Parse comparison operators (lowest precedence): >, <, >=, <=, ==, !=
+    /// Returns 1 for true, 0 for false.
+    fn parse_comparison(&mut self) -> Result<i64> {
+        let mut left = self.parse_expr()?;
+
+        loop {
+            self.skip_whitespace();
+            match (self.peek_ahead(0), self.peek_ahead(1)) {
+                // Two-character operators must be checked first
+                (Some('>'), Some('=')) => {
+                    self.advance(); // consume '>'
+                    self.advance(); // consume '='
+                    let right = self.parse_expr()?;
+                    left = if left >= right { 1 } else { 0 };
+                }
+                (Some('<'), Some('=')) => {
+                    self.advance(); // consume '<'
+                    self.advance(); // consume '='
+                    let right = self.parse_expr()?;
+                    left = if left <= right { 1 } else { 0 };
+                }
+                (Some('='), Some('=')) => {
+                    self.advance(); // consume '='
+                    self.advance(); // consume '='
+                    let right = self.parse_expr()?;
+                    left = if left == right { 1 } else { 0 };
+                }
+                (Some('!'), Some('=')) => {
+                    self.advance(); // consume '!'
+                    self.advance(); // consume '='
+                    let right = self.parse_expr()?;
+                    left = if left != right { 1 } else { 0 };
+                }
+                // Single-character operators
+                (Some('>'), _) => {
+                    self.advance(); // consume '>'
+                    let right = self.parse_expr()?;
+                    left = if left > right { 1 } else { 0 };
+                }
+                (Some('<'), _) => {
+                    self.advance(); // consume '<'
+                    let right = self.parse_expr()?;
+                    left = if left < right { 1 } else { 0 };
+                }
+                _ => break,
+            }
+        }
+
+        Ok(left)
     }
 
     /// Parse an expression: handles + and - (lowest precedence)
@@ -418,5 +476,70 @@ mod tests {
     #[test]
     fn test_complex_expression() {
         assert_eq!(eval("(1 + 2) * (3 + 4) - 5"), 16);
+    }
+
+    // Comparison operator tests
+    #[test]
+    fn test_greater_than() {
+        assert_eq!(eval("5 > 3"), 1);
+        assert_eq!(eval("3 > 5"), 0);
+        assert_eq!(eval("5 > 5"), 0);
+    }
+
+    #[test]
+    fn test_less_than() {
+        assert_eq!(eval("3 < 5"), 1);
+        assert_eq!(eval("5 < 3"), 0);
+        assert_eq!(eval("5 < 5"), 0);
+    }
+
+    #[test]
+    fn test_greater_or_equal() {
+        assert_eq!(eval("5 >= 3"), 1);
+        assert_eq!(eval("5 >= 5"), 1);
+        assert_eq!(eval("3 >= 5"), 0);
+    }
+
+    #[test]
+    fn test_less_or_equal() {
+        assert_eq!(eval("3 <= 5"), 1);
+        assert_eq!(eval("5 <= 5"), 1);
+        assert_eq!(eval("5 <= 3"), 0);
+    }
+
+    #[test]
+    fn test_equal() {
+        assert_eq!(eval("5 == 5"), 1);
+        assert_eq!(eval("5 == 3"), 0);
+    }
+
+    #[test]
+    fn test_not_equal() {
+        assert_eq!(eval("5 != 3"), 1);
+        assert_eq!(eval("5 != 5"), 0);
+    }
+
+    #[test]
+    fn test_comparison_with_arithmetic() {
+        assert_eq!(eval("(2 + 3) > 4"), 1);
+        assert_eq!(eval("10 / 2 == 5"), 1);
+        assert_eq!(eval("3 * 4 >= 12"), 1);
+        assert_eq!(eval("10 - 5 < 6"), 1);
+    }
+
+    #[test]
+    fn test_comparison_with_variables() {
+        assert_eq!(eval_with_var("X > 5", "X", 10), 1);
+        assert_eq!(eval_with_var("X == 10", "X", 10), 1);
+        assert_eq!(eval_with_var("X <= 10", "X", 10), 1);
+    }
+
+    #[test]
+    fn test_chained_comparison() {
+        // Note: chained comparisons work left-to-right, not mathematically
+        // (5 > 3) > 2 = 1 > 2 = 0
+        assert_eq!(eval("5 > 3 > 2"), 0);
+        // (5 > 3) == 1 = 1 == 1 = 1
+        assert_eq!(eval("5 > 3 == 1"), 1);
     }
 }
