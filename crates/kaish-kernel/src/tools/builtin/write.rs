@@ -60,6 +60,8 @@ fn value_to_string(value: &Value) -> String {
         Value::Float(f) => f.to_string(),
         Value::Bool(b) => b.to_string(),
         Value::Null => "null".to_string(),
+        Value::Json(json) => json.to_string(),
+        Value::Blob(blob) => format!("[blob: {} {}]", blob.formatted_size(), blob.content_type),
     }
 }
 

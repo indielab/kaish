@@ -175,8 +175,8 @@ fn format_json(val: &Val) -> String {
 /// Convert ast::Value to serde_json::Value for jq processing.
 ///
 /// This is smarter than the generic value_to_json because it handles the case
-/// where Value::String contains serialized JSON (objects/arrays are stored
-/// as stringified JSON in ast::Value).
+/// where Value::String contains serialized JSON (for legacy compatibility).
+/// Value::Json is returned directly as it's already a serde_json::Value.
 fn ast_value_to_json(value: &Value) -> serde_json::Value {
     match value {
         Value::Null => serde_json::Value::Null,
@@ -188,8 +188,17 @@ fn ast_value_to_json(value: &Value) -> serde_json::Value {
                 .unwrap_or(serde_json::Value::Null)
         }
         Value::String(s) => {
-            // Try to parse as JSON first - ExecResult stores objects/arrays as JSON strings
+            // Try to parse as JSON first - for backwards compatibility with serialized JSON in strings
             serde_json::from_str(s).unwrap_or_else(|_| serde_json::Value::String(s.clone()))
+        }
+        Value::Json(json) => json.clone(),
+        Value::Blob(blob) => {
+            let mut map = serde_json::Map::new();
+            map.insert("_type".to_string(), serde_json::Value::String("blob".to_string()));
+            map.insert("id".to_string(), serde_json::Value::String(blob.id.clone()));
+            map.insert("size".to_string(), serde_json::Value::Number(blob.size.into()));
+            map.insert("contentType".to_string(), serde_json::Value::String(blob.content_type.clone()));
+            serde_json::Value::Object(map)
         }
     }
 }

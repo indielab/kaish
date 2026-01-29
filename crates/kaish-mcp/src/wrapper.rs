@@ -251,5 +251,18 @@ fn value_to_json(value: &Value) -> serde_json::Value {
             .map(serde_json::Value::Number)
             .unwrap_or(serde_json::Value::Null),
         Value::String(s) => serde_json::Value::String(s.clone()),
+        Value::Json(json) => json.clone(),
+        Value::Blob(blob) => {
+            let mut map = serde_json::Map::new();
+            map.insert("_type".to_string(), serde_json::Value::String("blob".to_string()));
+            map.insert("id".to_string(), serde_json::Value::String(blob.id.clone()));
+            map.insert("size".to_string(), serde_json::Value::Number(blob.size.into()));
+            map.insert("contentType".to_string(), serde_json::Value::String(blob.content_type.clone()));
+            if let Some(hash) = &blob.hash {
+                let hash_hex: String = hash.iter().map(|b| format!("{:02x}", b)).collect();
+                map.insert("hash".to_string(), serde_json::Value::String(hash_hex));
+            }
+            serde_json::Value::Object(map)
+        }
     }
 }

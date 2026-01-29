@@ -57,6 +57,8 @@ fn format_value(value: &Value) -> String {
         Value::Int(i) => i.to_string(),
         Value::Float(f) => f.to_string(),
         Value::String(s) => format!("\"{}\"", s.replace('\"', "\\\"")),
+        Value::Json(json) => json.to_string(),
+        Value::Blob(blob) => format!("[blob: {} {}]", blob.formatted_size(), blob.content_type),
     }
 }
 

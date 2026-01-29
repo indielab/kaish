@@ -290,7 +290,8 @@ impl Default for ExecResult {
 
 /// Convert serde_json::Value to our AST Value.
 ///
-/// Arrays and objects are stringified - use `jq` to extract values.
+/// Primitives are mapped to their corresponding Value variants.
+/// Arrays and objects are preserved as `Value::Json` - use `jq` to query them.
 fn json_to_value(json: serde_json::Value) -> Value {
     match json {
         serde_json::Value::Null => Value::Null,
@@ -305,10 +306,8 @@ fn json_to_value(json: serde_json::Value) -> Value {
             }
         }
         serde_json::Value::String(s) => Value::String(s),
-        // Arrays and objects are stored as JSON strings
-        serde_json::Value::Array(_) | serde_json::Value::Object(_) => {
-            Value::String(json.to_string())
-        }
+        // Arrays and objects are preserved as Json values
+        serde_json::Value::Array(_) | serde_json::Value::Object(_) => Value::Json(json),
     }
 }
 
@@ -324,6 +323,19 @@ pub fn value_to_json(value: &Value) -> serde_json::Value {
                 .unwrap_or(serde_json::Value::Null)
         }
         Value::String(s) => serde_json::Value::String(s.clone()),
+        Value::Json(json) => json.clone(),
+        Value::Blob(blob) => {
+            let mut map = serde_json::Map::new();
+            map.insert("_type".to_string(), serde_json::Value::String("blob".to_string()));
+            map.insert("id".to_string(), serde_json::Value::String(blob.id.clone()));
+            map.insert("size".to_string(), serde_json::Value::Number(blob.size.into()));
+            map.insert("contentType".to_string(), serde_json::Value::String(blob.content_type.clone()));
+            if let Some(hash) = &blob.hash {
+                let hash_hex: String = hash.iter().map(|b| format!("{:02x}", b)).collect();
+                map.insert("hash".to_string(), serde_json::Value::String(hash_hex));
+            }
+            serde_json::Value::Object(map)
+        }
     }
 }
 
@@ -350,12 +362,17 @@ mod tests {
 
     #[test]
     fn json_stdout_is_parsed() {
-        // JSON objects/arrays are stored as JSON strings
+        // JSON objects/arrays are now stored as Value::Json for direct access
         let result = ExecResult::success(r#"{"count": 42, "items": ["a", "b"]}"#);
         assert!(result.data.is_some());
         let data = result.data.unwrap();
-        // Objects are stored as stringified JSON
-        assert!(matches!(data, Value::String(_)));
+        // Objects are stored as Value::Json
+        assert!(matches!(data, Value::Json(_)));
+        // Verify the structure is preserved
+        if let Value::Json(json) = data {
+            assert_eq!(json.get("count"), Some(&serde_json::json!(42)));
+            assert_eq!(json.get("items"), Some(&serde_json::json!(["a", "b"])));
+        }
     }
 
     #[test]

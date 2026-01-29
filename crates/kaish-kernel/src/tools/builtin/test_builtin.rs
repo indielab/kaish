@@ -88,6 +88,8 @@ async fn evaluate_test(args: ToolArgs, ctx: &mut ExecContext, bracket_mode: bool
             Value::Float(f) => Some(f.to_string()),
             Value::Bool(b) => Some(if *b { "true" } else { "false" }.to_string()),
             Value::Null => None,
+            Value::Json(json) => Some(json.to_string()),
+            Value::Blob(blob) => Some(format!("[blob: {} {}]", blob.formatted_size(), blob.content_type)),
         })
         .collect();
 

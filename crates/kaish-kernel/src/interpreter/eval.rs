@@ -470,6 +470,8 @@ pub fn value_to_string(value: &Value) -> String {
         Value::Int(i) => i.to_string(),
         Value::Float(f) => f.to_string(),
         Value::String(s) => s.clone(),
+        Value::Json(json) => json.to_string(),
+        Value::Blob(blob) => format!("[blob: {} {}]", blob.formatted_size(), blob.content_type),
     }
 }
 
@@ -480,6 +482,8 @@ pub fn value_to_string(value: &Value) -> String {
 /// - `String("")` → `false`, non-empty → `true`
 /// - `Null` → `false`
 /// - `Float(0.0)` → `false`, other floats → `true`
+/// - `Json(null)` → `false`, `Json([])` → `false`, `Json({})` → `false`, others → `true`
+/// - `Blob(_)` → `true` (blobs always exist if referenced)
 pub fn value_to_bool(value: &Value) -> bool {
     match value {
         Value::Null => false,
@@ -487,6 +491,15 @@ pub fn value_to_bool(value: &Value) -> bool {
         Value::Int(i) => *i != 0,
         Value::Float(f) => *f != 0.0,
         Value::String(s) => !s.is_empty(),
+        Value::Json(json) => match json {
+            serde_json::Value::Null => false,
+            serde_json::Value::Array(arr) => !arr.is_empty(),
+            serde_json::Value::Object(obj) => !obj.is_empty(),
+            serde_json::Value::Bool(b) => *b,
+            serde_json::Value::Number(n) => n.as_f64().map(|f| f != 0.0).unwrap_or(false),
+            serde_json::Value::String(s) => !s.is_empty(),
+        },
+        Value::Blob(_) => true, // Blob references are always truthy
     }
 }
 
@@ -588,15 +601,12 @@ fn format_path(path: &VarPath) -> String {
 /// - `false` → false
 /// - `0` → false
 /// - `""` → false
+/// - `Json(null)`, `Json([])`, `Json({})` → false
+/// - `Blob(_)` → true
 /// - Everything else → true
 fn is_truthy(value: &Value) -> bool {
-    match value {
-        Value::Null => false,
-        Value::Bool(b) => *b,
-        Value::Int(i) => *i != 0,
-        Value::Float(f) => *f != 0.0,
-        Value::String(s) => !s.is_empty(),
-    }
+    // Delegate to value_to_bool for consistent behavior
+    value_to_bool(value)
 }
 
 /// Check if two values are equal.
@@ -604,6 +614,8 @@ fn is_truthy(value: &Value) -> bool {
 /// Handles cross-type comparisons for shell compatibility:
 /// - String-to-Int: Try parsing the string as an integer
 /// - String-to-Float: Try parsing the string as a float
+/// - Json: Deep equality comparison
+/// - Blob: Compare by id
 fn values_equal(left: &Value, right: &Value) -> bool {
     match (left, right) {
         (Value::Null, Value::Null) => true,
@@ -622,6 +634,10 @@ fn values_equal(left: &Value, right: &Value) -> bool {
         (Value::String(s), Value::Float(f)) | (Value::Float(f), Value::String(s)) => {
             s.parse::<f64>().map(|parsed| (parsed - f).abs() < f64::EPSILON).unwrap_or(false)
         }
+        // Json deep equality
+        (Value::Json(a), Value::Json(b)) => a == b,
+        // Blob equality by id
+        (Value::Blob(a), Value::Blob(b)) => a.id == b.id,
         _ => false,
     }
 }
@@ -655,6 +671,8 @@ fn type_name(value: &Value) -> &'static str {
         Value::Int(_) => "int",
         Value::Float(_) => "float",
         Value::String(_) => "string",
+        Value::Json(_) => "json",
+        Value::Blob(_) => "blob",
     }
 }
 

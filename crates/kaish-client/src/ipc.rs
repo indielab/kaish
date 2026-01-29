@@ -221,6 +221,50 @@ fn set_value(builder: &mut value::Builder<'_>, value: &Value) {
         Value::Int(i) => builder.set_int(*i),
         Value::Float(f) => builder.set_float(*f),
         Value::String(s) => builder.set_string(s),
+        Value::Json(json) => {
+            set_json_value(builder.reborrow(), json);
+        }
+        Value::Blob(blob) => {
+            let mut blob_builder = builder.reborrow().init_blob();
+            blob_builder.set_id(&blob.id);
+            blob_builder.set_size(blob.size);
+            blob_builder.set_content_type(&blob.content_type);
+            if let Some(hash) = &blob.hash {
+                blob_builder.set_hash(hash);
+            }
+        }
+    }
+}
+
+/// Helper to serialize serde_json::Value to Cap'n Proto.
+fn set_json_value(mut builder: value::Builder<'_>, json: &serde_json::Value) {
+    match json {
+        serde_json::Value::Null => builder.set_null(()),
+        serde_json::Value::Bool(b) => builder.set_bool(*b),
+        serde_json::Value::Number(n) => {
+            if let Some(i) = n.as_i64() {
+                builder.set_int(i);
+            } else if let Some(f) = n.as_f64() {
+                builder.set_float(f);
+            } else {
+                builder.set_string(&n.to_string());
+            }
+        }
+        serde_json::Value::String(s) => builder.set_string(s),
+        serde_json::Value::Array(arr) => {
+            let mut array_builder = builder.init_array(arr.len() as u32);
+            for (i, item) in arr.iter().enumerate() {
+                set_json_value(array_builder.reborrow().get(i as u32), item);
+            }
+        }
+        serde_json::Value::Object(obj) => {
+            let mut object_builder = builder.init_object(obj.len() as u32);
+            for (i, (key, val)) in obj.iter().enumerate() {
+                let mut entry = object_builder.reborrow().get(i as u32);
+                entry.set_key(key);
+                set_json_value(entry.init_value(), val);
+            }
+        }
     }
 }
 
@@ -266,8 +310,30 @@ fn read_value(reader: &value::Reader<'_>) -> ClientResult<Value> {
             let json = serde_json::Value::Object(map);
             Ok(Value::String(json.to_string()))
         }
-        Which::Blob(_) => {
-            Err(ClientError::Rpc(capnp::Error::failed("blob values not supported".into())))
+        Which::Blob(blob) => {
+            // Convert blob reference to JSON string representation
+            let blob = blob?;
+            let id_text = blob.get_id()?;
+            let id = id_text.to_str().map_err(|e| {
+                ClientError::Rpc(capnp::Error::failed(format!("invalid utf8: {}", e)))
+            })?;
+            let size = blob.get_size();
+            let content_type_text = blob.get_content_type()?;
+            let content_type = content_type_text.to_str().map_err(|e| {
+                ClientError::Rpc(capnp::Error::failed(format!("invalid utf8: {}", e)))
+            })?;
+            let hash = blob.get_hash()?;
+
+            let mut map = serde_json::Map::new();
+            map.insert("_type".to_string(), serde_json::Value::String("blob".to_string()));
+            map.insert("id".to_string(), serde_json::Value::String(id.to_string()));
+            map.insert("size".to_string(), serde_json::Value::Number(size.into()));
+            map.insert("contentType".to_string(), serde_json::Value::String(content_type.to_string()));
+            if !hash.is_empty() {
+                let hash_hex: String = hash.iter().map(|b| format!("{:02x}", b)).collect();
+                map.insert("hash".to_string(), serde_json::Value::String(hash_hex));
+            }
+            Ok(Value::String(serde_json::Value::Object(map).to_string()))
         }
     }
 }
@@ -301,5 +367,18 @@ fn value_to_json(value: &Value) -> serde_json::Value {
             .map(serde_json::Value::Number)
             .unwrap_or(serde_json::Value::Null),
         Value::String(s) => serde_json::Value::String(s.clone()),
+        Value::Json(json) => json.clone(),
+        Value::Blob(blob) => {
+            let mut map = serde_json::Map::new();
+            map.insert("_type".to_string(), serde_json::Value::String("blob".to_string()));
+            map.insert("id".to_string(), serde_json::Value::String(blob.id.clone()));
+            map.insert("size".to_string(), serde_json::Value::Number(blob.size.into()));
+            map.insert("contentType".to_string(), serde_json::Value::String(blob.content_type.clone()));
+            if let Some(hash) = &blob.hash {
+                let hash_hex: String = hash.iter().map(|b| format!("{:02x}", b)).collect();
+                map.insert("hash".to_string(), serde_json::Value::String(hash_hex));
+            }
+            serde_json::Value::Object(map)
+        }
     }
 }

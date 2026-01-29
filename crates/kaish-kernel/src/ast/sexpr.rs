@@ -374,6 +374,8 @@ pub fn format_value(value: &Value) -> String {
         Value::Int(n) => format!("(int {})", n),
         Value::Float(f) => format!("(float {})", f),
         Value::String(s) => format!("(string \"{}\")", escape_for_display(s)),
+        Value::Json(json) => format!("(json {})", json),
+        Value::Blob(blob) => format!("(blob id={} size={} type={})", blob.id, blob.size, blob.content_type),
     }
 }
 

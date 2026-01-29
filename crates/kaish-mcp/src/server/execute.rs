@@ -86,9 +86,18 @@ impl ExecuteResult {
                     serde_json::Number::from_f64(*f).map(serde_json::Value::Number)
                 }
                 kaish_kernel::ast::Value::String(s) => {
-                    // Try to parse as JSON first
+                    // Try to parse as JSON first (for backwards compatibility)
                     serde_json::from_str(s).ok()
                         .or_else(|| Some(serde_json::Value::String(s.clone())))
+                }
+                kaish_kernel::ast::Value::Json(json) => Some(json.clone()),
+                kaish_kernel::ast::Value::Blob(blob) => {
+                    let mut map = serde_json::Map::new();
+                    map.insert("_type".to_string(), serde_json::Value::String("blob".to_string()));
+                    map.insert("id".to_string(), serde_json::Value::String(blob.id.clone()));
+                    map.insert("size".to_string(), serde_json::Value::Number(blob.size.into()));
+                    map.insert("contentType".to_string(), serde_json::Value::String(blob.content_type.clone()));
+                    Some(serde_json::Value::Object(map))
                 }
             }
         });

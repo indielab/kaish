@@ -131,6 +131,8 @@ fn format_value(value: &Value) -> String {
         Value::Int(i) => i.to_string(),
         Value::Float(f) => f.to_string(),
         Value::String(s) => format!("\"{}\"", s.replace('\\', "\\\\").replace('"', "\\\"")),
+        Value::Json(json) => format!("'{}'", json.to_string().replace('\'', "'\\''")),
+        Value::Blob(blob) => format!("[blob: {} {}]", blob.formatted_size(), blob.content_type),
     }
 }
 

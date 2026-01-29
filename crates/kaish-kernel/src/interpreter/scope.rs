@@ -407,13 +407,13 @@ mod tests {
                 VarSegment::Field("data".into()),
             ],
         };
-        // data is now a JSON string, not a nested object
+        // data is now a Value::Json for structured data
         let result = scope.resolve_path(&path);
         assert!(result.is_some());
-        if let Some(Value::String(s)) = result {
-            assert!(s.contains("count"));
+        if let Some(Value::Json(json)) = result {
+            assert_eq!(json.get("count"), Some(&serde_json::json!(5)));
         } else {
-            panic!("expected string data");
+            panic!("expected Value::Json, got {:?}", result);
         }
     }
 

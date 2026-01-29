@@ -1417,6 +1417,15 @@ fn is_truthy(value: &Value) -> bool {
         Value::Int(i) => *i != 0,
         Value::Float(f) => *f != 0.0,
         Value::String(s) => !s.is_empty(),
+        Value::Json(json) => match json {
+            serde_json::Value::Null => false,
+            serde_json::Value::Array(arr) => !arr.is_empty(),
+            serde_json::Value::Object(obj) => !obj.is_empty(),
+            serde_json::Value::Bool(b) => *b,
+            serde_json::Value::Number(n) => n.as_f64().map(|f| f != 0.0).unwrap_or(false),
+            serde_json::Value::String(s) => !s.is_empty(),
+        },
+        Value::Blob(_) => true, // Blob references are always truthy
     }
 }
 

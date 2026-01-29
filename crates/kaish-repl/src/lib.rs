@@ -1016,6 +1016,8 @@ fn format_value(value: &Value) -> String {
         Value::Int(i) => i.to_string(),
         Value::Float(f) => f.to_string(),
         Value::String(s) => format!("\"{}\"", s),
+        Value::Json(json) => json.to_string(),
+        Value::Blob(blob) => format!("[blob: {} {}]", blob.formatted_size(), blob.content_type),
     }
 }
 
@@ -1066,13 +1068,8 @@ fn format_result(result: &ExecResult) -> String {
 
 /// Check if a value is truthy.
 fn is_truthy(value: &Value) -> bool {
-    match value {
-        Value::Null => false,
-        Value::Bool(b) => *b,
-        Value::Int(i) => *i != 0,
-        Value::Float(f) => *f != 0.0,
-        Value::String(s) => !s.is_empty(),
-    }
+    // Delegate to kaish_kernel's exported value_to_bool function
+    kaish_kernel::interpreter::value_to_bool(value)
 }
 
 /// Check if two values are equal.
