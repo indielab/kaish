@@ -7,8 +7,8 @@ use async_trait::async_trait;
 use std::collections::HashMap;
 use std::io;
 use std::path::{Path, PathBuf};
-use std::sync::RwLock;
 use std::time::SystemTime;
+use tokio::sync::RwLock;
 
 /// Entry in the memory filesystem.
 #[derive(Debug, Clone)]
@@ -67,11 +67,8 @@ impl MemoryFs {
     }
 
     /// Ensure all parent directories exist.
-    fn ensure_parents(&self, path: &Path) -> io::Result<()> {
-        let mut entries = self
-            .entries
-            .write()
-            .map_err(|_| io::Error::other("lock poisoned"))?;
+    async fn ensure_parents(&self, path: &Path) -> io::Result<()> {
+        let mut entries = self.entries.write().await;
 
         let mut current = PathBuf::new();
         for component in path.parent().into_iter().flat_map(|p| p.components()) {
@@ -90,10 +87,7 @@ impl MemoryFs {
 impl Filesystem for MemoryFs {
     async fn read(&self, path: &Path) -> io::Result<Vec<u8>> {
         let normalized = Self::normalize(path);
-        let entries = self
-            .entries
-            .read()
-            .map_err(|_| io::Error::other("lock poisoned"))?;
+        let entries = self.entries.read().await;
 
         match entries.get(&normalized) {
             Some(Entry::File { data, .. }) => Ok(data.clone()),
@@ -112,12 +106,9 @@ impl Filesystem for MemoryFs {
         let normalized = Self::normalize(path);
 
         // Ensure parent directories exist
-        self.ensure_parents(&normalized)?;
+        self.ensure_parents(&normalized).await?;
 
-        let mut entries = self
-            .entries
-            .write()
-            .map_err(|_| io::Error::other("lock poisoned"))?;
+        let mut entries = self.entries.write().await;
 
         // Check we're not overwriting a directory
         if let Some(Entry::Directory { .. }) = entries.get(&normalized) {
@@ -139,10 +130,7 @@ impl Filesystem for MemoryFs {
 
     async fn list(&self, path: &Path) -> io::Result<Vec<DirEntry>> {
         let normalized = Self::normalize(path);
-        let entries = self
-            .entries
-            .read()
-            .map_err(|_| io::Error::other("lock poisoned"))?;
+        let entries = self.entries.read().await;
 
         // Verify the path is a directory
         match entries.get(&normalized) {
@@ -194,10 +182,7 @@ impl Filesystem for MemoryFs {
 
     async fn stat(&self, path: &Path) -> io::Result<Metadata> {
         let normalized = Self::normalize(path);
-        let entries = self
-            .entries
-            .read()
-            .map_err(|_| io::Error::other("lock poisoned"))?;
+        let entries = self.entries.read().await;
 
         // Handle root directory
         if normalized.as_os_str().is_empty() {
@@ -233,12 +218,9 @@ impl Filesystem for MemoryFs {
         let normalized = Self::normalize(path);
 
         // Ensure parent directories exist
-        self.ensure_parents(&normalized)?;
+        self.ensure_parents(&normalized).await?;
 
-        let mut entries = self
-            .entries
-            .write()
-            .map_err(|_| io::Error::other("lock poisoned"))?;
+        let mut entries = self.entries.write().await;
 
         // Check if something already exists
         if let Some(existing) = entries.get(&normalized) {
@@ -270,10 +252,7 @@ impl Filesystem for MemoryFs {
             ));
         }
 
-        let mut entries = self
-            .entries
-            .write()
-            .map_err(|_| io::Error::other("lock poisoned"))?;
+        let mut entries = self.entries.write().await;
 
         // Check if it's a non-empty directory
         if let Some(Entry::Directory { .. }) = entries.get(&normalized) {
