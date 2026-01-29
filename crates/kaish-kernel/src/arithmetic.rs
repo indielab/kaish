@@ -265,6 +265,18 @@ impl<'a> ArithParser<'a> {
     }
 
     fn get_var_value(&self, name: &str) -> Result<i64> {
+        // Check for positional parameters ($0, $1, $2, ... $9, etc.)
+        // Name is just the digits when called from `$1` or `${1}` parsing
+        if let Ok(index) = name.parse::<usize>() {
+            if let Some(pos_val) = self.scope.get_positional(index) {
+                return pos_val.parse().with_context(|| {
+                    format!("${} has non-numeric value: {:?}", index, pos_val)
+                });
+            }
+            return Ok(0); // Unset positional defaults to 0
+        }
+
+        // Regular variable lookup
         match self.scope.get(name) {
             Some(Value::Int(n)) => Ok(*n),
             Some(Value::String(s)) => {

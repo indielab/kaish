@@ -250,20 +250,7 @@ pub fn format_expr(expr: &Expr) -> String {
         Expr::Interpolated(parts) => {
             let parts_str: Vec<String> = parts
                 .iter()
-                .map(|p| match p {
-                    StringPart::Literal(s) => format!("\"{}\"", s),
-                    StringPart::Var(path) => format!("(varref {})", format_varpath(path)),
-                    StringPart::VarWithDefault { name, default } => {
-                        format!("(vardefault {} \"{}\")", name, default)
-                    }
-                    StringPart::VarLength(name) => format!("(varlength {})", name),
-                    StringPart::Positional(n) => format!("(positional {})", n),
-                    StringPart::AllArgs => "(allargs)".to_string(),
-                    StringPart::ArgCount => "(argcount)".to_string(),
-                    StringPart::Arithmetic(expr) => format!("(arith \"{}\")", expr),
-                    StringPart::LastExitCode => "(last-exit-code)".to_string(),
-                    StringPart::CurrentPid => "(current-pid)".to_string(),
-                })
+                .map(format_string_part)
                 .collect();
             format!("(interpolated {})", parts_str.join(" "))
         }
@@ -291,7 +278,8 @@ pub fn format_expr(expr: &Expr) -> String {
         Expr::ArgCount => "(arg-count)".to_string(),
         Expr::VarLength(name) => format!("(var-length {})", name),
         Expr::VarWithDefault { name, default } => {
-            format!("(var-default {} \"{}\")", name, default)
+            let default_parts: Vec<String> = default.iter().map(format_string_part).collect();
+            format!("(var-default {} ({}))", name, default_parts.join(" "))
         }
         Expr::Arithmetic(expr_str) => format!("(arithmetic \"{}\")", expr_str),
         Expr::Command(cmd) => format_command(cmd),
@@ -339,6 +327,26 @@ pub fn format_test_expr(test: &TestExpr) -> String {
                 format_expr(right)
             )
         }
+    }
+}
+
+/// Format a StringPart as an S-expression.
+fn format_string_part(part: &StringPart) -> String {
+    match part {
+        StringPart::Literal(s) => format!("\"{}\"", escape_for_display(s)),
+        StringPart::Var(path) => format!("(varref {})", format_varpath(path)),
+        StringPart::VarWithDefault { name, default } => {
+            let default_parts: Vec<String> = default.iter().map(format_string_part).collect();
+            format!("(vardefault {} ({}))", name, default_parts.join(" "))
+        }
+        StringPart::VarLength(name) => format!("(varlength {})", name),
+        StringPart::Positional(n) => format!("(positional {})", n),
+        StringPart::AllArgs => "(allargs)".to_string(),
+        StringPart::ArgCount => "(argcount)".to_string(),
+        StringPart::Arithmetic(expr) => format!("(arith \"{}\")", expr),
+        StringPart::CommandSubst(pipeline) => format!("(cmdsubst {})", format_pipeline(pipeline)),
+        StringPart::LastExitCode => "(last-exit-code)".to_string(),
+        StringPart::CurrentPid => "(current-pid)".to_string(),
     }
 }
 

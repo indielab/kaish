@@ -412,6 +412,134 @@ async fn test_braced_exit_code_in_string_interpolation() {
     );
 }
 
+// ============================================================================
+// Bug 9: $(true) and $(false) fail to parse - builtins in command substitution
+// ============================================================================
+
+#[tokio::test]
+async fn test_cmd_subst_with_true() {
+    let kernel = Kernel::transient().unwrap();
+    let result = kernel.execute("VAR=$(true); echo \"exit: $?\"").await.unwrap();
+    assert!(
+        result.out.contains("exit: 0"),
+        "$(true) should succeed with exit 0: {}",
+        result.out
+    );
+}
+
+#[tokio::test]
+async fn test_cmd_subst_with_false() {
+    let kernel = Kernel::transient().unwrap();
+    let result = kernel.execute("VAR=$(false); echo \"exit: $?\"").await.unwrap();
+    assert!(
+        result.out.contains("exit: 1"),
+        "$(false) should fail with exit 1: {}",
+        result.out
+    );
+}
+
+// Note: `if $(true); then` is NOT valid kaish syntax because $(true)
+// evaluates to empty string which isn't a command. Use `if true; then` instead.
+
+// ============================================================================
+// Bug 10: export VAR="value" doesn't set the variable
+// ============================================================================
+
+#[tokio::test]
+async fn test_export_with_value() {
+    let kernel = Kernel::transient().unwrap();
+    let result = kernel.execute("export FOO=\"bar\"; echo $FOO").await.unwrap();
+    assert_eq!(
+        result.out.trim(),
+        "bar",
+        "export should set variable value: {}",
+        result.out
+    );
+}
+
+#[tokio::test]
+async fn test_export_multiple_vars() {
+    let kernel = Kernel::transient().unwrap();
+    let result = kernel.execute("export A=1; export B=2; echo \"$A $B\"").await.unwrap();
+    assert_eq!(
+        result.out.trim(),
+        "1 2",
+        "export should set multiple variables: {}",
+        result.out
+    );
+}
+
+// ============================================================================
+// Bug 11: Positional params in arithmetic $(($1 + $2)) always return 0
+// ============================================================================
+
+#[tokio::test]
+async fn test_positional_params_in_arithmetic() {
+    let kernel = Kernel::transient().unwrap();
+    let result = kernel
+        .execute(
+            r#"
+add() {
+    echo $(($1 + $2))
+}
+add 3 4
+"#,
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        result.out.trim(),
+        "7",
+        "$(($1 + $2)) with 3 4 should be 7: {}",
+        result.out
+    );
+}
+
+#[tokio::test]
+async fn test_positional_params_arithmetic_multiply() {
+    let kernel = Kernel::transient().unwrap();
+    let result = kernel
+        .execute(
+            r#"
+mul() {
+    echo $(($1 * $2))
+}
+mul 5 6
+"#,
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        result.out.trim(),
+        "30",
+        "$(($1 * $2)) with 5 6 should be 30: {}",
+        result.out
+    );
+}
+
+#[tokio::test]
+async fn test_positional_params_arithmetic_with_variable() {
+    let kernel = Kernel::transient().unwrap();
+    let result = kernel
+        .execute(
+            r#"
+calc() {
+    local base = 10
+    echo $(($base + $1))
+}
+calc 5
+"#,
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        result.out.trim(),
+        "15",
+        "$(($base + $1)) with base=10 and $1=5 should be 15: {}",
+        result.out
+    );
+}
+
 #[tokio::test]
 async fn test_local_with_command_substitution() {
     let kernel = Kernel::transient().unwrap();
@@ -437,6 +565,102 @@ echo "outer: $val"
     assert!(
         result.out.contains("outer: original"),
         "Outer unchanged: {}",
+        result.out
+    );
+}
+
+// ============================================================================
+// Bug 12: Nested ${VAR:-default} doesn't work
+// ============================================================================
+
+#[tokio::test]
+async fn test_nested_var_default() {
+    let kernel = Kernel::transient().unwrap();
+    // All variables unset, should return the innermost default "deep"
+    let result = kernel.execute(r#"echo "${A:-${B:-deep}}""#).await.unwrap();
+    assert_eq!(
+        result.out.trim(),
+        "deep",
+        "Nested defaults should work: {}",
+        result.out
+    );
+}
+
+#[tokio::test]
+async fn test_nested_var_default_outer_set() {
+    let kernel = Kernel::transient().unwrap();
+    // A is set, should return A's value
+    let result = kernel.execute(r#"A=outer; echo "${A:-${B:-deep}}""#).await.unwrap();
+    assert_eq!(
+        result.out.trim(),
+        "outer",
+        "Outer var set should return outer: {}",
+        result.out
+    );
+}
+
+#[tokio::test]
+async fn test_nested_var_default_middle_set() {
+    let kernel = Kernel::transient().unwrap();
+    // A unset, B set - should return B's value
+    let result = kernel.execute(r#"B=middle; echo "${A:-${B:-deep}}""#).await.unwrap();
+    assert_eq!(
+        result.out.trim(),
+        "middle",
+        "Middle var set should return middle: {}",
+        result.out
+    );
+}
+
+#[tokio::test]
+async fn test_deeply_nested_defaults() {
+    let kernel = Kernel::transient().unwrap();
+    // Three levels of nesting
+    let result = kernel.execute(r#"echo "${A:-${B:-${C:-deepest}}}""#).await.unwrap();
+    assert_eq!(
+        result.out.trim(),
+        "deepest",
+        "Deeply nested defaults should work: {}",
+        result.out
+    );
+}
+
+// ============================================================================
+// Bug 13: Command substitution in strings "$(cmd)" doesn't work
+// ============================================================================
+
+#[tokio::test]
+async fn test_cmd_subst_in_string() {
+    let kernel = Kernel::transient().unwrap();
+    let result = kernel.execute(r#"echo "inner: $(echo nested)""#).await.unwrap();
+    assert_eq!(
+        result.out.trim(),
+        "inner: nested",
+        "Command subst in string should work: {}",
+        result.out
+    );
+}
+
+#[tokio::test]
+async fn test_cmd_subst_in_string_with_var() {
+    let kernel = Kernel::transient().unwrap();
+    let result = kernel.execute(r#"VAL=world; echo "hello $(echo $VAL)""#).await.unwrap();
+    assert_eq!(
+        result.out.trim(),
+        "hello world",
+        "Command subst with var in string should work: {}",
+        result.out
+    );
+}
+
+#[tokio::test]
+async fn test_var_in_default_with_cmd_subst() {
+    let kernel = Kernel::transient().unwrap();
+    let result = kernel.execute(r#"echo "${UNSET:-$(echo computed)}""#).await.unwrap();
+    assert_eq!(
+        result.out.trim(),
+        "computed",
+        "Command subst in default value should work: {}",
         result.out
     );
 }

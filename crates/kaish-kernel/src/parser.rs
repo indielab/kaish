@@ -19,7 +19,7 @@ pub type Span = SimpleSpan;
 /// Handles:
 /// - Special variables: `${?}` → LastExitCode, `${$}` → CurrentPid
 /// - Simple paths: `${VAR}`, `${VAR.field}`, `${VAR[0]}`, `${?.ok}` → VarRef
-/// - Default values: `${VAR:-default}` → VarWithDefault
+/// - Default values: `${VAR:-default}` → VarWithDefault (with nested expansion support)
 fn parse_var_expr(raw: &str) -> Expr {
     // Special case: ${?} is the last exit code (same as $?)
     if raw == "${?}" {
@@ -32,16 +32,70 @@ fn parse_var_expr(raw: &str) -> Expr {
     }
 
     // Check for default value syntax: ${VAR:-default}
-    if let Some(colon_idx) = raw.find(":-") {
+    // Need to find :- that's not inside a nested ${...}
+    if let Some(colon_idx) = find_default_separator(raw) {
         // Extract variable name (between ${ and :-)
         let name = raw[2..colon_idx].to_string();
-        // Extract default value (between :- and })
-        let default = raw[colon_idx + 2..raw.len() - 1].to_string();
+        // Extract default value (between :- and }) and recursively parse it
+        let default_str = &raw[colon_idx + 2..raw.len() - 1];
+        let default = parse_interpolated_string(default_str);
         return Expr::VarWithDefault { name, default };
     }
 
     // Regular variable path
     Expr::VarRef(parse_varpath(raw))
+}
+
+/// Find the position of :- in a ${VAR:-default} expression, accounting for nested ${...}.
+fn find_default_separator(raw: &str) -> Option<usize> {
+    let bytes = raw.as_bytes();
+    let mut depth = 0;
+    let mut i = 0;
+
+    while i < bytes.len() {
+        if i + 1 < bytes.len() && bytes[i] == b'$' && bytes[i + 1] == b'{' {
+            depth += 1;
+            i += 2;
+            continue;
+        }
+        if bytes[i] == b'}' && depth > 0 {
+            depth -= 1;
+            i += 1;
+            continue;
+        }
+        // Only find :- at the top level (depth == 1 means we're inside the outer ${...})
+        if depth == 1 && i + 1 < bytes.len() && bytes[i] == b':' && bytes[i + 1] == b'-' {
+            return Some(i);
+        }
+        i += 1;
+    }
+    None
+}
+
+/// Find the position of :- in variable content (without outer braces), accounting for nested ${...}.
+fn find_default_separator_in_content(content: &str) -> Option<usize> {
+    let bytes = content.as_bytes();
+    let mut depth = 0;
+    let mut i = 0;
+
+    while i < bytes.len() {
+        if i + 1 < bytes.len() && bytes[i] == b'$' && bytes[i + 1] == b'{' {
+            depth += 1;
+            i += 2;
+            continue;
+        }
+        if bytes[i] == b'}' && depth > 0 {
+            depth -= 1;
+            i += 1;
+            continue;
+        }
+        // Find :- at the top level (depth == 0)
+        if depth == 0 && i + 1 < bytes.len() && bytes[i] == b':' && bytes[i + 1] == b'-' {
+            return Some(i);
+        }
+        i += 1;
+    }
+    None
 }
 
 /// Parse a raw `${...}` string into a VarPath.
@@ -58,6 +112,18 @@ fn parse_varpath(raw: &str) -> VarPath {
 }
 
 /// Parse an interpolated string like "Hello ${NAME}!" or "Hello $NAME!" into parts.
+/// Extract a pipeline from a statement if possible.
+fn stmt_to_pipeline(stmt: Stmt) -> Option<Pipeline> {
+    match stmt {
+        Stmt::Pipeline(p) => Some(p),
+        Stmt::Command(cmd) => Some(Pipeline {
+            commands: vec![cmd],
+            background: false,
+        }),
+        _ => None,
+    }
+}
+
 fn parse_interpolated_string(s: &str) -> Vec<StringPart> {
     // First, replace escaped dollar markers with a temporary placeholder
     // The lexer uses __ESCAPED_DOLLAR__ for \$ to prevent re-interpretation
@@ -82,8 +148,55 @@ fn parse_interpolated_string(s: &str) -> Vec<StringPart> {
                 current_text.push('$');
             }
         } else if ch == '$' {
-            // Check for braced variable ${...} or simple $NAME
-            if chars.peek() == Some(&'{') {
+            // Check for command substitution $(...)
+            if chars.peek() == Some(&'(') {
+                // Command substitution $(...)
+                if !current_text.is_empty() {
+                    parts.push(StringPart::Literal(std::mem::take(&mut current_text)));
+                }
+
+                // Consume the '('
+                chars.next();
+
+                // Collect until matching ')' accounting for nested parens
+                let mut cmd_content = String::new();
+                let mut paren_depth = 1;
+                while let Some(c) = chars.next() {
+                    if c == '(' {
+                        paren_depth += 1;
+                        cmd_content.push(c);
+                    } else if c == ')' {
+                        paren_depth -= 1;
+                        if paren_depth == 0 {
+                            break;
+                        }
+                        cmd_content.push(c);
+                    } else {
+                        cmd_content.push(c);
+                    }
+                }
+
+                // Parse the command content as a pipeline
+                // We need to use the main parser for this
+                if let Ok(program) = parse(&cmd_content) {
+                    // Extract the pipeline from the parsed result
+                    if let Some(stmt) = program.statements.first() {
+                        if let Some(pipeline) = stmt_to_pipeline(stmt.clone()) {
+                            parts.push(StringPart::CommandSubst(pipeline));
+                        } else {
+                            // If we can't extract a pipeline, treat as literal
+                            current_text.push_str("$(");
+                            current_text.push_str(&cmd_content);
+                            current_text.push(')');
+                        }
+                    }
+                } else {
+                    // Parse failed - treat as literal
+                    current_text.push_str("$(");
+                    current_text.push_str(&cmd_content);
+                    current_text.push(')');
+                }
+            } else if chars.peek() == Some(&'{') {
                 // Braced variable reference ${...}
                 if !current_text.is_empty() {
                     parts.push(StringPart::Literal(std::mem::take(&mut current_text)));
@@ -92,13 +205,22 @@ fn parse_interpolated_string(s: &str) -> Vec<StringPart> {
                 // Consume the '{'
                 chars.next();
 
-                // Collect until '}'
+                // Collect until matching '}', tracking nesting depth
                 let mut var_content = String::new();
-                for c in chars.by_ref() {
-                    if c == '}' {
-                        break;
+                let mut depth = 1;
+                while let Some(c) = chars.next() {
+                    if c == '{' && var_content.ends_with('$') {
+                        depth += 1;
+                        var_content.push(c);
+                    } else if c == '}' {
+                        depth -= 1;
+                        if depth == 0 {
+                            break;
+                        }
+                        var_content.push(c);
+                    } else {
+                        var_content.push(c);
                     }
-                    var_content.push(c);
                 }
 
                 // Parse the content for special syntax
@@ -112,10 +234,11 @@ fn parse_interpolated_string(s: &str) -> Vec<StringPart> {
                         .and_then(|s| s.strip_suffix("__"))
                         .unwrap_or("");
                     StringPart::Arithmetic(expr.to_string())
-                } else if let Some(colon_idx) = var_content.find(":-") {
-                    // Variable with default: ${VAR:-default}
+                } else if let Some(colon_idx) = find_default_separator_in_content(&var_content) {
+                    // Variable with default: ${VAR:-default} - recursively parse the default
                     let name = var_content[..colon_idx].to_string();
-                    let default = var_content[colon_idx + 2..].to_string();
+                    let default_str = &var_content[colon_idx + 2..];
+                    let default = parse_interpolated_string(default_str);
                     StringPart::VarWithDefault { name, default }
                 } else {
                     // Regular variable: ${VAR} or ${VAR.field}
@@ -1148,6 +1271,20 @@ where
         Token::Arithmetic(expr_str) => Expr::Arithmetic(expr_str),
     };
 
+    // Keywords that can also be used as barewords in argument position
+    // (e.g., `echo done` should work even though `done` is a keyword)
+    let keyword_as_bareword = select! {
+        Token::Done => "done",
+        Token::Fi => "fi",
+        Token::Then => "then",
+        Token::Else => "else",
+        Token::Elif => "elif",
+        Token::In => "in",
+        Token::Do => "do",
+        Token::Esac => "esac",
+    }
+    .map(|s| Expr::Literal(Value::String(s.to_string())));
+
     recursive(|expr| {
         choice((
             positional,
@@ -1160,6 +1297,8 @@ where
             ident_parser().map(|s| Expr::Literal(Value::String(s))),
             // Absolute paths become string literals
             path_parser().map(|s| Expr::Literal(Value::String(s))),
+            // Keywords can be used as barewords in argument position
+            keyword_as_bareword,
         ))
         .labelled("expression")
     })
@@ -1226,8 +1365,15 @@ where
         positional,
     ));
 
+    // Command name parser - accepts identifiers and boolean keywords (true/false are builtins)
+    let command_name = choice((
+        ident_parser(),
+        just(Token::True).to("true".to_string()),
+        just(Token::False).to("false".to_string()),
+    ));
+
     // Command parser
-    let command = ident_parser()
+    let command = command_name
         .then(arg.repeated().collect::<Vec<_>>())
         .map(|(name, args)| Command {
             name,

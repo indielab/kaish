@@ -350,10 +350,16 @@ impl<'a> Validator<'a> {
         match part {
             StringPart::Literal(_) => {}
             StringPart::Var(path) => self.validate_var_ref(path),
-            StringPart::VarWithDefault { .. } => {}
+            StringPart::VarWithDefault { default, .. } => {
+                // Validate nested parts in the default value
+                for p in default {
+                    self.validate_string_part(p);
+                }
+            }
             StringPart::VarLength(name) => self.check_var_defined(name),
             StringPart::Positional(_) | StringPart::AllArgs | StringPart::ArgCount => {}
             StringPart::Arithmetic(_) => {} // Arithmetic expressions are validated at eval time
+            StringPart::CommandSubst(pipeline) => self.validate_pipeline(pipeline),
             StringPart::LastExitCode | StringPart::CurrentPid => {}
         }
     }

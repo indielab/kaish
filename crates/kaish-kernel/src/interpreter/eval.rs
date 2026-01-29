@@ -284,21 +284,21 @@ impl<'a, E: Executor> Evaluator<'a, E> {
     }
 
     /// Evaluate variable with default (${VAR:-default}).
-    /// Returns the variable value if set and non-empty, otherwise the default.
-    fn eval_var_with_default(&self, name: &str, default: &str) -> EvalResult<Value> {
+    /// Returns the variable value if set and non-empty, otherwise evaluates the default parts.
+    fn eval_var_with_default(&mut self, name: &str, default: &[StringPart]) -> EvalResult<Value> {
         match self.scope.get(name) {
             Some(value) => {
                 let s = value_to_string(value);
                 if s.is_empty() {
-                    // Variable is set but empty, use default
-                    Ok(Value::String(default.to_string()))
+                    // Variable is set but empty, evaluate the default parts
+                    self.eval_interpolated(default)
                 } else {
                     Ok(value.clone())
                 }
             }
             None => {
-                // Variable is unset, use default
-                Ok(Value::String(default.to_string()))
+                // Variable is unset, evaluate the default parts
+                self.eval_interpolated(default)
             }
         }
     }
@@ -338,6 +338,11 @@ impl<'a, E: Executor> Evaluator<'a, E> {
                 StringPart::Arithmetic(expr) => {
                     // Parse and evaluate the arithmetic expression
                     let value = self.eval_arithmetic_string(expr)?;
+                    result.push_str(&value_to_string(&value));
+                }
+                StringPart::CommandSubst(pipeline) => {
+                    // Execute the pipeline and capture its output
+                    let value = self.eval_command_subst(pipeline)?;
                     result.push_str(&value_to_string(&value));
                 }
                 StringPart::LastExitCode => {
@@ -1303,7 +1308,7 @@ mod tests {
         // Variable is set, return its value
         let expr = Expr::VarWithDefault {
             name: "NAME".into(),
-            default: "default".into(),
+            default: vec![StringPart::Literal("default".into())],
         };
         let result = eval_expr(&expr, &mut scope).unwrap();
         assert_eq!(result, Value::String("Alice".into()));
@@ -1316,7 +1321,7 @@ mod tests {
         // Variable is unset, return default
         let expr = Expr::VarWithDefault {
             name: "MISSING".into(),
-            default: "fallback".into(),
+            default: vec![StringPart::Literal("fallback".into())],
         };
         let result = eval_expr(&expr, &mut scope).unwrap();
         assert_eq!(result, Value::String("fallback".into()));
@@ -1330,7 +1335,7 @@ mod tests {
         // Variable is set but empty, return default
         let expr = Expr::VarWithDefault {
             name: "EMPTY".into(),
-            default: "not empty".into(),
+            default: vec![StringPart::Literal("not empty".into())],
         };
         let result = eval_expr(&expr, &mut scope).unwrap();
         assert_eq!(result, Value::String("not empty".into()));
@@ -1344,7 +1349,7 @@ mod tests {
         // Variable is set to a non-string value, return the value
         let expr = Expr::VarWithDefault {
             name: "NUM".into(),
-            default: "default".into(),
+            default: vec![StringPart::Literal("default".into())],
         };
         let result = eval_expr(&expr, &mut scope).unwrap();
         assert_eq!(result, Value::Int(42));

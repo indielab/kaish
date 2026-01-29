@@ -424,12 +424,12 @@ fn eval_simple_expr(expr: &Expr, ctx: &ExecContext) -> Option<Value> {
                             Some(value) => {
                                 let s = value_to_string(value);
                                 if s.is_empty() {
-                                    result.push_str(default);
+                                    result.push_str(&eval_string_parts_sync(default, ctx));
                                 } else {
                                     result.push_str(&s);
                                 }
                             }
-                            None => result.push_str(default),
+                            None => result.push_str(&eval_string_parts_sync(default, ctx)),
                         }
                     }
                     crate::ast::StringPart::VarLength(name) => {
@@ -455,6 +455,9 @@ fn eval_simple_expr(expr: &Expr, ctx: &ExecContext) -> Option<Value> {
                         if let Ok(value) = arithmetic::eval_arithmetic(expr, &ctx.scope) {
                             result.push_str(&value.to_string());
                         }
+                    }
+                    crate::ast::StringPart::CommandSubst(_) => {
+                        // Command substitution requires async - skip in sync context
                     }
                     crate::ast::StringPart::LastExitCode => {
                         result.push_str(&ctx.scope.last_result().code.to_string());
@@ -484,6 +487,68 @@ fn value_to_string(value: &Value) -> String {
         Value::Float(f) => f.to_string(),
         Value::String(s) => s.clone(),
     }
+}
+
+/// Evaluate string parts synchronously (for pipeline context).
+/// Command substitutions are skipped as they require async.
+fn eval_string_parts_sync(parts: &[crate::ast::StringPart], ctx: &ExecContext) -> String {
+    let mut result = String::new();
+    for part in parts {
+        match part {
+            crate::ast::StringPart::Literal(s) => result.push_str(s),
+            crate::ast::StringPart::Var(path) => {
+                if let Some(value) = ctx.scope.resolve_path(path) {
+                    result.push_str(&value_to_string(&value));
+                }
+            }
+            crate::ast::StringPart::VarWithDefault { name, default } => {
+                match ctx.scope.get(name) {
+                    Some(value) => {
+                        let s = value_to_string(value);
+                        if s.is_empty() {
+                            result.push_str(&eval_string_parts_sync(default, ctx));
+                        } else {
+                            result.push_str(&s);
+                        }
+                    }
+                    None => result.push_str(&eval_string_parts_sync(default, ctx)),
+                }
+            }
+            crate::ast::StringPart::VarLength(name) => {
+                let len = match ctx.scope.get(name) {
+                    Some(value) => value_to_string(value).len(),
+                    None => 0,
+                };
+                result.push_str(&len.to_string());
+            }
+            crate::ast::StringPart::Positional(n) => {
+                if let Some(s) = ctx.scope.get_positional(*n) {
+                    result.push_str(s);
+                }
+            }
+            crate::ast::StringPart::AllArgs => {
+                result.push_str(&ctx.scope.all_args().join(" "));
+            }
+            crate::ast::StringPart::ArgCount => {
+                result.push_str(&ctx.scope.arg_count().to_string());
+            }
+            crate::ast::StringPart::Arithmetic(expr) => {
+                if let Ok(value) = arithmetic::eval_arithmetic(expr, &ctx.scope) {
+                    result.push_str(&value.to_string());
+                }
+            }
+            crate::ast::StringPart::CommandSubst(_) => {
+                // Command substitution requires async - skip in sync context
+            }
+            crate::ast::StringPart::LastExitCode => {
+                result.push_str(&ctx.scope.last_result().code.to_string());
+            }
+            crate::ast::StringPart::CurrentPid => {
+                result.push_str(&ctx.scope.pid().to_string());
+            }
+        }
+    }
+    result
 }
 
 /// Find scatter and gather commands in a pipeline.

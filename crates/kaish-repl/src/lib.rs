@@ -553,12 +553,12 @@ impl Repl {
                                 Some(value) => {
                                     let s = format_value_unquoted(value);
                                     if s.is_empty() {
-                                        result.push_str(default);
+                                        result.push_str(&self.eval_string_parts(default)?);
                                     } else {
                                         result.push_str(&s);
                                     }
                                 }
-                                None => result.push_str(default),
+                                None => result.push_str(&self.eval_string_parts(default)?),
                             }
                         }
                         kaish_kernel::ast::StringPart::VarLength(name) => {
@@ -584,6 +584,10 @@ impl Repl {
                             if let Ok(value) = kaish_kernel::arithmetic::eval_arithmetic(expr, &self.exec_ctx.scope) {
                                 result.push_str(&value.to_string());
                             }
+                        }
+                        kaish_kernel::ast::StringPart::CommandSubst(_) => {
+                            // Command substitution requires async - skip in sync REPL context
+                            // The full evaluation happens via execute_pipeline
                         }
                         kaish_kernel::ast::StringPart::LastExitCode => {
                             result.push_str(&self.exec_ctx.scope.last_result().code.to_string());
@@ -769,12 +773,12 @@ impl Repl {
                     Some(value) => {
                         let s = format_value_unquoted(value);
                         if s.is_empty() {
-                            Ok(Value::String(default.clone()))
+                            Ok(Value::String(self.eval_string_parts(default)?))
                         } else {
                             Ok(value.clone())
                         }
                     }
-                    None => Ok(Value::String(default.clone())),
+                    None => Ok(Value::String(self.eval_string_parts(default)?)),
                 }
             }
             Expr::Arithmetic(expr_str) => {
@@ -798,6 +802,67 @@ impl Repl {
 
     fn eval_literal(&mut self, value: &Value) -> Result<Value> {
         Ok(value.clone())
+    }
+
+    /// Evaluate multiple string parts into a single string (for nested default values).
+    fn eval_string_parts(&mut self, parts: &[kaish_kernel::ast::StringPart]) -> Result<String> {
+        let mut result = String::new();
+        for part in parts {
+            match part {
+                kaish_kernel::ast::StringPart::Literal(s) => result.push_str(s),
+                kaish_kernel::ast::StringPart::Var(path) => {
+                    if let Some(value) = self.exec_ctx.scope.resolve_path(path) {
+                        result.push_str(&format_value_unquoted(&value));
+                    }
+                }
+                kaish_kernel::ast::StringPart::VarWithDefault { name, default } => {
+                    match self.exec_ctx.scope.get(name) {
+                        Some(value) => {
+                            let s = format_value_unquoted(value);
+                            if s.is_empty() {
+                                result.push_str(&self.eval_string_parts(default)?);
+                            } else {
+                                result.push_str(&s);
+                            }
+                        }
+                        None => result.push_str(&self.eval_string_parts(default)?),
+                    }
+                }
+                kaish_kernel::ast::StringPart::VarLength(name) => {
+                    let len = match self.exec_ctx.scope.get(name) {
+                        Some(value) => format_value_unquoted(value).len(),
+                        None => 0,
+                    };
+                    result.push_str(&len.to_string());
+                }
+                kaish_kernel::ast::StringPart::Positional(n) => {
+                    if let Some(s) = self.exec_ctx.scope.get_positional(*n) {
+                        result.push_str(s);
+                    }
+                }
+                kaish_kernel::ast::StringPart::AllArgs => {
+                    result.push_str(&self.exec_ctx.scope.all_args().join(" "));
+                }
+                kaish_kernel::ast::StringPart::ArgCount => {
+                    result.push_str(&self.exec_ctx.scope.arg_count().to_string());
+                }
+                kaish_kernel::ast::StringPart::Arithmetic(expr) => {
+                    if let Ok(value) = kaish_kernel::arithmetic::eval_arithmetic(expr, &self.exec_ctx.scope) {
+                        result.push_str(&value.to_string());
+                    }
+                }
+                kaish_kernel::ast::StringPart::CommandSubst(_) => {
+                    // Command substitution skipped in sync context
+                }
+                kaish_kernel::ast::StringPart::LastExitCode => {
+                    result.push_str(&self.exec_ctx.scope.last_result().code.to_string());
+                }
+                kaish_kernel::ast::StringPart::CurrentPid => {
+                    result.push_str(&self.exec_ctx.scope.pid().to_string());
+                }
+            }
+        }
+        Ok(result)
     }
 
     /// Handle a meta-command (starts with /).

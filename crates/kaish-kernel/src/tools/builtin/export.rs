@@ -51,19 +51,31 @@ impl Tool for Export {
             return print_exports(ctx);
         }
 
-        // No arguments: print exports (like bash)
-        if args.positional.is_empty() {
+        // No arguments and no named args: print exports (like bash)
+        if args.positional.is_empty() && args.named.is_empty() {
             return print_exports(ctx);
         }
 
-        // Process each argument
+        // Handle named arguments: `export FOO="bar"` parses as Named { key: "FOO", value: "bar" }
+        // This is the common case when the shell parses `export VAR="value"`
+        for (name, value) in &args.named {
+            if !is_valid_name(name) {
+                return ExecResult::failure(
+                    1,
+                    format!("export: `{}': not a valid identifier", name),
+                );
+            }
+            ctx.scope.set_exported(name, value.clone());
+        }
+
+        // Process positional arguments (for `export VAR` without value, or `export VAR=value` as single string)
         for arg in &args.positional {
             let arg_str = match arg {
                 Value::String(s) => s.as_str(),
                 _ => continue,
             };
 
-            // Check for VAR=value syntax
+            // Check for VAR=value syntax (when passed as a single string)
             if let Some(eq_pos) = arg_str.find('=') {
                 let name = &arg_str[..eq_pos];
                 let value = &arg_str[eq_pos + 1..];

@@ -839,16 +839,17 @@ impl Kernel {
             }
             Expr::VarWithDefault { name, default } => {
                 let scope = self.scope.read().await;
-                match scope.get(name) {
-                    Some(value) => {
-                        let s = value_to_string(value);
-                        if s.is_empty() {
-                            Ok(Value::String(default.clone()))
-                        } else {
-                            Ok(value.clone())
-                        }
-                    }
-                    None => Ok(Value::String(default.clone())),
+                let use_default = match scope.get(name) {
+                    Some(value) => value_to_string(value).is_empty(),
+                    None => true,
+                };
+                drop(scope); // Release the lock before recursive evaluation
+                if use_default {
+                    // Evaluate the default parts (supports nested expansions)
+                    self.eval_string_parts_async(default).await.map(Value::String)
+                } else {
+                    let scope = self.scope.read().await;
+                    Ok(scope.get(name).unwrap().clone())
                 }
             }
             Expr::Arithmetic(expr_str) => {
@@ -874,31 +875,44 @@ impl Kernel {
         })
     }
 
+    /// Async helper to evaluate multiple StringParts into a single string.
+    fn eval_string_parts_async<'a>(&'a self, parts: &'a [StringPart]) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<String>> + 'a>> {
+        Box::pin(async move {
+            let mut result = String::new();
+            for part in parts {
+                result.push_str(&self.eval_string_part_async(part).await?);
+            }
+            Ok(result)
+        })
+    }
+
     /// Async helper to evaluate a StringPart.
-    async fn eval_string_part_async(&self, part: &StringPart) -> Result<String> {
-        match part {
-            StringPart::Literal(s) => Ok(s.clone()),
-            StringPart::Var(path) => {
-                let scope = self.scope.read().await;
-                match scope.resolve_path(path) {
-                    Some(value) => Ok(value_to_string(&value)),
-                    None => Ok(String::new()), // Unset vars expand to empty
-                }
-            }
-            StringPart::VarWithDefault { name, default } => {
-                let scope = self.scope.read().await;
-                match scope.get(name) {
-                    Some(value) => {
-                        let s = value_to_string(value);
-                        if s.is_empty() {
-                            Ok(default.clone())
-                        } else {
-                            Ok(s)
-                        }
+    fn eval_string_part_async<'a>(&'a self, part: &'a StringPart) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<String>> + 'a>> {
+        Box::pin(async move {
+            match part {
+                StringPart::Literal(s) => Ok(s.clone()),
+                StringPart::Var(path) => {
+                    let scope = self.scope.read().await;
+                    match scope.resolve_path(path) {
+                        Some(value) => Ok(value_to_string(&value)),
+                        None => Ok(String::new()), // Unset vars expand to empty
                     }
-                    None => Ok(default.clone()),
                 }
-            }
+                StringPart::VarWithDefault { name, default } => {
+                    let scope = self.scope.read().await;
+                    let use_default = match scope.get(name) {
+                        Some(value) => value_to_string(value).is_empty(),
+                        None => true,
+                    };
+                    drop(scope); // Release lock before recursive evaluation
+                    if use_default {
+                        // Evaluate the default parts (supports nested expansions)
+                        self.eval_string_parts_async(default).await
+                    } else {
+                        let scope = self.scope.read().await;
+                        Ok(value_to_string(scope.get(name).unwrap()))
+                    }
+                }
             StringPart::VarLength(name) => {
                 let scope = self.scope.read().await;
                 match scope.get(name) {
@@ -928,6 +942,11 @@ impl Kernel {
                     Err(_) => Ok(String::new()),
                 }
             }
+            StringPart::CommandSubst(pipeline) => {
+                // Execute the pipeline and capture its output
+                let result = self.execute_pipeline(pipeline).await?;
+                Ok(result.out.trim_end_matches('\n').to_string())
+            }
             StringPart::LastExitCode => {
                 let scope = self.scope.read().await;
                 Ok(scope.last_result().code.to_string())
@@ -937,6 +956,7 @@ impl Kernel {
                 Ok(scope.pid().to_string())
             }
         }
+        })
     }
 
     /// Update the last result in scope.

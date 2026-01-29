@@ -215,7 +215,8 @@ pub enum Expr {
     /// Variable string length: `${#VAR}`
     VarLength(String),
     /// Variable with default: `${VAR:-default}` - use default if VAR is unset or empty
-    VarWithDefault { name: String, default: String },
+    /// The default can contain nested variable expansions and command substitutions
+    VarWithDefault { name: String, default: Vec<StringPart> },
     /// Arithmetic expansion: `$((expr))` - evaluates to integer
     Arithmetic(String),
     /// Command as condition: `if grep -q pattern file; then` - exit code determines truthiness
@@ -331,8 +332,8 @@ pub enum StringPart {
     Literal(String),
     /// Variable interpolation: `${VAR}` or `$VAR`
     Var(VarPath),
-    /// Variable with default: `${VAR:-default}`
-    VarWithDefault { name: String, default: String },
+    /// Variable with default: `${VAR:-default}` where default can contain nested expansions
+    VarWithDefault { name: String, default: Vec<StringPart> },
     /// Variable string length: `${#VAR}`
     VarLength(String),
     /// Positional parameter: `$0`, `$1`, ..., `$9`
@@ -343,6 +344,8 @@ pub enum StringPart {
     ArgCount,
     /// Arithmetic expansion: `$((expr))`
     Arithmetic(String),
+    /// Command substitution: `$(pipeline)` embedded in a string
+    CommandSubst(Pipeline),
     /// Last exit code: `$?`
     LastExitCode,
     /// Current shell PID: `$$`
