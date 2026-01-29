@@ -32,6 +32,8 @@ pub struct DirEntry {
     pub name: String,
     /// Type of entry.
     pub entry_type: EntryType,
+    /// Size in bytes (0 for directories).
+    pub size: u64,
 }
 
 /// Abstract filesystem interface.

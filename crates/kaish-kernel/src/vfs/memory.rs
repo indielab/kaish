@@ -164,13 +164,14 @@ impl Filesystem for MemoryFs {
             if let Some(parent) = entry_path.parent()
                 && parent == prefix && entry_path != &normalized
                     && let Some(name) = entry_path.file_name() {
-                        let entry_type = match entry {
-                            Entry::File { .. } => EntryType::File,
-                            Entry::Directory { .. } => EntryType::Directory,
+                        let (entry_type, size) = match entry {
+                            Entry::File { data, .. } => (EntryType::File, data.len() as u64),
+                            Entry::Directory { .. } => (EntryType::Directory, 0),
                         };
                         result.push(DirEntry {
                             name: name.to_string_lossy().into_owned(),
                             entry_type,
+                            size,
                         });
                     }
         }

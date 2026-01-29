@@ -316,7 +316,7 @@ impl KernelBackend for LocalBackend {
                     name: e.name,
                     is_dir,
                     is_file,
-                    size: 0,      // VFS DirEntry doesn't include size
+                    size: e.size,
                     modified: None, // VFS DirEntry doesn't include modified time
                     permissions: None,
                 }

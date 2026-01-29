@@ -277,6 +277,7 @@ impl VfsRouter {
                     entries.push(DirEntry {
                         name: first_component.to_string(),
                         entry_type: EntryType::Directory,
+                        size: 0,
                     });
                 }
             }

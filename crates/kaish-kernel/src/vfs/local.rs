@@ -134,8 +134,8 @@ impl Filesystem for LocalFs {
         let mut dir = fs::read_dir(&full_path).await?;
 
         while let Some(entry) = dir.next_entry().await? {
-            let file_type = entry.file_type().await?;
-            let entry_type = if file_type.is_dir() {
+            let metadata = entry.metadata().await?;
+            let entry_type = if metadata.is_dir() {
                 EntryType::Directory
             } else {
                 EntryType::File
@@ -144,6 +144,7 @@ impl Filesystem for LocalFs {
             entries.push(DirEntry {
                 name: entry.file_name().to_string_lossy().into_owned(),
                 entry_type,
+                size: metadata.len(),
             });
         }
 
