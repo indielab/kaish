@@ -137,9 +137,6 @@ Frontends connect via **embedded** (in-process) or **IPC** (Unix sockets + Cap'n
 |----------|-------------|
 | [Language Reference](docs/LANGUAGE.md) | Complete syntax and semantics |
 | [Builtins](docs/BUILTINS.md) | All 54 builtin tools |
-| [Grammar](docs/GRAMMAR.md) | Formal EBNF grammar |
-| [Architecture](docs/ARCHITECTURE.md) | Kernel design and protocols |
-| [漢字 Reference](docs/kanji.md) | Kanji vocabulary |
 
 ## Installation
 

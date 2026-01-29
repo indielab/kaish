@@ -178,10 +178,7 @@ cargo insta accept         # Accept all pending snapshots
 |------|---------|
 | `README.md` | Project overview, quick tour, MCP integration |
 | `docs/LANGUAGE.md` | Complete language reference with examples |
-| `docs/GRAMMAR.md` | EBNF grammar, ambiguity analysis |
-| `docs/ARCHITECTURE.md` | Kernel design, crate structure, protocols |
 | `docs/BUILTINS.md` | Tool compatibility and implementation notes |
-| `docs/kanji.md` | Kanji vocabulary for the project |
 
 ## Schema Files
 
