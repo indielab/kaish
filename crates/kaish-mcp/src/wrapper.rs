@@ -44,6 +44,43 @@ impl McpToolWrapper {
     pub fn client_name(&self) -> &str {
         self.client.name()
     }
+
+    /// Get the parameter names in a consistent order.
+    ///
+    /// The MCP schema properties are in a Map which doesn't guarantee order.
+    /// We try to use the "required" array first (which is ordered), then
+    /// append any remaining optional parameters.
+    fn param_names(&self) -> Vec<String> {
+        let input_schema = &self.mcp_tool.input_schema;
+
+        // Get required params first (they have a defined order in the array)
+        let required_params: Vec<String> = input_schema
+            .get("required")
+            .and_then(|r| r.as_array())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|v| v.as_str().map(String::from))
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        // Get all properties
+        let all_props: Vec<String> = input_schema
+            .get("properties")
+            .and_then(|p| p.as_object())
+            .map(|obj| obj.keys().cloned().collect())
+            .unwrap_or_default();
+
+        // Start with required params, then add optional ones
+        let mut result = required_params.clone();
+        for prop in all_props {
+            if !required_params.contains(&prop) {
+                result.push(prop);
+            }
+        }
+
+        result
+    }
 }
 
 #[async_trait]
@@ -65,6 +102,9 @@ impl Tool for McpToolWrapper {
         // input_schema is Arc<JsonObject> = Arc<Map<String, Value>>
         let input_schema = &self.mcp_tool.input_schema;
 
+        // Get parameter names in a consistent order for positional arg mapping
+        let param_names = self.param_names();
+
         if let Some(properties) = input_schema.get("properties").and_then(|p| p.as_object()) {
             let required_params: Vec<String> = input_schema
                 .get("required")
@@ -76,28 +116,31 @@ impl Tool for McpToolWrapper {
                 })
                 .unwrap_or_default();
 
-            for (param_name, param_schema) in properties {
-                let param_type = param_schema
-                    .get("type")
-                    .and_then(|t| t.as_str())
-                    .unwrap_or("any")
-                    .to_string();
+            // Use param_names order to ensure consistent ordering
+            for param_name in &param_names {
+                if let Some(param_schema) = properties.get(param_name) {
+                    let param_type = param_schema
+                        .get("type")
+                        .and_then(|t| t.as_str())
+                        .unwrap_or("any")
+                        .to_string();
 
-                let description = param_schema
-                    .get("description")
-                    .and_then(|d| d.as_str())
-                    .unwrap_or("")
-                    .to_string();
+                    let description = param_schema
+                        .get("description")
+                        .and_then(|d| d.as_str())
+                        .unwrap_or("")
+                        .to_string();
 
-                let is_required = required_params.contains(param_name);
+                    let is_required = required_params.contains(param_name);
 
-                let param = if is_required {
-                    ParamSchema::required(param_name, param_type, description)
-                } else {
-                    ParamSchema::optional(param_name, param_type, Value::Null, description)
-                };
+                    let param = if is_required {
+                        ParamSchema::required(param_name, param_type, description)
+                    } else {
+                        ParamSchema::optional(param_name, param_type, Value::Null, description)
+                    };
 
-                schema = schema.param(param);
+                    schema = schema.param(param);
+                }
             }
         }
 
@@ -105,8 +148,11 @@ impl Tool for McpToolWrapper {
     }
 
     async fn execute(&self, args: ToolArgs, _ctx: &mut ExecContext) -> ExecResult {
+        // Get parameter names for positional arg mapping
+        let param_names = self.param_names();
+
         // Convert kaish args to JSON arguments
-        let arguments = args_to_json(&args);
+        let arguments = args_to_json(&args, &param_names);
 
         // Call the MCP tool
         match self.client.call_tool(&self.mcp_tool.name, arguments).await {
@@ -162,10 +208,23 @@ impl std::fmt::Debug for McpToolWrapper {
 }
 
 /// Convert kaish ToolArgs to JSON arguments for MCP.
-fn args_to_json(args: &ToolArgs) -> Option<serde_json::Map<String, serde_json::Value>> {
+///
+/// The `param_names` are used to map positional arguments to their
+/// corresponding parameter names in order.
+fn args_to_json(
+    args: &ToolArgs,
+    param_names: &[String],
+) -> Option<serde_json::Map<String, serde_json::Value>> {
     let mut map = serde_json::Map::new();
 
-    // Add named arguments
+    // Add positional arguments mapped to parameter names in order
+    for (i, value) in args.positional.iter().enumerate() {
+        if let Some(param_name) = param_names.get(i) {
+            map.insert(param_name.clone(), value_to_json(value));
+        }
+    }
+
+    // Add named arguments (these override positional if same name)
     for (key, value) in &args.named {
         map.insert(key.clone(), value_to_json(value));
     }
@@ -174,9 +233,6 @@ fn args_to_json(args: &ToolArgs) -> Option<serde_json::Map<String, serde_json::V
     for flag in &args.flags {
         map.insert(flag.clone(), serde_json::Value::Bool(true));
     }
-
-    // Positional args are harder to map without schema info
-    // For now, we'll skip them as MCP tools typically use named params
 
     if map.is_empty() {
         None

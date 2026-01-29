@@ -112,6 +112,13 @@ impl McpClient {
             return Ok(tools.clone());
         }
 
+        self.refresh_tools().await
+    }
+
+    /// Refresh the tool cache from the MCP server.
+    ///
+    /// This forces a fresh fetch of tools, invalidating any cached version.
+    pub async fn refresh_tools(&self) -> Result<Vec<McpTool>> {
         // Get Arc clone of the service, releasing the lock immediately.
         let service = self
             .service
@@ -126,10 +133,17 @@ impl McpClient {
             .await
             .map_err(|e| anyhow::anyhow!("Failed to list tools: {}", e))?;
 
-        // Cache the tools
+        // Update the cache
         *self.tools.write().await = Some(tools.clone());
 
         Ok(tools)
+    }
+
+    /// Invalidate the tool cache.
+    ///
+    /// The next call to `list_tools` will fetch fresh data from the server.
+    pub async fn invalidate_tool_cache(&self) {
+        *self.tools.write().await = None;
     }
 
     /// Call a tool on the MCP server.
