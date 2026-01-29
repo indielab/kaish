@@ -427,6 +427,51 @@ fn parser_test_regex_not_match() {
 }
 
 // =============================================================================
+// TEST EXPRESSIONS: Compound (&&, ||, !)
+// =============================================================================
+
+#[test]
+fn parser_test_and() {
+    parse_and_snapshot("test_and", "[[ -f file && -d dir ]]");
+}
+
+#[test]
+fn parser_test_or() {
+    parse_and_snapshot("test_or", r#"[[ -z "$VAR" || -n "$DEFAULT" ]]"#);
+}
+
+#[test]
+fn parser_test_not() {
+    parse_and_snapshot("test_not", "[[ ! -f /tmp/lock ]]");
+}
+
+#[test]
+fn parser_test_not_double() {
+    parse_and_snapshot("test_not_double", "[[ ! ! -f file ]]");
+}
+
+#[test]
+fn parser_test_and_three() {
+    parse_and_snapshot("test_and_three", "[[ -f a && -f b && -f c ]]");
+}
+
+#[test]
+fn parser_test_and_or_precedence() {
+    // Precedence: ! > && > ||, so this is: (-f a) || ((-d b) && (-e c))
+    parse_and_snapshot("test_and_or_precedence", "[[ -f a || -d b && -e c ]]");
+}
+
+#[test]
+fn parser_test_not_with_and() {
+    parse_and_snapshot("test_not_with_and", "[[ ! -f a && -d b ]]");
+}
+
+#[test]
+fn parser_test_complex_compound() {
+    parse_and_snapshot("test_complex_compound", r#"[[ ! -z "$X" && $Y == "value" || -f /tmp/flag ]]"#);
+}
+
+// =============================================================================
 // STATEMENT CHAINING
 // =============================================================================
 

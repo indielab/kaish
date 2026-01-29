@@ -235,6 +235,28 @@ impl<'a, E: Executor> Evaluator<'a, E> {
                     }
                 }
             }
+            TestExpr::And { left, right } => {
+                // Short-circuit evaluation: evaluate left first
+                let left_result = self.eval_test(left)?;
+                if !value_to_bool(&left_result) {
+                    false // Short-circuit: left is false, don't evaluate right
+                } else {
+                    value_to_bool(&self.eval_test(right)?)
+                }
+            }
+            TestExpr::Or { left, right } => {
+                // Short-circuit evaluation: evaluate left first
+                let left_result = self.eval_test(left)?;
+                if value_to_bool(&left_result) {
+                    true // Short-circuit: left is true, don't evaluate right
+                } else {
+                    value_to_bool(&self.eval_test(right)?)
+                }
+            }
+            TestExpr::Not { expr } => {
+                let result = self.eval_test(expr)?;
+                !value_to_bool(&result)
+            }
         };
         Ok(Value::Bool(result))
     }
@@ -448,6 +470,23 @@ pub fn value_to_string(value: &Value) -> String {
         Value::Int(i) => i.to_string(),
         Value::Float(f) => f.to_string(),
         Value::String(s) => s.clone(),
+    }
+}
+
+/// Convert a Value to its boolean representation.
+///
+/// - `Bool(b)` → `b`
+/// - `Int(0)` → `false`, other ints → `true`
+/// - `String("")` → `false`, non-empty → `true`
+/// - `Null` → `false`
+/// - `Float(0.0)` → `false`, other floats → `true`
+pub fn value_to_bool(value: &Value) -> bool {
+    match value {
+        Value::Null => false,
+        Value::Bool(b) => *b,
+        Value::Int(i) => *i != 0,
+        Value::Float(f) => *f != 0.0,
+        Value::String(s) => !s.is_empty(),
     }
 }
 

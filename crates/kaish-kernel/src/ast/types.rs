@@ -236,6 +236,12 @@ pub enum TestExpr {
     StringTest { op: StringTestOp, value: Box<Expr> },
     /// Comparison: `[[ $X == "value" ]]`, `[[ $NUM -gt 5 ]]`
     Comparison { left: Box<Expr>, op: TestCmpOp, right: Box<Expr> },
+    /// Logical AND: `[[ -f a && -d b ]]` (short-circuit evaluation)
+    And { left: Box<TestExpr>, right: Box<TestExpr> },
+    /// Logical OR: `[[ -f a || -d b ]]` (short-circuit evaluation)
+    Or { left: Box<TestExpr>, right: Box<TestExpr> },
+    /// Logical NOT: `[[ ! -f file ]]`
+    Not { expr: Box<TestExpr> },
 }
 
 /// File test operators for `[[ ]]`.

@@ -58,7 +58,6 @@ async fn test_very_long_variable_name() {
 }
 
 #[tokio::test]
-#[ignore = "MCP transport closes on very large payloads (100KB+)"]
 async fn test_very_long_string() {
     let client = create_client().await.unwrap();
     let long_string = "x".repeat(100_000);
@@ -69,7 +68,6 @@ async fn test_very_long_string() {
 }
 
 #[tokio::test]
-#[ignore = "kernel: stack overflow in execute_stmt_flow with 1000 statements"]
 async fn test_many_variables() {
     let client = create_client().await.unwrap();
     // Create 1000 variables
@@ -84,7 +82,6 @@ async fn test_many_variables() {
 }
 
 #[tokio::test]
-#[ignore = "kernel: nested ${VAR:-default} expansion not recursive"]
 async fn test_deeply_nested_braces() {
     let client = create_client().await.unwrap();
     // ${VAR:-${VAR2:-${VAR3:-default}}}

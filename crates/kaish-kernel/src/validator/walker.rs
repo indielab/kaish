@@ -305,6 +305,11 @@ impl<'a> Validator<'a> {
                 self.validate_expr(left);
                 self.validate_expr(right);
             }
+            TestExpr::And { left, right } | TestExpr::Or { left, right } => {
+                self.validate_test(left);
+                self.validate_test(right);
+            }
+            TestExpr::Not { expr } => self.validate_test(expr),
         }
     }
 

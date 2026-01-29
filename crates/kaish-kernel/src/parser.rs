@@ -1108,6 +1108,9 @@ where
 /// - File tests: `[[ -f path ]]`, `[[ -d path ]]`, etc.
 /// - String tests: `[[ -z str ]]`, `[[ -n str ]]`
 /// - Comparisons: `[[ $X == "value" ]]`, `[[ $NUM -gt 5 ]]`
+/// - Compound: `[[ -f a && -d b ]]`, `[[ -z x || -n y ]]`, `[[ ! -f file ]]`
+///
+/// Precedence (highest to lowest): `!` > `&&` > `||`
 fn test_expr_stmt_parser<'tokens, I>(
 ) -> impl Parser<'tokens, I, TestExpr, extra::Err<Rich<'tokens, Token, Span>>> + Clone
 where
@@ -1147,7 +1150,7 @@ where
         select! { Token::ShortFlag(s) if s == "le" => TestCmpOp::LtEq },
     ));
 
-    // File test: [[ -f path ]]
+    // File test: -f path
     let file_test = file_test_op
         .then(primary_expr_parser())
         .map(|(op, path)| TestExpr::FileTest {
@@ -1155,7 +1158,7 @@ where
             path: Box::new(path),
         });
 
-    // String test: [[ -z str ]]
+    // String test: -z str
     let string_test = string_test_op
         .then(primary_expr_parser())
         .map(|(op, value)| TestExpr::StringTest {
@@ -1163,7 +1166,7 @@ where
             value: Box::new(value),
         });
 
-    // Comparison: [[ $X == "value" ]] or [[ $NUM -gt 5 ]]
+    // Comparison: $X == "value" or $NUM -gt 5
     let comparison = primary_expr_parser()
         .then(cmp_op)
         .then(primary_expr_parser())
@@ -1173,11 +1176,52 @@ where
             right: Box::new(right),
         });
 
+    // Primary test expression (atomic - no compound operators)
+    let primary_test = choice((file_test, string_test, comparison));
+
+    // Build compound expressions with proper precedence:
+    // Grammar:
+    //   test_expr = or_expr
+    //   or_expr   = and_expr { "||" and_expr }
+    //   and_expr  = unary_expr { "&&" unary_expr }
+    //   unary_expr = "!" unary_expr | primary_test
+    //
+    // Precedence: ! (highest) > && > ||
+
+    // Use recursive for the unary NOT operator
+    let compound_test = recursive(|compound| {
+        // Unary NOT: ! expr (can be chained: ! ! expr)
+        let not_expr = just(Token::Bang)
+            .ignore_then(compound.clone())
+            .map(|expr| TestExpr::Not { expr: Box::new(expr) });
+
+        // Unary level: ! or primary
+        let unary = choice((not_expr, primary_test.clone()));
+
+        // AND level: unary && unary && ...
+        let and_expr = unary.clone().foldl(
+            just(Token::And).ignore_then(unary).repeated(),
+            |left, right| TestExpr::And {
+                left: Box::new(left),
+                right: Box::new(right),
+            },
+        );
+
+        // OR level: and_expr || and_expr || ...
+        and_expr.clone().foldl(
+            just(Token::Or).ignore_then(and_expr).repeated(),
+            |left, right| TestExpr::Or {
+                left: Box::new(left),
+                right: Box::new(right),
+            },
+        )
+    });
+
     // [[ ]] is two consecutive bracket tokens (not a single TestStart token)
     // to avoid conflicts with nested array syntax like [[1, 2], [3, 4]]
     just(Token::LBracket)
         .then(just(Token::LBracket))
-        .ignore_then(choice((file_test, string_test, comparison)))
+        .ignore_then(compound_test)
         .then_ignore(just(Token::RBracket).then(just(Token::RBracket)))
         .labelled("test expression")
         .boxed()

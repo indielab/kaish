@@ -327,6 +327,15 @@ pub fn format_test_expr(test: &TestExpr) -> String {
                 format_expr(right)
             )
         }
+        TestExpr::And { left, right } => {
+            format!("(and {} {})", format_test_expr(left), format_test_expr(right))
+        }
+        TestExpr::Or { left, right } => {
+            format!("(or {} {})", format_test_expr(left), format_test_expr(right))
+        }
+        TestExpr::Not { expr } => {
+            format!("(not {})", format_test_expr(expr))
+        }
     }
 }
 

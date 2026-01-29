@@ -669,79 +669,7 @@ impl Repl {
                 Ok(result_to_value(&result))
             }
             Expr::Test(test_expr) => {
-                // Evaluate test expression [[ ... ]] and return boolean
-                use kaish_kernel::ast::{TestExpr, FileTestOp, StringTestOp, TestCmpOp};
-                use std::path::Path;
-
-                let result = match test_expr.as_ref() {
-                    TestExpr::FileTest { op, path } => {
-                        let path_val = self.eval_expr_inner(path)?;
-                        let path_str = format_value_unquoted(&path_val);
-                        let p = Path::new(&path_str);
-                        match op {
-                            FileTestOp::Exists => p.exists(),
-                            FileTestOp::IsFile => p.is_file(),
-                            FileTestOp::IsDir => p.is_dir(),
-                            FileTestOp::Readable => p.exists(),
-                            FileTestOp::Writable => p.exists() && std::fs::OpenOptions::new().write(true).open(p).is_ok(),
-                            FileTestOp::Executable => {
-                                #[cfg(unix)]
-                                {
-                                    use std::os::unix::fs::PermissionsExt;
-                                    p.metadata().map(|m| m.permissions().mode() & 0o111 != 0).unwrap_or(false)
-                                }
-                                #[cfg(not(unix))]
-                                { p.exists() }
-                            }
-                        }
-                    }
-                    TestExpr::StringTest { op, value } => {
-                        let val = self.eval_expr_inner(value)?;
-                        let s = format_value_unquoted(&val);
-                        match op {
-                            StringTestOp::IsEmpty => s.is_empty(),
-                            StringTestOp::IsNonEmpty => !s.is_empty(),
-                        }
-                    }
-                    TestExpr::Comparison { left, op, right } => {
-                        let l = self.eval_expr_inner(left)?;
-                        let r = self.eval_expr_inner(right)?;
-                        match op {
-                            TestCmpOp::Eq => values_equal(&l, &r),
-                            TestCmpOp::NotEq => !values_equal(&l, &r),
-                            TestCmpOp::Match | TestCmpOp::NotMatch => {
-                                // Regex match
-                                let text = match &l {
-                                    Value::String(s) => s.as_str(),
-                                    _ => anyhow::bail!("=~ requires string on left, got {:?}", l),
-                                };
-                                let pattern = match &r {
-                                    Value::String(s) => s.as_str(),
-                                    _ => anyhow::bail!("=~ requires regex pattern string on right, got {:?}", r),
-                                };
-                                let re = regex::Regex::new(pattern)
-                                    .map_err(|e| anyhow::anyhow!("invalid regex: {}", e))?;
-                                let matches = re.is_match(text);
-                                match op {
-                                    TestCmpOp::Match => matches,
-                                    TestCmpOp::NotMatch => !matches,
-                                    _ => unreachable!(),
-                                }
-                            }
-                            TestCmpOp::Gt | TestCmpOp::Lt | TestCmpOp::GtEq | TestCmpOp::LtEq => {
-                                let lnum = value_to_f64(&l);
-                                let rnum = value_to_f64(&r);
-                                match op {
-                                    TestCmpOp::Gt => lnum > rnum,
-                                    TestCmpOp::Lt => lnum < rnum,
-                                    TestCmpOp::GtEq => lnum >= rnum,
-                                    TestCmpOp::LtEq => lnum <= rnum,
-                                    _ => unreachable!(),
-                                }
-                            }
-                        }
-                    }
-                };
+                let result = self.eval_test_expr(test_expr)?;
                 Ok(Value::Bool(result))
             }
             Expr::Positional(n) => {
@@ -802,6 +730,100 @@ impl Repl {
 
     fn eval_literal(&mut self, value: &Value) -> Result<Value> {
         Ok(value.clone())
+    }
+
+    /// Evaluate a test expression `[[ ... ]]` to a boolean.
+    fn eval_test_expr(&mut self, test_expr: &kaish_kernel::ast::TestExpr) -> Result<bool> {
+        use kaish_kernel::ast::{TestExpr, FileTestOp, StringTestOp, TestCmpOp};
+        use std::path::Path;
+
+        match test_expr {
+            TestExpr::FileTest { op, path } => {
+                let path_val = self.eval_expr_inner(path)?;
+                let path_str = format_value_unquoted(&path_val);
+                let p = Path::new(&path_str);
+                Ok(match op {
+                    FileTestOp::Exists => p.exists(),
+                    FileTestOp::IsFile => p.is_file(),
+                    FileTestOp::IsDir => p.is_dir(),
+                    FileTestOp::Readable => p.exists(),
+                    FileTestOp::Writable => p.exists() && std::fs::OpenOptions::new().write(true).open(p).is_ok(),
+                    FileTestOp::Executable => {
+                        #[cfg(unix)]
+                        {
+                            use std::os::unix::fs::PermissionsExt;
+                            p.metadata().map(|m| m.permissions().mode() & 0o111 != 0).unwrap_or(false)
+                        }
+                        #[cfg(not(unix))]
+                        { p.exists() }
+                    }
+                })
+            }
+            TestExpr::StringTest { op, value } => {
+                let val = self.eval_expr_inner(value)?;
+                let s = format_value_unquoted(&val);
+                Ok(match op {
+                    StringTestOp::IsEmpty => s.is_empty(),
+                    StringTestOp::IsNonEmpty => !s.is_empty(),
+                })
+            }
+            TestExpr::Comparison { left, op, right } => {
+                let l = self.eval_expr_inner(left)?;
+                let r = self.eval_expr_inner(right)?;
+                Ok(match op {
+                    TestCmpOp::Eq => values_equal(&l, &r),
+                    TestCmpOp::NotEq => !values_equal(&l, &r),
+                    TestCmpOp::Match | TestCmpOp::NotMatch => {
+                        let text = match &l {
+                            Value::String(s) => s.as_str(),
+                            _ => anyhow::bail!("=~ requires string on left, got {:?}", l),
+                        };
+                        let pattern = match &r {
+                            Value::String(s) => s.as_str(),
+                            _ => anyhow::bail!("=~ requires regex pattern string on right, got {:?}", r),
+                        };
+                        let re = regex::Regex::new(pattern)
+                            .map_err(|e| anyhow::anyhow!("invalid regex: {}", e))?;
+                        let matches = re.is_match(text);
+                        match op {
+                            TestCmpOp::Match => matches,
+                            TestCmpOp::NotMatch => !matches,
+                            _ => unreachable!(),
+                        }
+                    }
+                    TestCmpOp::Gt | TestCmpOp::Lt | TestCmpOp::GtEq | TestCmpOp::LtEq => {
+                        let lnum = value_to_f64(&l);
+                        let rnum = value_to_f64(&r);
+                        match op {
+                            TestCmpOp::Gt => lnum > rnum,
+                            TestCmpOp::Lt => lnum < rnum,
+                            TestCmpOp::GtEq => lnum >= rnum,
+                            TestCmpOp::LtEq => lnum <= rnum,
+                            _ => unreachable!(),
+                        }
+                    }
+                })
+            }
+            TestExpr::And { left, right } => {
+                // Short-circuit: if left is false, don't evaluate right
+                if !self.eval_test_expr(left)? {
+                    Ok(false)
+                } else {
+                    self.eval_test_expr(right)
+                }
+            }
+            TestExpr::Or { left, right } => {
+                // Short-circuit: if left is true, don't evaluate right
+                if self.eval_test_expr(left)? {
+                    Ok(true)
+                } else {
+                    self.eval_test_expr(right)
+                }
+            }
+            TestExpr::Not { expr } => {
+                Ok(!self.eval_test_expr(expr)?)
+            }
+        }
     }
 
     /// Evaluate multiple string parts into a single string (for nested default values).

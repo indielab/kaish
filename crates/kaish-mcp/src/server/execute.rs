@@ -126,59 +126,77 @@ pub async fn execute(
         );
     }
 
-    // Run the kernel execution in a blocking task with its own runtime
-    // because kernel.execute() returns a non-Send future.
-    let result = tokio::task::spawn_blocking(move || -> Result<ExecuteResult> {
-        // Create a new single-threaded runtime for this execution
-        let rt = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .context("Failed to create runtime")?;
+    // Run the kernel execution in a dedicated thread with a large stack.
+    // The default tokio worker stack (2MB) isn't enough for deep recursion
+    // on large inputs (100KB+ strings). We use 16MB which should handle
+    // most realistic inputs.
+    let (tx, rx) = tokio::sync::oneshot::channel();
 
-        rt.block_on(async move {
-            let timeout = Duration::from_millis(timeout_ms);
-
-            // Create a fresh kernel
-            let cwd = params
-                .cwd
-                .map(PathBuf::from)
-                .unwrap_or_else(|| PathBuf::from("/mnt/local"));
-
-            let config = KernelConfig {
-                name: "mcp-execute".to_string(),
-                mount_local: true,
-                local_root: None,
-                cwd,
-                skip_validation: false,
-            };
-
-            let kernel = Kernel::new(config).context("Failed to create kernel")?;
-
-            // Set environment variables if provided
-            if let Some(env) = params.env {
-                for (key, value) in env {
-                    kernel
-                        .set_var(&key, kaish_kernel::ast::Value::String(value))
-                        .await;
+    std::thread::Builder::new()
+        .name("kaish-execute".to_string())
+        .stack_size(16 * 1024 * 1024) // 16MB stack
+        .spawn(move || {
+            // Create a new single-threaded runtime for this execution
+            let rt = match tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+            {
+                Ok(rt) => rt,
+                Err(e) => {
+                    let _ = tx.send(Err(anyhow::anyhow!("Failed to create runtime: {}", e)));
+                    return;
                 }
-            }
-
-            // Execute with timeout
-            let result = tokio::time::timeout(timeout, kernel.execute(&params.script)).await;
-
-            let exec_result = match result {
-                Ok(Ok(exec_result)) => ExecuteResult::from_exec_result(&exec_result),
-                Ok(Err(e)) => ExecuteResult::failure(1, e.to_string()),
-                Err(_) => ExecuteResult::failure(
-                    124, // Standard timeout exit code
-                    format!("Execution timed out after {}ms", timeout_ms),
-                ),
             };
-            Ok(exec_result)
+
+            let result = rt.block_on(async move {
+                let timeout = Duration::from_millis(timeout_ms);
+
+                // Create a fresh kernel
+                let cwd = params
+                    .cwd
+                    .map(PathBuf::from)
+                    .unwrap_or_else(|| PathBuf::from("/mnt/local"));
+
+                let config = KernelConfig {
+                    name: "mcp-execute".to_string(),
+                    mount_local: true,
+                    local_root: None,
+                    cwd,
+                    skip_validation: false,
+                };
+
+                let kernel = Kernel::new(config).context("Failed to create kernel")?;
+
+                // Set environment variables if provided
+                if let Some(env) = params.env {
+                    for (key, value) in env {
+                        kernel
+                            .set_var(&key, kaish_kernel::ast::Value::String(value))
+                            .await;
+                    }
+                }
+
+                // Execute with timeout
+                let result = tokio::time::timeout(timeout, kernel.execute(&params.script)).await;
+
+                let exec_result = match result {
+                    Ok(Ok(exec_result)) => ExecuteResult::from_exec_result(&exec_result),
+                    Ok(Err(e)) => ExecuteResult::failure(1, e.to_string()),
+                    Err(_) => ExecuteResult::failure(
+                        124, // Standard timeout exit code
+                        format!("Execution timed out after {}ms", timeout_ms),
+                    ),
+                };
+                Ok(exec_result)
+            });
+
+            let _ = tx.send(result);
         })
-    })
-    .await
-    .context("Kernel execution task panicked")??;
+        .context("Failed to spawn execution thread")?;
+
+    let result = rx
+        .await
+        .context("Execution thread terminated unexpectedly")??;
 
     Ok(result)
 }
