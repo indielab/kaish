@@ -288,7 +288,7 @@ Scripts execute in **isolated scope** (like a subshell) — they cannot access o
 | `source script.kai` | shared | ✓ yes |
 | `scriptname` (via PATH) | isolated | ✗ no |
 
-## 散・集 (San/Shū) — Scatter/Gather
+## 散・集 (San/Shū) — Scatter/Gather *(experimental)*
 
 Fan-out parallelism:
 
@@ -383,7 +383,7 @@ Features that ShellCheck warns about (word splitting, glob expansion, backticks)
 | **Booleans** | Exit codes | Native `true`/`false` | JSON interop, clearer conditions |
 | **Typed params** | None | `name:string` | Tool definitions with validation |
 | **Arithmetic** | `$(( ))` | `$((expr))` with comparisons | Integer arithmetic + `>`, `<`, `==` returning 1/0 |
-| **Scatter/gather** | None | `散/集` | Built-in parallelism |
+| **Scatter/gather** | None | `散/集` | Built-in parallelism *(experimental)* |
 | **VFS** | None | `/scratch/`, `/mnt/`, `/git/` | Unified resource access |
 | **Pre-validation** | None | `validate` builtin | Catch errors before execution |
 | **Strict validation** | Guesses | Rejects `TRUE`, `yes`, `123abc` | Agent-friendly, fail-fast |

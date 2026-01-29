@@ -47,7 +47,7 @@ exa:web_search --query "rust parser combinators"
 # Expand glob patterns to file paths
 glob **/*.rs --exclude='*_test.rs'
 
-# Parallel execution with scatter/gather
+# Parallel execution with scatter/gather (experimental)
 cat items.txt | scatter as=ITEM limit=4 | process $ITEM | gather
 ```
 
@@ -59,7 +59,7 @@ cat items.txt | scatter as=ITEM limit=4 | process $ITEM | gather
 | **50+ builtins** | ls, grep, find, jq, git, diff, patch, and more |
 | **MCP bridge** | Both client and server — script and orchestrate MCP tools |
 | **Virtual filesystem** | Unified access to local files, memory, and git repos |
-| **Scatter/gather** | Built-in parallelism with 散/集 |
+| **Scatter/gather** | Built-in parallelism with 散/集 *(experimental)* |
 | **Pre-validation** | Catch errors before execution with `validate` |
 | **Embeddable** | Library-first design for integration into larger systems |
 
