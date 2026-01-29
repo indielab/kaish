@@ -135,9 +135,14 @@ impl Repl {
     pub fn process_line(&mut self, line: &str) -> Result<Option<String>> {
         let trimmed = line.trim();
 
-        // Handle meta-commands
+        // Handle meta-commands (both /cmd and cmd forms for common ones)
         if trimmed.starts_with('/') {
             return self.handle_meta_command(trimmed);
+        }
+
+        // Also support shell-style meta-commands without slash
+        if let Some(result) = self.try_shell_style_command(trimmed) {
+            return result;
         }
 
         // Skip empty lines
@@ -952,8 +957,25 @@ impl Repl {
                 Ok(Some("Session reset (variables cleared)".to_string()))
             }
             _ => {
-                Ok(Some(format!("Unknown command: {}\nType /help for available commands.", command)))
+                Ok(Some(format!("Unknown command: {}\nType /help or help for available commands.", command)))
             }
+        }
+    }
+
+    /// Try to handle a shell-style command (without leading /).
+    /// Returns Some(result) if it was a recognized command, None otherwise.
+    ///
+    /// Note: We only intercept commands that don't have builtin tool equivalents.
+    /// For example, `vars` is a real builtin tool, so we don't intercept it.
+    fn try_shell_style_command(&mut self, cmd: &str) -> Option<Result<Option<String>>> {
+        let parts: Vec<&str> = cmd.split_whitespace().collect();
+        let command = parts.first().copied().unwrap_or("");
+
+        match command {
+            "quit" | "exit" => Some(self.handle_meta_command("/quit")),
+            "help" => Some(self.handle_meta_command("/help")),
+            "reset" => Some(self.handle_meta_command("/reset")),
+            _ => None,
         }
     }
 }
@@ -1082,17 +1104,19 @@ fn result_to_value(result: &ExecResult) -> Value {
 
 const HELP_TEXT: &str = r#"会sh — kaish REPL
 
-Meta Commands:
-  /help, /h, /?     Show this help
-  /quit, /q, /exit  Exit the REPL
+Meta Commands (use with or without /):
+  help, /help, /?   Show this help
+  quit, /quit, /q   Exit the REPL
+  reset, /reset     Clear in-memory state
+
+Slash-only commands:
   /ast              Toggle AST display mode
-  /scope, /vars     Show all variables
+  /scope, /vars     Show all variables (alt: `vars` builtin)
   /result, /$?      Show last command result
   /cwd              Show current working directory
-  /tools            List available tools
+  /tools            List available tools (alt: `tools` builtin)
   /jobs             List background jobs
   /state, /session  Show session info
-  /clear-state      Clear in-memory state
 
 Built-in Tools:
   echo [args...]    Print arguments
@@ -1133,7 +1157,7 @@ Examples:
 
 /// Run the REPL.
 pub fn run() -> Result<()> {
-    println!("会sh — kaish v{} (Layer 10: State & Persistence)", env!("CARGO_PKG_VERSION"));
+    println!("会sh — kaish v{}", env!("CARGO_PKG_VERSION"));
     println!("Type /help for commands, /quit to exit.");
 
     let mut rl: Editor<(), DefaultHistory> = Editor::new()

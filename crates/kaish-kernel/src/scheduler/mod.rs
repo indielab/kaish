@@ -5,7 +5,7 @@
 //!   of one command flows to stdin of the next.
 //! - **Background jobs**: Run commands in the background with `&`, track them,
 //!   and wait for completion.
-//! - **Scatter/Gather (散/集)**: Parallel fan-out and collection for pipelines.
+//! - **Scatter/Gather**: Parallel fan-out and collection for pipelines.
 //!
 //! # Architecture
 //!
@@ -19,7 +19,7 @@
 //! └─────────────────────────────────────────────────────────────┘
 //!
 //! ┌─────────────────────────────────────────────────────────────┐
-//! │                 ScatterGatherRunner (散/集)                  │
+//! │                    ScatterGatherRunner                        │
 //! │  ┌────────────┐         ┌─────────────────────────┐        │
 //! │  │ pre_scatter│────────▶│  scatter (fan-out)      │        │
 //! │  └────────────┘         │  ┌───┐ ┌───┐ ┌───┐      │        │

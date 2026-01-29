@@ -84,8 +84,8 @@ Search file contents for patterns.
 
 | Category | Supported | Deliberately Omitted |
 |----------|-----------|---------------------|
-| **Matching** | ERE patterns, `-i` (case-insensitive), `-v` (invert) | BRE, Perl regex `-P` |
-| **Output** | `-l` (files only), `-c` (count), `-n` (line numbers) | `-o` (only matching), `--color` |
+| **Matching** | ERE patterns, `-i` (case-insensitive), `-v` (invert), `-w` (word) | BRE, Perl regex `-P` |
+| **Output** | `-l` (files only), `-c` (count), `-n` (line numbers), `-o` (only matching), `-q` (quiet) | `--color` |
 | **Context** | `-A`, `-B`, `-C` (after/before/context lines) | — |
 | **Input** | Files, stdin, `-r`/`-R` (recursive) | `-z` (null separator) |
 | **Filtering** | `--include`, `--exclude` (glob patterns for recursive) | — |
@@ -194,19 +194,23 @@ cat file.txt | wc -l                         # from stdin
 
 ### jq
 
-JSON query and transformation.
+JSON query and transformation (powered by native jaq implementation).
 
 | Category | Supported | Deliberately Omitted |
 |----------|-----------|---------------------|
-| **Queries** | `.field`, `.[n]`, `.[]`, pipes | Most jq programming features |
-| **Options** | `-r` (raw output) | `-c` (compact), `-S` (sort keys) |
+| **Queries** | `.field`, `.[n]`, `.[]`, pipes, `map`, `select`, `type`, `length` | User-defined functions, `import` |
+| **Options** | `-r` (raw output), `-c` (compact) | `-S` (sort keys), `--slurpfile` |
+| **Builtins** | Standard jq library via jaq-std | Some niche functions |
 
-**Note:** This is a minimal jq for field extraction. For complex JSON transformations, consider using an MCP tool or external jq.
+This is a full jq implementation via [jaq](https://github.com/01mf02/jaq) — most jq filters work as expected.
 
 ```bash
-echo '{"name":"alice"}' | jq '.name'         # → "alice"
-echo '{"name":"alice"}' | jq -r '.name'      # → alice (no quotes)
-echo '[1,2,3]' | jq '.[0]'                   # → 1
+echo '{"name":"alice"}' | jq '.name'                    # → "alice"
+echo '{"name":"alice"}' | jq -r '.name'                 # → alice (no quotes)
+echo '[1,2,3]' | jq '.[0]'                              # → 1
+echo '[1,2,3]' | jq 'map(. * 2)'                        # → [2,4,6]
+echo '[{"a":1},{"a":2}]' | jq '[.[] | select(.a > 1)]' # → [{"a":2}]
+jq '.items[]' /path/to/file.json                        # read from file
 ```
 
 ---
@@ -215,13 +219,15 @@ echo '[1,2,3]' | jq '.[0]'                   # → 1
 
 ### cat / head / tail
 
-These are intentionally minimal — they read files and output content.
+File content output tools.
 
 | Tool | Supported | Deliberately Omitted |
 |------|-----------|---------------------|
-| `cat` | Read and concatenate files | `-n` (number lines), `-s` (squeeze blank) |
-| `head` | `-n` (line count) | `-c` (bytes) |
-| `tail` | `-n` (line count) | `-f` (follow), `-c` (bytes) |
+| `cat` | Read and concatenate files, `-n` (line numbers) | `-s` (squeeze blank), `-A` (show all) |
+| `head` | `-n` (lines), `-c` (chars) | — |
+| `tail` | `-n` (lines), `-c` (chars) | `-f` (follow) |
+
+**Note:** `-c` counts UTF-8 characters, not bytes (deliberate simplification for Unicode correctness).
 
 **Why no `tail -f`?** Use a dedicated log-watching tool or MCP integration for real-time streams.
 
@@ -233,17 +239,16 @@ These are intentionally minimal — they read files and output content.
 |------|-------|---------------|-----------|
 | **awk** | 80% | User functions, getline, output redir | Use kaish functions, pipes |
 | **sed** | 70% | Hold space, branching, in-place | Use awk for complex cases |
-| **grep** | 90% | Perl regex, `-o` only-matching | ERE is enough |
+| **grep** | 95% | Perl regex, `--color` | ERE is enough |
 | **cut** | 90% | Byte mode, complement | Rarely needed |
 | **tr** | 85% | Complement | Use sed for complex cases |
 | **sort** | 80% | Version sort, stable | Specialized needs |
 | **uniq** | 80% | Case-insensitive, field skip | Pre-process with awk |
-| **jq** | 60% | Programming features | Native jaq impl covers common cases |
+| **jq** | 70% | Advanced filters, modules | Native jaq covers common transforms |
 
 ---
 
 ## See Also
 
-- [README.md](../README.md) — Language reference and builtin list
-- [GRAMMAR.md](GRAMMAR.md) — Shell syntax EBNF
-- [ARCHITECTURE.md](ARCHITECTURE.md) — Kernel design
+- [README.md](../README.md) — Project overview and quick tour
+- [LANGUAGE.md](LANGUAGE.md) — Language reference

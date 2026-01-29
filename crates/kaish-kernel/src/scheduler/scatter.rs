@@ -1,4 +1,4 @@
-//! 散/集 (Scatter/Gather) — Parallel pipeline execution.
+//! Scatter/Gather — Parallel pipeline execution.
 //!
 //! Scatter splits input into items and runs the pipeline in parallel.
 //! Gather collects the parallel results.

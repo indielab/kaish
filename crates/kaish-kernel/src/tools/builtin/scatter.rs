@@ -1,4 +1,4 @@
-//! scatter — 散 — Fan out input items for parallel processing.
+//! scatter — Fan out input items for parallel processing.
 //!
 //! Scatter reads input (lines or JSON array), splits into items,
 //! and sets up parallel execution context. Used with `gather` to
@@ -32,7 +32,7 @@ impl Tool for Scatter {
     }
 
     fn schema(&self) -> ToolSchema {
-        ToolSchema::new("scatter", "散 — Fan out input items for parallel processing")
+        ToolSchema::new("scatter", "Fan out input items for parallel processing")
             .param(ParamSchema::optional(
                 "as",
                 "string",

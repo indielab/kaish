@@ -418,7 +418,7 @@ fn is_static_command_name(name: &str) -> bool {
 fn is_special_command(name: &str) -> bool {
     matches!(
         name,
-        "true" | "false" | ":" | "test" | "[" | "[["
+        "true" | "false" | ":" | "test" | "[" | "[[" | "readonly" | "local"
     )
 }
 

@@ -1,4 +1,4 @@
-//! gather — 集 — Collect results from parallel scatter processing.
+//! gather — Collect results from parallel scatter processing.
 //!
 //! Gather collects results from parallel scatter workers and outputs
 //! them as lines or JSON.
@@ -33,7 +33,7 @@ impl Tool for Gather {
     }
 
     fn schema(&self) -> ToolSchema {
-        ToolSchema::new("gather", "集 — Collect results from parallel scatter processing")
+        ToolSchema::new("gather", "Collect results from parallel scatter processing")
             .param(ParamSchema::optional(
                 "first",
                 "int",
