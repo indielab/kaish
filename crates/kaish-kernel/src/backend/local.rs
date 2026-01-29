@@ -370,6 +370,11 @@ impl KernelBackend for LocalBackend {
         Ok(())
     }
 
+    async fn rename(&self, from: &Path, to: &Path) -> BackendResult<()> {
+        self.vfs.rename(from, to).await?;
+        Ok(())
+    }
+
     async fn exists(&self, path: &Path) -> bool {
         self.vfs.exists(path).await
     }

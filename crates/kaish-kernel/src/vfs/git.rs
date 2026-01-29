@@ -438,6 +438,10 @@ impl Filesystem for GitVfs {
         self.local.remove(path).await
     }
 
+    async fn rename(&self, from: &Path, to: &Path) -> io::Result<()> {
+        self.local.rename(from, to).await
+    }
+
     fn read_only(&self) -> bool {
         self.local.read_only()
     }

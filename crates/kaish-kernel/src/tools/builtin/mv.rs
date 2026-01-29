@@ -53,8 +53,8 @@ impl Tool for Mv {
 
 /// Move a path to destination.
 ///
-/// First tries atomic rename (fast, same-filesystem). Falls back to copy+remove
-/// for cross-filesystem moves or virtual filesystems.
+/// Uses the VFS rename operation when possible (atomic, same-mount).
+/// Falls back to copy+remove for cross-mount moves.
 async fn move_path(
     backend: &dyn KernelBackend,
     src: &Path,
@@ -80,41 +80,16 @@ async fn move_path(
         return Ok(()); // Silently skip if destination exists
     }
 
-    // Try atomic rename first (only works on real filesystem, same mount)
-    if let (Some(real_src), Some(real_dst)) = (
-        backend.resolve_real_path(src),
-        backend.resolve_real_path(&final_dst),
-    ) {
-        // Ensure parent directory exists for destination
-        if let Some(parent) = real_dst.parent() {
-            if !parent.exists() {
-                // Parent doesn't exist - fall through to copy+remove
-            } else {
-                // Try rename - this is atomic and fast for same-filesystem moves
-                match std::fs::rename(&real_src, &real_dst) {
-                    Ok(()) => return Ok(()),
-                    Err(e) => {
-                        // EXDEV (cross-device link) means different filesystems
-                        // Fall through to copy+remove in that case
-                        #[cfg(unix)]
-                        if e.raw_os_error() == Some(18) {
-                            // EXDEV on Linux
-                            // Fall through to copy+remove
-                        } else {
-                            return Err(e.into());
-                        }
-                        #[cfg(not(unix))]
-                        {
-                            // On non-Unix, any rename error falls back to copy+remove
-                            let _ = e;
-                        }
-                    }
-                }
-            }
+    // Try VFS rename first (works for same-mount operations)
+    match backend.rename(src, &final_dst).await {
+        Ok(()) => return Ok(()),
+        Err(BackendError::Io(msg)) if msg.contains("cross") || msg.contains("Unsupported") => {
+            // Cross-mount rename not supported, fall through to copy+remove
         }
+        Err(e) => return Err(e),
     }
 
-    // Fall back to copy + remove (for virtual filesystems or cross-device moves)
+    // Fall back to copy + remove (for cross-mount moves)
     if info.is_dir {
         // Copy directory recursively, then remove source
         move_dir_recursive(backend, src, &final_dst).await?;

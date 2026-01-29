@@ -362,6 +362,12 @@ pub trait KernelBackend: Send + Sync {
     /// If `recursive` is true, removes directories and their contents.
     async fn remove(&self, path: &Path, recursive: bool) -> BackendResult<()>;
 
+    /// Rename (move) a file or directory.
+    ///
+    /// This is an atomic operation when source and destination are on the same
+    /// filesystem. Cross-mount renames are not supported.
+    async fn rename(&self, from: &Path, to: &Path) -> BackendResult<()>;
+
     /// Check if a path exists.
     async fn exists(&self, path: &Path) -> bool;
 

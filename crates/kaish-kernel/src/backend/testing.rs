@@ -72,6 +72,10 @@ impl KernelBackend for MockBackend {
         Ok(())
     }
 
+    async fn rename(&self, _from: &Path, _to: &Path) -> BackendResult<()> {
+        Ok(())
+    }
+
     async fn exists(&self, _path: &Path) -> bool {
         false
     }

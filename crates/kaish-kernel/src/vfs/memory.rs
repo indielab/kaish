@@ -277,6 +277,75 @@ impl Filesystem for MemoryFs {
         Ok(())
     }
 
+    async fn rename(&self, from: &Path, to: &Path) -> io::Result<()> {
+        let from_normalized = Self::normalize(from);
+        let to_normalized = Self::normalize(to);
+
+        if from_normalized.as_os_str().is_empty() {
+            return Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "cannot rename root directory",
+            ));
+        }
+
+        // Ensure parent directories exist for destination
+        drop(self.ensure_parents(&to_normalized).await);
+
+        let mut entries = self.entries.write().await;
+
+        // Get the source entry
+        let entry = entries.remove(&from_normalized).ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::NotFound,
+                format!("not found: {}", from.display()),
+            )
+        })?;
+
+        // Check we're not overwriting a directory with a file or vice versa
+        if let Some(existing) = entries.get(&to_normalized) {
+            match (&entry, existing) {
+                (Entry::File { .. }, Entry::Directory { .. }) => {
+                    // Put the source back and error
+                    entries.insert(from_normalized, entry);
+                    return Err(io::Error::new(
+                        io::ErrorKind::IsADirectory,
+                        format!("destination is a directory: {}", to.display()),
+                    ));
+                }
+                (Entry::Directory { .. }, Entry::File { .. }) => {
+                    entries.insert(from_normalized, entry);
+                    return Err(io::Error::new(
+                        io::ErrorKind::NotADirectory,
+                        format!("destination is not a directory: {}", to.display()),
+                    ));
+                }
+                _ => {}
+            }
+        }
+
+        // For directories, we need to rename all children too
+        if matches!(entry, Entry::Directory { .. }) {
+            // Collect paths to rename (can't modify while iterating)
+            let children_to_rename: Vec<(PathBuf, Entry)> = entries
+                .iter()
+                .filter(|(k, _)| k.starts_with(&from_normalized) && *k != &from_normalized)
+                .map(|(k, v)| (k.clone(), v.clone()))
+                .collect();
+
+            // Remove old children and insert with new paths
+            for (old_path, child_entry) in children_to_rename {
+                entries.remove(&old_path);
+                let relative = old_path.strip_prefix(&from_normalized).unwrap();
+                let new_path = to_normalized.join(relative);
+                entries.insert(new_path, child_entry);
+            }
+        }
+
+        // Insert at new location
+        entries.insert(to_normalized, entry);
+        Ok(())
+    }
+
     fn read_only(&self) -> bool {
         false
     }
@@ -412,5 +481,52 @@ mod tests {
 
         fs.write(Path::new("yes.txt"), b"here").await.unwrap();
         assert!(fs.exists(Path::new("yes.txt")).await);
+    }
+
+    #[tokio::test]
+    async fn test_rename_file() {
+        let fs = MemoryFs::new();
+        fs.write(Path::new("old.txt"), b"content").await.unwrap();
+
+        fs.rename(Path::new("old.txt"), Path::new("new.txt")).await.unwrap();
+
+        // New path exists with same content
+        let data = fs.read(Path::new("new.txt")).await.unwrap();
+        assert_eq!(data, b"content");
+
+        // Old path no longer exists
+        assert!(!fs.exists(Path::new("old.txt")).await);
+    }
+
+    #[tokio::test]
+    async fn test_rename_directory() {
+        let fs = MemoryFs::new();
+        fs.write(Path::new("dir/a.txt"), b"a").await.unwrap();
+        fs.write(Path::new("dir/b.txt"), b"b").await.unwrap();
+        fs.write(Path::new("dir/sub/c.txt"), b"c").await.unwrap();
+
+        fs.rename(Path::new("dir"), Path::new("renamed")).await.unwrap();
+
+        // New paths exist
+        assert!(fs.exists(Path::new("renamed")).await);
+        assert!(fs.exists(Path::new("renamed/a.txt")).await);
+        assert!(fs.exists(Path::new("renamed/b.txt")).await);
+        assert!(fs.exists(Path::new("renamed/sub/c.txt")).await);
+
+        // Old paths don't exist
+        assert!(!fs.exists(Path::new("dir")).await);
+        assert!(!fs.exists(Path::new("dir/a.txt")).await);
+
+        // Content preserved
+        let data = fs.read(Path::new("renamed/a.txt")).await.unwrap();
+        assert_eq!(data, b"a");
+    }
+
+    #[tokio::test]
+    async fn test_rename_not_found() {
+        let fs = MemoryFs::new();
+        let result = fs.rename(Path::new("nonexistent"), Path::new("dest")).await;
+        assert!(result.is_err());
+        assert_eq!(result.unwrap_err().kind(), io::ErrorKind::NotFound);
     }
 }

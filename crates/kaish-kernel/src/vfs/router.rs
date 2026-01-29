@@ -226,6 +226,21 @@ impl Filesystem for VfsRouter {
         fs.remove(&relative).await
     }
 
+    async fn rename(&self, from: &Path, to: &Path) -> io::Result<()> {
+        let (from_fs, from_relative) = self.find_mount(from)?;
+        let (to_fs, to_relative) = self.find_mount(to)?;
+
+        // Check if both paths are on the same mount by comparing Arc pointers
+        if !Arc::ptr_eq(&from_fs, &to_fs) {
+            return Err(io::Error::new(
+                io::ErrorKind::Unsupported,
+                "cannot rename across different mount points",
+            ));
+        }
+
+        from_fs.rename(&from_relative, &to_relative).await
+    }
+
     fn read_only(&self) -> bool {
         // Router itself isn't read-only; individual mounts might be
         false
@@ -426,5 +441,35 @@ mod tests {
         let router = VfsRouter::new();
         let meta = router.stat(Path::new("/")).await.unwrap();
         assert!(meta.is_dir);
+    }
+
+    #[tokio::test]
+    async fn test_rename_same_mount() {
+        let mut router = VfsRouter::new();
+        let mem = MemoryFs::new();
+        mem.write(Path::new("old.txt"), b"data").await.unwrap();
+        router.mount("/scratch", mem);
+
+        router.rename(Path::new("/scratch/old.txt"), Path::new("/scratch/new.txt")).await.unwrap();
+
+        // New path exists
+        let data = router.read(Path::new("/scratch/new.txt")).await.unwrap();
+        assert_eq!(data, b"data");
+
+        // Old path doesn't exist
+        assert!(!router.exists(Path::new("/scratch/old.txt")).await);
+    }
+
+    #[tokio::test]
+    async fn test_rename_cross_mount_fails() {
+        let mut router = VfsRouter::new();
+        let mem1 = MemoryFs::new();
+        mem1.write(Path::new("file.txt"), b"data").await.unwrap();
+        router.mount("/mount1", mem1);
+        router.mount("/mount2", MemoryFs::new());
+
+        let result = router.rename(Path::new("/mount1/file.txt"), Path::new("/mount2/file.txt")).await;
+        assert!(result.is_err());
+        assert_eq!(result.unwrap_err().kind(), io::ErrorKind::Unsupported);
     }
 }

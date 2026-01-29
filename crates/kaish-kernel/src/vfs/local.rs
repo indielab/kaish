@@ -181,6 +181,19 @@ impl Filesystem for LocalFs {
         }
     }
 
+    async fn rename(&self, from: &Path, to: &Path) -> io::Result<()> {
+        self.check_writable()?;
+        let from_path = self.resolve(from)?;
+        let to_path = self.resolve(to)?;
+
+        // Ensure parent directory exists for destination
+        if let Some(parent) = to_path.parent() {
+            fs::create_dir_all(parent).await?;
+        }
+
+        fs::rename(&from_path, &to_path).await
+    }
+
     fn read_only(&self) -> bool {
         self.read_only
     }
