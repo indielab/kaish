@@ -251,4 +251,58 @@ mod tests {
         assert!(last.ok());
         assert_eq!(last.out.trim(), "test");
     }
+
+    #[tokio::test]
+    async fn test_embedded_blob_write_read() {
+        let client = EmbeddedClient::transient().expect("failed to create client");
+
+        let data = b"hello blob world!";
+        let id = client.write_blob("text/plain", data).await.expect("write_blob failed");
+
+        assert!(!id.is_empty(), "blob id should not be empty");
+
+        let read_data = client.read_blob(&id).await.expect("read_blob failed");
+        assert_eq!(read_data, data);
+    }
+
+    #[tokio::test]
+    async fn test_embedded_blob_delete() {
+        let client = EmbeddedClient::transient().expect("failed to create client");
+
+        let data = b"blob to delete";
+        let id = client.write_blob("application/octet-stream", data).await.expect("write_blob failed");
+
+        // Verify it exists
+        let read_data = client.read_blob(&id).await.expect("read_blob failed");
+        assert_eq!(read_data, data);
+
+        // Delete it
+        let deleted = client.delete_blob(&id).await.expect("delete_blob failed");
+        assert!(deleted, "blob should have been deleted");
+
+        // Verify it's gone
+        let result = client.read_blob(&id).await;
+        assert!(result.is_err(), "blob should not exist after deletion");
+    }
+
+    #[tokio::test]
+    async fn test_embedded_blob_delete_nonexistent() {
+        let client = EmbeddedClient::transient().expect("failed to create client");
+
+        let deleted = client.delete_blob("nonexistent-blob-id").await.expect("delete_blob failed");
+        assert!(!deleted, "deleting nonexistent blob should return false");
+    }
+
+    #[tokio::test]
+    async fn test_embedded_blob_large_data() {
+        let client = EmbeddedClient::transient().expect("failed to create client");
+
+        // Create 1MB of data
+        let data: Vec<u8> = (0..1024 * 1024).map(|i| (i % 256) as u8).collect();
+        let id = client.write_blob("application/octet-stream", &data).await.expect("write_blob failed");
+
+        let read_data = client.read_blob(&id).await.expect("read_blob failed");
+        assert_eq!(read_data.len(), data.len());
+        assert_eq!(read_data, data);
+    }
 }
