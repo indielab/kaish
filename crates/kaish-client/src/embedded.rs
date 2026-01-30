@@ -7,16 +7,32 @@
 //! - Unit testing
 //! - Single-process use cases
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use async_trait::async_trait;
 
 use kaish_kernel::ast::Value;
 use kaish_kernel::interpreter::ExecResult;
+use kaish_kernel::vfs::Filesystem;
 use kaish_kernel::{Kernel, KernelConfig};
 
 use crate::traits::{ClientError, ClientResult, KernelClient};
+
+/// Generate a unique blob ID.
+fn generate_blob_id() -> String {
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+
+    let timestamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    let count = COUNTER.fetch_add(1, Ordering::SeqCst);
+
+    format!("{:x}-{:x}", timestamp, count)
+}
 
 /// A client that wraps a `Kernel` directly for in-process access.
 ///
@@ -117,6 +133,50 @@ impl KernelClient for EmbeddedClient {
         // For embedded client, shutdown is a no-op since we don't own the kernel lifecycle
         // The kernel will be dropped when the client is dropped
         Ok(())
+    }
+
+    async fn read_blob(&self, id: &str) -> ClientResult<Vec<u8>> {
+        let vfs = self.kernel.vfs();
+        let path = PathBuf::from(format!("/v/blobs/{}", id));
+
+        vfs.read(&path)
+            .await
+            .map_err(|e| ClientError::Io(e))
+    }
+
+    async fn write_blob(&self, content_type: &str, data: &[u8]) -> ClientResult<String> {
+        let vfs = self.kernel.vfs();
+        let id = generate_blob_id();
+        let path = PathBuf::from(format!("/v/blobs/{}", id));
+
+        // Ensure parent directory exists
+        let parent = Path::new("/v/blobs");
+        if let Err(e) = vfs.mkdir(parent).await {
+            // Ignore "already exists" errors
+            if e.kind() != std::io::ErrorKind::AlreadyExists {
+                tracing::warn!("Failed to create blob directory: {}", e);
+            }
+        }
+
+        // Store content type as metadata (could be extended later)
+        tracing::debug!("Creating blob {} with content type {}", id, content_type);
+
+        vfs.write(&path, data)
+            .await
+            .map_err(|e| ClientError::Io(e))?;
+
+        Ok(id)
+    }
+
+    async fn delete_blob(&self, id: &str) -> ClientResult<bool> {
+        let vfs = self.kernel.vfs();
+        let path = PathBuf::from(format!("/v/blobs/{}", id));
+
+        match vfs.remove(&path).await {
+            Ok(()) => Ok(true),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(false),
+            Err(e) => Err(ClientError::Io(e)),
+        }
     }
 }
 

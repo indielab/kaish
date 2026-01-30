@@ -205,6 +205,71 @@ impl KernelClient for IpcClient {
         request.send().promise.await?;
         Ok(())
     }
+
+    async fn read_blob(&self, id: &str) -> ClientResult<Vec<u8>> {
+        let mut request = self.client.read_blob_request();
+        request.get().set_id(id);
+
+        let response = request.send().promise.await?;
+        let stream = response.get()?.get_stream()?;
+
+        // Read all data from the stream
+        let mut data = Vec::new();
+        loop {
+            let mut read_request = stream.read_request();
+            read_request.get().set_max_bytes(64 * 1024); // 64KB chunks
+
+            let read_response = read_request.send().promise.await?;
+            let result = read_response.get()?;
+
+            let chunk = result.get_data()?;
+            data.extend_from_slice(chunk);
+
+            if result.get_done() {
+                break;
+            }
+        }
+
+        Ok(data)
+    }
+
+    async fn write_blob(&self, content_type: &str, data: &[u8]) -> ClientResult<String> {
+        let mut request = self.client.write_blob_request();
+        {
+            let mut params = request.get();
+            params.set_content_type(content_type);
+            params.set_size(data.len() as u64);
+        }
+
+        let response = request.send().promise.await?;
+        let result = response.get()?;
+
+        let id = result.get_id()?.to_str()?.to_string();
+        let sink = result.get_stream()?;
+
+        // Write data in chunks
+        const CHUNK_SIZE: usize = 64 * 1024; // 64KB chunks
+        for chunk in data.chunks(CHUNK_SIZE) {
+            let mut write_request = sink.write_request();
+            write_request.get().set_data(chunk);
+            write_request.send().promise.await?;
+        }
+
+        // Finish the write
+        let _finish_response = sink.finish_request().send().promise.await?;
+
+        Ok(id)
+    }
+
+    async fn delete_blob(&self, id: &str) -> ClientResult<bool> {
+        let mut request = self.client.delete_blob_request();
+        request.get().set_id(id);
+
+        let response = request.send().promise.await?;
+        let success = response.get()?.get_success();
+
+        Ok(success)
+    }
 }
 
 // ============================================================

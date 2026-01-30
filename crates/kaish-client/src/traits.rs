@@ -82,4 +82,19 @@ pub trait KernelClient {
 
     /// Shutdown the kernel.
     async fn shutdown(&self) -> ClientResult<()>;
+
+    /// Read a blob by ID.
+    ///
+    /// Returns the blob contents as raw bytes.
+    async fn read_blob(&self, id: &str) -> ClientResult<Vec<u8>>;
+
+    /// Write a blob and return its ID.
+    ///
+    /// The blob is stored in `/v/blobs/{id}` and can be referenced via BlobRef.
+    async fn write_blob(&self, content_type: &str, data: &[u8]) -> ClientResult<String>;
+
+    /// Delete a blob by ID.
+    ///
+    /// Returns true if the blob was deleted, false if it didn't exist.
+    async fn delete_blob(&self, id: &str) -> ClientResult<bool>;
 }

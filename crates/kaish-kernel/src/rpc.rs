@@ -17,19 +17,21 @@
 //!   │    (execute, vars, etc) │
 //! ```
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use capnp_rpc::{rpc_twoparty_capnp, twoparty, RpcSystem};
 use futures::AsyncReadExt;
 use tokio::net::UnixListener;
+use tokio::sync::Mutex;
 use tokio_util::compat::TokioAsyncReadCompatExt;
 
-use kaish_schema::kernel;
+use kaish_schema::{blob_sink, blob_stream, kernel};
 
 use crate::kernel::Kernel;
 use crate::paths as state_paths;
+use crate::vfs::{Filesystem, VfsRouter};
 
 /// RPC server wrapper around a Kernel.
 ///
@@ -103,6 +105,199 @@ impl KernelRpcServer {
             });
         }
     }
+}
+
+// ============================================================
+// Blob Stream/Sink Implementations
+// ============================================================
+
+/// Implementation of BlobStream for reading blobs.
+struct BlobStreamImpl {
+    data: Vec<u8>,
+    position: Mutex<usize>,
+}
+
+impl BlobStreamImpl {
+    fn new(data: Vec<u8>) -> Self {
+        Self {
+            data,
+            position: Mutex::new(0),
+        }
+    }
+}
+
+impl blob_stream::Server for BlobStreamImpl {
+    fn read(
+        &mut self,
+        params: blob_stream::ReadParams,
+        mut results: blob_stream::ReadResults,
+    ) -> capnp::capability::Promise<(), capnp::Error> {
+        let max_bytes = match params.get() {
+            Ok(p) => p.get_max_bytes() as usize,
+            Err(e) => return capnp::capability::Promise::err(e),
+        };
+
+        // Use block_in_place to safely access the mutex in sync context
+        let (chunk, done) = tokio::task::block_in_place(|| {
+            let mut pos = self.position.blocking_lock();
+            let remaining = self.data.len().saturating_sub(*pos);
+            let read_size = max_bytes.min(remaining);
+            let chunk = self.data[*pos..*pos + read_size].to_vec();
+            *pos += read_size;
+            let done = *pos >= self.data.len();
+            (chunk, done)
+        });
+
+        let mut builder = results.get();
+        builder.set_data(&chunk);
+        builder.set_done(done);
+        capnp::capability::Promise::ok(())
+    }
+
+    fn size(
+        &mut self,
+        _params: blob_stream::SizeParams,
+        mut results: blob_stream::SizeResults,
+    ) -> capnp::capability::Promise<(), capnp::Error> {
+        let mut builder = results.get();
+        builder.set_bytes(self.data.len() as u64);
+        builder.set_known(true);
+        capnp::capability::Promise::ok(())
+    }
+
+    fn cancel(
+        &mut self,
+        _params: blob_stream::CancelParams,
+        _results: blob_stream::CancelResults,
+    ) -> capnp::capability::Promise<(), capnp::Error> {
+        // Nothing to clean up - data is dropped when impl is dropped
+        capnp::capability::Promise::ok(())
+    }
+}
+
+/// Implementation of BlobSink for writing blobs.
+struct BlobSinkImpl {
+    vfs: Arc<VfsRouter>,
+    path: PathBuf,
+    data: Mutex<Vec<u8>>,
+    aborted: Mutex<bool>,
+}
+
+impl BlobSinkImpl {
+    fn new(vfs: Arc<VfsRouter>, path: PathBuf) -> Self {
+        Self {
+            vfs,
+            path,
+            data: Mutex::new(Vec::new()),
+            aborted: Mutex::new(false),
+        }
+    }
+}
+
+impl blob_sink::Server for BlobSinkImpl {
+    fn write(
+        &mut self,
+        params: blob_sink::WriteParams,
+        _results: blob_sink::WriteResults,
+    ) -> capnp::capability::Promise<(), capnp::Error> {
+        let chunk = match params.get() {
+            Ok(p) => match p.get_data() {
+                Ok(d) => d.to_vec(),
+                Err(e) => return capnp::capability::Promise::err(e),
+            },
+            Err(e) => return capnp::capability::Promise::err(e),
+        };
+
+        tokio::task::block_in_place(|| {
+            let aborted = self.aborted.blocking_lock();
+            if *aborted {
+                return;
+            }
+            drop(aborted);
+
+            let mut data = self.data.blocking_lock();
+            data.extend(chunk);
+        });
+
+        capnp::capability::Promise::ok(())
+    }
+
+    fn finish(
+        &mut self,
+        _params: blob_sink::FinishParams,
+        mut results: blob_sink::FinishResults,
+    ) -> capnp::capability::Promise<(), capnp::Error> {
+        let vfs = self.vfs.clone();
+        let path = self.path.clone();
+
+        // Get the data and compute hash
+        let (data, hash) = tokio::task::block_in_place(|| {
+            let aborted = self.aborted.blocking_lock();
+            if *aborted {
+                return (Vec::new(), Vec::new());
+            }
+            drop(aborted);
+
+            let data = self.data.blocking_lock().clone();
+
+            // Compute SHA-256 hash
+            use std::collections::hash_map::DefaultHasher;
+            use std::hash::{Hash, Hasher};
+            let mut hasher = DefaultHasher::new();
+            data.hash(&mut hasher);
+            let hash_value = hasher.finish();
+            let hash = hash_value.to_be_bytes().to_vec();
+
+            (data, hash)
+        });
+
+        capnp::capability::Promise::from_future(async move {
+            // Ensure parent directory exists
+            let parent = path.parent().unwrap_or(Path::new("/v/blobs"));
+            if let Err(e) = vfs.mkdir(parent).await {
+                // Ignore "already exists" errors
+                if e.kind() != std::io::ErrorKind::AlreadyExists {
+                    tracing::warn!("Failed to create blob directory: {}", e);
+                }
+            }
+
+            // Write the blob
+            vfs.write(&path, &data).await.map_err(|e| {
+                capnp::Error::failed(format!("failed to write blob: {}", e))
+            })?;
+
+            results.get().set_hash(&hash);
+            Ok(())
+        })
+    }
+
+    fn abort(
+        &mut self,
+        _params: blob_sink::AbortParams,
+        _results: blob_sink::AbortResults,
+    ) -> capnp::capability::Promise<(), capnp::Error> {
+        tokio::task::block_in_place(|| {
+            let mut aborted = self.aborted.blocking_lock();
+            *aborted = true;
+        });
+        capnp::capability::Promise::ok(())
+    }
+}
+
+/// Generate a unique blob ID.
+fn generate_blob_id() -> String {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+
+    let timestamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    let count = COUNTER.fetch_add(1, Ordering::SeqCst);
+
+    format!("{:x}-{:x}", timestamp, count)
 }
 
 /// Implementation of the Kernel Cap'n Proto interface.
@@ -487,32 +682,112 @@ impl kernel::Server for KernelImpl {
 
     fn read_blob(
         &mut self,
-        _params: kernel::ReadBlobParams,
-        _results: kernel::ReadBlobResults,
+        params: kernel::ReadBlobParams,
+        mut results: kernel::ReadBlobResults,
     ) -> capnp::capability::Promise<(), capnp::Error> {
-        capnp::capability::Promise::err(capnp::Error::unimplemented(
-            "read_blob not yet implemented".into(),
-        ))
+        let vfs = self.kernel.vfs();
+
+        let id = match params.get() {
+            Ok(p) => match p.get_id() {
+                Ok(s) => match s.to_str() {
+                    Ok(s) => s.to_string(),
+                    Err(e) => return capnp::capability::Promise::err(capnp::Error::failed(format!("invalid utf8: {}", e))),
+                },
+                Err(e) => return capnp::capability::Promise::err(e),
+            },
+            Err(e) => return capnp::capability::Promise::err(e),
+        };
+
+        capnp::capability::Promise::from_future(async move {
+            let path = PathBuf::from(format!("/v/blobs/{}", id));
+
+            // Read the blob data
+            let data = vfs.read(&path).await.map_err(|e| {
+                capnp::Error::failed(format!("failed to read blob {}: {}", id, e))
+            })?;
+
+            // Create the stream implementation
+            let stream_impl = BlobStreamImpl::new(data);
+            let stream_client: blob_stream::Client = capnp_rpc::new_client(stream_impl);
+
+            results.get().set_stream(stream_client);
+            Ok(())
+        })
     }
 
     fn write_blob(
         &mut self,
-        _params: kernel::WriteBlobParams,
-        _results: kernel::WriteBlobResults,
+        params: kernel::WriteBlobParams,
+        mut results: kernel::WriteBlobResults,
     ) -> capnp::capability::Promise<(), capnp::Error> {
-        capnp::capability::Promise::err(capnp::Error::unimplemented(
-            "write_blob not yet implemented".into(),
-        ))
+        let vfs = self.kernel.vfs();
+
+        let (content_type, _size) = match params.get() {
+            Ok(p) => {
+                let ct = match p.get_content_type() {
+                    Ok(s) => match s.to_str() {
+                        Ok(s) => s.to_string(),
+                        Err(e) => return capnp::capability::Promise::err(capnp::Error::failed(format!("invalid utf8: {}", e))),
+                    },
+                    Err(e) => return capnp::capability::Promise::err(e),
+                };
+                let size = p.get_size();
+                (ct, size)
+            },
+            Err(e) => return capnp::capability::Promise::err(e),
+        };
+
+        // Generate a unique blob ID
+        let id = generate_blob_id();
+        let path = PathBuf::from(format!("/v/blobs/{}", id));
+
+        // Store content type as metadata (could be extended later)
+        tracing::debug!("Creating blob {} with content type {}", id, content_type);
+
+        // Create the sink implementation
+        let sink_impl = BlobSinkImpl::new(vfs, path);
+        let sink_client: blob_sink::Client = capnp_rpc::new_client(sink_impl);
+
+        let mut builder = results.get();
+        builder.set_id(&id);
+        builder.set_stream(sink_client);
+
+        capnp::capability::Promise::ok(())
     }
 
     fn delete_blob(
         &mut self,
-        _params: kernel::DeleteBlobParams,
-        _results: kernel::DeleteBlobResults,
+        params: kernel::DeleteBlobParams,
+        mut results: kernel::DeleteBlobResults,
     ) -> capnp::capability::Promise<(), capnp::Error> {
-        capnp::capability::Promise::err(capnp::Error::unimplemented(
-            "delete_blob not yet implemented".into(),
-        ))
+        let vfs = self.kernel.vfs();
+
+        let id = match params.get() {
+            Ok(p) => match p.get_id() {
+                Ok(s) => match s.to_str() {
+                    Ok(s) => s.to_string(),
+                    Err(e) => return capnp::capability::Promise::err(capnp::Error::failed(format!("invalid utf8: {}", e))),
+                },
+                Err(e) => return capnp::capability::Promise::err(e),
+            },
+            Err(e) => return capnp::capability::Promise::err(e),
+        };
+
+        capnp::capability::Promise::from_future(async move {
+            let path = PathBuf::from(format!("/v/blobs/{}", id));
+
+            // Delete the blob
+            let success = match vfs.remove(&path).await {
+                Ok(()) => true,
+                Err(e) => {
+                    tracing::warn!("Failed to delete blob {}: {}", id, e);
+                    false
+                }
+            };
+
+            results.get().set_success(success);
+            Ok(())
+        })
     }
 }
 
