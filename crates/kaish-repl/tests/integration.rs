@@ -398,9 +398,9 @@ fn control_nested_if() {
 
 #[test]
 fn control_for_loop() {
-    // POSIX-style word splitting: space-separated strings
+    // kaish requires explicit split for word splitting (no implicit splitting)
     let outputs = run_script(r#"
-        for I in "1 2 3"; do echo ${I}; done
+        for I in $(split "1 2 3"); do echo ${I}; done
     "#);
     let joined = outputs.join("\n");
     assert!(joined.contains("1"), "Output was: {}", joined);
@@ -410,18 +410,19 @@ fn control_for_loop() {
 
 #[test]
 fn control_nested_loops() {
+    // kaish requires explicit split for word splitting
     let outputs = run_script(r#"
-        for I in "1 2"; do for J in "a b"; do echo "${I}-${J}"; done; done
+        for I in $(split "1 2"); do for J in $(split "a b"); do echo "${I}-${J}"; done; done
     "#);
     assert!(outputs_contain(&outputs, &["1-a", "1-b", "2-a", "2-b"]));
 }
 
 #[test]
 fn control_empty_loop() {
-    // Empty string produces no iterations
+    // Empty split produces no iterations
     let outputs = run_script(r#"
         EMPTY=""
-        for I in ${EMPTY}; do echo "never"; done
+        for I in $(split ${EMPTY}); do echo "never"; done
         echo "after"
     "#);
     assert!(outputs_contain(&outputs, &["after"]));
@@ -430,10 +431,9 @@ fn control_empty_loop() {
 
 #[test]
 fn control_loop_with_conditional() {
-    // Note: word-split values are strings, compare with string "2"
-    // Shell-compatible: use [[ ]] for comparisons
+    // kaish requires explicit split; values are strings, compare with string "2"
     let outputs = run_script(r#"
-        for I in "1 2 3"; do if [[ ${I} == "2" ]]; then echo "found two"; fi; done
+        for I in $(split "1 2 3"); do if [[ ${I} == "2" ]]; then echo "found two"; fi; done
     "#);
     assert!(outputs_contain(&outputs, &["found two"]));
 }
