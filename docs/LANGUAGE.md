@@ -181,6 +181,72 @@ echo "Current time: $NOW"
 RESULT=$(cat file.json | jq ".name")
 ```
 
+### Structured Data from Command Substitution
+
+Unlike traditional shells, kaish does **not** perform implicit word splitting on command substitution results. Instead, commands can return structured data (JSON arrays) that iterate properly in for loops:
+
+```bash
+# seq returns a JSON array — iterates over numbers
+for i in $(seq 1 5); do
+    echo "Number: $i"
+done
+
+# glob returns a JSON array — iterates over files
+for f in $(glob "*.rs"); do
+    echo "File: $f"
+done
+
+# echo returns a string — iterates ONCE (no splitting!)
+for x in $(echo "a b c"); do
+    echo "Item: $x"  # prints "Item: a b c" once
+done
+
+# Use split for explicit word splitting
+for x in $(split "a b c"); do
+    echo "Item: $x"  # prints a, b, c separately
+done
+```
+
+**Why?** Implicit word splitting is a major source of shell bugs. By requiring explicit `split`, kaish makes the intent clear and avoids surprises with variables containing spaces.
+
+## String Splitting
+
+The `split` builtin provides explicit string splitting:
+
+```bash
+# Default: split on whitespace (like Python str.split())
+for word in $(split "hello world foo"); do
+    echo $word
+done
+
+# Split on delimiter
+for part in $(split "a:b:c" ":"); do
+    echo $part
+done
+
+# Split on regex
+for part in $(split "a1b2c3" -r "[0-9]"); do
+    echo $part
+done
+
+# Limit number of splits
+for part in $(split "a:b:c:d" ":" --limit=2); do
+    echo $part  # outputs: a, b:c:d
+done
+```
+
+### Migration from Traditional Shells
+
+If you're porting scripts that rely on word splitting:
+
+```bash
+# Old (implicit split in bash)
+for i in $ITEMS; do echo $i; done
+
+# New (explicit split in kaish)
+for i in $(split "$ITEMS"); do echo $i; done
+```
+
 ## Arithmetic
 
 Arithmetic expansion is **integer-only**. Floats exist as a data type (for JSON interop) but `$(( ))` operates on integers.
@@ -369,8 +435,8 @@ Features that ShellCheck warns about (word splitting, glob expansion, backticks)
 | SC Code | Warning | Kaish Approach |
 |---------|---------|----------------|
 | SC2006 | Use `$()` instead of backticks | Backticks don't exist |
-| SC2086 | Double quote to prevent word splitting | No word splitting |
-| SC2046 | Quote this to prevent word splitting | `$(cmd)` returns single value |
+| SC2086 | Double quote to prevent word splitting | No implicit word splitting — use `split` explicitly |
+| SC2046 | Quote this to prevent word splitting | `$(cmd)` returns structured data or single string |
 | SC2035 | Use `./*` so globs don't expand | No glob expansion |
 | SC2039 | Use `[[ ]]` in POSIX sh | Only `[[ ]]` exists |
 | SC1083 | Escape literal braces | No shell-level brace expansion |

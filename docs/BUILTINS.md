@@ -176,6 +176,40 @@ sort file.txt | uniq -d                      # show only duplicates
 
 ---
 
+### split
+
+Split a string into an array for iteration.
+
+| Category | Supported | Deliberately Omitted |
+|----------|-----------|---------------------|
+| **Delimiters** | Whitespace (default), literal string, regex (`-r`) | — |
+| **Options** | `--limit` (max splits) | — |
+| **Output** | JSON array (structured), newline-separated text (pipes) | — |
+
+**Why split?** kaish does not perform implicit word splitting on variables or command substitution. Use `split` when you explicitly need to split a string into parts for iteration.
+
+```bash
+# Split on whitespace (default)
+for word in $(split "hello world foo"); do
+    echo $word
+done
+
+# Split on delimiter
+for part in $(split "a:b:c" ":"); do
+    echo $part
+done
+
+# Split on regex
+for part in $(split "a1b2c3" -r "[0-9]"); do
+    echo $part
+done
+
+# Limit splits
+split "a:b:c:d" ":" --limit=2              # → ["a", "b:c:d"]
+```
+
+---
+
 ### wc
 
 Count lines, words, and characters.
@@ -271,6 +305,7 @@ File content output tools.
 | **tr** | 85% | Complement | Use sed for complex cases |
 | **sort** | 80% | Version sort, stable | Specialized needs |
 | **uniq** | 80% | Case-insensitive, field skip | Pre-process with awk |
+| **split** | 100% | — | Explicit string splitting for iteration |
 | **jq** | 70% | Advanced filters, modules | Native jaq covers common transforms |
 
 ---

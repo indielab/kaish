@@ -12,11 +12,13 @@ sh, dropping several features that are easy to make mistakes with.
 
 **kaish eliminates entire classes of bugs at the language level:**
 
-- No word splitting — `$VAR` is always one value
-- No glob expansion — tools handle globbing or use glob() builtin
-- No backticks — only `$(cmd)` substitution
-- Strict booleans — `TRUE` and `yes` are errors, not truthy
-- ShellCheck-clean — the Bourne subset passes `shellcheck --enable=all`
+- **No implicit word splitting** — `$VAR` is always one value, never split on spaces
+- **No glob expansion** — tools handle globbing or use `glob` builtin
+- **Structured iteration** — `for i in $(seq 1 5)` works because `seq` returns a JSON array
+- **Explicit splitting** — use `split "$VAR"` when you need word splitting
+- **No backticks** — only `$(cmd)` substitution
+- **Strict booleans** — `TRUE` and `yes` are errors, not truthy
+- **ShellCheck-clean** — the Bourne subset passes `shellcheck --enable=all`
 
 Skills transfer from bash. Footguns don't.
 
@@ -34,8 +36,17 @@ if [[ -f config.json ]]; then
     echo "Config found"
 fi
 
-for item in $ITEMS; do
+# For loops - no implicit word splitting!
+for item in one two three; do      # literal items
     echo "Processing: $item"
+done
+
+for i in $(seq 1 3); do            # seq returns array
+    echo "Count: $i"
+done
+
+for file in $(glob "*.txt"); do    # glob returns array
+    echo "Found: $file"
 done
 
 # Pipes and redirects
