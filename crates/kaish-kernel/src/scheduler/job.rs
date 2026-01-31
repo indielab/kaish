@@ -10,6 +10,7 @@ use std::sync::Arc;
 use tokio::sync::{oneshot, Mutex};
 use tokio::task::JoinHandle;
 
+use super::stream::BoundedStream;
 use crate::interpreter::ExecResult;
 
 /// Unique identifier for a background job.
@@ -70,6 +71,10 @@ pub struct Job {
     result: Option<ExecResult>,
     /// Path to output file (captures stdout/stderr after completion).
     output_file: Option<PathBuf>,
+    /// Live stdout stream (bounded ring buffer).
+    stdout_stream: Option<Arc<BoundedStream>>,
+    /// Live stderr stream (bounded ring buffer).
+    stderr_stream: Option<Arc<BoundedStream>>,
 }
 
 impl Job {
@@ -82,6 +87,8 @@ impl Job {
             result_rx: None,
             result: None,
             output_file: None,
+            stdout_stream: None,
+            stderr_stream: None,
         }
     }
 
@@ -94,6 +101,30 @@ impl Job {
             result_rx: Some(rx),
             result: None,
             output_file: None,
+            stdout_stream: None,
+            stderr_stream: None,
+        }
+    }
+
+    /// Create a new job with attached output streams.
+    ///
+    /// The streams provide live access to job output via `/v/jobs/{id}/stdout` and `/stderr`.
+    pub fn with_streams(
+        id: JobId,
+        command: String,
+        rx: oneshot::Receiver<ExecResult>,
+        stdout: Arc<BoundedStream>,
+        stderr: Arc<BoundedStream>,
+    ) -> Self {
+        Self {
+            id,
+            command,
+            handle: None,
+            result_rx: Some(rx),
+            result: None,
+            output_file: None,
+            stdout_stream: Some(stdout),
+            stderr_stream: Some(stderr),
         }
     }
 
@@ -114,6 +145,30 @@ impl Job {
             Some(_) => JobStatus::Failed,
             None => JobStatus::Running,
         }
+    }
+
+    /// Get the job's status as a string suitable for /v/jobs/{id}/status.
+    ///
+    /// Returns:
+    /// - `"running"` if the job is still running
+    /// - `"done:0"` if the job completed successfully
+    /// - `"failed:{code}"` if the job failed with an exit code
+    pub fn status_string(&self) -> String {
+        match &self.result {
+            Some(r) if r.ok() => "done:0".to_string(),
+            Some(r) => format!("failed:{}", r.code),
+            None => "running".to_string(),
+        }
+    }
+
+    /// Get the stdout stream (if attached).
+    pub fn stdout_stream(&self) -> Option<&Arc<BoundedStream>> {
+        self.stdout_stream.as_ref()
+    }
+
+    /// Get the stderr stream (if attached).
+    pub fn stderr_stream(&self) -> Option<&Arc<BoundedStream>> {
+        self.stderr_stream.as_ref()
     }
 
     /// Wait for the job to complete and return its result.
@@ -249,6 +304,25 @@ impl JobManager {
         id
     }
 
+    /// Register a job with attached output streams.
+    ///
+    /// The streams provide live access to job output via `/v/jobs/{id}/stdout` and `/stderr`.
+    pub async fn register_with_streams(
+        &self,
+        command: String,
+        rx: oneshot::Receiver<ExecResult>,
+        stdout: Arc<BoundedStream>,
+        stderr: Arc<BoundedStream>,
+    ) -> JobId {
+        let id = JobId(self.next_id.fetch_add(1, Ordering::SeqCst));
+        let job = Job::with_streams(id, command, rx, stdout, stderr);
+
+        let mut jobs = self.jobs.lock().await;
+        jobs.insert(id, job);
+
+        id
+    }
+
     /// Wait for a specific job to complete.
     pub async fn wait(&self, id: JobId) -> Option<ExecResult> {
         let mut jobs = self.jobs.lock().await;
@@ -318,6 +392,50 @@ impl JobManager {
             status: job.status(),
             output_file: job.output_file.clone(),
         })
+    }
+
+    /// Get the command string for a job.
+    pub async fn get_command(&self, id: JobId) -> Option<String> {
+        let jobs = self.jobs.lock().await;
+        jobs.get(&id).map(|job| job.command.clone())
+    }
+
+    /// Get the status string for a job (for /v/jobs/{id}/status).
+    pub async fn get_status_string(&self, id: JobId) -> Option<String> {
+        let jobs = self.jobs.lock().await;
+        jobs.get(&id).map(|job| job.status_string())
+    }
+
+    /// Read stdout stream content for a job.
+    ///
+    /// Returns `None` if the job doesn't exist or has no attached stream.
+    pub async fn read_stdout(&self, id: JobId) -> Option<Vec<u8>> {
+        let jobs = self.jobs.lock().await;
+        if let Some(job) = jobs.get(&id) {
+            if let Some(stream) = job.stdout_stream() {
+                return Some(stream.read().await);
+            }
+        }
+        None
+    }
+
+    /// Read stderr stream content for a job.
+    ///
+    /// Returns `None` if the job doesn't exist or has no attached stream.
+    pub async fn read_stderr(&self, id: JobId) -> Option<Vec<u8>> {
+        let jobs = self.jobs.lock().await;
+        if let Some(job) = jobs.get(&id) {
+            if let Some(stream) = job.stderr_stream() {
+                return Some(stream.read().await);
+            }
+        }
+        None
+    }
+
+    /// List all job IDs.
+    pub async fn list_ids(&self) -> Vec<JobId> {
+        let jobs = self.jobs.lock().await;
+        jobs.keys().copied().collect()
     }
 }
 

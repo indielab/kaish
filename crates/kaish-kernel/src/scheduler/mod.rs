@@ -49,8 +49,10 @@
 mod job;
 mod pipeline;
 mod scatter;
+mod stream;
 
 pub use job::{Job, JobId, JobInfo, JobManager, JobStatus};
+pub use stream::{drain_to_stream, BoundedStream, StreamStats, DEFAULT_STREAM_MAX_SIZE};
 pub use pipeline::{build_tool_args, PipelineRunner};
 pub use scatter::{
     parse_gather_options, parse_scatter_options, GatherOptions, ScatterGatherRunner,
