@@ -55,6 +55,8 @@ pub enum IssueCode {
     RecursiveWithoutFlag,
     /// Extra positional arguments beyond what tool accepts.
     ExtraPositionalArgs,
+    /// Bare scalar variable in for loop (no word splitting in kaish).
+    ForLoopScalarVar,
 }
 
 impl IssueCode {
@@ -77,6 +79,7 @@ impl IssueCode {
             IssueCode::DiffNeedsTwoFiles => "E011",
             IssueCode::RecursiveWithoutFlag => "W004",
             IssueCode::ExtraPositionalArgs => "W005",
+            IssueCode::ForLoopScalarVar => "E012",
         }
     }
 
@@ -91,7 +94,8 @@ impl IssueCode {
             | IssueCode::BreakOutsideLoop
             | IssueCode::ReturnOutsideFunction
             | IssueCode::InvalidCount
-            | IssueCode::DiffNeedsTwoFiles => Severity::Error,
+            | IssueCode::DiffNeedsTwoFiles
+            | IssueCode::ForLoopScalarVar => Severity::Error,
 
             // These are warnings because context matters:
             // - MissingRequiredArg: might be provided by pipeline stdin or environment

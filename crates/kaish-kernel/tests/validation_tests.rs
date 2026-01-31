@@ -75,6 +75,58 @@ async fn validation_blocks_seq_zero_increment() {
     );
 }
 
+#[tokio::test]
+async fn validation_blocks_bare_var_in_for_loop() {
+    let kernel = make_kernel().await;
+    // `for i in $VAR` is always wrong in kaish - no implicit word splitting
+    let result = kernel.execute(r#"
+        ITEMS="a b c"
+        for i in $ITEMS; do
+            echo $i
+        done
+    "#).await;
+
+    assert!(result.is_err(), "bare variable in for loop should fail validation");
+    let err = result.unwrap_err().to_string();
+    assert!(
+        err.contains("word splitting") || err.contains("iterate once") || err.contains("E012"),
+        "error should mention word splitting or iterate once: {}",
+        err
+    );
+}
+
+#[tokio::test]
+async fn validation_allows_split_in_for_loop() {
+    let kernel = make_kernel().await;
+    // `for i in $(split "$VAR")` is the correct way
+    let result = kernel.execute(r#"
+        ITEMS="a b c"
+        for i in $(split "$ITEMS"); do
+            echo $i
+        done
+    "#).await;
+
+    assert!(result.is_ok(), "split in for loop should pass validation");
+    let exec = result.unwrap();
+    assert!(exec.ok(), "split in for loop should execute successfully");
+    assert!(exec.out.contains("a") && exec.out.contains("b") && exec.out.contains("c"));
+}
+
+#[tokio::test]
+async fn validation_allows_seq_in_for_loop() {
+    let kernel = make_kernel().await;
+    // `for i in $(seq 1 3)` works because seq returns a JSON array
+    let result = kernel.execute(r#"
+        for i in $(seq 1 3); do
+            echo $i
+        done
+    "#).await;
+
+    assert!(result.is_ok(), "seq in for loop should pass validation");
+    let exec = result.unwrap();
+    assert!(exec.ok(), "seq in for loop should execute successfully");
+}
+
 // ============================================================================
 // Tests that verify validation ALLOWS execution (Warning-level issues only)
 // ============================================================================

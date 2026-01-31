@@ -167,9 +167,27 @@ impl<'a> Validator<'a> {
 
     /// Validate a for loop.
     fn validate_for(&mut self, for_loop: &ForLoop) {
-        // Validate item expressions
+        // Validate item expressions and check for bare scalar variables
         for item in &for_loop.items {
             self.validate_expr(item);
+
+            // Detect `for i in $VAR` pattern - always a mistake in kaish
+            // since we don't do implicit word splitting
+            if self.is_bare_scalar_var(item) {
+                self.issues.push(
+                    ValidationIssue::error(
+                        IssueCode::ForLoopScalarVar,
+                        "bare variable in for loop iterates once (kaish has no implicit word splitting)",
+                    )
+                    .with_suggestion(concat!(
+                        "use one of:\n",
+                        "    for i in $(split \"$VAR\")      # split on whitespace\n",
+                        "    for i in $(split \"$VAR\" \":\")  # split on delimiter\n",
+                        "    for i in $(seq 1 10)          # iterate numbers\n",
+                        "    for i in $(glob \"*.rs\")       # iterate files",
+                    )),
+                );
+            }
         }
 
         self.loop_depth += 1;
@@ -184,6 +202,26 @@ impl<'a> Validator<'a> {
 
         self.scope.pop_frame();
         self.loop_depth -= 1;
+    }
+
+    /// Check if an expression is a bare scalar variable reference.
+    ///
+    /// Returns true for `$VAR` or `${VAR}` but not for `$(cmd)` or `"$VAR"`.
+    fn is_bare_scalar_var(&self, expr: &Expr) -> bool {
+        match expr {
+            // Direct variable reference like $VAR or ${VAR}
+            Expr::VarRef(_) => true,
+            // Variable with default like ${VAR:-default} - also problematic
+            Expr::VarWithDefault { .. } => true,
+            // NOT a problem: command substitution like $(cmd) - returns structured data
+            Expr::CommandSubst(_) => false,
+            // NOT a problem: literals are fine
+            Expr::Literal(_) => false,
+            // NOT a problem: interpolated strings are a single value
+            Expr::Interpolated(_) => false,
+            // Everything else: not a bare scalar var
+            _ => false,
+        }
     }
 
     /// Validate a while loop.
