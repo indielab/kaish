@@ -13,6 +13,10 @@
 //! git branch                      # List branches
 //! git branch -c feature           # Create a new branch
 //! git checkout main               # Switch branches
+//! git worktree list               # List worktrees
+//! git worktree add ../wt feature  # Create worktree for branch
+//! git worktree remove wt-name     # Remove a worktree
+//! git worktree prune              # Clean stale worktrees
 //! ```
 
 use async_trait::async_trait;
@@ -36,7 +40,7 @@ impl Tool for Git {
             .param(ParamSchema::required(
                 "subcommand",
                 "string",
-                "Git subcommand (init, clone, status, add, commit, log, diff, branch, checkout)",
+                "Git subcommand (init, clone, status, add, commit, log, diff, branch, checkout, worktree)",
             ))
             .param(ParamSchema::optional(
                 "args",
@@ -76,6 +80,7 @@ impl Tool for Git {
             "diff" => git_diff(ctx).await,
             "branch" => git_branch(&args, ctx).await,
             "checkout" => git_checkout(&rest_args, ctx).await,
+            "worktree" => git_worktree(&args, &rest_args, ctx).await,
             _ => ExecResult::failure(1, format!("git: unknown subcommand '{}'", subcommand)),
         }
     }
@@ -415,6 +420,169 @@ async fn git_checkout(args: &[String], ctx: &ExecContext) -> ExecResult {
     }
 }
 
+/// Worktree operations.
+async fn git_worktree(args: &ToolArgs, rest_args: &[String], ctx: &ExecContext) -> ExecResult {
+    if rest_args.is_empty() {
+        return ExecResult::failure(1, "git worktree: missing subcommand (list, add, remove, lock, unlock, prune)");
+    }
+
+    let git = match open_repo(ctx) {
+        Ok(g) => g,
+        Err(e) => return e,
+    };
+
+    let subcmd = &rest_args[0];
+    let subargs = &rest_args[1..];
+
+    match subcmd.as_str() {
+        "list" => worktree_list(&git),
+        "add" => worktree_add(&git, subargs, ctx),
+        "remove" => worktree_remove(&git, subargs, args),
+        "lock" => worktree_lock(&git, subargs, args),
+        "unlock" => worktree_unlock(&git, subargs),
+        "prune" => worktree_prune(&git),
+        _ => ExecResult::failure(1, format!("git worktree: unknown subcommand '{}'", subcmd)),
+    }
+}
+
+/// List all worktrees.
+fn worktree_list(git: &GitVfs) -> ExecResult {
+    match git.worktrees() {
+        Ok(worktrees) => {
+            let mut output = String::new();
+            for wt in worktrees {
+                // Format: path  commit  [branch]
+                let name_display = wt.name.as_deref().unwrap_or("(main)");
+                let head_display = wt.head.as_deref().unwrap_or("(detached)");
+                let lock_marker = if wt.locked { " [locked]" } else { "" };
+
+                output.push_str(&format!(
+                    "{:<40} {:<12} [{}]{}\n",
+                    wt.path.display(),
+                    head_display,
+                    name_display,
+                    lock_marker
+                ));
+            }
+            ExecResult::success(output.trim_end())
+        }
+        Err(e) => ExecResult::failure(1, format!("git worktree list: {}", e)),
+    }
+}
+
+/// Add a new worktree.
+fn worktree_add(git: &GitVfs, args: &[String], ctx: &ExecContext) -> ExecResult {
+    if args.is_empty() {
+        return ExecResult::failure(1, "git worktree add: missing path");
+    }
+
+    let path_arg = &args[0];
+    let branch = args.get(1).map(|s| s.as_str());
+
+    // Resolve the path relative to cwd
+    let vfs_path = ctx.resolve_path(path_arg);
+
+    // Get real filesystem path
+    let real_path = match ctx.backend.resolve_real_path(&vfs_path) {
+        Some(p) => p,
+        None => {
+            // If VFS path doesn't resolve, try resolving the parent
+            let parent = vfs_path.parent().unwrap_or(&vfs_path);
+            match ctx.backend.resolve_real_path(parent) {
+                Some(p) => {
+                    if let Some(name) = vfs_path.file_name() {
+                        p.join(name)
+                    } else {
+                        p
+                    }
+                }
+                None => {
+                    return ExecResult::failure(
+                        1,
+                        format!("git worktree add: {} is not on a real filesystem", vfs_path.display()),
+                    )
+                }
+            }
+        }
+    };
+
+    // Derive worktree name from path
+    let name = real_path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("worktree");
+
+    match git.worktree_add(name, &real_path, branch) {
+        Ok(info) => {
+            let branch_msg = info.head.as_deref().unwrap_or(name);
+            ExecResult::success(format!(
+                "Preparing worktree (new branch '{}')\nHEAD is now at {}",
+                branch_msg,
+                info.path.display()
+            ))
+        }
+        Err(e) => ExecResult::failure(1, format!("git worktree add: {}", e)),
+    }
+}
+
+/// Remove a worktree.
+fn worktree_remove(git: &GitVfs, args: &[String], tool_args: &ToolArgs) -> ExecResult {
+    if args.is_empty() {
+        return ExecResult::failure(1, "git worktree remove: missing worktree name");
+    }
+
+    let name = &args[0];
+    let force = tool_args.has_flag("f") || tool_args.has_flag("force");
+
+    match git.worktree_remove(name, force) {
+        Ok(()) => ExecResult::success(format!("Removed worktree '{}'", name)),
+        Err(e) => ExecResult::failure(1, format!("git worktree remove: {}", e)),
+    }
+}
+
+/// Lock a worktree.
+fn worktree_lock(git: &GitVfs, args: &[String], tool_args: &ToolArgs) -> ExecResult {
+    if args.is_empty() {
+        return ExecResult::failure(1, "git worktree lock: missing worktree name");
+    }
+
+    let name = &args[0];
+    let reason = tool_args.get_string("reason", usize::MAX);
+
+    match git.worktree_lock(name, reason.as_deref()) {
+        Ok(()) => ExecResult::success(format!("Locked worktree '{}'", name)),
+        Err(e) => ExecResult::failure(1, format!("git worktree lock: {}", e)),
+    }
+}
+
+/// Unlock a worktree.
+fn worktree_unlock(git: &GitVfs, args: &[String]) -> ExecResult {
+    if args.is_empty() {
+        return ExecResult::failure(1, "git worktree unlock: missing worktree name");
+    }
+
+    let name = &args[0];
+
+    match git.worktree_unlock(name) {
+        Ok(()) => ExecResult::success(format!("Unlocked worktree '{}'", name)),
+        Err(e) => ExecResult::failure(1, format!("git worktree unlock: {}", e)),
+    }
+}
+
+/// Prune stale worktrees.
+fn worktree_prune(git: &GitVfs) -> ExecResult {
+    match git.worktree_prune() {
+        Ok(count) => {
+            if count == 0 {
+                ExecResult::success("Nothing to prune")
+            } else {
+                ExecResult::success(format!("Pruned {} stale worktree(s)", count))
+            }
+        }
+        Err(e) => ExecResult::failure(1, format!("git worktree prune: {}", e)),
+    }
+}
+
 /// Open the git repository in the current working directory.
 fn open_repo(ctx: &ExecContext) -> Result<GitVfs, ExecResult> {
     // Resolve VFS path to real filesystem path
@@ -649,6 +817,90 @@ mod tests {
         assert!(!result.ok());
         assert!(result.err.contains("not a git repository"));
 
+        cleanup(&dir).await;
+    }
+
+    #[tokio::test]
+    async fn test_git_worktree_list() {
+        let (mut ctx, dir) = setup_git_repo().await;
+
+        // Create initial commit (required for worktrees)
+        fs::write(dir.join("README.md"), b"# Test").await.unwrap();
+        {
+            let git = GitVfs::open(&dir).unwrap();
+            git.add(&["README.md"]).unwrap();
+            git.commit("Initial commit", None).unwrap();
+        }
+
+        // List worktrees
+        let mut args = ToolArgs::new();
+        args.positional.push(Value::String("worktree".into()));
+        args.positional.push(Value::String("list".into()));
+
+        let result = Git.execute(args, &mut ctx).await;
+        assert!(result.ok(), "worktree list failed: {}", result.err);
+        // Should show at least the main worktree
+        assert!(result.out.contains("(main)") || result.out.contains("master") || !result.out.is_empty());
+
+        cleanup(&dir).await;
+    }
+
+    #[tokio::test]
+    async fn test_git_worktree_add_and_remove() {
+        let (_setup_ctx, dir) = setup_git_repo().await;
+
+        // Create initial commit (required for worktrees)
+        fs::write(dir.join("README.md"), b"# Test").await.unwrap();
+        {
+            let git = GitVfs::open(&dir).unwrap();
+            git.add(&["README.md"]).unwrap();
+            git.commit("Initial commit", None).unwrap();
+        }
+
+        // Create a worktree directory path
+        let wt_path = dir.parent().unwrap().join("test-worktree");
+
+        // Mount the parent so we can create the worktree there
+        let parent_dir = dir.parent().unwrap().to_path_buf();
+        let mut vfs = VfsRouter::new();
+        let local = crate::vfs::LocalFs::new(&parent_dir);
+        vfs.mount("/", local);
+        let mut ctx = ExecContext::new(Arc::new(vfs));
+        ctx.cwd = std::path::PathBuf::from("/").join(dir.file_name().unwrap());
+
+        // Add worktree
+        let mut args = ToolArgs::new();
+        args.positional.push(Value::String("worktree".into()));
+        args.positional.push(Value::String("add".into()));
+        args.positional.push(Value::String("../test-worktree".into()));
+
+        let result = Git.execute(args, &mut ctx).await;
+        assert!(result.ok(), "worktree add failed: {}", result.err);
+
+        // Verify worktree was created
+        assert!(wt_path.exists(), "worktree directory should exist");
+
+        // List should show both worktrees
+        let mut args = ToolArgs::new();
+        args.positional.push(Value::String("worktree".into()));
+        args.positional.push(Value::String("list".into()));
+
+        let result = Git.execute(args, &mut ctx).await;
+        assert!(result.ok());
+        assert!(result.out.contains("test-worktree"));
+
+        // Remove the worktree
+        let mut args = ToolArgs::new();
+        args.positional.push(Value::String("worktree".into()));
+        args.positional.push(Value::String("remove".into()));
+        args.positional.push(Value::String("test-worktree".into()));
+        args.flags.insert("force".into());
+
+        let result = Git.execute(args, &mut ctx).await;
+        assert!(result.ok(), "worktree remove failed: {}", result.err);
+
+        // Cleanup
+        let _ = fs::remove_dir_all(&wt_path).await;
         cleanup(&dir).await;
     }
 }

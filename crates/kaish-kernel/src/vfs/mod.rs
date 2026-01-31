@@ -25,7 +25,7 @@ mod memory;
 mod router;
 mod traits;
 
-pub use git::{FileStatus, GitVfs, LogEntry, StatusSummary};
+pub use git::{FileStatus, GitVfs, LogEntry, StatusSummary, WorktreeInfo};
 pub use local::LocalFs;
 pub use memory::MemoryFs;
 pub use router::{MountInfo, VfsRouter};

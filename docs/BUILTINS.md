@@ -310,6 +310,58 @@ File content output tools.
 
 ---
 
+## Version Control
+
+### git
+
+Version control operations via git2-rs.
+
+| Category | Supported | Deliberately Omitted |
+|----------|-----------|---------------------|
+| **Repository** | `init`, `clone`, `status` | — |
+| **Staging** | `add` (with globs) | `rm`, `reset` (file level) |
+| **Commits** | `commit -m`, `log`, `diff` | `rebase`, `cherry-pick`, `merge` |
+| **Branches** | `branch`, `checkout` | `switch` (use checkout) |
+| **Worktrees** | `worktree list/add/remove/lock/unlock/prune` | — |
+| **Remote** | — | `fetch`, `pull`, `push`, `remote` |
+
+**Why no network operations?** Complex authentication scenarios are better handled by the real `git` command via `exec`. Use the builtin for local operations.
+
+```bash
+# Repository operations
+git init                              # initialize repo
+git clone https://url.git mydir       # clone repo
+git status                            # show status
+git status -s                         # short format
+git status --porcelain                # machine-readable
+
+# Staging and commits
+git add src/*.rs                      # stage files
+git commit -m "Add feature"           # commit
+git log -n 5                          # recent commits
+git log --oneline                     # compact format
+git diff                              # show changes
+
+# Branches
+git branch                            # list branches
+git branch -c feature                 # create branch
+git branch -b feature                 # create and switch
+git checkout main                     # switch branch
+
+# Worktrees (manage multiple working trees)
+git worktree list                     # list all worktrees
+git worktree add ../wt-feature feature  # create worktree for branch
+git worktree add ../wt-new            # create worktree (new branch)
+git worktree remove wt-name           # remove worktree
+git worktree remove -f wt-name        # force remove
+git worktree lock wt-name             # prevent pruning
+git worktree lock wt-name --reason="WIP"
+git worktree unlock wt-name           # allow pruning
+git worktree prune                    # clean stale worktree info
+```
+
+---
+
 ## See Also
 
 - [README.md](../README.md) — Project overview and quick tour

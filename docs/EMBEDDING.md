@@ -122,7 +122,7 @@ When you run `git status` in kaish:
 For lower-level git operations, use `GitVfs` directly:
 
 ```rust
-use kaish_kernel::{GitVfs, FileStatus, LogEntry};
+use kaish_kernel::{GitVfs, FileStatus, LogEntry, WorktreeInfo};
 use std::path::Path;
 
 fn inspect_repo() -> anyhow::Result<()> {
@@ -147,6 +147,40 @@ fn inspect_repo() -> anyhow::Result<()> {
     for entry in repo.log(5)? {
         println!("{} {}", entry.short_id, entry.message.lines().next().unwrap_or(""));
     }
+
+    Ok(())
+}
+
+fn manage_worktrees() -> anyhow::Result<()> {
+    let repo = GitVfs::open("/path/to/main/repo")?;
+
+    // List all worktrees
+    for wt in repo.worktrees()? {
+        println!("{}: {} ({:?})",
+            wt.name.as_deref().unwrap_or("main"),
+            wt.path.display(),
+            wt.head
+        );
+    }
+
+    // Create a new worktree for a feature branch
+    let wt_info = repo.worktree_add(
+        "feature-work",
+        Path::new("/path/to/feature-worktree"),
+        Some("feature-branch"),  // existing branch, or None for new branch
+    )?;
+    println!("Created worktree at {}", wt_info.path.display());
+
+    // Lock a worktree to prevent accidental pruning
+    repo.worktree_lock("feature-work", Some("work in progress"))?;
+
+    // Later, unlock and remove
+    repo.worktree_unlock("feature-work")?;
+    repo.worktree_remove("feature-work", false)?;  // force=false
+
+    // Clean up stale worktree entries
+    let pruned = repo.worktree_prune()?;
+    println!("Pruned {} stale worktree(s)", pruned);
 
     Ok(())
 }
@@ -211,6 +245,7 @@ The `kaish_kernel` crate exports these types at the crate root for convenience:
 - `FileStatus` — Status of a single file
 - `StatusSummary` — Aggregate status counts
 - `LogEntry` — A commit in the log
+- `WorktreeInfo` — Information about a worktree
 
 ### Path Primitives
 - `home_dir()` — User's home directory

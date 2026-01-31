@@ -16,7 +16,7 @@
 use async_trait::async_trait;
 use git2::{
     Commit, DiffOptions, Error as GitError, IndexAddOption, Oid, Repository, Signature, Status,
-    StatusOptions, StatusShow,
+    StatusOptions, StatusShow, WorktreeAddOptions, WorktreeLockStatus, WorktreePruneOptions,
 };
 use std::io;
 use std::path::{Path, PathBuf};
@@ -419,6 +419,189 @@ impl GitVfs {
         repo.checkout_head(Some(&mut checkout_opts))?;
         Ok(())
     }
+
+    // ═══════════════════════════════════════════════════════════════════════════
+    // Git Worktree Operations
+    // ═══════════════════════════════════════════════════════════════════════════
+
+    /// List all worktrees attached to this repository.
+    ///
+    /// Returns the main worktree plus any linked worktrees.
+    pub fn worktrees(&self) -> Result<Vec<WorktreeInfo>, GitError> {
+        let repo = self.repo.lock().map_err(|_| {
+            GitError::from_str("failed to acquire repository lock")
+        })?;
+
+        let mut result = Vec::new();
+
+        // Add the main worktree (the repository itself)
+        let main_path = repo.workdir().unwrap_or(self.root.as_path());
+        let head_name = repo
+            .head()
+            .ok()
+            .and_then(|h| h.shorthand().map(String::from));
+
+        result.push(WorktreeInfo {
+            name: None, // Main worktree has no name
+            path: main_path.to_path_buf(),
+            head: head_name,
+            locked: false,
+            prunable: false,
+        });
+
+        // Add linked worktrees
+        let worktree_names = repo.worktrees()?;
+        for name in worktree_names.iter() {
+            if let Some(name) = name {
+                if let Ok(wt) = repo.find_worktree(name) {
+                    let locked = matches!(wt.is_locked(), Ok(WorktreeLockStatus::Locked(_)));
+                    let prunable = wt.is_prunable(None).unwrap_or(false);
+
+                    // Get the HEAD of this worktree by opening it as a repo
+                    let wt_head = Repository::open_from_worktree(&wt)
+                        .ok()
+                        .and_then(|r| {
+                            r.head().ok().and_then(|h| h.shorthand().map(String::from))
+                        });
+
+                    result.push(WorktreeInfo {
+                        name: Some(name.to_string()),
+                        path: wt.path().to_path_buf(),
+                        head: wt_head,
+                        locked,
+                        prunable,
+                    });
+                }
+            }
+        }
+
+        Ok(result)
+    }
+
+    /// Add a new worktree.
+    ///
+    /// Creates a new worktree at `path` with the given `name`.
+    /// If `branch` is provided, checks out that branch; otherwise creates
+    /// a new branch with the worktree name.
+    pub fn worktree_add(
+        &self,
+        name: &str,
+        path: &Path,
+        branch: Option<&str>,
+    ) -> Result<WorktreeInfo, GitError> {
+        let repo = self.repo.lock().map_err(|_| {
+            GitError::from_str("failed to acquire repository lock")
+        })?;
+
+        let mut opts = WorktreeAddOptions::new();
+
+        // If a branch is specified, find it and set reference
+        let branch_ref;
+        if let Some(branch_name) = branch {
+            if let Ok(br) = repo.find_branch(branch_name, git2::BranchType::Local) {
+                branch_ref = Some(br.into_reference());
+                opts.reference(branch_ref.as_ref());
+            }
+            // If branch doesn't exist, git2 will create one with the worktree name
+        }
+
+        let wt = repo.worktree(name, path, Some(&opts))?;
+
+        // Get info about the newly created worktree
+        let locked = matches!(wt.is_locked(), Ok(WorktreeLockStatus::Locked(_)));
+        let wt_head = Repository::open_from_worktree(&wt)
+            .ok()
+            .and_then(|r| {
+                r.head().ok().and_then(|h| h.shorthand().map(String::from))
+            });
+
+        Ok(WorktreeInfo {
+            name: Some(name.to_string()),
+            path: wt.path().to_path_buf(),
+            head: wt_head,
+            locked,
+            prunable: false,
+        })
+    }
+
+    /// Remove a worktree.
+    ///
+    /// The worktree must not be locked and must be prunable (no uncommitted changes).
+    /// Use `force` to remove even if it has changes.
+    pub fn worktree_remove(&self, name: &str, force: bool) -> Result<(), GitError> {
+        let repo = self.repo.lock().map_err(|_| {
+            GitError::from_str("failed to acquire repository lock")
+        })?;
+
+        let wt = repo.find_worktree(name)?;
+
+        // Check if locked
+        if let Ok(WorktreeLockStatus::Locked(reason)) = wt.is_locked() {
+            let msg = reason
+                .map(|r| format!("worktree '{}' is locked: {}", name, r))
+                .unwrap_or_else(|| format!("worktree '{}' is locked", name));
+            return Err(GitError::from_str(&msg));
+        }
+
+        let mut prune_opts = WorktreePruneOptions::new();
+        if force {
+            prune_opts.valid(true);
+            prune_opts.working_tree(true);
+        }
+
+        wt.prune(Some(&mut prune_opts))?;
+        Ok(())
+    }
+
+    /// Lock a worktree to prevent it from being pruned.
+    pub fn worktree_lock(&self, name: &str, reason: Option<&str>) -> Result<(), GitError> {
+        let repo = self.repo.lock().map_err(|_| {
+            GitError::from_str("failed to acquire repository lock")
+        })?;
+
+        let wt = repo.find_worktree(name)?;
+        wt.lock(reason)?;
+        Ok(())
+    }
+
+    /// Unlock a worktree.
+    pub fn worktree_unlock(&self, name: &str) -> Result<(), GitError> {
+        let repo = self.repo.lock().map_err(|_| {
+            GitError::from_str("failed to acquire repository lock")
+        })?;
+
+        let wt = repo.find_worktree(name)?;
+        wt.unlock()?;
+        Ok(())
+    }
+
+    /// Prune stale worktree information.
+    ///
+    /// Removes worktree entries that no longer exist on disk.
+    pub fn worktree_prune(&self) -> Result<usize, GitError> {
+        let repo = self.repo.lock().map_err(|_| {
+            GitError::from_str("failed to acquire repository lock")
+        })?;
+
+        let mut pruned = 0;
+        let worktree_names = repo.worktrees()?;
+
+        for name in worktree_names.iter() {
+            if let Some(name) = name {
+                if let Ok(wt) = repo.find_worktree(name) {
+                    // Check if the worktree path still exists
+                    if wt.validate().is_err() {
+                        let mut opts = WorktreePruneOptions::new();
+                        if wt.prune(Some(&mut opts)).is_ok() {
+                            pruned += 1;
+                        }
+                    }
+                }
+            }
+        }
+
+        Ok(pruned)
+    }
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -474,6 +657,21 @@ impl std::fmt::Debug for GitVfs {
 // ═══════════════════════════════════════════════════════════════════════════
 // Helper Types
 // ═══════════════════════════════════════════════════════════════════════════
+
+/// Information about a worktree.
+#[derive(Debug, Clone)]
+pub struct WorktreeInfo {
+    /// Name of the worktree (None for main worktree).
+    pub name: Option<String>,
+    /// Path to the worktree directory.
+    pub path: PathBuf,
+    /// Current HEAD reference (branch name or commit).
+    pub head: Option<String>,
+    /// Whether the worktree is locked.
+    pub locked: bool,
+    /// Whether the worktree can be pruned.
+    pub prunable: bool,
+}
 
 /// Status of a single file in the working tree.
 #[derive(Debug, Clone)]
