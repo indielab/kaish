@@ -478,6 +478,147 @@ pub enum Token {
     LineContinuation,
 }
 
+/// Semantic category for syntax highlighting.
+///
+/// Stable enum that groups tokens by purpose. Consumers match on categories
+/// instead of individual tokens, insulating them from lexer evolution.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum TokenCategory {
+    /// Keywords: if, then, else, for, while, function, return, etc.
+    Keyword,
+    /// Operators: |, &&, ||, >, >>, 2>&1, =, ==, etc.
+    Operator,
+    /// String literals: "...", '...', heredocs
+    String,
+    /// Numeric literals: 123, 3.14, arithmetic expressions
+    Number,
+    /// Variable references: $foo, ${bar}, $1, $@, $#, $?, $$
+    Variable,
+    /// Comments: # ...
+    Comment,
+    /// Punctuation: ; , . ( ) { } [ ]
+    Punctuation,
+    /// Identifiers in command position
+    Command,
+    /// Absolute paths: /foo/bar
+    Path,
+    /// Flags: --long, -s, +x
+    Flag,
+    /// Invalid tokens
+    Error,
+}
+
+impl Token {
+    /// Returns the semantic category for syntax highlighting.
+    pub fn category(&self) -> TokenCategory {
+        match self {
+            // Keywords
+            Token::If
+            | Token::Then
+            | Token::Else
+            | Token::Elif
+            | Token::Fi
+            | Token::For
+            | Token::In
+            | Token::Do
+            | Token::Done
+            | Token::While
+            | Token::Case
+            | Token::Esac
+            | Token::Function
+            | Token::Return
+            | Token::Break
+            | Token::Continue
+            | Token::Exit
+            | Token::Set
+            | Token::Local
+            | Token::True
+            | Token::False
+            | Token::TypeString
+            | Token::TypeInt
+            | Token::TypeFloat
+            | Token::TypeBool => TokenCategory::Keyword,
+
+            // Operators and redirections
+            Token::Pipe
+            | Token::And
+            | Token::Or
+            | Token::Amp
+            | Token::Eq
+            | Token::EqEq
+            | Token::NotEq
+            | Token::Match
+            | Token::NotMatch
+            | Token::Lt
+            | Token::Gt
+            | Token::LtEq
+            | Token::GtEq
+            | Token::GtGt
+            | Token::Stderr
+            | Token::Both
+            | Token::HereDocStart
+            | Token::StderrToStdout
+            | Token::StdoutToStderr
+            | Token::StdoutToStderr2 => TokenCategory::Operator,
+
+            // Strings
+            Token::String(_) | Token::SingleString(_) | Token::HereDoc(_) => TokenCategory::String,
+
+            // Numbers
+            Token::Int(_) | Token::Float(_) | Token::Arithmetic(_) => TokenCategory::Number,
+
+            // Variables
+            Token::VarRef(_)
+            | Token::SimpleVarRef(_)
+            | Token::Positional(_)
+            | Token::AllArgs
+            | Token::ArgCount
+            | Token::VarLength(_)
+            | Token::LastExitCode
+            | Token::CurrentPid => TokenCategory::Variable,
+
+            // Flags
+            Token::LongFlag(_)
+            | Token::ShortFlag(_)
+            | Token::PlusFlag(_)
+            | Token::DoubleDash => TokenCategory::Flag,
+
+            // Punctuation
+            Token::Semi
+            | Token::DoubleSemi
+            | Token::Colon
+            | Token::Comma
+            | Token::Dot
+            | Token::LParen
+            | Token::RParen
+            | Token::LBrace
+            | Token::RBrace
+            | Token::LBracket
+            | Token::RBracket
+            | Token::Bang
+            | Token::Question
+            | Token::Star
+            | Token::Newline
+            | Token::LineContinuation
+            | Token::CmdSubstStart => TokenCategory::Punctuation,
+
+            // Comments
+            Token::Comment => TokenCategory::Comment,
+
+            // Paths
+            Token::Path(_) => TokenCategory::Path,
+
+            // Commands/identifiers
+            Token::Ident(_) => TokenCategory::Command,
+
+            // Errors
+            Token::InvalidNumberIdent
+            | Token::InvalidFloatNoLeading
+            | Token::InvalidFloatNoTrailing => TokenCategory::Error,
+        }
+    }
+}
+
 /// Lex a double-quoted string literal, processing escape sequences.
 fn lex_string(lex: &mut logos::Lexer<Token>) -> Result<String, LexerError> {
     parse_string_literal(lex.slice())
@@ -2257,5 +2398,72 @@ mod tests {
         let source = "$((((1 + 2) * 3)))";
         let tokens = lex(source);
         assert_eq!(tokens, vec![Token::Arithmetic("((1 + 2) * 3)".to_string())]);
+    }
+
+    // ═══════════════════════════════════════════════════════════════════
+    // Token category tests
+    // ═══════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn token_categories() {
+        // Keywords
+        assert_eq!(Token::If.category(), TokenCategory::Keyword);
+        assert_eq!(Token::Then.category(), TokenCategory::Keyword);
+        assert_eq!(Token::For.category(), TokenCategory::Keyword);
+        assert_eq!(Token::Function.category(), TokenCategory::Keyword);
+        assert_eq!(Token::True.category(), TokenCategory::Keyword);
+        assert_eq!(Token::TypeString.category(), TokenCategory::Keyword);
+
+        // Operators
+        assert_eq!(Token::Pipe.category(), TokenCategory::Operator);
+        assert_eq!(Token::And.category(), TokenCategory::Operator);
+        assert_eq!(Token::Or.category(), TokenCategory::Operator);
+        assert_eq!(Token::StderrToStdout.category(), TokenCategory::Operator);
+        assert_eq!(Token::GtGt.category(), TokenCategory::Operator);
+
+        // Strings
+        assert_eq!(Token::String("test".to_string()).category(), TokenCategory::String);
+        assert_eq!(Token::SingleString("test".to_string()).category(), TokenCategory::String);
+        assert_eq!(Token::HereDoc("test".to_string()).category(), TokenCategory::String);
+
+        // Numbers
+        assert_eq!(Token::Int(42).category(), TokenCategory::Number);
+        assert_eq!(Token::Float(3.14).category(), TokenCategory::Number);
+        assert_eq!(Token::Arithmetic("1+2".to_string()).category(), TokenCategory::Number);
+
+        // Variables
+        assert_eq!(Token::SimpleVarRef("X".to_string()).category(), TokenCategory::Variable);
+        assert_eq!(Token::VarRef("${X}".to_string()).category(), TokenCategory::Variable);
+        assert_eq!(Token::Positional(1).category(), TokenCategory::Variable);
+        assert_eq!(Token::AllArgs.category(), TokenCategory::Variable);
+        assert_eq!(Token::ArgCount.category(), TokenCategory::Variable);
+        assert_eq!(Token::LastExitCode.category(), TokenCategory::Variable);
+        assert_eq!(Token::CurrentPid.category(), TokenCategory::Variable);
+
+        // Flags
+        assert_eq!(Token::ShortFlag("l".to_string()).category(), TokenCategory::Flag);
+        assert_eq!(Token::LongFlag("verbose".to_string()).category(), TokenCategory::Flag);
+        assert_eq!(Token::PlusFlag("e".to_string()).category(), TokenCategory::Flag);
+        assert_eq!(Token::DoubleDash.category(), TokenCategory::Flag);
+
+        // Punctuation
+        assert_eq!(Token::Semi.category(), TokenCategory::Punctuation);
+        assert_eq!(Token::LParen.category(), TokenCategory::Punctuation);
+        assert_eq!(Token::LBracket.category(), TokenCategory::Punctuation);
+        assert_eq!(Token::Newline.category(), TokenCategory::Punctuation);
+
+        // Comments
+        assert_eq!(Token::Comment.category(), TokenCategory::Comment);
+
+        // Paths
+        assert_eq!(Token::Path("/tmp/file".to_string()).category(), TokenCategory::Path);
+
+        // Commands
+        assert_eq!(Token::Ident("echo".to_string()).category(), TokenCategory::Command);
+
+        // Errors
+        assert_eq!(Token::InvalidNumberIdent.category(), TokenCategory::Error);
+        assert_eq!(Token::InvalidFloatNoLeading.category(), TokenCategory::Error);
+        assert_eq!(Token::InvalidFloatNoTrailing.category(), TokenCategory::Error);
     }
 }
