@@ -1,11 +1,12 @@
-//! jobs — List background jobs.
+//! jobs — List and manage background jobs.
 
 use async_trait::async_trait;
 
+use crate::ast::Value;
 use crate::interpreter::ExecResult;
-use crate::tools::{ExecContext, Tool, ToolArgs, ToolSchema};
+use crate::tools::{ExecContext, ParamSchema, Tool, ToolArgs, ToolSchema};
 
-/// Jobs tool: list background jobs.
+/// Jobs tool: list and manage background jobs.
 pub struct Jobs;
 
 #[async_trait]
@@ -15,14 +16,29 @@ impl Tool for Jobs {
     }
 
     fn schema(&self) -> ToolSchema {
-        ToolSchema::new("jobs", "List background jobs")
+        ToolSchema::new("jobs", "List and manage background jobs")
+            .param(ParamSchema::optional(
+                "cleanup",
+                "bool",
+                Value::Bool(false),
+                "Remove completed jobs from tracking (--cleanup)",
+            ))
     }
 
-    async fn execute(&self, _args: ToolArgs, ctx: &mut ExecContext) -> ExecResult {
+    async fn execute(&self, args: ToolArgs, ctx: &mut ExecContext) -> ExecResult {
         let manager = match &ctx.job_manager {
             Some(m) => m,
             None => return ExecResult::success("(no job manager)"),
         };
+
+        // Handle --cleanup flag
+        if args.has_flag("cleanup") {
+            let before = manager.list().await.len();
+            manager.cleanup().await;
+            let after = manager.list().await.len();
+            let removed = before - after;
+            return ExecResult::success(format!("Cleaned up {} completed job(s)\n", removed));
+        }
 
         let jobs = manager.list().await;
 
@@ -32,9 +48,10 @@ impl Tool for Jobs {
 
         let mut output = String::new();
         for job in jobs {
+            // Format: [id] Status command  /v/jobs/id/
             output.push_str(&format!(
-                "[{}] {} {}\n",
-                job.id, job.status, job.command
+                "[{}] {} {}  /v/jobs/{}/\n",
+                job.id, job.status, job.command, job.id
             ));
         }
 
@@ -94,5 +111,61 @@ mod tests {
         assert!(result.out.contains("[1]"));
         assert!(result.out.contains("test command"));
         assert!(result.out.contains("Running"));
+        assert!(result.out.contains("/v/jobs/1/"));
+    }
+
+    #[tokio::test]
+    async fn test_jobs_cleanup() {
+        let mut ctx = make_ctx();
+        let manager = Arc::new(JobManager::new());
+        ctx.set_job_manager(manager.clone());
+
+        // Spawn a quick job that will complete
+        let id = manager.spawn("quick job".to_string(), async {
+            ExecResult::success("")
+        });
+
+        // Wait for it to complete
+        tokio::time::sleep(Duration::from_millis(10)).await;
+        let _ = manager.wait(id).await;
+
+        // Should have 1 completed job
+        assert_eq!(manager.list().await.len(), 1);
+
+        // Cleanup
+        let mut args = ToolArgs::new();
+        args.flags.insert("cleanup".to_string());
+        let result = Jobs.execute(args, &mut ctx).await;
+
+        assert!(result.ok());
+        assert!(result.out.contains("Cleaned up 1 completed job"));
+
+        // Should have no jobs now
+        assert_eq!(manager.list().await.len(), 0);
+    }
+
+    #[tokio::test]
+    async fn test_jobs_cleanup_preserves_running() {
+        let mut ctx = make_ctx();
+        let manager = Arc::new(JobManager::new());
+        ctx.set_job_manager(manager.clone());
+
+        // Spawn a long-running job
+        manager.spawn("long job".to_string(), async {
+            tokio::time::sleep(Duration::from_secs(10)).await;
+            ExecResult::success("")
+        });
+
+        // Wait for registration
+        tokio::time::sleep(Duration::from_millis(10)).await;
+
+        // Cleanup should not remove running job
+        let mut args = ToolArgs::new();
+        args.flags.insert("cleanup".to_string());
+        let result = Jobs.execute(args, &mut ctx).await;
+
+        assert!(result.ok());
+        assert!(result.out.contains("Cleaned up 0 completed job"));
+        assert_eq!(manager.list().await.len(), 1);
     }
 }
