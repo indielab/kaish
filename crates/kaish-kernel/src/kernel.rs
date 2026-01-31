@@ -34,10 +34,10 @@ use crate::backend::KernelBackend;
 use crate::glob::glob_match;
 use crate::interpreter::{eval_expr, expand_tilde, json_to_value, value_to_string, ControlFlow, DisplayHint, ExecResult, Scope};
 use crate::parser::parse;
-use crate::scheduler::{JobManager, PipelineRunner};
+use crate::scheduler::{drain_to_stream, BoundedStream, JobManager, PipelineRunner, DEFAULT_STREAM_MAX_SIZE};
 use crate::tools::{register_builtins, resolve_in_path, ExecContext, ToolArgs, ToolRegistry};
 use crate::validator::{Severity, Validator};
-use crate::vfs::{LocalFs, MemoryFs, VfsRouter};
+use crate::vfs::{JobFs, LocalFs, MemoryFs, VfsRouter};
 
 /// VFS mount mode determines how the local filesystem is exposed.
 ///
@@ -282,9 +282,13 @@ impl Kernel {
     /// Create a new kernel with the given configuration.
     #[allow(deprecated)]
     pub fn new(config: KernelConfig) -> Result<Self> {
-        let vfs = Self::setup_vfs(&config);
-        let vfs = Arc::new(vfs);
+        let mut vfs = Self::setup_vfs(&config);
         let jobs = Arc::new(JobManager::new());
+
+        // Mount JobFs for job observability at /v/jobs
+        vfs.mount("/v/jobs", JobFs::new(jobs.clone()));
+
+        let vfs = Arc::new(vfs);
 
         // Set up tools
         let mut tools = ToolRegistry::new();
@@ -390,8 +394,13 @@ impl Kernel {
     /// the `vfs()` method, but it won't be used for execution context operations.
     pub fn with_backend(backend: Arc<dyn KernelBackend>, config: KernelConfig) -> Result<Self> {
         // Create VFS for compatibility (but exec_ctx will use the provided backend)
-        let vfs = Arc::new(Self::setup_vfs(&config));
+        let mut vfs = Self::setup_vfs(&config);
         let jobs = Arc::new(JobManager::new());
+
+        // Mount JobFs for job observability at /v/jobs
+        vfs.mount("/v/jobs", JobFs::new(jobs.clone()));
+
+        let vfs = Arc::new(vfs);
 
         // Set up tools
         let mut tools = ToolRegistry::new();
@@ -1642,33 +1651,72 @@ impl Kernel {
             }
         }
 
-        // Wait for completion and collect output
-        // TODO: Add streaming with bounded output (task #6)
-        match child.wait_with_output().await {
-            Ok(output) => {
-                let code = output.status.code().unwrap_or_else(|| {
-                    // Process was killed by signal
-                    #[cfg(unix)]
-                    {
-                        use std::os::unix::process::ExitStatusExt;
-                        128 + output.status.signal().unwrap_or(0)
-                    }
-                    #[cfg(not(unix))]
-                    {
-                        -1
-                    }
-                }) as i64;
+        // Create bounded streams for output capture (prevents OOM from large output)
+        let stdout_stream = Arc::new(BoundedStream::new(DEFAULT_STREAM_MAX_SIZE));
+        let stderr_stream = Arc::new(BoundedStream::new(DEFAULT_STREAM_MAX_SIZE));
 
-                let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
-                let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+        // Take pipes and spawn drain tasks
+        let stdout_pipe = child.stdout.take();
+        let stderr_pipe = child.stderr.take();
 
-                Ok(Some(ExecResult::from_output(code, stdout, stderr)))
+        let stdout_clone = stdout_stream.clone();
+        let stderr_clone = stderr_stream.clone();
+
+        let stdout_task = if let Some(pipe) = stdout_pipe {
+            Some(tokio::spawn(async move {
+                drain_to_stream(pipe, stdout_clone).await;
+            }))
+        } else {
+            None
+        };
+
+        let stderr_task = if let Some(pipe) = stderr_pipe {
+            Some(tokio::spawn(async move {
+                drain_to_stream(pipe, stderr_clone).await;
+            }))
+        } else {
+            None
+        };
+
+        // Wait for process to exit
+        let status = match child.wait().await {
+            Ok(s) => s,
+            Err(e) => {
+                return Ok(Some(ExecResult::failure(
+                    1,
+                    format!("{}: failed to wait: {}", name, e),
+                )));
             }
-            Err(e) => Ok(Some(ExecResult::failure(
-                1,
-                format!("{}: failed to wait: {}", name, e),
-            ))),
+        };
+
+        // Wait for drain tasks to complete
+        if let Some(task) = stdout_task {
+            // Ignore join error - the drain task logs its own errors
+            let _ = task.await;
         }
+        if let Some(task) = stderr_task {
+            let _ = task.await;
+        }
+
+        // Extract exit code
+        let code = status.code().unwrap_or_else(|| {
+            // Process was killed by signal
+            #[cfg(unix)]
+            {
+                use std::os::unix::process::ExitStatusExt;
+                128 + status.signal().unwrap_or(0)
+            }
+            #[cfg(not(unix))]
+            {
+                -1
+            }
+        }) as i64;
+
+        // Read final output from streams
+        let stdout = stdout_stream.read_string().await;
+        let stderr = stderr_stream.read_string().await;
+
+        Ok(Some(ExecResult::from_output(code, stdout, stderr)))
     }
 
     // --- Variable Access ---
