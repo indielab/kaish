@@ -134,12 +134,14 @@ impl Job {
     }
 
     /// Check if the job has completed.
-    pub fn is_done(&self) -> bool {
+    pub fn is_done(&mut self) -> bool {
+        self.try_poll();
         self.result.is_some()
     }
 
     /// Get the job's status.
-    pub fn status(&self) -> JobStatus {
+    pub fn status(&mut self) -> JobStatus {
+        self.try_poll();
         match &self.result {
             Some(r) if r.ok() => JobStatus::Done,
             Some(_) => JobStatus::Failed,
@@ -153,7 +155,8 @@ impl Job {
     /// - `"running"` if the job is still running
     /// - `"done:0"` if the job completed successfully
     /// - `"failed:{code}"` if the job failed with an exit code
-    pub fn status_string(&self) -> String {
+    pub fn status_string(&mut self) -> String {
+        self.try_poll();
         match &self.result {
             Some(r) if r.ok() => "done:0".to_string(),
             Some(r) => format!("failed:{}", r.code),
@@ -255,6 +258,57 @@ impl Job {
     pub fn try_result(&self) -> Option<&ExecResult> {
         self.result.as_ref()
     }
+
+    /// Try to poll the result channel and update status.
+    ///
+    /// This is a non-blocking check that updates `self.result` if the
+    /// job has completed. Returns true if the job is now done.
+    pub fn try_poll(&mut self) -> bool {
+        if self.result.is_some() {
+            return true;
+        }
+
+        // Try to poll the oneshot channel
+        if let Some(rx) = self.result_rx.as_mut() {
+            match rx.try_recv() {
+                Ok(result) => {
+                    self.result = Some(result);
+                    self.result_rx = None;
+                    return true;
+                }
+                Err(tokio::sync::oneshot::error::TryRecvError::Empty) => {
+                    // Still running
+                    return false;
+                }
+                Err(tokio::sync::oneshot::error::TryRecvError::Closed) => {
+                    // Channel closed without result - job failed
+                    self.result = Some(ExecResult::failure(1, "job channel closed"));
+                    self.result_rx = None;
+                    return true;
+                }
+            }
+        }
+
+        // Check if handle is finished
+        if let Some(handle) = self.handle.as_mut() {
+            if handle.is_finished() {
+                // Take the handle and wait for it (should be instant)
+                let handle = self.handle.take().unwrap();
+                // We can't await here, so we use now_or_never
+                // Note: this is synchronous since is_finished() was true
+                let result = match tokio::task::block_in_place(|| {
+                    tokio::runtime::Handle::current().block_on(handle)
+                }) {
+                    Ok(r) => r,
+                    Err(e) => ExecResult::failure(1, format!("job panicked: {}", e)),
+                };
+                self.result = Some(result);
+                return true;
+            }
+        }
+
+        false
+    }
 }
 
 /// Manager for background jobs.
@@ -354,8 +408,8 @@ impl JobManager {
 
     /// List all jobs with their status.
     pub async fn list(&self) -> Vec<JobInfo> {
-        let jobs = self.jobs.lock().await;
-        jobs.values()
+        let mut jobs = self.jobs.lock().await;
+        jobs.values_mut()
             .map(|job| JobInfo {
                 id: job.id,
                 command: job.command.clone(),
@@ -367,8 +421,14 @@ impl JobManager {
 
     /// Get the number of running jobs.
     pub async fn running_count(&self) -> usize {
-        let jobs = self.jobs.lock().await;
-        jobs.values().filter(|j| !j.is_done()).count()
+        let mut jobs = self.jobs.lock().await;
+        let mut count = 0;
+        for job in jobs.values_mut() {
+            if !job.is_done() {
+                count += 1;
+            }
+        }
+        count
     }
 
     /// Remove completed jobs from tracking.
@@ -385,8 +445,8 @@ impl JobManager {
 
     /// Get info for a specific job.
     pub async fn get(&self, id: JobId) -> Option<JobInfo> {
-        let jobs = self.jobs.lock().await;
-        jobs.get(&id).map(|job| JobInfo {
+        let mut jobs = self.jobs.lock().await;
+        jobs.get_mut(&id).map(|job| JobInfo {
             id: job.id,
             command: job.command.clone(),
             status: job.status(),
@@ -402,8 +462,8 @@ impl JobManager {
 
     /// Get the status string for a job (for /v/jobs/{id}/status).
     pub async fn get_status_string(&self, id: JobId) -> Option<String> {
-        let jobs = self.jobs.lock().await;
-        jobs.get(&id).map(|job| job.status_string())
+        let mut jobs = self.jobs.lock().await;
+        jobs.get_mut(&id).map(|job| job.status_string())
     }
 
     /// Read stdout stream content for a job.

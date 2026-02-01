@@ -124,6 +124,7 @@ fn setup_stdin_redirects(cmd: &Command, ctx: &mut ExecContext) {
 }
 
 /// Runs pipelines by spawning tasks and connecting them via channels.
+#[derive(Clone)]
 pub struct PipelineRunner {
     tools: Arc<ToolRegistry>,
 }

@@ -920,6 +920,11 @@ impl Kernel {
             return Ok(ExecResult::success(""));
         }
 
+        // Handle background execution (`&` operator)
+        if pipeline.background {
+            return self.execute_background(pipeline).await;
+        }
+
         // For single command without redirects, execute directly for efficiency
         if pipeline.commands.len() == 1 && pipeline.commands[0].redirects.is_empty() {
             let cmd = &pipeline.commands[0];
@@ -942,6 +947,143 @@ impl Kernel {
         }
 
         Ok(result)
+    }
+
+    /// Execute a pipeline in the background.
+    ///
+    /// The command is spawned as a tokio task, registered with the JobManager,
+    /// and its output is captured via BoundedStreams. The job is observable via
+    /// `/v/jobs/{id}/stdout`, `/v/jobs/{id}/stderr`, and `/v/jobs/{id}/status`.
+    ///
+    /// Returns immediately with a job ID like "[1]".
+    async fn execute_background(&self, pipeline: &crate::ast::Pipeline) -> Result<ExecResult> {
+        use tokio::sync::oneshot;
+
+        // Format the command for display in /v/jobs/{id}/command
+        let command_str = self.format_pipeline(pipeline);
+
+        // Create bounded streams for output capture
+        let stdout = Arc::new(BoundedStream::default_size());
+        let stderr = Arc::new(BoundedStream::default_size());
+
+        // Create channel for result notification
+        let (tx, rx) = oneshot::channel();
+
+        // Register with JobManager to get job ID and create VFS entries
+        let job_id = self.jobs.register_with_streams(
+            command_str.clone(),
+            rx,
+            stdout.clone(),
+            stderr.clone(),
+        ).await;
+
+        // Clone state needed for the spawned task
+        let runner = self.runner.clone();
+        let commands = pipeline.commands.clone();
+        let backend = {
+            let ctx = self.exec_ctx.read().await;
+            ctx.backend.clone()
+        };
+        let scope = {
+            let scope = self.scope.read().await;
+            scope.clone()
+        };
+        let cwd = {
+            let ctx = self.exec_ctx.read().await;
+            ctx.cwd.clone()
+        };
+        let tools = self.tools.clone();
+        let tool_schemas = self.tools.schemas();
+
+        // Spawn the background task
+        tokio::spawn(async move {
+            // Create execution context for the background job
+            // It inherits env vars and cwd from the parent context
+            let mut bg_ctx = ExecContext::with_backend(backend);
+            bg_ctx.scope = scope;
+            bg_ctx.cwd = cwd;
+            bg_ctx.set_tools(tools);
+            bg_ctx.set_tool_schemas(tool_schemas);
+
+            // Execute the pipeline
+            let result = runner.run(&commands, &mut bg_ctx).await;
+
+            // Write output to streams
+            if !result.out.is_empty() {
+                stdout.write(result.out.as_bytes()).await;
+            }
+            if !result.err.is_empty() {
+                stderr.write(result.err.as_bytes()).await;
+            }
+
+            // Close streams
+            stdout.close().await;
+            stderr.close().await;
+
+            // Send result to JobManager (ignore error if receiver dropped)
+            let _ = tx.send(result);
+        });
+
+        Ok(ExecResult::success(format!("[{}]", job_id)))
+    }
+
+    /// Format a pipeline as a command string for display.
+    fn format_pipeline(&self, pipeline: &crate::ast::Pipeline) -> String {
+        pipeline.commands
+            .iter()
+            .map(|cmd| {
+                let mut parts = vec![cmd.name.clone()];
+                for arg in &cmd.args {
+                    match arg {
+                        Arg::Positional(expr) => {
+                            parts.push(self.format_expr(expr));
+                        }
+                        Arg::Named { key, value } => {
+                            parts.push(format!("{}={}", key, self.format_expr(value)));
+                        }
+                        Arg::ShortFlag(name) => {
+                            parts.push(format!("-{}", name));
+                        }
+                        Arg::LongFlag(name) => {
+                            parts.push(format!("--{}", name));
+                        }
+                        Arg::DoubleDash => {
+                            parts.push("--".to_string());
+                        }
+                    }
+                }
+                parts.join(" ")
+            })
+            .collect::<Vec<_>>()
+            .join(" | ")
+    }
+
+    /// Format an expression as a string for display.
+    fn format_expr(&self, expr: &Expr) -> String {
+        match expr {
+            Expr::Literal(Value::String(s)) => {
+                if s.contains(' ') || s.contains('"') {
+                    format!("'{}'", s.replace('\'', "\\'"))
+                } else {
+                    s.clone()
+                }
+            }
+            Expr::Literal(Value::Int(i)) => i.to_string(),
+            Expr::Literal(Value::Float(f)) => f.to_string(),
+            Expr::Literal(Value::Bool(b)) => b.to_string(),
+            Expr::Literal(Value::Null) => "null".to_string(),
+            Expr::VarRef(path) => {
+                let name = path.segments.iter()
+                    .map(|seg| match seg {
+                        crate::ast::VarSegment::Field(f) => f.clone(),
+                    })
+                    .collect::<Vec<_>>()
+                    .join(".");
+                format!("${{{}}}", name)
+            }
+            Expr::Interpolated(_) => "\"...\"".to_string(),
+            _ => "...".to_string(),
+        }
     }
 
     /// Execute a single command.
@@ -3398,6 +3540,35 @@ AFTER="yes"'"#)
         // Variables inside command substitution
         let result = kernel.execute(r#"Y=world; X=$(echo "hello $Y"); echo "$X""#).await.expect("execution failed");
         assert_eq!(result.out.trim(), "hello world");
+    }
+
+    #[tokio::test]
+    async fn test_background_job_basic() {
+        use std::time::Duration;
+
+        let kernel = Kernel::new(KernelConfig::isolated()).expect("failed to create kernel");
+
+        // Run a simple background command
+        let result = kernel.execute("echo hello &").await.expect("execution failed");
+        assert!(result.ok(), "background command should succeed: {}", result.err);
+        assert!(result.out.contains("[1]"), "should return job ID: {}", result.out);
+
+        // Give the job time to complete
+        tokio::time::sleep(Duration::from_millis(100)).await;
+
+        // Check job status
+        let status = kernel.execute("cat /v/jobs/1/status").await.expect("status check failed");
+        assert!(status.ok(), "status should succeed: {}", status.err);
+        assert!(
+            status.out.contains("done:") || status.out.contains("running"),
+            "should have valid status: {}",
+            status.out
+        );
+
+        // Check stdout
+        let stdout = kernel.execute("cat /v/jobs/1/stdout").await.expect("stdout check failed");
+        assert!(stdout.ok());
+        assert!(stdout.out.contains("hello"));
     }
 
 }
