@@ -625,9 +625,15 @@ mod wc_realworld {
 
         let result = wc.execute(args, &mut ctx).await;
         assert!(result.ok(), "wc -l failed: {}", result.err);
-        // Should output line count
-        let count: i32 = result.out.split_whitespace().next().unwrap_or("0").parse().unwrap_or(-1);
-        assert!(count > 0, "Expected positive line count");
+        // Output is TSV format: filename\tcount - get count from last column
+        let count: i32 = result.out
+            .split('\t')
+            .last()
+            .unwrap_or("0")
+            .trim()
+            .parse()
+            .unwrap_or(-1);
+        assert!(count > 0, "Expected positive line count, got: {}", result.out);
     }
 
     // Pattern: wc -l file1 file2 file3

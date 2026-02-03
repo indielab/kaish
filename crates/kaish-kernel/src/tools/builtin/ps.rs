@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
 use crate::ast::Value;
-use crate::interpreter::ExecResult;
+use crate::interpreter::{ExecResult, OutputData, OutputNode};
 use crate::tools::{ExecContext, ParamSchema, Tool, ToolArgs, ToolSchema};
 
 /// Process information for output.
@@ -291,49 +291,48 @@ fn round_to_1(val: f64) -> f64 {
     (val * 10.0).round() / 10.0
 }
 
-/// Format processes as a table.
+/// Format processes as structured OutputData table.
 fn format_table(processes: &[ProcessInfo]) -> ExecResult {
     if processes.is_empty() {
-        return ExecResult::success("");
+        return ExecResult::with_output(OutputData::new());
     }
 
-    let mut output = String::new();
+    let headers = vec![
+        "PID".to_string(),
+        "PPID".to_string(),
+        "USER".to_string(),
+        "S".to_string(),
+        "%CPU".to_string(),
+        "%MEM".to_string(),
+        "VSZ".to_string(),
+        "RSS".to_string(),
+        "TTY".to_string(),
+        "TIME".to_string(),
+        "COMMAND".to_string(),
+    ];
 
-    // Header
-    output.push_str(&format!(
-        "{:>7} {:>7} {:<8} {:>1} {:>5} {:>5} {:>9} {:>9} {:<8} {:>8} {}\n",
-        "PID", "PPID", "USER", "S", "%CPU", "%MEM", "VSZ", "RSS", "TTY", "TIME", "COMMAND"
-    ));
+    let nodes: Vec<OutputNode> = processes
+        .iter()
+        .map(|p| {
+            let tty = p.tty.as_deref().unwrap_or("?");
+            OutputNode::new(p.pid.to_string()).with_cells(vec![
+                p.ppid.to_string(),
+                p.user.clone(),
+                p.state.clone(),
+                format!("{:.1}", p.cpu),
+                format!("{:.1}", p.mem),
+                p.vsz.to_string(),
+                p.rss.to_string(),
+                tty.to_string(),
+                p.time.clone(),
+                p.command.clone(),
+            ])
+        })
+        .collect();
 
-    for p in processes {
-        let tty = p.tty.as_deref().unwrap_or("?");
-        output.push_str(&format!(
-            "{:>7} {:>7} {:<8} {:>1} {:>5.1} {:>5.1} {:>9} {:>9} {:<8} {:>8} {}\n",
-            p.pid,
-            p.ppid,
-            truncate(&p.user, 8),
-            &p.state,
-            p.cpu,
-            p.mem,
-            p.vsz,
-            p.rss,
-            truncate(tty, 8),
-            &p.time,
-            &p.command
-        ));
-    }
-
-    ExecResult::success(output)
+    ExecResult::with_output(OutputData::table(headers, nodes))
 }
 
-/// Truncate a string to max length.
-fn truncate(s: &str, max: usize) -> &str {
-    if s.len() <= max {
-        s
-    } else {
-        &s[..max]
-    }
-}
 
 #[cfg(test)]
 mod tests {
@@ -353,7 +352,13 @@ mod tests {
         let result = Ps.execute(ToolArgs::new(), &mut ctx).await;
         // Should succeed and show at least the current process
         assert!(result.ok());
-        assert!(result.out.contains("PID"));
+        // Check OutputData is present with table headers
+        assert!(result.output.is_some());
+        let output = result.output.as_ref().unwrap();
+        assert!(output.headers.is_some());
+        let headers = output.headers.as_ref().unwrap();
+        assert!(headers.contains(&"PID".to_string()));
+        assert!(headers.contains(&"COMMAND".to_string()));
     }
 
     #[tokio::test]
@@ -364,8 +369,10 @@ mod tests {
 
         let result = Ps.execute(args, &mut ctx).await;
         assert!(result.ok());
-        // Should show more processes than default
-        assert!(result.out.contains("PID"));
+        // Should have OutputData with processes
+        assert!(result.output.is_some());
+        let output = result.output.as_ref().unwrap();
+        assert!(!output.root.is_empty());
     }
 
     #[tokio::test]
@@ -423,13 +430,6 @@ mod tests {
         assert_eq!(round_to_1(3.14159), 3.1);
         assert_eq!(round_to_1(2.95), 3.0);
         assert_eq!(round_to_1(0.04), 0.0);
-    }
-
-    #[test]
-    fn test_truncate() {
-        assert_eq!(truncate("hello", 10), "hello");
-        assert_eq!(truncate("hello world", 5), "hello");
-        assert_eq!(truncate("", 5), "");
     }
 
     #[test]

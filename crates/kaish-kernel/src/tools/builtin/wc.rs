@@ -4,7 +4,7 @@ use async_trait::async_trait;
 use std::path::Path;
 
 use crate::ast::Value;
-use crate::interpreter::ExecResult;
+use crate::interpreter::{ExecResult, OutputData, OutputNode};
 use crate::tools::{ExecContext, ParamSchema, Tool, ToolArgs, ToolSchema};
 
 /// Wc tool: count lines, words, characters, and bytes.
@@ -70,126 +70,140 @@ impl Tool for Wc {
             })
             .collect();
 
+        // Build headers based on flags
+        let headers = build_headers(lines_only, words_only, chars_only, bytes_only, show_all);
+
         // If no files, read from stdin
         if paths.is_empty() {
             let input = ctx.take_stdin().unwrap_or_default();
-            let output = format_counts(&input, None, lines_only, words_only, chars_only, bytes_only, show_all);
-            return ExecResult::success(output);
+            let (lc, wc, cc, bc) = count_content(&input);
+            let cells = build_cells(lc, wc, cc, bc, lines_only, words_only, chars_only, bytes_only, show_all);
+            let node = OutputNode::new("").with_cells(cells);
+            return ExecResult::with_output(OutputData::table(headers, vec![node]));
         }
 
         // Process each file
-        let mut output_lines = Vec::new();
+        let mut nodes = Vec::new();
         let mut total_lines = 0usize;
         let mut total_words = 0usize;
         let mut total_chars = 0usize;
         let mut total_bytes = 0usize;
         let mut had_error = false;
+        let mut error_messages = Vec::new();
 
         for path in &paths {
             let resolved = ctx.resolve_path(path);
             match ctx.backend.read(Path::new(&resolved), None).await {
                 Ok(data) => match String::from_utf8(data) {
                     Ok(input) => {
-                        let lc = input.lines().count();
-                        let wc = input.split_whitespace().count();
-                        let cc = input.chars().count();
-                        let bc = input.len();
+                        let (lc, wc, cc, bc) = count_content(&input);
 
                         total_lines += lc;
                         total_words += wc;
                         total_chars += cc;
                         total_bytes += bc;
 
-                        let line = format_counts_raw(
-                            lc, wc, cc, bc,
-                            Some(path.as_str()),
-                            lines_only, words_only, chars_only, bytes_only, show_all,
-                        );
-                        output_lines.push(line);
+                        let cells = build_cells(lc, wc, cc, bc, lines_only, words_only, chars_only, bytes_only, show_all);
+                        nodes.push(OutputNode::new(path.as_str()).with_cells(cells));
                     }
                     Err(_) => {
-                        output_lines.push(format!("wc: {}: invalid UTF-8", path));
+                        error_messages.push(format!("wc: {}: invalid UTF-8", path));
                         had_error = true;
                     }
                 },
                 Err(e) => {
-                    output_lines.push(format!("wc: {}: {}", path, e));
+                    error_messages.push(format!("wc: {}: {}", path, e));
                     had_error = true;
                 }
             }
         }
 
-        // Add total line if multiple files
+        // Add total row if multiple files
         if paths.len() > 1 {
-            let total_line = format_counts_raw(
+            let cells = build_cells(
                 total_lines, total_words, total_chars, total_bytes,
-                Some("total"),
                 lines_only, words_only, chars_only, bytes_only, show_all,
             );
-            output_lines.push(total_line);
+            nodes.push(OutputNode::new("total").with_cells(cells));
         }
 
-        let output = output_lines.join("\n") + "\n";
+        let output = OutputData::table(headers, nodes);
 
         if had_error {
-            ExecResult::failure(1, output)
+            // Return with error but include the output we did get
+            let mut result = ExecResult::with_output(output);
+            result.code = 1;
+            result.err = error_messages.join("\n");
+            result
         } else {
-            ExecResult::success(output)
+            ExecResult::with_output(output)
         }
     }
 }
 
-/// Format counts for a single input (used for stdin).
-fn format_counts(
-    input: &str,
-    filename: Option<&str>,
+/// Count lines, words, chars, and bytes in content.
+fn count_content(input: &str) -> (usize, usize, usize, usize) {
+    let lines = input.lines().count();
+    let words = input.split_whitespace().count();
+    let chars = input.chars().count();
+    let bytes = input.len();
+    (lines, words, chars, bytes)
+}
+
+/// Build headers based on which counts are shown.
+fn build_headers(
     lines_only: bool,
     words_only: bool,
     chars_only: bool,
     bytes_only: bool,
     show_all: bool,
-) -> String {
-    let lc = input.lines().count();
-    let wc = input.split_whitespace().count();
-    let cc = input.chars().count();
-    let bc = input.len();
-    format_counts_raw(lc, wc, cc, bc, filename, lines_only, words_only, chars_only, bytes_only, show_all) + "\n"
+) -> Vec<String> {
+    let mut headers = vec!["File".to_string()];
+
+    if show_all || lines_only {
+        headers.push("Lines".to_string());
+    }
+    if show_all || words_only {
+        headers.push("Words".to_string());
+    }
+    if show_all || bytes_only {
+        headers.push("Bytes".to_string());
+    }
+    if chars_only {
+        headers.push("Chars".to_string());
+    }
+
+    headers
 }
 
-/// Format counts from raw values.
-fn format_counts_raw(
+/// Build cells for a single count row.
+fn build_cells(
     line_count: usize,
     word_count: usize,
     char_count: usize,
     byte_count: usize,
-    filename: Option<&str>,
     lines_only: bool,
     words_only: bool,
     chars_only: bool,
     bytes_only: bool,
     show_all: bool,
-) -> String {
-    let mut parts = Vec::new();
+) -> Vec<String> {
+    let mut cells = Vec::new();
 
     if show_all || lines_only {
-        parts.push(format!("{:>8}", line_count));
+        cells.push(line_count.to_string());
     }
     if show_all || words_only {
-        parts.push(format!("{:>8}", word_count));
+        cells.push(word_count.to_string());
     }
     if show_all || bytes_only {
-        parts.push(format!("{:>8}", byte_count));
+        cells.push(byte_count.to_string());
     }
     if chars_only {
-        parts.push(format!("{:>8}", char_count));
+        cells.push(char_count.to_string());
     }
 
-    let mut output = parts.join("");
-    if let Some(name) = filename {
-        output.push(' ');
-        output.push_str(name);
-    }
-    output
+    cells
 }
 
 #[cfg(test)]
@@ -235,7 +249,9 @@ mod tests {
 
         let result = Wc.execute(args, &mut ctx).await;
         assert!(result.ok());
-        assert!(result.out.trim().starts_with("2"));
+        // TSV format: filename\tcount
+        assert!(result.out.contains("2"));
+        assert!(result.out.contains("/test.txt"));
     }
 
     #[tokio::test]
@@ -247,7 +263,8 @@ mod tests {
 
         let result = Wc.execute(args, &mut ctx).await;
         assert!(result.ok());
-        assert!(result.out.trim().starts_with("5"));
+        // TSV format: filename\tcount
+        assert!(result.out.contains("5"));
     }
 
     #[tokio::test]
@@ -259,7 +276,8 @@ mod tests {
 
         let result = Wc.execute(args, &mut ctx).await;
         assert!(result.ok());
-        assert!(result.out.trim().starts_with("24"));
+        // TSV format: filename\tcount
+        assert!(result.out.contains("24"));
     }
 
     #[tokio::test]
@@ -272,7 +290,8 @@ mod tests {
         let result = Wc.execute(args, &mut ctx).await;
         assert!(result.ok());
         // "héllo wörld\n" = 12 chars (é and ö are single chars)
-        assert!(result.out.trim().starts_with("12"));
+        // TSV format: filename\tcount
+        assert!(result.out.contains("12"));
     }
 
     #[tokio::test]
@@ -376,8 +395,8 @@ mod tests {
 
         let result = Wc.execute(args, &mut ctx).await;
         assert!(result.ok());
-        // 0 words
-        assert!(result.out.trim().starts_with("0"));
+        // 0 words - TSV format with empty filename for stdin
+        assert!(result.out.contains("0"));
     }
 
     #[tokio::test]
@@ -391,7 +410,7 @@ mod tests {
         let result = Wc.execute(args, &mut ctx).await;
         assert!(result.ok());
         // 日本語 (3) + space (1) + テスト (3) + newline (1) = 8 chars
-        assert!(result.out.trim().starts_with("8"));
+        assert!(result.out.contains("8"));
     }
 
     #[tokio::test]

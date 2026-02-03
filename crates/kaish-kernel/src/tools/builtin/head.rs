@@ -4,7 +4,7 @@ use async_trait::async_trait;
 use std::path::Path;
 
 use crate::ast::Value;
-use crate::interpreter::ExecResult;
+use crate::interpreter::{ExecResult, OutputData, OutputNode};
 use crate::tools::{ExecContext, ParamSchema, Tool, ToolArgs, ToolSchema};
 
 /// Head tool: output the first part of files or stdin.
@@ -70,9 +70,9 @@ impl Tool for Head {
         });
 
         if let Some(byte_count) = bytes {
-            // Byte mode: output first N bytes
+            // Byte mode: output first N bytes (keep as text, no structure)
             let output: String = input.chars().take(byte_count).collect();
-            return ExecResult::success(output);
+            return ExecResult::with_output(OutputData::text(output));
         }
 
         // Line mode: output first N lines
@@ -98,11 +98,27 @@ impl Tool for Head {
             lines
         };
 
-        let output: Vec<&str> = input.lines().take(lines).collect();
-        if output.is_empty() {
-            ExecResult::success("")
+        let output_lines: Vec<&str> = input.lines().take(lines).collect();
+        if output_lines.is_empty() {
+            ExecResult::with_output(OutputData::new())
         } else {
-            ExecResult::success(format!("{}\n", output.join("\n")))
+            // Build nodes with line numbers as cells
+            let nodes: Vec<OutputNode> = output_lines
+                .iter()
+                .enumerate()
+                .map(|(i, line)| {
+                    OutputNode::new(*line).with_cells(vec![(i + 1).to_string()])
+                })
+                .collect();
+
+            let output_data = OutputData::table(
+                vec!["Line".to_string(), "Num".to_string()],
+                nodes,
+            );
+            let mut result = ExecResult::with_output(output_data);
+            // Override canonical output with traditional format
+            result.out = format!("{}\n", output_lines.join("\n"));
+            result
         }
     }
 }

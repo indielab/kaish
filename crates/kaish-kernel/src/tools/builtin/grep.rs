@@ -5,7 +5,7 @@ use regex::RegexBuilder;
 use std::path::{Path, PathBuf};
 
 use crate::ast::Value;
-use crate::interpreter::ExecResult;
+use crate::interpreter::{ExecResult, OutputData, OutputNode};
 use crate::tools::{ExecContext, ParamSchema, Tool, ToolArgs, ToolSchema, validate_against_schema};
 use crate::validator::{IssueCode, ValidationIssue};
 use crate::walker::{FileWalker, GlobPath, IncludeExclude, WalkOptions};
@@ -276,7 +276,7 @@ impl Tool for Grep {
             None => (ctx.take_stdin().unwrap_or_default(), None),
         };
 
-        let (output, match_count) = grep_lines(&input, &regex, &grep_opts, None);
+        let (text_output, nodes, match_count) = grep_lines_structured(&input, &regex, &grep_opts, filename.as_deref());
 
         // Quiet mode: just return exit code
         if quiet {
@@ -303,9 +303,19 @@ impl Tool for Grep {
         if count_only {
             ExecResult::success(format!("{}\n", match_count))
         } else if match_count == 0 {
-            ExecResult::from_output(1, output, "")
+            ExecResult::from_output(1, text_output, "")
         } else {
-            ExecResult::success(output)
+            // Return structured output with nodes
+            let headers = if grep_opts.show_line_numbers {
+                vec!["Match".to_string(), "Line".to_string()]
+            } else {
+                vec!["Match".to_string()]
+            };
+            let output = OutputData::table(headers, nodes);
+            let mut result = ExecResult::with_output(output);
+            // Override the canonical output with traditional grep format
+            result.out = text_output;
+            result
         }
     }
 }
@@ -323,6 +333,7 @@ impl Grep {
         count_only: bool,
     ) -> ExecResult {
         let mut total_output = String::new();
+        let mut total_nodes: Vec<OutputNode> = Vec::new();
         let mut total_matches = 0;
         let mut files_with_matches = Vec::new();
 
@@ -347,7 +358,7 @@ impl Grep {
                 .to_string_lossy()
                 .to_string();
 
-            let (output, match_count) = grep_lines(&content, regex, &opts, Some(&display_name));
+            let (output, nodes, match_count) = grep_lines_structured(&content, regex, &opts, Some(&display_name));
 
             if match_count > 0 {
                 total_matches += match_count;
@@ -355,6 +366,7 @@ impl Grep {
 
                 if !quiet && !files_only && !count_only {
                     total_output.push_str(&output);
+                    total_nodes.extend(nodes);
                 }
             }
         }
@@ -380,7 +392,16 @@ impl Grep {
         } else if total_matches == 0 {
             ExecResult::from_output(1, total_output, "")
         } else {
-            ExecResult::success(total_output)
+            // Return structured output
+            let headers = if opts.show_line_numbers {
+                vec!["Match".to_string(), "File".to_string(), "Line".to_string()]
+            } else {
+                vec!["Match".to_string(), "File".to_string()]
+            };
+            let output = OutputData::table(headers, total_nodes);
+            let mut result = ExecResult::with_output(output);
+            result.out = total_output;
+            result
         }
     }
 }
@@ -395,19 +416,20 @@ struct GrepOptions {
     after_context: Option<usize>,
 }
 
-/// Search lines and return matching output and count.
-fn grep_lines(
+/// Search lines and return matching output, nodes, and count.
+fn grep_lines_structured(
     input: &str,
     regex: &regex::Regex,
     opts: &GrepOptions,
     filename: Option<&str>,
-) -> (String, usize) {
+) -> (String, Vec<OutputNode>, usize) {
     let lines: Vec<&str> = input.lines().collect();
     let mut output = String::new();
+    let mut nodes: Vec<OutputNode> = Vec::new();
     let mut match_count = 0;
     let mut printed = vec![false; lines.len()];
 
-    // Helper to format prefix
+    // Helper to format prefix for text output
     let prefix = |line_num: usize, sep: char| -> String {
         let mut p = String::new();
         if opts.show_filename {
@@ -429,7 +451,7 @@ fn grep_lines(
         if should_match {
             match_count += 1;
 
-            // Handle context lines
+            // Handle context lines (text output only, not as nodes)
             if let Some(before) = opts.before_context {
                 let start = line_num.saturating_sub(before);
                 for ctx_line in start..line_num {
@@ -450,16 +472,40 @@ fn grep_lines(
                         output.push_str(&prefix(line_num, ':'));
                         output.push_str(m.as_str());
                         output.push('\n');
+
+                        // Create node for each match
+                        let mut cells = Vec::new();
+                        if opts.show_filename {
+                            if let Some(f) = filename {
+                                cells.push(f.to_string());
+                            }
+                        }
+                        if opts.show_line_numbers {
+                            cells.push((line_num + 1).to_string());
+                        }
+                        nodes.push(OutputNode::new(m.as_str()).with_cells(cells));
                     }
                 } else {
                     output.push_str(&prefix(line_num, ':'));
                     output.push_str(line);
                     output.push('\n');
+
+                    // Create node for the match
+                    let mut cells = Vec::new();
+                    if opts.show_filename {
+                        if let Some(f) = filename {
+                            cells.push(f.to_string());
+                        }
+                    }
+                    if opts.show_line_numbers {
+                        cells.push((line_num + 1).to_string());
+                    }
+                    nodes.push(OutputNode::new(*line).with_cells(cells));
                 }
                 printed[line_num] = true;
             }
 
-            // Handle after context
+            // Handle after context (text output only)
             if let Some(after) = opts.after_context {
                 let end = (line_num + after + 1).min(lines.len());
                 for ctx_line in (line_num + 1)..end {
@@ -474,7 +520,7 @@ fn grep_lines(
         }
     }
 
-    (output, match_count)
+    (output, nodes, match_count)
 }
 
 #[cfg(test)]

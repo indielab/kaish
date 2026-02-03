@@ -3,7 +3,7 @@
 use async_trait::async_trait;
 
 use crate::ast::Value;
-use crate::interpreter::ExecResult;
+use crate::interpreter::{ExecResult, OutputData, OutputNode};
 use crate::tools::{ExecContext, ParamSchema, Tool, ToolArgs, ToolSchema, validate_against_schema};
 use crate::validator::{IssueCode, ValidationIssue};
 
@@ -139,11 +139,8 @@ impl Tool for Seq {
         }
 
         if numbers.is_empty() {
-            // Return empty array as structured data
-            return ExecResult::success_with_data(
-                String::new(),
-                Value::Json(serde_json::Value::Array(vec![])),
-            );
+            // Return empty OutputData
+            return ExecResult::with_output(OutputData::new());
         }
 
         // Format output
@@ -175,8 +172,11 @@ impl Tool for Seq {
             numbers.iter().map(|n| format!("{}", n)).collect()
         };
 
-        let mut output = formatted.join(&separator);
-        output.push('\n');
+        // Build OutputNodes from formatted numbers
+        let nodes: Vec<OutputNode> = formatted
+            .iter()
+            .map(|s| OutputNode::new(s.as_str()))
+            .collect();
 
         // Build JSON array of numbers for structured iteration
         let json_array: Vec<serde_json::Value> = numbers
@@ -192,10 +192,14 @@ impl Tool for Seq {
             })
             .collect();
 
-        ExecResult::success_with_data(
-            output,
-            Value::Json(serde_json::Value::Array(json_array)),
-        )
+        // Create OutputData and preserve the custom separator in text output
+        let output_data = OutputData::nodes(nodes);
+        let mut result = ExecResult::with_output(output_data);
+
+        // Override canonical output with custom separator format
+        result.out = formatted.join(&separator) + "\n";
+        result.data = Some(Value::Json(serde_json::Value::Array(json_array)));
+        result
     }
 }
 

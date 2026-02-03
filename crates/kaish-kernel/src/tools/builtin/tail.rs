@@ -4,7 +4,7 @@ use async_trait::async_trait;
 use std::path::Path;
 
 use crate::ast::Value;
-use crate::interpreter::ExecResult;
+use crate::interpreter::{ExecResult, OutputData, OutputNode};
 use crate::tools::{ExecContext, ParamSchema, Tool, ToolArgs, ToolSchema};
 
 /// Tail tool: output the last part of files or stdin.
@@ -70,11 +70,11 @@ impl Tool for Tail {
         });
 
         if let Some(byte_count) = bytes {
-            // Byte mode: output last N bytes
+            // Byte mode: output last N bytes (keep as text, no structure)
             let char_count = input.chars().count();
             let skip = char_count.saturating_sub(byte_count);
             let output: String = input.chars().skip(skip).collect();
-            return ExecResult::success(output);
+            return ExecResult::with_output(OutputData::text(output));
         }
 
         // Line mode: output last N lines
@@ -89,13 +89,30 @@ impl Tool for Tail {
 
         let all_lines: Vec<&str> = input.lines().collect();
         let total = all_lines.len();
-        let skip = total.saturating_sub(lines);
-        let output: Vec<&str> = all_lines.into_iter().skip(skip).collect();
+        let skip_count = total.saturating_sub(lines);
+        let output_lines: Vec<&str> = all_lines.into_iter().skip(skip_count).collect();
 
-        if output.is_empty() {
-            ExecResult::success("")
+        if output_lines.is_empty() {
+            ExecResult::with_output(OutputData::new())
         } else {
-            ExecResult::success(format!("{}\n", output.join("\n")))
+            // Build nodes with line numbers as cells (actual line number in file)
+            let nodes: Vec<OutputNode> = output_lines
+                .iter()
+                .enumerate()
+                .map(|(i, line)| {
+                    let line_num = skip_count + i + 1;
+                    OutputNode::new(*line).with_cells(vec![line_num.to_string()])
+                })
+                .collect();
+
+            let output_data = OutputData::table(
+                vec!["Line".to_string(), "Num".to_string()],
+                nodes,
+            );
+            let mut result = ExecResult::with_output(output_data);
+            // Override canonical output with traditional format
+            result.out = format!("{}\n", output_lines.join("\n"));
+            result
         }
     }
 }

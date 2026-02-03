@@ -16,7 +16,7 @@ use std::path::Path;
 use std::time::SystemTime;
 
 use crate::ast::Value;
-use crate::interpreter::ExecResult;
+use crate::interpreter::{EntryType, ExecResult, OutputData, OutputNode};
 use crate::tools::{ExecContext, ParamSchema, Tool, ToolArgs, ToolSchema};
 use crate::walker::{EntryTypes, FileWalker, GlobPath, WalkOptions};
 
@@ -152,16 +152,19 @@ impl Tool for Find {
         };
 
         // Apply post-filters (mtime, size) and collect results
-        let mut path_strings: Vec<String> = Vec::new();
+        let mut nodes: Vec<OutputNode> = Vec::new();
         let now_secs = SystemTime::now()
             .duration_since(SystemTime::UNIX_EPOCH)
             .map(|d| d.as_secs())
             .unwrap_or(0);
 
         for path in paths {
+            // Get entry info for filters and entry type
+            let info = ctx.backend.stat(&path).await.ok();
+
             // Check mtime filter
             if let Some((sign, days)) = mtime_filter {
-                if let Ok(info) = ctx.backend.stat(&path).await {
+                if let Some(ref info) = info {
                     if let Some(modified) = info.modified {
                         let age_secs = now_secs.saturating_sub(modified);
                         let age_days = age_secs / 86400;
@@ -179,7 +182,7 @@ impl Tool for Find {
 
             // Check size filter
             if let Some((sign, size)) = size_filter {
-                if let Ok(info) = ctx.backend.stat(&path).await {
+                if let Some(ref info) = info {
                     let matches = match sign {
                         '+' => info.size > size,   // larger than N
                         '-' => info.size < size,   // smaller than N
@@ -191,23 +194,26 @@ impl Tool for Find {
                 }
             }
 
-            path_strings.push(path.to_string_lossy().to_string());
+            // Determine entry type for rendering hints
+            let entry_type = info
+                .map(|i| if i.is_dir { EntryType::Directory } else { EntryType::File })
+                .unwrap_or(EntryType::File);
+
+            let path_str = path.to_string_lossy().to_string();
+            nodes.push(OutputNode::new(&path_str).with_entry_type(entry_type));
         }
 
-        // Build text output (newline-separated)
-        let output = path_strings.join("\n");
-
-        // Build JSON array for structured iteration
-        let json_array: Vec<serde_json::Value> = path_strings
+        // Build JSON array for structured iteration (for compatibility)
+        let json_array: Vec<serde_json::Value> = nodes
             .iter()
-            .map(|s| serde_json::Value::String(s.clone()))
+            .map(|n| serde_json::Value::String(n.name.clone()))
             .collect();
 
-        // Return both text output and structured data
-        ExecResult::success_with_data(
-            output,
-            Value::Json(serde_json::Value::Array(json_array)),
-        )
+        // Create OutputData and attach JSON data
+        let output = OutputData::nodes(nodes);
+        let mut result = ExecResult::with_output(output);
+        result.data = Some(Value::Json(serde_json::Value::Array(json_array)));
+        result
     }
 }
 

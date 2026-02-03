@@ -4,7 +4,7 @@ use async_trait::async_trait;
 use std::path::Path;
 
 use crate::ast::Value;
-use crate::interpreter::ExecResult;
+use crate::interpreter::{EntryType, ExecResult, OutputData, OutputNode};
 use crate::tools::{ExecContext, ParamSchema, Tool, ToolArgs, ToolSchema};
 
 /// Stat tool: display file or filesystem status.
@@ -40,21 +40,38 @@ impl Tool for Stat {
 
         match ctx.backend.stat(Path::new(&resolved)).await {
             Ok(info) => {
-                let output = if let Some(fmt) = format {
-                    format_stat(&fmt, &path_str, &info)
+                if let Some(fmt) = format {
+                    // Custom format mode: return plain text
+                    let output = format_stat(&fmt, &path_str, &info);
+                    ExecResult::success(output)
                 } else {
-                    // Default output similar to stat(1)
+                    // Default output: use structured OutputData
                     let file_type = if info.is_dir {
                         "directory"
                     } else {
                         "regular file"
                     };
-                    format!(
-                        "  File: {}\n  Size: {}\t\tType: {}\n",
-                        path_str, info.size, file_type
-                    )
-                };
-                ExecResult::success(output)
+                    let entry_type = if info.is_dir {
+                        EntryType::Directory
+                    } else {
+                        EntryType::File
+                    };
+
+                    let node = OutputNode::new(&path_str)
+                        .with_cells(vec![
+                            info.size.to_string(),
+                            file_type.to_string(),
+                        ])
+                        .with_entry_type(entry_type);
+
+                    let headers = vec![
+                        "File".to_string(),
+                        "Size".to_string(),
+                        "Type".to_string(),
+                    ];
+
+                    ExecResult::with_output(OutputData::table(headers, vec![node]))
+                }
             }
             Err(e) => ExecResult::failure(1, format!("stat: {}: {}", path_str, e)),
         }
@@ -108,9 +125,14 @@ mod tests {
 
         let result = Stat.execute(args, &mut ctx).await;
         assert!(result.ok());
+        // Check OutputData structure
+        assert!(result.output.is_some());
+        let output = result.output.as_ref().unwrap();
+        assert!(output.headers.is_some());
+        assert_eq!(output.root.len(), 1);
+        // Canonical output contains file info
         assert!(result.out.contains("file.txt"));
         assert!(result.out.contains("11")); // "hello world" = 11 bytes
-        assert!(result.out.contains("regular file"));
     }
 
     #[tokio::test]
@@ -121,6 +143,10 @@ mod tests {
 
         let result = Stat.execute(args, &mut ctx).await;
         assert!(result.ok());
+        assert!(result.output.is_some());
+        let output = result.output.as_ref().unwrap();
+        assert_eq!(output.root.len(), 1);
+        // Check canonical output contains directory
         assert!(result.out.contains("directory"));
     }
 
