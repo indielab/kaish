@@ -56,6 +56,9 @@ capnp-rpc = { workspace = true }
 futures = { workspace = true }
 tokio-util = { workspace = true }
 
+[build-dependencies]
+chrono = { workspace = true }
+
 [dev-dependencies]
 proptest = { workspace = true }
 rstest = { workspace = true }

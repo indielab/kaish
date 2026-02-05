@@ -94,10 +94,9 @@ async fn external_command_short_flags() {
 #[tokio::test]
 async fn external_command_long_flags() {
     let kernel = repl_kernel();
-    // Test long flags with external command
-    // uname is typically external and supports --kernel-name
-    let result = kernel.execute("uname --kernel-name").await.unwrap();
-    assert!(result.ok(), "uname --kernel-name should succeed: {:?}", result);
+    // Test long flags with external command via exec (uname is now a builtin)
+    let result = kernel.execute("exec uname --kernel-name").await.unwrap();
+    assert!(result.ok(), "exec uname --kernel-name should succeed: {:?}", result);
     assert!(
         result.out.contains("Linux"),
         "Should show Linux: {}",
