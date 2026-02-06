@@ -30,7 +30,7 @@ use anyhow::{Context, Result};
 use tokio::sync::RwLock;
 
 use crate::ast::{Arg, Expr, Stmt, StringPart, ToolDef, Value, BinaryOp};
-use crate::backend::KernelBackend;
+use crate::backend::{BackendError, KernelBackend};
 use crate::glob::glob_match;
 use crate::interpreter::{eval_expr, expand_tilde, json_to_value, value_to_string, ControlFlow, ExecResult, Scope};
 use crate::parser::parse;
@@ -1118,6 +1118,31 @@ impl Kernel {
                 if let Some(result) = self.try_execute_external(name, args).await? {
                     return Ok(result);
                 }
+
+                // Try backend-registered tools (embedder engines, MCP tools, etc.)
+                let tool_args = self.build_args_async(args).await?;
+                let mut ctx = self.exec_ctx.write().await;
+                {
+                    let scope = self.scope.read().await;
+                    ctx.scope = scope.clone();
+                }
+                let backend = ctx.backend.clone();
+                match backend.call_tool(name, tool_args, &mut ctx).await {
+                    Ok(result) => {
+                        let mut scope = self.scope.write().await;
+                        *scope = ctx.scope.clone();
+                        return Ok(ExecResult::from_output(
+                            result.code as i64, result.stdout, result.stderr,
+                        ));
+                    }
+                    Err(BackendError::ToolNotFound(_)) => {
+                        // Fall through to "command not found"
+                    }
+                    Err(e) => {
+                        return Ok(ExecResult::failure(1, e.to_string()));
+                    }
+                }
+
                 return Ok(ExecResult::failure(127, format!("command not found: {}", name)));
             }
         };
