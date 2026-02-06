@@ -8,7 +8,7 @@ This file provides guidance to models when working with in this repository.
 
 Part of the [Kaijutsu](https://github.com/tobert/kaijutsu) project.
 
-**Status**: Core implementation complete. Lexer, parser, interpreter, 54 builtins, MCP client/server, VFS.
+**Status**: Core implementation complete. Lexer, parser, interpreter, builtins, MCP client/server, VFS.
 
 ## Philosophy
 
@@ -104,7 +104,7 @@ Kernel (核)
     ├── Parser (chumsky)
     ├── Validator (pre-execution checks)
     ├── Interpreter (tokio async)
-    ├── Tool Registry (54 builtins + MCP)
+    ├── Tool Registry (builtins + MCP)
     ├── VFS Router (local, memory, git backends)
     └── Job Scheduler (background jobs, scatter/gather)
 ```

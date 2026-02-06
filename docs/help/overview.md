@@ -5,13 +5,13 @@ Predictable shell for MCP tool orchestration.
 - **Bourne-like syntax** — familiar, but no implicit word splitting, glob expansion, or backticks
 - **Strict validation** — catches errors before execution, not at runtime
 - **Clear errors** — fails fast with useful messages, never guesses
-- **Builtin-first** — 54 builtins run in-process; external commands available via PATH fallback
+- **Builtin-first** — builtins run in-process; external commands available via PATH fallback
 
 ## Topics
 
 ```
 help syntax     Variables, quoting, pipes, control flow
-help builtins   List of 54+ builtins
+help builtins   List of all builtins
 help vfs        Virtual filesystem mounts
 help scatter    Parallel processing (散/集)
 help limits     Known limitations

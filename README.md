@@ -61,13 +61,13 @@ seq 1 10 | scatter as=N limit=4 | echo "processing $N" | gather
 | Feature | Description |
 |---------|-------------|
 | **Bourne-compatible** | Variables, pipes, control flow, functions — familiar syntax |
-| **54 builtins** | grep, jq, git, find, sed, awk, diff, patch, and more |
+| **66 builtins** | grep, jq, git, find, sed, awk, diff, patch, and more |
 | **Structured data** | Commands return typed arrays — `for i in $(seq 1 5)` iterates 5 values, not word-split text |
 | **Strict validation** | Errors caught before execution with clear messages |
 | **Virtual filesystem** | Unified access: `/mnt/local` (home), `/scratch` (memory), `/v/jobs` (observability) |
 | **Scatter/gather** | Built-in parallelism with 散/集 |
 
-See [Language Reference](docs/LANGUAGE.md) for complete syntax and [Builtins](docs/BUILTINS.md) for all 54 tools.
+See [Language Reference](docs/LANGUAGE.md) for complete syntax and [Builtins](docs/BUILTINS.md) for all 66 tools.
 
 ---
 
@@ -77,7 +77,7 @@ kaish is built as a set of crates that can be used independently:
 
 ### kaish-kernel
 
-The core execution engine. Lexer, parser, interpreter, 54 builtins, VFS.
+The core execution engine. Lexer, parser, interpreter, 66 builtins, VFS.
 
 ```rust
 use kaish_kernel::{Kernel, KernelConfig};
@@ -124,7 +124,7 @@ Add to your MCP client configuration:
 **`execute`** — Run kaish scripts in a fresh, isolated environment.
 
 ```
-Supports: pipes, redirects, here-docs, if/for/while, functions, 54 builtins,
+Supports: pipes, redirects, here-docs, if/for/while, functions, 66 builtins,
 ${VAR:-default}, $((arithmetic)), scatter/gather parallelism.
 
 NOT supported: process substitution <(), backticks, eval, aliases.

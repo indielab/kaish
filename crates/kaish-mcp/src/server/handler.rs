@@ -106,7 +106,7 @@ impl KaishServerHandler {
     ///
     /// Each call runs in a fresh, isolated environment. Supports restricted/modified
     /// Bourne syntax plus kaish extensions (scatter/gather, typed params, MCP tool calls).
-    #[tool(description = "Execute kaish shell scripts. Fresh isolated environment per call.\n\nSupports: pipes, redirects, here-docs, if/for/while, functions, 54 builtins (grep, jq, git, find, sed, awk, cat, ls, etc.), ${VAR:-default}, $((arithmetic)), scatter/gather parallelism.\n\nNOT supported: process substitution <(), backticks, eval, aliases, implicit word splitting.\n\nPaths: Native paths work within $HOME (e.g., /home/user/src/project). /scratch/ = ephemeral memory. Use 'help' tool for details.")]
+    #[tool(description = "Execute kaish shell scripts. Fresh isolated environment per call.\n\nSupports: pipes, redirects, here-docs, if/for/while, functions, builtins (grep, jq, git, find, sed, awk, cat, ls, etc.), ${VAR:-default}, $((arithmetic)), scatter/gather parallelism.\n\nNOT supported: process substitution <(), backticks, eval, aliases, implicit word splitting.\n\nPaths: Native paths work within $HOME (e.g., /home/user/src/project). /scratch/ = ephemeral memory. Use 'help' tool for details.")]
     async fn execute(&self, input: Parameters<ExecuteInput>) -> Result<CallToolResult, McpError> {
         let params = ExecuteParams {
             script: input.0.script,
@@ -143,7 +143,7 @@ impl KaishServerHandler {
     )]
     async fn help(&self, input: Parameters<HelpInput>) -> Result<CallToolResult, McpError> {
         let topic_str = input.0.topic.as_deref().unwrap_or("overview");
-        let topic = HelpTopic::from_str(topic_str);
+        let topic = HelpTopic::parse_topic(topic_str);
 
         // For builtins topic, we need tool schemas from a temporary kernel
         let content = if matches!(topic, HelpTopic::Builtins) || matches!(topic, HelpTopic::Tool(_))
@@ -177,9 +177,9 @@ impl rmcp::ServerHandler for KaishServerHandler {
                 "kaish (会sh) — Predictable shell for MCP tool orchestration.\n\n\
                  Bourne-like syntax without the gotchas (no word splitting, no glob expansion, \
                  no backticks). Strict validation catches errors before execution. \
-                 54 builtins run in-process; use `exec` for external commands.\n\n\
+                 Builtins run in-process; use `exec` for external commands.\n\n\
                  Tools:\n\
-                 • execute — Run shell scripts (pipes, redirects, 54 builtins, loops, functions)\n\
+                 • execute — Run shell scripts (pipes, redirects, builtins, loops, functions)\n\
                  • help — Discover syntax, builtins, VFS mounts, capabilities\n\n\
                  Use 'help' first to learn what's available."
                     .to_string(),

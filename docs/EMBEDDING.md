@@ -36,7 +36,7 @@ kaish separates concerns into layers:
 ├─────────────────────────────────────────────────────────┤
 │  Kernel                                                  │
 │  - Lexer/Parser/Interpreter                             │
-│  - Tool Registry (54 builtins)                          │
+│  - Tool Registry (builtins)                              │
 │  - VFS Router                                           │
 └─────────────────────────────────────────────────────────┘
 ```
