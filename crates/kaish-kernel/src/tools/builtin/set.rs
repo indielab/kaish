@@ -3,7 +3,7 @@
 use async_trait::async_trait;
 
 use crate::ast::Value;
-use crate::interpreter::ExecResult;
+use crate::interpreter::{ExecResult, OutputData};
 use crate::tools::{ExecContext, ParamSchema, Tool, ToolArgs, ToolSchema};
 
 /// Set tool: configure shell options.
@@ -37,7 +37,7 @@ impl Tool for Set {
             if ctx.scope.error_exit_enabled() {
                 output.push_str("set -e\n");
             }
-            return ExecResult::success(output.trim_end());
+            return ExecResult::with_output(OutputData::text(output.trim_end()));
         }
 
         // Process options from both flags and positional args
@@ -66,7 +66,7 @@ impl Tool for Set {
             }
         }
 
-        ExecResult::success("")
+        ExecResult::with_output(OutputData::text(""))
     }
 }
 

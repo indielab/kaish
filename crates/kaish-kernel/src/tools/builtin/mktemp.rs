@@ -16,7 +16,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::ast::Value;
 use crate::backend::WriteMode;
-use crate::interpreter::ExecResult;
+use crate::interpreter::{ExecResult, OutputData};
 use crate::tools::{ExecContext, ParamSchema, Tool, ToolArgs, ToolSchema};
 
 /// Global counter for unique temp file generation.
@@ -81,13 +81,13 @@ impl Tool for Mktemp {
         // Create the temp file or directory
         if is_dir {
             match ctx.backend.mkdir(Path::new(&resolved)).await {
-                Ok(()) => ExecResult::success(resolved.to_string_lossy().to_string()),
+                Ok(()) => ExecResult::with_output(OutputData::text(resolved.to_string_lossy().to_string())),
                 Err(e) => ExecResult::failure(1, format!("mktemp: failed to create directory: {}", e)),
             }
         } else {
             // Create empty file (CreateNew ensures uniqueness)
             match ctx.backend.write(Path::new(&resolved), &[], WriteMode::CreateNew).await {
-                Ok(()) => ExecResult::success(resolved.to_string_lossy().to_string()),
+                Ok(()) => ExecResult::with_output(OutputData::text(resolved.to_string_lossy().to_string())),
                 Err(e) => ExecResult::failure(1, format!("mktemp: failed to create file: {}", e)),
             }
         }

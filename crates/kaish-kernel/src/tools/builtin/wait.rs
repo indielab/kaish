@@ -3,7 +3,7 @@
 use async_trait::async_trait;
 
 use crate::ast::Value;
-use crate::interpreter::ExecResult;
+use crate::interpreter::{ExecResult, OutputData};
 use crate::scheduler::JobId;
 use crate::tools::{ExecContext, ParamSchema, Tool, ToolArgs, ToolSchema};
 
@@ -29,7 +29,7 @@ impl Tool for Wait {
     async fn execute(&self, args: ToolArgs, ctx: &mut ExecContext) -> ExecResult {
         let manager = match &ctx.job_manager {
             Some(m) => m.clone(),
-            None => return ExecResult::success("(no job manager)\n"),
+            None => return ExecResult::with_output(OutputData::text("(no job manager)\n")),
         };
 
         // Check if a specific job ID was provided
@@ -48,7 +48,7 @@ impl Tool for Wait {
             match manager.wait(id).await {
                 Some(result) => {
                     let status = if result.ok() { "Done" } else { "Failed" };
-                    ExecResult::success(format!("[{}] {}\n", id, status))
+                    ExecResult::with_output(OutputData::text(format!("[{}] {}\n", id, status)))
                 }
                 None => ExecResult::failure(1, format!("wait: job {} not found", id)),
             }
@@ -57,7 +57,7 @@ impl Tool for Wait {
             let results = manager.wait_all().await;
 
             if results.is_empty() {
-                return ExecResult::success("(no jobs to wait for)\n");
+                return ExecResult::with_output(OutputData::text("(no jobs to wait for)\n"));
             }
 
             let mut output = String::new();
@@ -76,7 +76,7 @@ impl Tool for Wait {
             if any_failed {
                 ExecResult::from_output(1, output, "")
             } else {
-                ExecResult::success(output)
+                ExecResult::with_output(OutputData::text(output))
             }
         }
     }

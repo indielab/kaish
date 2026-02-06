@@ -4,7 +4,7 @@ use async_trait::async_trait;
 use std::path::Path;
 
 use crate::ast::Value;
-use crate::interpreter::ExecResult;
+use crate::interpreter::{ExecResult, OutputData};
 use crate::tools::{ExecContext, ParamSchema, Tool, ToolArgs, ToolSchema};
 
 /// Basename tool: extract filename from path.
@@ -47,7 +47,7 @@ impl Tool for Basename {
             _ => filename,
         };
 
-        ExecResult::success(format!("{}\n", result))
+        ExecResult::with_output(OutputData::text(format!("{}\n", result)))
     }
 }
 

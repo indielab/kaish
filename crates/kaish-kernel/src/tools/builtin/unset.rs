@@ -3,7 +3,7 @@
 use async_trait::async_trait;
 
 use crate::ast::Value;
-use crate::interpreter::ExecResult;
+use crate::interpreter::{ExecResult, OutputData};
 use crate::tools::{ExecContext, ParamSchema, Tool, ToolArgs, ToolSchema};
 
 /// Unset tool: removes variables from the current scope.
@@ -41,7 +41,7 @@ impl Tool for Unset {
             }
         }
 
-        ExecResult::success(format!("{}", unset_count))
+        ExecResult::with_output(OutputData::text(format!("{}", unset_count)))
     }
 }
 

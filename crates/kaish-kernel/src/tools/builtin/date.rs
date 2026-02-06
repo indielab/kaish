@@ -4,7 +4,7 @@ use async_trait::async_trait;
 use chrono::{Local, Utc};
 
 use crate::ast::Value;
-use crate::interpreter::ExecResult;
+use crate::interpreter::{ExecResult, OutputData};
 use crate::tools::{ExecContext, ParamSchema, Tool, ToolArgs, ToolSchema};
 
 /// Date tool: display current date/time.
@@ -78,7 +78,7 @@ impl Tool for Date {
             }
         };
 
-        ExecResult::success(format!("{}\n", output))
+        ExecResult::with_output(OutputData::text(format!("{}\n", output)))
     }
 }
 

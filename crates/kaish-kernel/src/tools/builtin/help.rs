@@ -4,7 +4,7 @@ use async_trait::async_trait;
 
 use crate::ast::Value;
 use crate::help::{get_help, HelpTopic};
-use crate::interpreter::ExecResult;
+use crate::interpreter::{ExecResult, OutputData};
 use crate::tools::{ExecContext, ParamSchema, Tool, ToolArgs, ToolSchema};
 
 /// Help tool: display help for topics and tools.
@@ -33,7 +33,7 @@ impl Tool for Help {
         let topic_str = args.get_string("topic", 0).unwrap_or_default();
         let topic = HelpTopic::parse_topic(&topic_str);
         let content = get_help(&topic, &ctx.tool_schemas);
-        ExecResult::success(content)
+        ExecResult::with_output(OutputData::text(content))
     }
 }
 

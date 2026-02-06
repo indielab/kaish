@@ -7,7 +7,7 @@ use async_trait::async_trait;
 use std::path::Path;
 
 use crate::ast::Value;
-use crate::interpreter::ExecResult;
+use crate::interpreter::{ExecResult, OutputData};
 use crate::tools::{ExecContext, ParamSchema, Tool, ToolArgs, ToolSchema};
 
 /// Readlink tool: read symlink target or canonicalize a path.
@@ -45,12 +45,12 @@ impl Tool for Readlink {
             // Normalize the path (resolve . and ..)
             let resolved_str = resolved.to_string_lossy();
             let normalized = normalize_path(&resolved_str);
-            return ExecResult::success(format!("{}\n", normalized));
+            return ExecResult::with_output(OutputData::text(format!("{}\n", normalized)));
         }
 
         // Without -f, read the raw symlink target
         match ctx.backend.read_link(Path::new(&resolved)).await {
-            Ok(target) => ExecResult::success(format!("{}\n", target.display())),
+            Ok(target) => ExecResult::with_output(OutputData::text(format!("{}\n", target.display()))),
             Err(e) => {
                 use crate::backend::BackendError;
                 match &e {

@@ -3,7 +3,7 @@
 use async_trait::async_trait;
 use std::path::Path;
 
-use crate::interpreter::ExecResult;
+use crate::interpreter::{ExecResult, OutputData};
 use crate::tools::{ExecContext, ParamSchema, Tool, ToolArgs, ToolSchema};
 
 /// Dirname tool: extract directory from path.
@@ -30,7 +30,7 @@ impl Tool for Dirname {
 
         // Special case: root "/" has itself as parent
         if path_str == "/" {
-            return ExecResult::success("/\n".to_string());
+            return ExecResult::with_output(OutputData::text("/\n"));
         }
 
         let parent = path
@@ -41,7 +41,7 @@ impl Tool for Dirname {
         // Handle empty parent (happens for relative paths like "file")
         let result = if parent.is_empty() { "." } else { parent };
 
-        ExecResult::success(format!("{}\n", result))
+        ExecResult::with_output(OutputData::text(format!("{}\n", result)))
     }
 }
 

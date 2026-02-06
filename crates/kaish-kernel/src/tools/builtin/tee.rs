@@ -5,7 +5,7 @@ use std::path::Path;
 
 use crate::ast::Value;
 use crate::backend::WriteMode;
-use crate::interpreter::ExecResult;
+use crate::interpreter::{ExecResult, OutputData};
 use crate::tools::{ExecContext, ParamSchema, Tool, ToolArgs, ToolSchema};
 
 /// Tee tool: duplicate stdin to stdout and files.
@@ -62,7 +62,7 @@ impl Tool for Tee {
             .write(Path::new(&resolved), &final_content, WriteMode::Overwrite)
             .await
         {
-            Ok(()) => ExecResult::success(input),
+            Ok(()) => ExecResult::with_output(OutputData::text(input)),
             Err(e) => ExecResult::failure(1, format!("tee: {}: {}", path_str, e)),
         }
     }

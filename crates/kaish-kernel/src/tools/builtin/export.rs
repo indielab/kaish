@@ -12,7 +12,7 @@
 use async_trait::async_trait;
 
 use crate::ast::Value;
-use crate::interpreter::ExecResult;
+use crate::interpreter::{ExecResult, OutputData};
 use crate::tools::{ExecContext, ParamSchema, Tool, ToolArgs, ToolSchema};
 
 /// Export tool: marks variables for export to child processes.
@@ -100,7 +100,7 @@ impl Tool for Export {
             }
         }
 
-        ExecResult::success("")
+        ExecResult::with_output(OutputData::text(""))
     }
 }
 
@@ -120,7 +120,7 @@ fn print_exports(ctx: &ExecContext) -> ExecResult {
         }
     }
 
-    ExecResult::success(output.trim_end())
+    ExecResult::with_output(OutputData::text(output.trim_end()))
 }
 
 /// Format a value for shell output.

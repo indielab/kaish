@@ -4,7 +4,7 @@ use async_trait::async_trait;
 use std::path::{Path, PathBuf};
 
 use crate::ast::Value;
-use crate::interpreter::ExecResult;
+use crate::interpreter::{ExecResult, OutputData};
 use crate::tools::{ExecContext, Tool, ToolArgs, ToolSchema, ParamSchema};
 
 /// Cd tool: change current working directory.
@@ -49,9 +49,9 @@ impl Tool for Cd {
                     ctx.set_cwd(new_cwd);
                     // For `cd -`, output the new directory (like bash)
                     if path_arg == "-" {
-                        ExecResult::success(resolved.to_string_lossy().to_string())
+                        ExecResult::with_output(OutputData::text(resolved.to_string_lossy().to_string()))
                     } else {
-                        ExecResult::success("")
+                        ExecResult::with_output(OutputData::text(""))
                     }
                 } else {
                     ExecResult::failure(1, format!("cd: {}: Not a directory", path_arg))

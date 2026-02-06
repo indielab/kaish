@@ -3,7 +3,7 @@
 use async_trait::async_trait;
 use std::path::Path;
 
-use crate::interpreter::ExecResult;
+use crate::interpreter::{ExecResult, OutputData};
 use crate::tools::{ExecContext, ParamSchema, Tool, ToolArgs, ToolSchema};
 
 /// Realpath tool: resolve path to absolute, canonical form.
@@ -33,7 +33,7 @@ impl Tool for Realpath {
         // Normalize the path (remove . and ..)
         let normalized = normalize_path(&resolved_str);
 
-        ExecResult::success(format!("{}\n", normalized))
+        ExecResult::with_output(OutputData::text(format!("{}\n", normalized)))
     }
 }
 

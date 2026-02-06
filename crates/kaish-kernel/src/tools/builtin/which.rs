@@ -12,7 +12,7 @@ use async_trait::async_trait;
 use std::path::Path;
 
 use crate::ast::Value;
-use crate::interpreter::ExecResult;
+use crate::interpreter::{ExecResult, OutputData};
 use crate::tools::{ExecContext, ParamSchema, Tool, ToolArgs, ToolSchema};
 
 /// Which tool: locates commands in PATH.
@@ -90,10 +90,10 @@ impl Tool for Which {
 
         if found_any {
             if not_found.is_empty() {
-                ExecResult::success(output)
+                ExecResult::with_output(OutputData::text(output))
             } else {
                 // Some found, some not - still success but report not found
-                let mut result = ExecResult::success(output);
+                let mut result = ExecResult::with_output(OutputData::text(output));
                 result.err = not_found
                     .iter()
                     .map(|n| format!("which: no {} in ({})", n, path_var))

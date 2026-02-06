@@ -2,7 +2,7 @@
 
 use async_trait::async_trait;
 
-use crate::interpreter::ExecResult;
+use crate::interpreter::{ExecResult, OutputData};
 use crate::tools::{ExecContext, Tool, ToolArgs, ToolSchema};
 
 /// Pwd tool: print current working directory.
@@ -19,7 +19,7 @@ impl Tool for Pwd {
     }
 
     async fn execute(&self, _args: ToolArgs, ctx: &mut ExecContext) -> ExecResult {
-        ExecResult::success(ctx.cwd.to_string_lossy().to_string())
+        ExecResult::with_output(OutputData::text(ctx.cwd.to_string_lossy().to_string()))
     }
 }
 

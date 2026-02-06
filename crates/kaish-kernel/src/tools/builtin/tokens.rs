@@ -4,7 +4,7 @@ use async_trait::async_trait;
 use tiktoken_rs::{cl100k_base, o200k_base, p50k_base};
 
 use crate::ast::Value;
-use crate::interpreter::ExecResult;
+use crate::interpreter::{ExecResult, OutputData};
 use crate::tools::{ExecContext, ParamSchema, Tool, ToolArgs, ToolSchema};
 
 /// Helper to extract string from Value.
@@ -116,10 +116,10 @@ impl Tool for Tokens {
         }
 
         if verbose {
-            return ExecResult::success(format!("count: {}\nids: {:?}", count, token_ids));
+            return ExecResult::with_output(OutputData::text(format!("count: {}\nids: {:?}", count, token_ids)));
         }
 
-        ExecResult::success(count.to_string())
+        ExecResult::with_output(OutputData::text(count.to_string()))
     }
 }
 

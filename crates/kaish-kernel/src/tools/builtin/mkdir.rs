@@ -3,7 +3,7 @@
 use async_trait::async_trait;
 use std::path::Path;
 
-use crate::interpreter::ExecResult;
+use crate::interpreter::{ExecResult, OutputData};
 use crate::tools::{ExecContext, Tool, ToolArgs, ToolSchema, ParamSchema};
 
 /// Mkdir tool: create directories.
@@ -29,7 +29,7 @@ impl Tool for Mkdir {
         let resolved = ctx.resolve_path(&path);
 
         match ctx.backend.mkdir(Path::new(&resolved)).await {
-            Ok(()) => ExecResult::success(""),
+            Ok(()) => ExecResult::with_output(OutputData::text("")),
             Err(e) => ExecResult::failure(1, format!("mkdir: {}: {}", path, e)),
         }
     }

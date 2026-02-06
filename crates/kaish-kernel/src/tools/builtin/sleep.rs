@@ -4,7 +4,7 @@ use async_trait::async_trait;
 use std::time::Duration;
 
 use crate::ast::Value;
-use crate::interpreter::ExecResult;
+use crate::interpreter::{ExecResult, OutputData};
 use crate::tools::{ExecContext, ParamSchema, Tool, ToolArgs, ToolSchema};
 
 /// Sleep tool: pause execution for a specified duration.
@@ -43,7 +43,7 @@ impl Tool for Sleep {
         let duration = Duration::from_secs_f64(seconds);
         tokio::time::sleep(duration).await;
 
-        ExecResult::success("")
+        ExecResult::with_output(OutputData::text(""))
     }
 }
 
