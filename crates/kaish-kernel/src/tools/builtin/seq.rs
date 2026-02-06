@@ -67,16 +67,14 @@ impl Tool for Seq {
                         "seq: increment cannot be zero (would cause infinite loop)",
                     ));
                 }
-            } else if let Some(Value::String(s)) = args.positional.get(1) {
-                if let Ok(n) = s.parse::<f64>() {
-                    if n == 0.0 {
+            } else if let Some(Value::String(s)) = args.positional.get(1)
+                && let Ok(n) = s.parse::<f64>()
+                    && n == 0.0 {
                         issues.push(ValidationIssue::error(
                             IssueCode::SeqZeroIncrement,
                             "seq: increment cannot be zero (would cause infinite loop)",
                         ));
                     }
-                }
-            }
         }
 
         issues

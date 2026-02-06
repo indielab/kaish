@@ -1412,7 +1412,9 @@ pub fn parse_var_ref(source: &str) -> Result<Vec<String>, LexerError> {
                 // Collect the index
                 let mut index = String::from("[");
                 while let Some(&c) = chars.peek() {
-                    index.push(chars.next().expect("peeked char should exist"));
+                    if let Some(c) = chars.next() {
+                        index.push(c);
+                    }
                     if c == ']' {
                         break;
                     }

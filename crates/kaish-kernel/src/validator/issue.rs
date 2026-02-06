@@ -238,11 +238,10 @@ impl ValidationIssue {
         }
 
         // Source context if we have a span
-        if let Some(span) = &self.span {
-            if let Some(line_content) = get_line_at_offset(source, span.start) {
+        if let Some(span) = &self.span
+            && let Some(line_content) = get_line_at_offset(source, span.start) {
                 result.push_str(&format!("\n  | {}", line_content));
             }
-        }
 
         result
     }

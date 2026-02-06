@@ -282,7 +282,7 @@ impl OutputData {
         }
 
         self.root.iter()
-            .map(|n| format_node(n))
+            .map(format_node)
             .collect::<Vec<_>>()
             .join("\n")
     }

@@ -107,7 +107,10 @@ impl Tool for Env {
         }
 
         // Execute command with modified environment
-        let cmd_idx = command_start.expect("command position found");
+        // Safety: we checked `command_start.is_none()` above and returned
+        let Some(cmd_idx) = command_start else {
+            return ExecResult::failure(1, "env: internal error: missing command index");
+        };
         let command = match &args.positional[cmd_idx] {
             Value::String(s) => s.clone(),
             other => value_to_string(other),

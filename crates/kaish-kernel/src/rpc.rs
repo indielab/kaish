@@ -515,7 +515,7 @@ impl kernel::Server for KernelImpl {
 
         capnp::capability::Promise::from_future(async move {
             let cwd = kernel.cwd().await;
-            results.get().set_path(&cwd.to_string_lossy());
+            results.get().set_path(cwd.to_string_lossy());
             Ok(())
         })
     }
@@ -839,7 +839,7 @@ fn set_json_value(mut builder: value::Builder<'_>, json: &serde_json::Value) {
             } else if let Some(f) = n.as_f64() {
                 builder.set_float(f);
             } else {
-                builder.set_string(&n.to_string());
+                builder.set_string(n.to_string());
             }
         }
         serde_json::Value::String(s) => builder.set_string(s),

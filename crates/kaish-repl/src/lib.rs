@@ -228,6 +228,7 @@ impl Repl {
 }
 
 impl Default for Repl {
+    #[allow(clippy::expect_used)]
     fn default() -> Self {
         Self::new().expect("Failed to create REPL")
     }
@@ -341,11 +342,10 @@ Examples:
 /// Save REPL history to disk.
 fn save_history(rl: &mut Editor<(), DefaultHistory>, history_path: &Option<PathBuf>) {
     if let Some(path) = history_path {
-        if let Some(parent) = path.parent() {
-            if let Err(e) = std::fs::create_dir_all(parent) {
+        if let Some(parent) = path.parent()
+            && let Err(e) = std::fs::create_dir_all(parent) {
                 tracing::warn!("Failed to create history directory: {}", e);
             }
-        }
         if let Err(e) = rl.save_history(path) {
             tracing::warn!("Failed to save history: {}", e);
         }
@@ -363,15 +363,14 @@ pub fn run() -> Result<()> {
     // Load history if it exists
     let history_path = directories::BaseDirs::new()
         .map(|b| b.data_dir().join("kaish").join("history.txt"));
-    if let Some(ref path) = history_path {
-        if let Err(e) = rl.load_history(path) {
+    if let Some(ref path) = history_path
+        && let Err(e) = rl.load_history(path) {
             // Only log if it's not a "file not found" error (expected on first run)
             let is_not_found = matches!(&e, ReadlineError::Io(io_err) if io_err.kind() == std::io::ErrorKind::NotFound);
             if !is_not_found {
                 tracing::warn!("Failed to load history: {}", e);
             }
         }
-    }
 
     let mut repl = Repl::new()?;
     println!();

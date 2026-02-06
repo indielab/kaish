@@ -168,7 +168,7 @@ impl Tool for Uname {
 
         let mut parts: Vec<&str> = Vec::new();
 
-        if (any_explicit && flag_s) || !any_explicit {
+        if flag_s || !any_explicit {
             parts.push(&info.sysname);
         }
         if flag_n {

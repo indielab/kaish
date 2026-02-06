@@ -28,7 +28,7 @@ impl TreeNode {
         let entry = self
             .children
             .entry(path[0].to_string())
-            .or_insert_with(TreeNode::default);
+            .or_default();
 
         if path.len() == 1 {
             entry.is_dir = is_dir;
@@ -68,19 +68,13 @@ impl TreeNode {
         }
     }
 
-    fn format_flat(&self, prefix: &str, indent: usize, output: &mut String) {
+    fn format_flat(&self, indent: usize, output: &mut String) {
         let mut children: Vec<_> = self.children.iter().collect();
         children.sort_by_key(|(name, _)| *name);
 
         for (name, node) in children {
             let spaces = "  ".repeat(indent);
-            let name_suffix = if node.is_dir && node.children.is_empty() {
-                "/"
-            } else if node.is_dir {
-                "/"
-            } else {
-                ""
-            };
+            let name_suffix = if node.is_dir { "/" } else { "" };
 
             output.push_str(&spaces);
             output.push_str(name);
@@ -88,7 +82,7 @@ impl TreeNode {
             output.push('\n');
 
             if !node.children.is_empty() {
-                node.format_flat(prefix, indent + 1, output);
+                node.format_flat(indent + 1, output);
             }
         }
     }
@@ -232,11 +226,10 @@ impl Tool for Tree {
 
         while let Some((dir, depth)) = stack.pop() {
             // Check max depth
-            if let Some(max) = max_depth {
-                if depth >= max {
+            if let Some(max) = max_depth
+                && depth >= max {
                     continue;
                 }
-            }
 
             // List directory contents
             let entries = match ctx.backend.list(Path::new(&dir)).await {
@@ -251,11 +244,10 @@ impl Tool for Tree {
                 }
 
                 // Check ignore filter
-                if let Some(ref filter) = ignore_filter {
-                    if filter.is_name_ignored(&entry.name, entry.is_dir) {
+                if let Some(ref filter) = ignore_filter
+                    && filter.is_name_ignored(&entry.name, entry.is_dir) {
                         continue;
                     }
-                }
 
                 let dir_str = dir.trim_end_matches('/');
                 let full_path = format!("{}/{}", dir_str, entry.name);
@@ -295,7 +287,7 @@ impl Tool for Tree {
 
         if flat {
             let mut output = format!("{}/\n", root_name);
-            tree.format_flat(&root_name, 1, &mut output);
+            tree.format_flat(1, &mut output);
             return ExecResult::success(output.trim_end().to_string());
         }
 

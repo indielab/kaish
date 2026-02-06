@@ -188,7 +188,7 @@ impl GitVfs {
         let tree = head_commit.tree()?;
 
         // Reset the path in the index to match HEAD
-        repo.reset_default(Some(head_commit.as_object()), &[path])?;
+        repo.reset_default(Some(head_commit.as_object()), [path])?;
 
         // If the file doesn't exist in HEAD, remove it from index
         if tree.get_path(path).is_err() {
@@ -452,8 +452,8 @@ impl GitVfs {
         // Add linked worktrees
         let worktree_names = repo.worktrees()?;
         for name in worktree_names.iter() {
-            if let Some(name) = name {
-                if let Ok(wt) = repo.find_worktree(name) {
+            if let Some(name) = name
+                && let Ok(wt) = repo.find_worktree(name) {
                     let locked = matches!(wt.is_locked(), Ok(WorktreeLockStatus::Locked(_)));
                     let prunable = wt.is_prunable(None).unwrap_or(false);
 
@@ -472,7 +472,6 @@ impl GitVfs {
                         prunable,
                     });
                 }
-            }
         }
 
         Ok(result)
@@ -627,8 +626,8 @@ impl GitVfs {
         let worktree_names = repo.worktrees()?;
 
         for name in worktree_names.iter() {
-            if let Some(name) = name {
-                if let Ok(wt) = repo.find_worktree(name) {
+            if let Some(name) = name
+                && let Ok(wt) = repo.find_worktree(name) {
                     // Check if the worktree path still exists
                     if wt.validate().is_err() {
                         let mut opts = WorktreePruneOptions::new();
@@ -637,7 +636,6 @@ impl GitVfs {
                         }
                     }
                 }
-            }
         }
 
         Ok(pruned)
@@ -773,13 +771,12 @@ pub struct LogEntry {
 
 /// Parse "Name <email>" format.
 fn parse_author(s: &str) -> Option<(String, String)> {
-    if let Some(lt_pos) = s.find('<') {
-        if let Some(gt_pos) = s.find('>') {
+    if let Some(lt_pos) = s.find('<')
+        && let Some(gt_pos) = s.find('>') {
             let name = s[..lt_pos].trim().to_string();
             let email = s[lt_pos + 1..gt_pos].trim().to_string();
             return Some((name, email));
         }
-    }
     None
 }
 
@@ -990,8 +987,8 @@ mod tests {
         git_fs.add(&["README.md"]).unwrap();
         git_fs.commit("Initial commit", None).unwrap();
 
-        // Create worktree path
-        let wt_path = dir.parent().unwrap().join("test-wt-new");
+        // Create worktree path (unique per test run)
+        let wt_path = temp_dir();
 
         // Add worktree (no branch specified = new branch)
         let info = git_fs.worktree_add("test-wt", &wt_path, None).unwrap();
@@ -1023,7 +1020,7 @@ mod tests {
         git_fs.create_branch("feature").unwrap();
 
         // Create worktree for existing branch
-        let wt_path = dir.parent().unwrap().join("test-wt-branch");
+        let wt_path = temp_dir();
         let info = git_fs.worktree_add("wt-feature", &wt_path, Some("feature")).unwrap();
 
         assert_eq!(info.name, Some("wt-feature".to_string()));
@@ -1055,7 +1052,7 @@ mod tests {
         git_fs.commit("Second commit", None).unwrap();
 
         // Create worktree at specific commit (first commit)
-        let wt_path = dir.parent().unwrap().join("test-wt-commit");
+        let wt_path = temp_dir();
         let short_oid = &oid.to_string()[..7];
         let info = git_fs.worktree_add("wt-commit", &wt_path, Some(short_oid)).unwrap();
 
@@ -1082,7 +1079,7 @@ mod tests {
         git_fs.commit("Initial commit", None).unwrap();
 
         // Try to create worktree with invalid ref
-        let wt_path = dir.parent().unwrap().join("test-wt-invalid");
+        let wt_path = temp_dir();
         let result = git_fs.worktree_add("wt-bad", &wt_path, Some("nonexistent-branch"));
 
         assert!(result.is_err());
@@ -1105,7 +1102,7 @@ mod tests {
         git_fs.commit("Initial commit", None).unwrap();
 
         // Create worktree
-        let wt_path = dir.parent().unwrap().join("test-wt-lock");
+        let wt_path = temp_dir();
         git_fs.worktree_add("wt-lock", &wt_path, None).unwrap();
 
         // Lock it
@@ -1143,7 +1140,7 @@ mod tests {
         git_fs.commit("Initial commit", None).unwrap();
 
         // Create worktree
-        let wt_path = dir.parent().unwrap().join("test-wt-remove");
+        let wt_path = temp_dir();
         git_fs.worktree_add("wt-remove", &wt_path, None).unwrap();
 
         // Verify it exists
@@ -1173,7 +1170,7 @@ mod tests {
         git_fs.commit("Initial commit", None).unwrap();
 
         // Create and lock worktree
-        let wt_path = dir.parent().unwrap().join("test-wt-locked-rm");
+        let wt_path = temp_dir();
         git_fs.worktree_add("wt-locked", &wt_path, None).unwrap();
         git_fs.worktree_lock("wt-locked", None).unwrap();
 
@@ -1202,7 +1199,7 @@ mod tests {
         git_fs.commit("Initial commit", None).unwrap();
 
         // Create worktree
-        let wt_path = dir.parent().unwrap().join("test-wt-prune");
+        let wt_path = temp_dir();
         git_fs.worktree_add("wt-prune", &wt_path, None).unwrap();
 
         // Verify 2 worktrees

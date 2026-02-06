@@ -2,6 +2,7 @@
 //!
 //! Compiles schema/kaish.capnp into Rust types at build time.
 
+#[allow(clippy::expect_used)]
 fn main() {
     println!("cargo::rerun-if-changed=../../schema/kaish.capnp");
 

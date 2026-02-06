@@ -584,6 +584,7 @@ fn worktree_prune(git: &GitVfs) -> ExecResult {
 }
 
 /// Open the git repository in the current working directory.
+#[allow(clippy::result_large_err)]
 fn open_repo(ctx: &ExecContext) -> Result<GitVfs, ExecResult> {
     // Resolve VFS path to real filesystem path
     let real_path = ctx.backend.resolve_real_path(&ctx.cwd).ok_or_else(|| {

@@ -177,6 +177,7 @@ fn build_headers(
 }
 
 /// Build cells for a single count row.
+#[allow(clippy::too_many_arguments)]
 fn build_cells(
     line_count: usize,
     word_count: usize,

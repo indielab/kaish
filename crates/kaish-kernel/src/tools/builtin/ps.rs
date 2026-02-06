@@ -125,25 +125,23 @@ impl Tool for Ps {
                 continue;
             }
 
-            if let Some(pid) = filter_pid {
-                if stat.pid != pid {
+            if let Some(pid) = filter_pid
+                && stat.pid != pid {
                     continue;
                 }
-            }
 
             let username = user_cache
                 .get(&owner_uid)
                 .cloned()
                 .unwrap_or_else(|| owner_uid.to_string());
 
-            if let Some(ref user) = filter_user {
-                if &username != user {
+            if let Some(ref user) = filter_user
+                && &username != user {
                     continue;
                 }
-            }
 
             // Calculate RSS in KB
-            let rss_kb = (stat.rss as u64 * page_size) / 1024;
+            let rss_kb = (stat.rss * page_size) / 1024;
 
             // Calculate memory percentage
             let mem_percent = if total_memory_kb > 0 {
@@ -218,11 +216,10 @@ fn build_user_cache() -> HashMap<u32, String> {
     if let Ok(content) = std::fs::read_to_string("/etc/passwd") {
         for line in content.lines() {
             let parts: Vec<&str> = line.split(':').collect();
-            if parts.len() >= 3 {
-                if let Ok(uid) = parts[2].parse::<u32>() {
+            if parts.len() >= 3
+                && let Ok(uid) = parts[2].parse::<u32>() {
                     cache.insert(uid, parts[0].to_string());
                 }
-            }
         }
     }
 

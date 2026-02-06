@@ -133,15 +133,14 @@ fn compare_lines(
     let (val_a, val_b) = match key_field {
         Some(k) if k > 0 => {
             let delim = delimiter.unwrap_or(" \t");
-            let split_a: Vec<&str> = if delim.len() == 1 {
-                a.split(delim.chars().next().expect("delimiter not empty")).collect()
-            } else {
-                a.split_whitespace().collect()
+            let delim_char = delim.chars().next();
+            let split_a: Vec<&str> = match delim_char {
+                Some(ch) if delim.len() == 1 => a.split(ch).collect(),
+                _ => a.split_whitespace().collect(),
             };
-            let split_b: Vec<&str> = if delim.len() == 1 {
-                b.split(delim.chars().next().expect("delimiter not empty")).collect()
-            } else {
-                b.split_whitespace().collect()
+            let split_b: Vec<&str> = match delim_char {
+                Some(ch) if delim.len() == 1 => b.split(ch).collect(),
+                _ => b.split_whitespace().collect(),
             };
 
             let field_a = split_a.get(k - 1).copied().unwrap_or("");

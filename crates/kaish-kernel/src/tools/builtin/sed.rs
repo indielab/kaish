@@ -114,10 +114,8 @@ fn collect_expressions(args: &ToolArgs) -> Vec<String> {
     }
 
     // First positional is expression if no -e flag was used
-    if exprs.is_empty() {
-        if let Some(Value::String(e)) = args.positional.first() {
-            exprs.push(e.clone());
-        }
+    if exprs.is_empty() && let Some(Value::String(e)) = args.positional.first() {
+        exprs.push(e.clone());
     }
 
     exprs
@@ -196,8 +194,8 @@ fn parse_address(expr: &str) -> Result<(Address, &str), String> {
     if expr.starts_with('/') {
         let (pattern, rest) = parse_pattern_address(expr)?;
         // Check for range
-        if rest.starts_with(',') {
-            let (end_addr, final_rest) = parse_address(&rest[1..])?;
+        if let Some(after_comma) = rest.strip_prefix(',') {
+            let (end_addr, final_rest) = parse_address(after_comma)?;
             return Ok((
                 Address::Range(Box::new(Address::Pattern(pattern)), Box::new(end_addr)),
                 final_rest,
@@ -207,10 +205,9 @@ fn parse_address(expr: &str) -> Result<(Address, &str), String> {
     }
 
     // Check for $ (last line)
-    if expr.starts_with('$') {
-        let rest = &expr[1..];
-        if rest.starts_with(',') {
-            let (end_addr, final_rest) = parse_address(&rest[1..])?;
+    if let Some(rest) = expr.strip_prefix('$') {
+        if let Some(after_comma) = rest.strip_prefix(',') {
+            let (end_addr, final_rest) = parse_address(after_comma)?;
             return Ok((
                 Address::Range(Box::new(Address::LastLine), Box::new(end_addr)),
                 final_rest,
@@ -230,8 +227,8 @@ fn parse_address(expr: &str) -> Result<(Address, &str), String> {
         let rest = &expr[num_end..];
 
         // Check for range
-        if rest.starts_with(',') {
-            let (end_addr, final_rest) = parse_address(&rest[1..])?;
+        if let Some(after_comma) = rest.strip_prefix(',') {
+            let (end_addr, final_rest) = parse_address(after_comma)?;
             return Ok((
                 Address::Range(Box::new(Address::Line(num)), Box::new(end_addr)),
                 final_rest,
@@ -289,7 +286,10 @@ fn parse_command(cmd: &str) -> Result<Command, String> {
         return Err("missing command".to_string());
     }
 
-    let first = cmd.chars().next().expect("command string not empty");
+    // Safe: we checked `cmd.is_empty()` above, so `.next()` always succeeds.
+    let Some(first) = cmd.chars().next() else {
+        return Err("missing command".to_string());
+    };
 
     match first {
         's' => parse_substitute(&cmd[1..]),
@@ -499,7 +499,10 @@ fn address_matches(
 /// Substitute first match, handling capture groups.
 fn substitute_first(pattern: &Regex, text: &str, replacement: &str) -> String {
     if let Some(captures) = pattern.captures(text) {
-        let mat = captures.get(0).expect("capture group 0 always exists");
+        // Capture group 0 (the full match) is always present when captures succeeds.
+        let Some(mat) = captures.get(0) else {
+            return text.to_string();
+        };
         let expanded = expand_replacement(replacement, &captures);
         format!("{}{}{}", &text[..mat.start()], expanded, &text[mat.end()..])
     } else {
@@ -513,7 +516,10 @@ fn substitute_all(pattern: &Regex, text: &str, replacement: &str) -> String {
     let mut last_end = 0;
 
     for captures in pattern.captures_iter(text) {
-        let mat = captures.get(0).expect("capture group 0 always exists");
+        // Capture group 0 (the full match) is always present when captures succeeds.
+        let Some(mat) = captures.get(0) else {
+            continue;
+        };
         result.push_str(&text[last_end..mat.start()]);
         result.push_str(&expand_replacement(replacement, &captures));
         last_end = mat.end();

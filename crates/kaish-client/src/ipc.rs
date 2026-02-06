@@ -320,7 +320,7 @@ fn set_json_value(mut builder: value::Builder<'_>, json: &serde_json::Value) {
             } else if let Some(f) = n.as_f64() {
                 builder.set_float(f);
             } else {
-                builder.set_string(&n.to_string());
+                builder.set_string(n.to_string());
             }
         }
         serde_json::Value::String(s) => builder.set_string(s),

@@ -107,11 +107,10 @@ fn setup_stdin_redirects(cmd: &Command, ctx: &mut ExecContext) {
     for redir in &cmd.redirects {
         match &redir.kind {
             RedirectKind::Stdin => {
-                if let Some(path) = eval_redirect_target(&redir.target, ctx) {
-                    if let Ok(content) = std::fs::read_to_string(&path) {
+                if let Some(path) = eval_redirect_target(&redir.target, ctx)
+                    && let Ok(content) = std::fs::read_to_string(&path) {
                         ctx.set_stdin(content);
                     }
-                }
             }
             RedirectKind::HereDoc => {
                 if let Expr::Literal(Value::String(content)) = &redir.target {

@@ -61,11 +61,10 @@ impl Tool for Ln {
         let link_path = ctx.resolve_path(&link_name);
 
         // Handle force flag - remove existing link
-        if force && ctx.backend.exists(Path::new(&link_path)).await {
-            if let Err(e) = ctx.backend.remove(Path::new(&link_path), false).await {
+        if force && ctx.backend.exists(Path::new(&link_path)).await
+            && let Err(e) = ctx.backend.remove(Path::new(&link_path), false).await {
                 return ExecResult::failure(1, format!("ln: cannot remove '{}': {}", link_name, e));
             }
-        }
 
         // Create the symlink
         // Note: target is stored as-is (can be relative or absolute)

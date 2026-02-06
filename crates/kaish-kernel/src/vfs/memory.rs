@@ -472,7 +472,9 @@ impl Filesystem for MemoryFs {
             // Remove old children and insert with new paths
             for (old_path, child_entry) in children_to_rename {
                 entries.remove(&old_path);
-                let relative = old_path.strip_prefix(&from_normalized).unwrap();
+                let Ok(relative) = old_path.strip_prefix(&from_normalized) else {
+                    continue;
+                };
                 let new_path = to_normalized.join(relative);
                 entries.insert(new_path, child_entry);
             }

@@ -104,12 +104,11 @@ impl Tool for Ls {
 
         // Check if path is a file (not a directory)
         // Real ls behavior: `ls file.txt` just outputs the filename
-        if let Ok(info) = ctx.backend.stat(Path::new(&resolved)).await {
-            if !info.is_dir {
+        if let Ok(info) = ctx.backend.stat(Path::new(&resolved)).await
+            && !info.is_dir {
                 // It's a file - just display it
                 return self.list_file(ctx, &path, &info, long_format, human_readable);
             }
-        }
 
         if recursive {
             // Recursive listing
@@ -169,6 +168,7 @@ impl Ls {
         ExecResult::success(output)
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn list_single(
         &self,
         ctx: &mut ExecContext,

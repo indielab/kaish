@@ -244,14 +244,13 @@ fn parse_unified_diff(content: &str) -> Result<Vec<FileHunks>, String> {
     if let Some(hunk) = current_hunk {
         current_hunks.push(hunk);
     }
-    if let Some(file) = current_file {
-        if !current_hunks.is_empty() {
+    if let Some(file) = current_file
+        && !current_hunks.is_empty() {
             result.push(FileHunks {
                 target_file: file,
                 hunks: current_hunks,
             });
         }
-    }
 
     Ok(result)
 }

@@ -351,7 +351,6 @@ fn check_writable(path: &Path) -> Result<bool, String> {
     }
     // Try to open for writing (append mode to avoid truncating)
     Ok(std::fs::OpenOptions::new()
-        .write(true)
         .append(true)
         .open(path)
         .is_ok())

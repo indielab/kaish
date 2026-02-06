@@ -10,6 +10,7 @@
 mod filter;
 mod glob_path;
 mod ignore;
+#[allow(clippy::module_inception)]
 mod walker;
 
 pub use filter::{FilterResult, IncludeExclude};

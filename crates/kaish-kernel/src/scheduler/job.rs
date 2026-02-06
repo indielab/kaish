@@ -199,11 +199,10 @@ impl Job {
         };
 
         // Write output to temp file for later retrieval
-        if self.output_file.is_none() {
-            if let Some(path) = self.write_output_file(&result) {
+        if self.output_file.is_none()
+            && let Some(path) = self.write_output_file(&result) {
                 self.output_file = Some(path);
             }
-        }
 
         self.result = Some(result.clone());
         result
@@ -290,10 +289,12 @@ impl Job {
         }
 
         // Check if handle is finished
-        if let Some(handle) = self.handle.as_mut() {
-            if handle.is_finished() {
+        if let Some(handle) = self.handle.as_mut()
+            && handle.is_finished() {
                 // Take the handle and wait for it (should be instant)
-                let handle = self.handle.take().unwrap();
+                let Some(handle) = self.handle.take() else {
+                    return false;
+                };
                 // We can't await here, so we use now_or_never
                 // Note: this is synchronous since is_finished() was true
                 let result = match tokio::task::block_in_place(|| {
@@ -305,7 +306,6 @@ impl Job {
                 self.result = Some(result);
                 return true;
             }
-        }
 
         false
     }
@@ -471,11 +471,10 @@ impl JobManager {
     /// Returns `None` if the job doesn't exist or has no attached stream.
     pub async fn read_stdout(&self, id: JobId) -> Option<Vec<u8>> {
         let jobs = self.jobs.lock().await;
-        if let Some(job) = jobs.get(&id) {
-            if let Some(stream) = job.stdout_stream() {
+        if let Some(job) = jobs.get(&id)
+            && let Some(stream) = job.stdout_stream() {
                 return Some(stream.read().await);
             }
-        }
         None
     }
 
@@ -484,11 +483,10 @@ impl JobManager {
     /// Returns `None` if the job doesn't exist or has no attached stream.
     pub async fn read_stderr(&self, id: JobId) -> Option<Vec<u8>> {
         let jobs = self.jobs.lock().await;
-        if let Some(job) = jobs.get(&id) {
-            if let Some(stream) = job.stderr_stream() {
+        if let Some(job) = jobs.get(&id)
+            && let Some(stream) = job.stderr_stream() {
                 return Some(stream.read().await);
             }
-        }
         None
     }
 

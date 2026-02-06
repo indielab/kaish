@@ -141,7 +141,7 @@ impl KernelClient for EmbeddedClient {
 
         vfs.read(&path)
             .await
-            .map_err(|e| ClientError::Io(e))
+            .map_err(ClientError::Io)
     }
 
     async fn write_blob(&self, content_type: &str, data: &[u8]) -> ClientResult<String> {
@@ -163,7 +163,7 @@ impl KernelClient for EmbeddedClient {
 
         vfs.write(&path, data)
             .await
-            .map_err(|e| ClientError::Io(e))?;
+            .map_err(ClientError::Io)?;
 
         Ok(id)
     }

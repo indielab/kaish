@@ -45,11 +45,10 @@ impl Tool for Set {
         // From parser: PlusFlag("e") -> args.positional contains String("+e")
         // From direct call: args.positional might contain String("-e") or String("+e")
         for flag in &args.flags {
-            match flag.as_str() {
-                "e" => ctx.scope.set_error_exit(true),
-                // Silently ignore unrecognized flags for bash compatibility
-                _ => {}
+            if flag.as_str() == "e" {
+                ctx.scope.set_error_exit(true);
             }
+            // Silently ignore unrecognized flags for bash compatibility
         }
 
         for arg in &args.positional {

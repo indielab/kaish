@@ -527,7 +527,7 @@ impl Kernel {
         // Pre-execution validation
         if !self.skip_validation {
             let user_tools = self.user_tools.read().await;
-            let validator = Validator::new(&self.tools, &*user_tools);
+            let validator = Validator::new(&self.tools, &user_tools);
             let issues = validator.validate(&program);
 
             // Collect errors (warnings are logged but don't prevent execution)
@@ -1316,7 +1316,7 @@ impl Kernel {
                     self.eval_string_parts_async(default).await.map(Value::String)
                 } else {
                     let scope = self.scope.read().await;
-                    Ok(scope.get(name).unwrap().clone())
+                    scope.get(name).cloned().ok_or_else(|| anyhow::anyhow!("variable '{}' not found", name))
                 }
             }
             Expr::Arithmetic(expr_str) => {
@@ -1377,7 +1377,7 @@ impl Kernel {
                         self.eval_string_parts_async(default).await
                     } else {
                         let scope = self.scope.read().await;
-                        Ok(value_to_string(scope.get(name).unwrap()))
+                        Ok(value_to_string(scope.get(name).ok_or_else(|| anyhow::anyhow!("variable '{}' not found", name))?))
                     }
                 }
             StringPart::VarLength(name) => {
@@ -1852,17 +1852,17 @@ impl Kernel {
         };
 
         // Write stdin if present
-        if let Some(data) = stdin_data {
-            if let Some(mut stdin) = child.stdin.take() {
-                use tokio::io::AsyncWriteExt;
-                if let Err(e) = stdin.write_all(data.as_bytes()).await {
-                    return Ok(Some(ExecResult::failure(
-                        1,
-                        format!("{}: failed to write stdin: {}", name, e),
-                    )));
-                }
-                // Drop stdin to signal EOF
+        if let Some(data) = stdin_data
+            && let Some(mut stdin) = child.stdin.take()
+        {
+            use tokio::io::AsyncWriteExt;
+            if let Err(e) = stdin.write_all(data.as_bytes()).await {
+                return Ok(Some(ExecResult::failure(
+                    1,
+                    format!("{}: failed to write stdin: {}", name, e),
+                )));
             }
+            // Drop stdin to signal EOF
         }
 
         // Create bounded streams for output capture (prevents OOM from large output)
@@ -1876,21 +1876,17 @@ impl Kernel {
         let stdout_clone = stdout_stream.clone();
         let stderr_clone = stderr_stream.clone();
 
-        let stdout_task = if let Some(pipe) = stdout_pipe {
-            Some(tokio::spawn(async move {
+        let stdout_task = stdout_pipe.map(|pipe| {
+            tokio::spawn(async move {
                 drain_to_stream(pipe, stdout_clone).await;
-            }))
-        } else {
-            None
-        };
+            })
+        });
 
-        let stderr_task = if let Some(pipe) = stderr_pipe {
-            Some(tokio::spawn(async move {
+        let stderr_task = stderr_pipe.map(|pipe| {
+            tokio::spawn(async move {
                 drain_to_stream(pipe, stderr_clone).await;
-            }))
-        } else {
-            None
-        };
+            })
+        });
 
         // Wait for process to exit
         let status = match child.wait().await {

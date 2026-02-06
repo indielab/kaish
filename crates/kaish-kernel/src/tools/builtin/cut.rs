@@ -145,11 +145,10 @@ fn select_indices(spec: &str, max_len: usize) -> Vec<usize> {
                     indices.push(i - 1); // Convert to 0-indexed
                 }
             }
-        } else if let Ok(n) = part.parse::<usize>() {
-            if n > 0 && n <= max_len {
+        } else if let Ok(n) = part.parse::<usize>()
+            && n > 0 && n <= max_len {
                 indices.push(n - 1); // Convert to 0-indexed
             }
-        }
     }
 
     indices

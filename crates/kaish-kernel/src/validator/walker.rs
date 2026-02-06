@@ -60,7 +60,7 @@ impl<'a> Validator<'a> {
             Stmt::Case(case_stmt) => self.validate_case(case_stmt),
             Stmt::Break(levels) => self.validate_break(*levels),
             Stmt::Continue(levels) => self.validate_continue(*levels),
-            Stmt::Return(expr) => self.validate_return(expr.as_ref()),
+            Stmt::Return(expr) => self.validate_return(expr.as_deref()),
             Stmt::Exit(expr) => {
                 if let Some(e) = expr {
                     self.validate_expr(e);
@@ -117,8 +117,8 @@ impl<'a> Validator<'a> {
         // Check for shell glob patterns in arguments (unless command expects patterns)
         if !command_expects_pattern_or_text(&cmd.name) {
             for arg in &cmd.args {
-                if let Arg::Positional(expr) = arg {
-                    if let Some(pattern) = self.extract_unquoted_glob_pattern(expr) {
+                if let Arg::Positional(expr) = arg
+                    && let Some(pattern) = self.extract_unquoted_glob_pattern(expr) {
                         self.issues.push(
                             ValidationIssue::error(
                                 IssueCode::ShellGlobPattern,
@@ -132,7 +132,6 @@ impl<'a> Validator<'a> {
                             ),
                         );
                     }
-                }
             }
         }
 
@@ -235,11 +234,10 @@ impl<'a> Validator<'a> {
             Expr::Literal(Value::String(s)) if looks_like_shell_glob(s) => Some(s.clone()),
             // Interpolated strings that are just a literal (parser may produce these)
             Expr::Interpolated(parts) if parts.len() == 1 => {
-                if let StringPart::Literal(s) = &parts[0] {
-                    if looks_like_shell_glob(s) {
+                if let StringPart::Literal(s) = &parts[0]
+                    && looks_like_shell_glob(s) {
                         return Some(s.clone());
                     }
-                }
                 None
             }
             _ => None,
@@ -306,8 +304,8 @@ impl<'a> Validator<'a> {
                 IssueCode::BreakOutsideLoop,
                 "break used outside of a loop",
             ));
-        } else if let Some(n) = levels {
-            if n > self.loop_depth {
+        } else if let Some(n) = levels
+            && n > self.loop_depth {
                 self.issues.push(ValidationIssue::warning(
                     IssueCode::BreakOutsideLoop,
                     format!(
@@ -316,7 +314,6 @@ impl<'a> Validator<'a> {
                     ),
                 ));
             }
-        }
     }
 
     /// Validate a continue statement.
@@ -326,8 +323,8 @@ impl<'a> Validator<'a> {
                 IssueCode::BreakOutsideLoop,
                 "continue used outside of a loop",
             ));
-        } else if let Some(n) = levels {
-            if n > self.loop_depth {
+        } else if let Some(n) = levels
+            && n > self.loop_depth {
                 self.issues.push(ValidationIssue::warning(
                     IssueCode::BreakOutsideLoop,
                     format!(
@@ -336,11 +333,10 @@ impl<'a> Validator<'a> {
                     ),
                 ));
             }
-        }
     }
 
     /// Validate a return statement.
-    fn validate_return(&mut self, expr: Option<&Box<Expr>>) {
+    fn validate_return(&mut self, expr: Option<&Expr>) {
         if let Some(e) = expr {
             self.validate_expr(e);
         }

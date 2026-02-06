@@ -131,13 +131,12 @@ impl<'a> FileWalker<'a> {
 
             // Try to load .gitignore from root
             let gitignore_path = self.root.join(".gitignore");
-            if self.backend.exists(&gitignore_path).await {
-                if let Ok(gitignore) =
+            if self.backend.exists(&gitignore_path).await
+                && let Ok(gitignore) =
                     IgnoreFilter::from_gitignore(&gitignore_path, self.backend).await
                 {
                     filter.merge(&gitignore);
                 }
-            }
             Some(filter)
         } else {
             self.ignore_filter.take()
@@ -149,11 +148,10 @@ impl<'a> FileWalker<'a> {
 
         while let Some((dir, depth, current_filter)) = stack.pop() {
             // Check max depth
-            if let Some(max) = self.options.max_depth {
-                if depth > max {
+            if let Some(max) = self.options.max_depth
+                && depth > max {
                     continue;
                 }
-            }
 
             // List directory contents
             let entries = match self.backend.list(&dir).await {
@@ -184,15 +182,14 @@ impl<'a> FileWalker<'a> {
                         continue;
                     }
                     // Also check filename only for patterns like "*_test.rs"
-                    if let Some(name) = full_path.file_name() {
-                        if self
+                    if let Some(name) = full_path.file_name()
+                        && self
                             .options
                             .filter
                             .should_exclude(Path::new(name))
                         {
                             continue;
                         }
-                    }
                 }
 
                 if entry.is_dir {

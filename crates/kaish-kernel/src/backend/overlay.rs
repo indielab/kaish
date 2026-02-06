@@ -247,16 +247,14 @@ impl KernelBackend for VirtualOverlayBackend {
 
     async fn remove(&self, path: &Path, recursive: bool) -> BackendResult<()> {
         if Self::is_virtual_path(path) {
-            if recursive {
-                if let Ok(meta) = self.vfs.stat(path).await
-                    && meta.is_dir
-                {
-                    if let Ok(entries) = self.vfs.list(path).await {
-                        for entry in entries {
-                            let child_path = path.join(&entry.name);
-                            Box::pin(self.remove(&child_path, true)).await?;
-                        }
-                    }
+            if recursive
+                && let Ok(meta) = self.vfs.stat(path).await
+                && meta.is_dir
+                && let Ok(entries) = self.vfs.list(path).await
+            {
+                for entry in entries {
+                    let child_path = path.join(&entry.name);
+                    Box::pin(self.remove(&child_path, true)).await?;
                 }
             }
             self.vfs.remove(path).await?;

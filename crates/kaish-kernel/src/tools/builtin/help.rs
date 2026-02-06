@@ -31,7 +31,7 @@ impl Tool for Help {
 
     async fn execute(&self, args: ToolArgs, ctx: &mut ExecContext) -> ExecResult {
         let topic_str = args.get_string("topic", 0).unwrap_or_default();
-        let topic = HelpTopic::from_str(&topic_str);
+        let topic = HelpTopic::parse_topic(&topic_str);
         let content = get_help(&topic, &ctx.tool_schemas);
         ExecResult::success(content)
     }

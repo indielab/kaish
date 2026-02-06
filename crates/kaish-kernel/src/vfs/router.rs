@@ -131,10 +131,10 @@ impl VfsRouter {
 
             if is_match {
                 // Keep the longest match
-                if best_match.is_none()
-                    || mount_path.as_os_str().len()
-                        > best_match.expect("checked is_none").0.as_os_str().len()
-                {
+                let dominated = best_match
+                    .as_ref()
+                    .is_none_or(|(bp, _)| mount_path.as_os_str().len() > bp.as_os_str().len());
+                if dominated {
                     best_match = Some((mount_path, fs));
                 }
             }

@@ -116,11 +116,13 @@ impl Tool for Find {
             .and_then(|s| parse_size_filter(&s));
 
         // Build walker options
-        let mut options = WalkOptions::default();
-        options.max_depth = max_depth;
-        options.entry_types = entry_types;
-        options.include_hidden = true; // find includes hidden by default
-        options.respect_gitignore = false; // find doesn't respect gitignore
+        let options = WalkOptions {
+            max_depth,
+            entry_types,
+            include_hidden: true, // find includes hidden by default
+            respect_gitignore: false, // find doesn't respect gitignore
+            ..WalkOptions::default()
+        };
 
         // Build walker
         let mut walker = FileWalker::new(ctx.backend.as_ref(), &resolved_path)
@@ -163,9 +165,9 @@ impl Tool for Find {
             let info = ctx.backend.stat(&path).await.ok();
 
             // Check mtime filter
-            if let Some((sign, days)) = mtime_filter {
-                if let Some(ref info) = info {
-                    if let Some(modified) = info.modified {
+            if let Some((sign, days)) = mtime_filter
+                && let Some(ref info) = info
+                    && let Some(modified) = info.modified {
                         let age_secs = now_secs.saturating_sub(modified);
                         let age_days = age_secs / 86400;
                         let matches = match sign {
@@ -177,12 +179,10 @@ impl Tool for Find {
                             continue;
                         }
                     }
-                }
-            }
 
             // Check size filter
-            if let Some((sign, size)) = size_filter {
-                if let Some(ref info) = info {
+            if let Some((sign, size)) = size_filter
+                && let Some(ref info) = info {
                     let matches = match sign {
                         '+' => info.size > size,   // larger than N
                         '-' => info.size < size,   // smaller than N
@@ -192,7 +192,6 @@ impl Tool for Find {
                         continue;
                     }
                 }
-            }
 
             // Determine entry type for rendering hints
             let entry_type = info

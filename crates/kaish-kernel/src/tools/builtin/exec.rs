@@ -164,14 +164,13 @@ impl Tool for Exec {
         };
 
         // Write stdin if present
-        if let Some(data) = stdin_data {
-            if let Some(mut stdin) = child.stdin.take() {
+        if let Some(data) = stdin_data
+            && let Some(mut stdin) = child.stdin.take() {
                 use tokio::io::AsyncWriteExt;
                 if let Err(e) = stdin.write_all(data.as_bytes()).await {
                     return ExecResult::failure(1, format!("exec: failed to write stdin: {}", e));
                 }
             }
-        }
 
         // Wait with optional timeout
         if let Some(ms) = timeout_ms {

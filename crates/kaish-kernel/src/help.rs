@@ -29,7 +29,7 @@ impl HelpTopic {
     ///
     /// Returns Overview for empty/None, specific topics for known names,
     /// or Tool(name) for anything else (assumes it's a tool name).
-    pub fn from_str(s: &str) -> Self {
+    pub fn parse_topic(s: &str) -> Self {
         match s.to_lowercase().as_str() {
             "" | "overview" | "help" => Self::Overview,
             "syntax" | "language" | "lang" => Self::Syntax,
@@ -193,17 +193,17 @@ mod tests {
 
     #[test]
     fn test_topic_parsing() {
-        assert_eq!(HelpTopic::from_str(""), HelpTopic::Overview);
-        assert_eq!(HelpTopic::from_str("overview"), HelpTopic::Overview);
-        assert_eq!(HelpTopic::from_str("syntax"), HelpTopic::Syntax);
-        assert_eq!(HelpTopic::from_str("SYNTAX"), HelpTopic::Syntax);
-        assert_eq!(HelpTopic::from_str("builtins"), HelpTopic::Builtins);
-        assert_eq!(HelpTopic::from_str("vfs"), HelpTopic::Vfs);
-        assert_eq!(HelpTopic::from_str("scatter"), HelpTopic::Scatter);
-        assert_eq!(HelpTopic::from_str("集"), HelpTopic::Scatter);
-        assert_eq!(HelpTopic::from_str("limits"), HelpTopic::Limits);
+        assert_eq!(HelpTopic::parse_topic(""), HelpTopic::Overview);
+        assert_eq!(HelpTopic::parse_topic("overview"), HelpTopic::Overview);
+        assert_eq!(HelpTopic::parse_topic("syntax"), HelpTopic::Syntax);
+        assert_eq!(HelpTopic::parse_topic("SYNTAX"), HelpTopic::Syntax);
+        assert_eq!(HelpTopic::parse_topic("builtins"), HelpTopic::Builtins);
+        assert_eq!(HelpTopic::parse_topic("vfs"), HelpTopic::Vfs);
+        assert_eq!(HelpTopic::parse_topic("scatter"), HelpTopic::Scatter);
+        assert_eq!(HelpTopic::parse_topic("集"), HelpTopic::Scatter);
+        assert_eq!(HelpTopic::parse_topic("limits"), HelpTopic::Limits);
         assert_eq!(
-            HelpTopic::from_str("grep"),
+            HelpTopic::parse_topic("grep"),
             HelpTopic::Tool("grep".to_string())
         );
     }

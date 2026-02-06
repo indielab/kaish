@@ -444,9 +444,10 @@ impl<'a> AwkLexer<'a> {
                 s.push(c);
                 self.advance();
                 // Handle exponent sign
-                if (c == 'e' || c == 'E') && self.peek().is_some_and(|c| c == '+' || c == '-') {
-                    s.push(self.advance().expect("peeked char exists"));
-                }
+                if (c == 'e' || c == 'E') && self.peek().is_some_and(|c| c == '+' || c == '-')
+                    && let Some(sign) = self.advance() {
+                        s.push(sign);
+                    }
             } else {
                 break;
             }
@@ -554,7 +555,9 @@ impl<'a> AwkLexer<'a> {
     }
 
     fn scan_operator(&mut self) -> Result<Token, String> {
-        let c = self.advance().expect("scan_operator called after peek");
+        let Some(c) = self.advance() else {
+            return Err("unexpected end of input in operator".to_string());
+        };
         let tok = match c {
             '+' => {
                 if self.peek() == Some('+') {
@@ -1383,27 +1386,32 @@ fn parse_program(input: &str) -> Result<AwkProgram, String> {
 // ============================================================================
 
 /// AWK value with string/number coercion.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 enum AwkValue {
     String(String),
     Number(f64),
+    #[default]
     Uninitialized,
 }
 
-impl AwkValue {
-    fn to_string(&self) -> String {
+impl std::fmt::Display for AwkValue {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            AwkValue::String(s) => s.clone(),
+            AwkValue::String(s) => f.write_str(s),
             AwkValue::Number(n) => {
                 if n.fract() == 0.0 && n.abs() < 1e15 {
-                    format!("{}", *n as i64)
+                    write!(f, "{}", *n as i64)
                 } else {
-                    format!("{:.6}", n).trim_end_matches('0').trim_end_matches('.').to_string()
+                    let s = format!("{:.6}", n);
+                    f.write_str(s.trim_end_matches('0').trim_end_matches('.'))
                 }
             }
-            AwkValue::Uninitialized => String::new(),
+            AwkValue::Uninitialized => Ok(()),
         }
     }
+}
+
+impl AwkValue {
 
     fn to_number(&self) -> f64 {
         match self {
@@ -1422,11 +1430,6 @@ impl AwkValue {
     }
 }
 
-impl Default for AwkValue {
-    fn default() -> Self {
-        AwkValue::Uninitialized
-    }
-}
 
 fn parse_awk_number(s: &str) -> f64 {
     let s = s.trim();
@@ -1575,11 +1578,8 @@ impl AwkRuntime {
     fn execute(&mut self, program: &AwkProgram, input: &str) -> Result<String, String> {
         // Run BEGIN rules
         for rule in &program.rules {
-            if matches!(rule.pattern, Pattern::Begin) {
-                match self.execute_block(&rule.action)? {
-                    ControlFlow::Exit(_) => return Ok(std::mem::take(&mut self.output)),
-                    _ => {}
-                }
+            if matches!(rule.pattern, Pattern::Begin) && let ControlFlow::Exit(_) = self.execute_block(&rule.action)? {
+                return Ok(std::mem::take(&mut self.output));
             }
         }
 
@@ -1619,11 +1619,8 @@ impl AwkRuntime {
 
         // Run END rules
         for rule in &program.rules {
-            if matches!(rule.pattern, Pattern::End) {
-                match self.execute_block(&rule.action)? {
-                    ControlFlow::Exit(_) => break,
-                    _ => {}
-                }
+            if matches!(rule.pattern, Pattern::End) && let ControlFlow::Exit(_) = self.execute_block(&rule.action)? {
+                break;
             }
         }
 

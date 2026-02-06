@@ -161,11 +161,10 @@ fn get_system_entropy(len: usize) -> Vec<u8> {
     use std::io::Read;
 
     let mut buf = vec![0u8; len];
-    if let Ok(mut file) = std::fs::File::open("/dev/urandom") {
-        if file.read_exact(&mut buf).is_ok() {
+    if let Ok(mut file) = std::fs::File::open("/dev/urandom")
+        && file.read_exact(&mut buf).is_ok() {
             return buf;
         }
-    }
     Vec::new() // Return empty on failure, triggering fallback
 }
 

@@ -87,8 +87,8 @@ impl Scope {
 
         // Search from innermost to outermost to find existing variable
         for frame in self.frames.iter_mut().rev() {
-            if frame.contains_key(&name) {
-                frame.insert(name, value);
+            if let std::collections::hash_map::Entry::Occupied(mut e) = frame.entry(name.clone()) {
+                e.insert(value);
                 return;
             }
         }

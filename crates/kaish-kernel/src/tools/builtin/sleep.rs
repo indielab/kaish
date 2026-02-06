@@ -55,14 +55,14 @@ fn parse_duration(s: &str) -> Result<f64, String> {
     }
 
     // Check for suffix
-    let (num_str, multiplier) = if s.ends_with('s') {
-        (&s[..s.len() - 1], 1.0)
-    } else if s.ends_with('m') {
-        (&s[..s.len() - 1], 60.0)
-    } else if s.ends_with('h') {
-        (&s[..s.len() - 1], 3600.0)
-    } else if s.ends_with('d') {
-        (&s[..s.len() - 1], 86400.0)
+    let (num_str, multiplier) = if let Some(rest) = s.strip_suffix('s') {
+        (rest, 1.0)
+    } else if let Some(rest) = s.strip_suffix('m') {
+        (rest, 60.0)
+    } else if let Some(rest) = s.strip_suffix('h') {
+        (rest, 3600.0)
+    } else if let Some(rest) = s.strip_suffix('d') {
+        (rest, 86400.0)
     } else {
         (s, 1.0)
     };

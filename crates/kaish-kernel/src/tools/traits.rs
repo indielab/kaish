@@ -282,20 +282,18 @@ pub fn validate_against_schema(args: &ToolArgs, schema: &ToolSchema) -> Vec<Vali
 
     // Check type compatibility for named args
     for (key, value) in &args.named {
-        if let Some(param) = schema.params.iter().find(|p| &p.name == key) {
-            if let Some(issue) = check_type_compatibility(key, value, &param.param_type) {
+        if let Some(param) = schema.params.iter().find(|p| &p.name == key)
+            && let Some(issue) = check_type_compatibility(key, value, &param.param_type) {
                 issues.push(issue);
             }
-        }
     }
 
     // Check type compatibility for positional args
     for (i, value) in args.positional.iter().enumerate() {
-        if let Some(param) = schema.params.get(i) {
-            if let Some(issue) = check_type_compatibility(&param.name, value, &param.param_type) {
+        if let Some(param) = schema.params.get(i)
+            && let Some(issue) = check_type_compatibility(&param.name, value, &param.param_type) {
                 issues.push(issue);
             }
-        }
     }
 
     issues

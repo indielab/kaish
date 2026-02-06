@@ -131,14 +131,13 @@ impl Tool for Grep {
         // Check if the regex pattern is valid
         if let Some(pattern) = args.get_string("pattern", 0) {
             // Don't validate if pattern looks dynamic (contains shell expansion markers)
-            if !pattern.contains("<dynamic>") {
-                if let Err(e) = regex::Regex::new(&pattern) {
+            if !pattern.contains("<dynamic>")
+                && let Err(e) = regex::Regex::new(&pattern) {
                     issues.push(ValidationIssue::error(
                         IssueCode::InvalidRegex,
                         format!("grep: invalid regex pattern: {}", e),
                     ).with_suggestion("check regex syntax at https://docs.rs/regex"));
                 }
-            }
         }
 
         issues
@@ -321,6 +320,7 @@ impl Tool for Grep {
 }
 
 impl Grep {
+    #[allow(clippy::too_many_arguments)]
     async fn grep_multiple_files(
         &self,
         ctx: &mut ExecContext,
@@ -432,12 +432,11 @@ fn grep_lines_structured(
     // Helper to format prefix for text output
     let prefix = |line_num: usize, sep: char| -> String {
         let mut p = String::new();
-        if opts.show_filename {
-            if let Some(f) = filename {
+        if opts.show_filename
+            && let Some(f) = filename {
                 p.push_str(f);
                 p.push(sep);
             }
-        }
         if opts.show_line_numbers {
             p.push_str(&format!("{}{}", line_num + 1, sep));
         }
@@ -475,11 +474,10 @@ fn grep_lines_structured(
 
                         // Create node for each match
                         let mut cells = Vec::new();
-                        if opts.show_filename {
-                            if let Some(f) = filename {
+                        if opts.show_filename
+                            && let Some(f) = filename {
                                 cells.push(f.to_string());
                             }
-                        }
                         if opts.show_line_numbers {
                             cells.push((line_num + 1).to_string());
                         }
@@ -492,11 +490,10 @@ fn grep_lines_structured(
 
                     // Create node for the match
                     let mut cells = Vec::new();
-                    if opts.show_filename {
-                        if let Some(f) = filename {
+                    if opts.show_filename
+                        && let Some(f) = filename {
                             cells.push(f.to_string());
                         }
-                    }
                     if opts.show_line_numbers {
                         cells.push((line_num + 1).to_string());
                     }

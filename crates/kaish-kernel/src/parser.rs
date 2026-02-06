@@ -142,7 +142,9 @@ fn parse_interpolated_string(s: &str) -> Vec<StringPart> {
                     chars.next(); // consume closing marker
                     break;
                 }
-                marker.push(chars.next().unwrap());
+                if let Some(c) = chars.next() {
+                    marker.push(c);
+                }
             }
             if marker == "DOLLAR" {
                 current_text.push('$');
@@ -161,7 +163,7 @@ fn parse_interpolated_string(s: &str) -> Vec<StringPart> {
                 // Collect until matching ')' accounting for nested parens
                 let mut cmd_content = String::new();
                 let mut paren_depth = 1;
-                while let Some(c) = chars.next() {
+                for c in chars.by_ref() {
                     if c == '(' {
                         paren_depth += 1;
                         cmd_content.push(c);
@@ -208,7 +210,7 @@ fn parse_interpolated_string(s: &str) -> Vec<StringPart> {
                 // Collect until matching '}', tracking nesting depth
                 let mut var_content = String::new();
                 let mut depth = 1;
-                while let Some(c) = chars.next() {
+                for c in chars.by_ref() {
                     if c == '{' && var_content.ends_with('$') {
                         depth += 1;
                         var_content.push(c);
@@ -250,9 +252,10 @@ fn parse_interpolated_string(s: &str) -> Vec<StringPart> {
                 if !current_text.is_empty() {
                     parts.push(StringPart::Literal(std::mem::take(&mut current_text)));
                 }
-                let digit = chars.next().expect("peeked digit should exist");
-                let n = digit.to_digit(10).expect("is_ascii_digit guarantees valid digit") as usize;
-                parts.push(StringPart::Positional(n));
+                if let Some(digit) = chars.next() {
+                    let n = digit.to_digit(10).unwrap_or(0) as usize;
+                    parts.push(StringPart::Positional(n));
+                }
             } else if chars.peek() == Some(&'@') {
                 // All arguments $@
                 if !current_text.is_empty() {
@@ -291,7 +294,9 @@ fn parse_interpolated_string(s: &str) -> Vec<StringPart> {
                 let mut var_name = String::new();
                 while let Some(&c) = chars.peek() {
                     if c.is_ascii_alphanumeric() || c == '_' {
-                        var_name.push(chars.next().expect("peeked char should exist"));
+                        if let Some(c) = chars.next() {
+                            var_name.push(c);
+                        }
                     } else {
                         break;
                     }
