@@ -5,7 +5,8 @@
 
 use std::path::Path;
 
-use super::GlobPath;
+use crate::glob::glob_match;
+use crate::glob_path::GlobPath;
 
 /// Result of checking a path against filters.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -26,7 +27,7 @@ pub enum FilterResult {
 ///
 /// # Examples
 /// ```
-/// use kaish_kernel::walker::{IncludeExclude, FilterResult};
+/// use kaish_glob::{IncludeExclude, FilterResult};
 /// use std::path::Path;
 ///
 /// let mut filter = IncludeExclude::new();
@@ -55,7 +56,6 @@ struct CompiledRule {
 
 impl CompiledRule {
     fn new(pattern: &str) -> Self {
-        // Try to compile as GlobPath
         let glob = GlobPath::new(pattern).ok();
 
         Self {
@@ -75,12 +75,12 @@ impl CompiledRule {
         // Also try matching just the filename
         if let Some(name) = path.file_name() {
             let name_str = name.to_string_lossy();
-            if crate::glob::glob_match(&self.raw, &name_str) {
+            if glob_match(&self.raw, &name_str) {
                 return true;
             }
         }
 
-        crate::glob::glob_match(&self.raw, &path_str)
+        glob_match(&self.raw, &path_str)
     }
 }
 
@@ -175,23 +175,19 @@ mod tests {
 
     #[test]
     fn test_order_matters() {
-        // First rule wins
         let mut filter = IncludeExclude::new();
         filter.include("*.rs");
         filter.exclude("*_test.rs");
 
-        // *.rs matches first, so test files are included
         assert_eq!(
             filter.check(Path::new("parser_test.rs")),
             FilterResult::Include
         );
 
-        // Reverse order
         let mut filter = IncludeExclude::new();
         filter.exclude("*_test.rs");
         filter.include("*.rs");
 
-        // *_test.rs matches first, so test files are excluded
         assert_eq!(
             filter.check(Path::new("parser_test.rs")),
             FilterResult::Exclude

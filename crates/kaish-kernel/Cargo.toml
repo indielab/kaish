@@ -8,6 +8,7 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
+kaish-glob = { path = "../kaish-glob" }
 kaish-schema = { path = "../kaish-schema" }
 
 # Async runtime

@@ -5,6 +5,7 @@ use regex::RegexBuilder;
 use std::path::{Path, PathBuf};
 
 use crate::ast::Value;
+use crate::backend_walker_fs::BackendWalkerFs;
 use crate::interpreter::{ExecResult, OutputData, OutputNode};
 use crate::tools::{ExecContext, ParamSchema, Tool, ToolArgs, ToolSchema, validate_against_schema};
 use crate::validator::{IssueCode, ValidationIssue};
@@ -240,12 +241,13 @@ impl Tool for Grep {
                 filter,
             };
 
+            let fs = BackendWalkerFs(ctx.backend.as_ref());
             let walker = if let Some(g) = glob {
-                FileWalker::new(ctx.backend.as_ref(), &root)
+                FileWalker::new(&fs, &root)
                     .with_pattern(g)
                     .with_options(options)
             } else {
-                FileWalker::new(ctx.backend.as_ref(), &root).with_options(options)
+                FileWalker::new(&fs, &root).with_options(options)
             };
 
             let files = match walker.collect().await {

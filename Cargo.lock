@@ -866,6 +866,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "kaish-glob"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "rstest",
+ "thiserror 2.0.17",
+ "tokio",
+]
+
+[[package]]
 name = "kaish-kernel"
 version = "0.1.0"
 dependencies = [
@@ -883,6 +893,7 @@ dependencies = [
  "jaq-core",
  "jaq-json",
  "jaq-std",
+ "kaish-glob",
  "kaish-schema",
  "logos",
  "procfs",

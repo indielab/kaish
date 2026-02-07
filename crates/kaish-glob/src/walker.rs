@@ -1,12 +1,13 @@
-//! Core async file walker using KernelBackend.
+//! Core async file walker, generic over `WalkerFs`.
 //!
 //! Provides recursive directory traversal with filtering support.
 
 use std::path::{Path, PathBuf};
 
-use crate::backend::KernelBackend;
-
-use super::{GlobPath, IgnoreFilter, IncludeExclude};
+use crate::{WalkerDirEntry, WalkerFs};
+use crate::glob_path::GlobPath;
+use crate::ignore::IgnoreFilter;
+use crate::filter::IncludeExclude;
 
 /// Types of entries to include in walk results.
 #[derive(Debug, Clone, Copy, Default)]
@@ -70,31 +71,31 @@ impl Default for WalkOptions {
     }
 }
 
-/// Async file walker using KernelBackend.
+/// Async file walker, generic over any `WalkerFs` implementation.
 ///
 /// # Examples
 /// ```ignore
-/// use kaish_kernel::walker::{FileWalker, WalkOptions, GlobPath};
+/// use kaish_glob::{FileWalker, WalkOptions, GlobPath};
 ///
-/// let walker = FileWalker::new(backend, "src")
+/// let walker = FileWalker::new(&my_fs, "src")
 ///     .with_pattern(GlobPath::new("**/*.rs").unwrap())
 ///     .with_options(WalkOptions::default());
 ///
 /// let files = walker.collect().await?;
 /// ```
-pub struct FileWalker<'a> {
-    backend: &'a dyn KernelBackend,
+pub struct FileWalker<'a, F: WalkerFs> {
+    fs: &'a F,
     root: PathBuf,
     pattern: Option<GlobPath>,
     options: WalkOptions,
     ignore_filter: Option<IgnoreFilter>,
 }
 
-impl<'a> FileWalker<'a> {
+impl<'a, F: WalkerFs> FileWalker<'a, F> {
     /// Create a new file walker starting at the given root.
-    pub fn new(backend: &'a dyn KernelBackend, root: impl AsRef<Path>) -> Self {
+    pub fn new(fs: &'a F, root: impl AsRef<Path>) -> Self {
         Self {
-            backend,
+            fs,
             root: root.as_ref().to_path_buf(),
             pattern: None,
             options: WalkOptions::default(),
@@ -121,7 +122,7 @@ impl<'a> FileWalker<'a> {
     }
 
     /// Collect all matching paths.
-    pub async fn collect(mut self) -> anyhow::Result<Vec<PathBuf>> {
+    pub async fn collect(mut self) -> Result<Vec<PathBuf>, crate::WalkerError> {
         // Set up base ignore filter
         let base_filter = if self.options.respect_gitignore {
             let mut filter = self
@@ -131,9 +132,9 @@ impl<'a> FileWalker<'a> {
 
             // Try to load .gitignore from root
             let gitignore_path = self.root.join(".gitignore");
-            if self.backend.exists(&gitignore_path).await
+            if self.fs.exists(&gitignore_path).await
                 && let Ok(gitignore) =
-                    IgnoreFilter::from_gitignore(&gitignore_path, self.backend).await
+                    IgnoreFilter::from_gitignore(&gitignore_path, self.fs).await
                 {
                     filter.merge(&gitignore);
                 }
@@ -143,7 +144,7 @@ impl<'a> FileWalker<'a> {
         };
 
         let mut results = Vec::new();
-        // Stack now carries: (directory, depth, ignore_filter for this dir)
+        // Stack carries: (directory, depth, ignore_filter for this dir)
         let mut stack = vec![(self.root.clone(), 0usize, base_filter.clone())];
 
         while let Some((dir, depth, current_filter)) = stack.pop() {
@@ -154,23 +155,25 @@ impl<'a> FileWalker<'a> {
                 }
 
             // List directory contents
-            let entries = match self.backend.list(&dir).await {
+            let entries = match self.fs.list_dir(&dir).await {
                 Ok(entries) => entries,
                 Err(_) => continue, // Silently skip unreadable dirs
             };
 
             for entry in entries {
-                let full_path = dir.join(&entry.name);
+                let entry_name = entry.name().to_string();
+                let entry_is_dir = entry.is_dir();
+                let full_path = dir.join(&entry_name);
 
                 // Check hidden files
-                if !self.options.include_hidden && entry.name.starts_with('.') {
+                if !self.options.include_hidden && entry_name.starts_with('.') {
                     continue;
                 }
 
                 // Check ignore filter
                 if let Some(ref filter) = current_filter {
                     let relative = self.relative_path(&full_path);
-                    if filter.is_ignored(&relative, entry.is_dir) {
+                    if filter.is_ignored(&relative, entry_is_dir) {
                         continue;
                     }
                 }
@@ -192,13 +195,13 @@ impl<'a> FileWalker<'a> {
                         }
                 }
 
-                if entry.is_dir {
+                if entry_is_dir {
                     // Check for nested .gitignore in this directory
                     let child_filter = if self.options.respect_gitignore {
                         let gitignore_path = full_path.join(".gitignore");
-                        if self.backend.exists(&gitignore_path).await {
+                        if self.fs.exists(&gitignore_path).await {
                             if let Ok(nested_gitignore) =
-                                IgnoreFilter::from_gitignore(&gitignore_path, self.backend).await
+                                IgnoreFilter::from_gitignore(&gitignore_path, self.fs).await
                             {
                                 // Merge with parent filter
                                 current_filter.as_ref().map(|f| f.merged_with(&nested_gitignore))
@@ -213,18 +216,13 @@ impl<'a> FileWalker<'a> {
                         current_filter.clone()
                     };
 
-                    // Only recurse if the pattern requires it:
-                    // - No pattern: recurse freely
-                    // - Pattern with globstar (**): needs recursive search
-                    // - Pattern with fixed depth: only recurse if we haven't reached required depth
+                    // Only recurse if the pattern requires it
                     let should_recurse = match &self.pattern {
                         None => true,
                         Some(pat) => {
                             if pat.has_globstar() {
                                 true
                             } else if let Some(fixed) = pat.fixed_depth() {
-                                // depth is 0-indexed, fixed_depth counts segments
-                                // e.g., "*.rs" has depth 1, so we don't recurse past depth 0
                                 depth + 1 < fixed
                             } else {
                                 true
@@ -273,51 +271,148 @@ impl<'a> FileWalker<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::vfs::{Filesystem, MemoryFs, VfsRouter};
+    use crate::{WalkerDirEntry, WalkerError, WalkerFs};
+    use std::collections::HashMap;
     use std::sync::Arc;
+    use tokio::sync::RwLock;
 
-    async fn make_test_fs() -> Arc<VfsRouter> {
-        let mut vfs = VfsRouter::new();
-        let mem = MemoryFs::new();
+    /// Simple in-memory dir entry for testing.
+    struct MemEntry {
+        name: String,
+        is_dir: bool,
+    }
 
-        // Create a test directory structure
-        mem.mkdir(Path::new("src")).await.unwrap();
-        mem.mkdir(Path::new("src/lib")).await.unwrap();
-        mem.mkdir(Path::new("test")).await.unwrap();
-        mem.mkdir(Path::new(".git")).await.unwrap();
-        mem.mkdir(Path::new("node_modules")).await.unwrap();
+    impl WalkerDirEntry for MemEntry {
+        fn name(&self) -> &str { &self.name }
+        fn is_dir(&self) -> bool { self.is_dir }
+        fn is_file(&self) -> bool { !self.is_dir }
+        fn is_symlink(&self) -> bool { false }
+    }
 
-        mem.write(Path::new("src/main.rs"), b"fn main() {}")
-            .await
-            .unwrap();
-        mem.write(Path::new("src/lib.rs"), b"pub mod lib;")
-            .await
-            .unwrap();
-        mem.write(Path::new("src/lib/utils.rs"), b"pub fn util() {}")
-            .await
-            .unwrap();
-        mem.write(Path::new("test/main_test.rs"), b"#[test]")
-            .await
-            .unwrap();
-        mem.write(Path::new("README.md"), b"# Test").await.unwrap();
-        mem.write(Path::new(".hidden"), b"secret").await.unwrap();
-        mem.write(Path::new(".git/config"), b"[core]")
-            .await
-            .unwrap();
-        mem.write(Path::new("node_modules/pkg.json"), b"{}")
-            .await
-            .unwrap();
+    /// In-memory filesystem for testing the walker.
+    struct MemoryFs {
+        files: Arc<RwLock<HashMap<PathBuf, Vec<u8>>>>,
+        dirs: Arc<RwLock<std::collections::HashSet<PathBuf>>>,
+    }
 
-        vfs.mount("/", mem);
-        Arc::new(vfs)
+    impl MemoryFs {
+        fn new() -> Self {
+            let mut dirs = std::collections::HashSet::new();
+            dirs.insert(PathBuf::from("/"));
+            Self {
+                files: Arc::new(RwLock::new(HashMap::new())),
+                dirs: Arc::new(RwLock::new(dirs)),
+            }
+        }
+
+        async fn add_file(&self, path: &str, content: &[u8]) {
+            let path = PathBuf::from(path);
+            // Ensure parent dirs exist
+            if let Some(parent) = path.parent() {
+                self.ensure_dirs(parent).await;
+            }
+            self.files.write().await.insert(path, content.to_vec());
+        }
+
+        async fn add_dir(&self, path: &str) {
+            self.ensure_dirs(&PathBuf::from(path)).await;
+        }
+
+        async fn ensure_dirs(&self, path: &Path) {
+            let mut dirs = self.dirs.write().await;
+            let mut current = PathBuf::new();
+            for component in path.components() {
+                current.push(component);
+                dirs.insert(current.clone());
+            }
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl WalkerFs for MemoryFs {
+        type DirEntry = MemEntry;
+
+        async fn list_dir(&self, path: &Path) -> Result<Vec<MemEntry>, WalkerError> {
+            let files = self.files.read().await;
+            let dirs = self.dirs.read().await;
+
+            let mut entries = Vec::new();
+            let mut seen = std::collections::HashSet::new();
+
+            // Find files directly under this dir
+            for file_path in files.keys() {
+                if let Some(parent) = file_path.parent() {
+                    if parent == path {
+                        if let Some(name) = file_path.file_name() {
+                            let name_str = name.to_string_lossy().to_string();
+                            if seen.insert(name_str.clone()) {
+                                entries.push(MemEntry { name: name_str, is_dir: false });
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Find subdirs directly under this dir
+            for dir_path in dirs.iter() {
+                if let Some(parent) = dir_path.parent() {
+                    if parent == path && dir_path != path {
+                        if let Some(name) = dir_path.file_name() {
+                            let name_str = name.to_string_lossy().to_string();
+                            if seen.insert(name_str.clone()) {
+                                entries.push(MemEntry { name: name_str, is_dir: true });
+                            }
+                        }
+                    }
+                }
+            }
+
+            Ok(entries)
+        }
+
+        async fn read_file(&self, path: &Path) -> Result<Vec<u8>, WalkerError> {
+            let files = self.files.read().await;
+            files.get(path)
+                .cloned()
+                .ok_or_else(|| WalkerError::NotFound(path.display().to_string()))
+        }
+
+        async fn is_dir(&self, path: &Path) -> bool {
+            self.dirs.read().await.contains(path)
+        }
+
+        async fn exists(&self, path: &Path) -> bool {
+            self.files.read().await.contains_key(path)
+                || self.dirs.read().await.contains(path)
+        }
+    }
+
+    async fn make_test_fs() -> MemoryFs {
+        let fs = MemoryFs::new();
+
+        fs.add_dir("/src").await;
+        fs.add_dir("/src/lib").await;
+        fs.add_dir("/test").await;
+        fs.add_dir("/.git").await;
+        fs.add_dir("/node_modules").await;
+
+        fs.add_file("/src/main.rs", b"fn main() {}").await;
+        fs.add_file("/src/lib.rs", b"pub mod lib;").await;
+        fs.add_file("/src/lib/utils.rs", b"pub fn util() {}").await;
+        fs.add_file("/test/main_test.rs", b"#[test]").await;
+        fs.add_file("/README.md", b"# Test").await;
+        fs.add_file("/.hidden", b"secret").await;
+        fs.add_file("/.git/config", b"[core]").await;
+        fs.add_file("/node_modules/pkg.json", b"{}").await;
+
+        fs
     }
 
     #[tokio::test]
     async fn test_walk_all_files() {
-        let vfs = make_test_fs().await;
-        let backend = crate::LocalBackend::new(vfs);
+        let fs = make_test_fs().await;
 
-        let walker = FileWalker::new(&backend, "/").with_options(WalkOptions {
+        let walker = FileWalker::new(&fs, "/").with_options(WalkOptions {
             respect_gitignore: false,
             include_hidden: true,
             ..Default::default()
@@ -333,10 +428,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_walk_with_pattern() {
-        let vfs = make_test_fs().await;
-        let backend = crate::LocalBackend::new(vfs);
+        let fs = make_test_fs().await;
 
-        let walker = FileWalker::new(&backend, "/")
+        let walker = FileWalker::new(&fs, "/")
             .with_pattern(GlobPath::new("**/*.rs").unwrap())
             .with_options(WalkOptions {
                 respect_gitignore: false,
@@ -353,17 +447,15 @@ mod tests {
 
     #[tokio::test]
     async fn test_walk_respects_gitignore() {
-        let vfs = make_test_fs().await;
-        let backend = crate::LocalBackend::new(vfs);
+        let fs = make_test_fs().await;
 
-        let walker = FileWalker::new(&backend, "/").with_options(WalkOptions {
+        let walker = FileWalker::new(&fs, "/").with_options(WalkOptions {
             respect_gitignore: true,
             ..Default::default()
         });
 
         let files = walker.collect().await.unwrap();
 
-        // .git and node_modules should be ignored
         assert!(!files
             .iter()
             .any(|p| p.to_string_lossy().contains(".git")));
@@ -371,16 +463,14 @@ mod tests {
             .iter()
             .any(|p| p.to_string_lossy().contains("node_modules")));
 
-        // Regular files should be present
         assert!(files.iter().any(|p| p.ends_with("main.rs")));
     }
 
     #[tokio::test]
     async fn test_walk_hides_dotfiles() {
-        let vfs = make_test_fs().await;
-        let backend = crate::LocalBackend::new(vfs);
+        let fs = make_test_fs().await;
 
-        let walker = FileWalker::new(&backend, "/").with_options(WalkOptions {
+        let walker = FileWalker::new(&fs, "/").with_options(WalkOptions {
             include_hidden: false,
             respect_gitignore: false,
             ..Default::default()
@@ -394,10 +484,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_walk_max_depth() {
-        let vfs = make_test_fs().await;
-        let backend = crate::LocalBackend::new(vfs);
+        let fs = make_test_fs().await;
 
-        let walker = FileWalker::new(&backend, "/").with_options(WalkOptions {
+        let walker = FileWalker::new(&fs, "/").with_options(WalkOptions {
             max_depth: Some(1),
             respect_gitignore: false,
             include_hidden: true,
@@ -416,10 +505,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_walk_directories() {
-        let vfs = make_test_fs().await;
-        let backend = crate::LocalBackend::new(vfs);
+        let fs = make_test_fs().await;
 
-        let walker = FileWalker::new(&backend, "/").with_options(WalkOptions {
+        let walker = FileWalker::new(&fs, "/").with_options(WalkOptions {
             entry_types: EntryTypes::dirs_only(),
             respect_gitignore: false,
             ..Default::default()
@@ -434,13 +522,12 @@ mod tests {
 
     #[tokio::test]
     async fn test_walk_with_filter() {
-        let vfs = make_test_fs().await;
-        let backend = crate::LocalBackend::new(vfs);
+        let fs = make_test_fs().await;
 
         let mut filter = IncludeExclude::new();
         filter.exclude("*_test.rs");
 
-        let walker = FileWalker::new(&backend, "/")
+        let walker = FileWalker::new(&fs, "/")
             .with_pattern(GlobPath::new("**/*.rs").unwrap())
             .with_options(WalkOptions {
                 filter,
@@ -456,29 +543,20 @@ mod tests {
 
     #[tokio::test]
     async fn test_walk_nested_gitignore() {
-        // Create a filesystem with nested .gitignore files
-        let mut vfs = VfsRouter::new();
-        let mem = MemoryFs::new();
+        let fs = MemoryFs::new();
 
-        // Root structure
-        mem.mkdir(Path::new("src")).await.unwrap();
-        mem.mkdir(Path::new("src/subdir")).await.unwrap();
-        mem.write(Path::new("root.rs"), b"root").await.unwrap();
-        mem.write(Path::new("src/main.rs"), b"main").await.unwrap();
-        mem.write(Path::new("src/ignored.log"), b"log").await.unwrap();
-        mem.write(Path::new("src/subdir/util.rs"), b"util").await.unwrap();
-        mem.write(Path::new("src/subdir/local_ignore.txt"), b"ignored").await.unwrap();
+        fs.add_dir("/src").await;
+        fs.add_dir("/src/subdir").await;
+        fs.add_file("/root.rs", b"root").await;
+        fs.add_file("/src/main.rs", b"main").await;
+        fs.add_file("/src/ignored.log", b"log").await;
+        fs.add_file("/src/subdir/util.rs", b"util").await;
+        fs.add_file("/src/subdir/local_ignore.txt", b"ignored").await;
 
-        // Root .gitignore ignores .log files
-        mem.write(Path::new(".gitignore"), b"*.log").await.unwrap();
+        fs.add_file("/.gitignore", b"*.log").await;
+        fs.add_file("/src/subdir/.gitignore", b"*.txt").await;
 
-        // Nested .gitignore in src/subdir ignores .txt files
-        mem.write(Path::new("src/subdir/.gitignore"), b"*.txt").await.unwrap();
-
-        vfs.mount("/", mem);
-        let backend = crate::LocalBackend::new(Arc::new(vfs));
-
-        let walker = FileWalker::new(&backend, "/")
+        let walker = FileWalker::new(&fs, "/")
             .with_options(WalkOptions {
                 respect_gitignore: true,
                 include_hidden: true,
@@ -487,15 +565,11 @@ mod tests {
 
         let files = walker.collect().await.unwrap();
 
-        // Regular files should be present
         assert!(files.iter().any(|p| p.ends_with("root.rs")));
         assert!(files.iter().any(|p| p.ends_with("main.rs")));
         assert!(files.iter().any(|p| p.ends_with("util.rs")));
 
-        // .log files should be ignored (from root .gitignore)
         assert!(!files.iter().any(|p| p.ends_with("ignored.log")));
-
-        // .txt files in subdir should be ignored (from nested .gitignore)
         assert!(!files.iter().any(|p| p.ends_with("local_ignore.txt")));
     }
 }

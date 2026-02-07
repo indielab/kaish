@@ -16,6 +16,7 @@ use std::path::Path;
 use std::time::SystemTime;
 
 use crate::ast::Value;
+use crate::backend_walker_fs::BackendWalkerFs;
 use crate::interpreter::{EntryType, ExecResult, OutputData, OutputNode};
 use crate::tools::{ExecContext, ParamSchema, Tool, ToolArgs, ToolSchema};
 use crate::walker::{EntryTypes, FileWalker, GlobPath, WalkOptions};
@@ -125,7 +126,8 @@ impl Tool for Find {
         };
 
         // Build walker
-        let mut walker = FileWalker::new(ctx.backend.as_ref(), &resolved_path)
+        let fs = BackendWalkerFs(ctx.backend.as_ref());
+        let mut walker = FileWalker::new(&fs, &resolved_path)
             .with_options(options);
 
         // Add glob pattern if specified

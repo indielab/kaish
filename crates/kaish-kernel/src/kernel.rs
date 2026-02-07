@@ -31,7 +31,7 @@ use tokio::sync::RwLock;
 
 use crate::ast::{Arg, Expr, Stmt, StringPart, ToolDef, Value, BinaryOp};
 use crate::backend::{BackendError, KernelBackend};
-use crate::glob::glob_match;
+use kaish_glob::glob_match;
 use crate::interpreter::{apply_output_format, eval_expr, expand_tilde, json_to_value, value_to_string, ControlFlow, ExecResult, Scope};
 use crate::parser::parse;
 use crate::scheduler::{drain_to_stream, BoundedStream, JobManager, PipelineRunner, DEFAULT_STREAM_MAX_SIZE};

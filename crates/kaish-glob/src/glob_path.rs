@@ -1,6 +1,6 @@
 //! Path-aware glob matching with globstar (`**`) support.
 //!
-//! Extends the basic glob matching in `src/glob.rs` to handle patterns
+//! Extends the basic glob matching in `glob.rs` to handle patterns
 //! that span directory boundaries with `**`:
 //!
 //! - `**/*.rs` matches `foo.rs`, `src/foo.rs`, `a/b/c/foo.rs`
@@ -36,7 +36,7 @@ pub enum PathSegment {
 ///
 /// # Examples
 /// ```
-/// use kaish_kernel::walker::GlobPath;
+/// use kaish_glob::GlobPath;
 /// use std::path::Path;
 ///
 /// let pattern = GlobPath::new("**/*.rs").unwrap();
@@ -106,7 +106,7 @@ impl GlobPath {
     ///
     /// # Examples
     /// ```
-    /// use kaish_kernel::walker::GlobPath;
+    /// use kaish_glob::GlobPath;
     /// use std::path::PathBuf;
     ///
     /// let pattern = GlobPath::new("src/lib/**/*.rs").unwrap();
@@ -212,8 +212,6 @@ impl GlobPath {
                 if comp_idx >= components.len() {
                     return false;
                 }
-                // Use the existing glob_match for pattern matching
-                // But we need to handle brace expansion here
                 if self.matches_component(pat, components[comp_idx]) {
                     self.match_segments(segments, components, seg_idx + 1, comp_idx + 1)
                 } else {
@@ -225,7 +223,6 @@ impl GlobPath {
 
     /// Match a single component against a pattern (with brace expansion).
     fn matches_component(&self, pattern: &str, component: &str) -> bool {
-        // Use glob_match which handles brace expansion
         glob_match(pattern, component)
     }
 }
@@ -368,12 +365,9 @@ mod tests {
 
     #[test]
     fn test_fixed_depth() {
-        // Non-recursive patterns have fixed depth
         assert_eq!(GlobPath::new("*.rs").unwrap().fixed_depth(), Some(1));
         assert_eq!(GlobPath::new("src/*.rs").unwrap().fixed_depth(), Some(2));
         assert_eq!(GlobPath::new("a/b/c.txt").unwrap().fixed_depth(), Some(3));
-
-        // Recursive patterns have no fixed depth
         assert_eq!(GlobPath::new("**/*.rs").unwrap().fixed_depth(), None);
         assert_eq!(GlobPath::new("src/**").unwrap().fixed_depth(), None);
     }
@@ -387,14 +381,12 @@ mod tests {
 
     #[test]
     fn test_complex_real_world() {
-        // Match all test files
         let pat = GlobPath::new("**/*_test.rs").unwrap();
         assert!(pat.matches(Path::new("parser_test.rs")));
         assert!(pat.matches(Path::new("src/lexer_test.rs")));
         assert!(pat.matches(Path::new("crates/kernel/tests/eval_test.rs")));
         assert!(!pat.matches(Path::new("parser.rs")));
 
-        // Match source files in specific dirs
         let pat = GlobPath::new("src/**/*.{rs,go}").unwrap();
         assert!(pat.matches(Path::new("src/main.rs")));
         assert!(pat.matches(Path::new("src/api/handler.go")));

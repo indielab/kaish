@@ -14,7 +14,7 @@
 pub mod arithmetic;
 pub mod ast;
 pub mod backend;
-pub mod glob;
+pub(crate) mod backend_walker_fs;
 pub mod help;
 pub mod interpreter;
 pub mod kernel;
@@ -26,7 +26,23 @@ pub mod scheduler;
 pub mod tools;
 pub mod validator;
 pub mod vfs;
-pub mod walker;
+
+// Re-export kaish_glob as our glob/walker modules for backwards compatibility
+pub use kaish_glob as glob_crate;
+
+/// Glob pattern matching (re-exported from kaish-glob).
+pub mod glob {
+    pub use kaish_glob::glob::{expand_braces, glob_match};
+}
+
+/// Recursive file walking infrastructure (re-exported from kaish-glob).
+pub mod walker {
+    pub use kaish_glob::{
+        EntryTypes, FileWalker, FilterResult, GlobPath, IgnoreFilter, IncludeExclude,
+        PathSegment, PatternError, WalkOptions, WalkerDirEntry, WalkerError, WalkerFs,
+    };
+    pub use crate::backend_walker_fs::BackendWalkerFs;
+}
 
 pub use backend::{
     BackendError, BackendResult, EntryInfo, KernelBackend, LocalBackend, PatchOp, ReadRange,

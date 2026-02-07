@@ -1,6 +1,6 @@
-//! Glob pattern matching for case statements.
+//! Glob pattern matching for case statements and file paths.
 //!
-//! Implements shell-style glob patterns used in case statement branches:
+//! Implements shell-style glob patterns:
 //! - `*` matches zero or more characters
 //! - `?` matches exactly one character
 //! - `[abc]` matches any character in the set
@@ -15,7 +15,7 @@
 ///
 /// # Examples
 /// ```
-/// use kaish_kernel::glob::glob_match;
+/// use kaish_glob::glob_match;
 ///
 /// assert!(glob_match("*.rs", "main.rs"));
 /// assert!(glob_match("test?", "test1"));
@@ -43,7 +43,7 @@ pub fn glob_match(pattern: &str, input: &str) -> bool {
 ///
 /// # Examples
 /// ```
-/// use kaish_kernel::glob::expand_braces;
+/// use kaish_glob::expand_braces;
 ///
 /// assert_eq!(expand_braces("simple"), vec!["simple"]);
 /// assert_eq!(expand_braces("{a,b}"), vec!["a", "b"]);
@@ -354,7 +354,6 @@ mod tests {
 
     #[test]
     fn case_statement_patterns() {
-        // Common case statement patterns
         assert!(glob_match("*.rs", "main.rs"));
         assert!(glob_match("*.py", "script.py"));
         assert!(glob_match("y", "y"));
@@ -363,7 +362,7 @@ mod tests {
         assert!(glob_match("[Yy]*", "yes"));
         assert!(glob_match("[Yy]*", "y"));
         assert!(glob_match("[Nn]*", "no"));
-        assert!(glob_match("*", "anything"));  // default case
+        assert!(glob_match("*", "anything"));
     }
 
     #[test]
@@ -375,49 +374,34 @@ mod tests {
 
     #[test]
     fn edge_cases() {
-        // Empty pattern only matches empty string
         assert!(glob_match("", ""));
         assert!(!glob_match("", "a"));
-
-        // Star matches empty
         assert!(glob_match("a*", "a"));
         assert!(glob_match("*a", "a"));
-
-        // Multiple patterns
         assert!(glob_match("*/*", "foo/bar"));
         assert!(!glob_match("*/*", "foobar"));
     }
 
-    // ═══════════════════════════════════════════════════════════════════════════
-    // Extended tests for comprehensive coverage
-    // ═══════════════════════════════════════════════════════════════════════════
-
     #[test]
     fn char_class_literal_dash() {
-        // Dash at start is literal
         assert!(glob_match("[-abc]", "-"));
         assert!(glob_match("[-abc]", "a"));
-        // Dash at end is literal
         assert!(glob_match("[abc-]", "-"));
         assert!(glob_match("[abc-]", "c"));
-        // Dash between is range
         assert!(glob_match("[a-c]", "b"));
         assert!(!glob_match("[a-c]", "-"));
     }
 
     #[test]
     fn char_class_literal_bracket() {
-        // ] as first char is literal (POSIX behavior)
         assert!(glob_match("[]abc]", "]"));
         assert!(glob_match("[]abc]", "a"));
-        // After negation
         assert!(glob_match("[!]abc]", "x"));
         assert!(!glob_match("[!]abc]", "]"));
     }
 
     #[test]
     fn char_class_multiple_ranges() {
-        // Multiple ranges
         assert!(glob_match("[a-zA-Z0-9]", "m"));
         assert!(glob_match("[a-zA-Z0-9]", "M"));
         assert!(glob_match("[a-zA-Z0-9]", "5"));
@@ -427,17 +411,12 @@ mod tests {
 
     #[test]
     fn char_class_with_wildcards() {
-        // Char class followed by star
         assert!(glob_match("[abc]*", "aXXX"));
         assert!(glob_match("[abc]*", "a"));
         assert!(!glob_match("[abc]*", "dXXX"));
-
-        // Star followed by char class
         assert!(glob_match("*[0-9]", "test5"));
         assert!(glob_match("*[0-9]", "5"));
         assert!(!glob_match("*[0-9]", "test"));
-
-        // Char class with question mark
         assert!(glob_match("[abc]?", "a1"));
         assert!(!glob_match("[abc]?", "a"));
         assert!(!glob_match("[abc]?", "a12"));
@@ -454,45 +433,31 @@ mod tests {
 
     #[test]
     fn backtracking_stress() {
-        // Patterns that require backtracking
         assert!(glob_match("a*a*a*a*a*a*a*a", "aaaaaaaaaaaaaaaa"));
         assert!(!glob_match("a*a*a*a*a*a*a*ab", "aaaaaaaaaaaaaaaa"));
-
-        // Multiple stars with specific endings
         assert!(glob_match("*a*b*c", "XXXaYYYbZZZc"));
         assert!(glob_match("*a*b*c", "abc"));
         assert!(!glob_match("*a*b*c", "XXXaYYYcZZZb"));
-
-        // Star greedy vs non-greedy
         assert!(glob_match("*.*.txt", "file.backup.txt"));
         assert!(!glob_match("*.*.txt", "file.txt"));
     }
 
     #[test]
     fn real_world_file_patterns() {
-        // Source files
         assert!(glob_match("*.rs", "main.rs"));
         assert!(glob_match("*.rs", "lib.rs"));
         assert!(glob_match("*_test.rs", "parser_test.rs"));
         assert!(!glob_match("*_test.rs", "parser.rs"));
-
-        // Hidden files
         assert!(glob_match(".*", ".gitignore"));
         assert!(glob_match(".*", ".env"));
         assert!(!glob_match(".*", "visible"));
-
-        // Compressed files
         assert!(glob_match("*.tar.gz", "archive.tar.gz"));
         assert!(glob_match("*.tar.gz", "backup.tar.gz"));
         assert!(!glob_match("*.tar.gz", "archive.tar"));
         assert!(!glob_match("*.tar.gz", "archive.gz"));
-
-        // Log rotation
         assert!(glob_match("app.log.[0-9]", "app.log.1"));
         assert!(glob_match("app.log.[0-9]", "app.log.9"));
         assert!(!glob_match("app.log.[0-9]", "app.log.10"));
-
-        // Config files with brace expansion
         assert!(glob_match("*.{json,yaml,toml}", "config.json"));
         assert!(glob_match("*.{json,yaml,toml}", "config.yaml"));
         assert!(glob_match("*.{json,yaml,toml}", "config.toml"));
@@ -501,48 +466,36 @@ mod tests {
 
     #[test]
     fn special_characters_in_input() {
-        // Input contains glob-like characters
         assert!(glob_match("test", "test"));
-        assert!(!glob_match("test", "te*t"));  // literal star in input
-        assert!(!glob_match("test", "te?t"));  // literal ? in input
-
-        // Matching literal special chars (escaped in pattern)
+        assert!(!glob_match("test", "te*t"));
+        assert!(!glob_match("test", "te?t"));
         assert!(glob_match("file\\[1\\]", "file[1]"));
         assert!(glob_match("test\\?", "test?"));
     }
 
     #[test]
     fn whitespace_handling() {
-        // Spaces in pattern and input
         assert!(glob_match("hello world", "hello world"));
         assert!(glob_match("hello*world", "hello   world"));
         assert!(glob_match("* *", "hello world"));
-
-        // Tabs and special whitespace
         assert!(glob_match("*\t*", "hello\tworld"));
     }
 
     #[test]
     fn case_sensitivity() {
-        // Glob matching is case-sensitive
         assert!(glob_match("Hello", "Hello"));
         assert!(!glob_match("Hello", "hello"));
         assert!(!glob_match("hello", "Hello"));
-
-        // Case-insensitive via char class
         assert!(glob_match("[Hh]ello", "Hello"));
         assert!(glob_match("[Hh]ello", "hello"));
     }
 
     #[test]
     fn long_strings() {
-        // Very long input
         let long_str = "a".repeat(1000);
         assert!(glob_match("*", &long_str));
         assert!(glob_match("a*", &long_str));
         assert!(glob_match("*a", &long_str));
-
-        // Pattern at various positions in long string
         let mixed = format!("{}X{}", "a".repeat(500), "a".repeat(500));
         assert!(glob_match("*X*", &mixed));
         assert!(!glob_match("*Y*", &mixed));
@@ -550,113 +503,77 @@ mod tests {
 
     #[test]
     fn unicode_basic() {
-        // Basic unicode matching
         assert!(glob_match("héllo", "héllo"));
         assert!(glob_match("*ñ*", "español"));
-        assert!(glob_match("?", "ü"));  // Single unicode char
-
-        // Unicode in char class (basic)
+        assert!(glob_match("?", "ü"));
         assert!(glob_match("[αβγ]", "β"));
     }
 
     #[test]
     fn negated_char_class_edge_cases() {
-        // Negated with range
         assert!(glob_match("[!a-z]", "A"));
         assert!(glob_match("[!a-z]", "5"));
         assert!(!glob_match("[!a-z]", "m"));
-
-        // Negated multiple ranges
         assert!(glob_match("[!a-zA-Z]", "5"));
         assert!(!glob_match("[!a-zA-Z]", "x"));
         assert!(!glob_match("[!a-zA-Z]", "X"));
-
-        // Negated empty should match anything
-        // (edge case: [!] with nothing after !)
     }
 
     #[test]
     fn path_like_patterns() {
-        // Path separators
         assert!(glob_match("src/*.rs", "src/main.rs"));
         assert!(!glob_match("src/*.rs", "test/main.rs"));
-
-        // Multiple path components
         assert!(glob_match("*/*/*.rs", "src/foo/bar.rs"));
         assert!(!glob_match("*/*/*.rs", "src/bar.rs"));
-
-        // Path with question mark
         assert!(glob_match("v?.0", "v1.0"));
         assert!(glob_match("v?.0", "v2.0"));
         assert!(!glob_match("v?.0", "v10.0"));
     }
 
-    // ═══════════════════════════════════════════════════════════════════════════
-    // Brace Expansion Tests
-    // ═══════════════════════════════════════════════════════════════════════════
-
     #[test]
     fn brace_expansion_basic() {
-        // Simple alternatives
         assert!(glob_match("{foo,bar}", "foo"));
         assert!(glob_match("{foo,bar}", "bar"));
         assert!(!glob_match("{foo,bar}", "baz"));
-
-        // With prefix
         assert!(glob_match("test_{a,b,c}", "test_a"));
         assert!(glob_match("test_{a,b,c}", "test_b"));
         assert!(glob_match("test_{a,b,c}", "test_c"));
         assert!(!glob_match("test_{a,b,c}", "test_d"));
-
-        // With suffix
         assert!(glob_match("{debug,release}.exe", "debug.exe"));
         assert!(glob_match("{debug,release}.exe", "release.exe"));
-
-        // With both prefix and suffix
         assert!(glob_match("lib{foo,bar}.so", "libfoo.so"));
         assert!(glob_match("lib{foo,bar}.so", "libbar.so"));
     }
 
     #[test]
     fn brace_expansion_with_wildcards() {
-        // Brace with star
         assert!(glob_match("*.{rs,go,py}", "main.rs"));
         assert!(glob_match("*.{rs,go,py}", "server.go"));
         assert!(glob_match("*.{rs,go,py}", "script.py"));
         assert!(!glob_match("*.{rs,go,py}", "style.css"));
-
-        // Brace with question mark
         assert!(glob_match("file{1,2,3}.txt", "file1.txt"));
         assert!(glob_match("test?.{log,txt}", "test1.log"));
         assert!(glob_match("test?.{log,txt}", "testA.txt"));
-
-        // Brace with char class
         assert!(glob_match("[abc].{x,y}", "a.x"));
         assert!(glob_match("[abc].{x,y}", "b.y"));
     }
 
     #[test]
     fn brace_expansion_multiple_braces() {
-        // Two brace groups (cartesian product)
         assert!(glob_match("{a,b}{1,2}", "a1"));
         assert!(glob_match("{a,b}{1,2}", "a2"));
         assert!(glob_match("{a,b}{1,2}", "b1"));
         assert!(glob_match("{a,b}{1,2}", "b2"));
         assert!(!glob_match("{a,b}{1,2}", "c1"));
-
-        // Three brace groups
         assert!(glob_match("{a,b}{1,2}{x,y}", "a1x"));
         assert!(glob_match("{a,b}{1,2}{x,y}", "b2y"));
     }
 
     #[test]
     fn brace_expansion_nested() {
-        // Nested braces
         assert!(glob_match("{a,{b,c}}", "a"));
         assert!(glob_match("{a,{b,c}}", "b"));
         assert!(glob_match("{a,{b,c}}", "c"));
-
-        // More complex nesting
         assert!(glob_match("{{a,b},{c,d}}", "a"));
         assert!(glob_match("{{a,b},{c,d}}", "b"));
         assert!(glob_match("{{a,b},{c,d}}", "c"));
@@ -665,51 +582,33 @@ mod tests {
 
     #[test]
     fn brace_expansion_empty_alternatives() {
-        // Empty alternative (creates pattern without that part)
         assert!(glob_match("{,un}do", "do"));
         assert!(glob_match("{,un}do", "undo"));
-
-        // Multiple empty
         assert!(glob_match("test{,s}", "test"));
         assert!(glob_match("test{,s}", "tests"));
     }
 
     #[test]
     fn brace_expansion_single_item() {
-        // Single item in braces (edge case, should still work)
         assert!(glob_match("{foo}", "foo"));
         assert!(!glob_match("{foo}", "bar"));
-
-        // Single with prefix/suffix
         assert!(glob_match("test_{only}.rs", "test_only.rs"));
     }
 
     #[test]
     fn brace_expansion_real_world() {
-        // Common dev patterns
         assert!(glob_match("src/**/*.{ts,tsx,js,jsx}", "src/**/*.ts"));
-        // Note: ** doesn't have special meaning in our glob, treated as **
-
-        // Makefile patterns
         assert!(glob_match("{M,m}akefile", "Makefile"));
         assert!(glob_match("{M,m}akefile", "makefile"));
-
-        // README variations
         assert!(glob_match("README{,.md,.txt}", "README"));
         assert!(glob_match("README{,.md,.txt}", "README.md"));
         assert!(glob_match("README{,.md,.txt}", "README.txt"));
-
-        // License files
         assert!(glob_match("{LICENSE,LICENCE}{,.md,.txt}", "LICENSE"));
         assert!(glob_match("{LICENSE,LICENCE}{,.md,.txt}", "LICENCE.md"));
-
-        // Config file locations
         assert!(glob_match("{,.}config{,.json,.yaml}", "config"));
         assert!(glob_match("{,.}config{,.json,.yaml}", ".config"));
         assert!(glob_match("{,.}config{,.json,.yaml}", "config.json"));
         assert!(glob_match("{,.}config{,.json,.yaml}", ".config.yaml"));
-
-        // Docker files
         assert!(glob_match("{D,d}ocker{file,-compose.yml}", "Dockerfile"));
         assert!(glob_match("{D,d}ocker{file,-compose.yml}", "dockerfile"));
         assert!(glob_match("{D,d}ocker{file,-compose.yml}", "Docker-compose.yml"));
@@ -717,7 +616,6 @@ mod tests {
 
     #[test]
     fn brace_expansion_no_braces() {
-        // Pattern without braces should still work
         assert!(glob_match("simple", "simple"));
         assert!(glob_match("*.rs", "main.rs"));
         assert!(glob_match("[abc]", "b"));
@@ -725,21 +623,16 @@ mod tests {
 
     #[test]
     fn brace_expansion_unclosed() {
-        // Unclosed brace treated as literal
         assert!(glob_match("{abc", "{abc"));
         assert!(glob_match("test{", "test{"));
-
-        // Unmatched closing brace
         assert!(glob_match("abc}", "abc}"));
     }
 
     #[test]
     fn expand_braces_unit() {
-        // Direct tests for expand_braces function
         assert_eq!(expand_braces("simple"), vec!["simple"]);
         assert_eq!(expand_braces("{a,b}"), vec!["a", "b"]);
         assert_eq!(expand_braces("x{a,b}y"), vec!["xay", "xby"]);
-
         let mut result = expand_braces("{a,b}{1,2}");
         result.sort();
         assert_eq!(result, vec!["a1", "a2", "b1", "b2"]);

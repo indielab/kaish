@@ -3,6 +3,7 @@
 use async_trait::async_trait;
 
 use crate::ast::Value;
+use crate::backend_walker_fs::BackendWalkerFs;
 use crate::interpreter::{EntryType, ExecResult, OutputData, OutputNode};
 use crate::tools::{ExecContext, ParamSchema, Tool, ToolArgs, ToolSchema};
 use crate::walker::{EntryTypes, FileWalker, GlobPath, IncludeExclude, WalkOptions};
@@ -166,7 +167,8 @@ impl Tool for Glob {
         };
 
         // Create walker
-        let walker = FileWalker::new(ctx.backend.as_ref(), &root)
+        let fs = BackendWalkerFs(ctx.backend.as_ref());
+        let walker = FileWalker::new(&fs, &root)
             .with_pattern(glob)
             .with_options(options);
 

@@ -1,0 +1,19 @@
+[package]
+name = "kaish-glob"
+description = "Glob matching and async file walking with gitignore support"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+async-trait = { workspace = true }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true }
+rstest = { workspace = true }
+
+[lints]
+workspace = true

@@ -4,7 +4,7 @@
 
 use std::path::Path;
 
-use crate::backend::KernelBackend;
+use crate::WalkerFs;
 use crate::glob::glob_match;
 
 /// A compiled ignore rule from a gitignore file.
@@ -94,7 +94,6 @@ impl IgnoreRule {
     fn glob_match_path(&self, path: &str) -> bool {
         // Handle ** in patterns by converting to a match that works
         if self.pattern.contains("**") {
-            // For patterns like "**/*.rs", we need special handling
             self.match_with_globstar(path)
         } else {
             glob_match(&self.pattern, path)
@@ -172,12 +171,12 @@ impl IgnoreFilter {
         filter
     }
 
-    /// Load patterns from a gitignore file.
+    /// Load patterns from a gitignore file via `WalkerFs`.
     pub async fn from_gitignore(
         path: &Path,
-        backend: &dyn KernelBackend,
-    ) -> anyhow::Result<Self> {
-        let content = backend.read(path, None).await?;
+        fs: &impl WalkerFs,
+    ) -> Result<Self, crate::WalkerError> {
+        let content = fs.read_file(path).await?;
         let text = String::from_utf8_lossy(&content);
 
         let mut filter = Self::new();
