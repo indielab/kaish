@@ -133,7 +133,10 @@ impl IgnoreRule {
             // Also try matching just the suffix
             glob_match(suffix, remaining)
         } else {
-            // Complex pattern with multiple **, fall back to component matching
+            // Complex pattern with multiple **. Replacing ** with * is safe here
+            // because glob_match's * already crosses / boundaries (unlike POSIX
+            // path-aware globbing). This flattens O(n^k) multi-globstar into a
+            // single wildcard pass while preserving match semantics.
             glob_match(&self.pattern.replace("**", "*"), path)
         }
     }

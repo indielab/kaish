@@ -8,6 +8,11 @@
 //! - `[!abc]` or `[^abc]` matches any character NOT in the set
 //! - `{a,b,c}` brace expansion (matches any of the alternatives)
 
+/// Maximum number of recursive calls for glob matching. Protects against
+/// adversarial patterns like `*a*a*a*...*a` that cause O(n^k) backtracking.
+/// Counted as total work (calls), not stack depth, to bound actual CPU cost.
+const MAX_MATCH_CALLS: usize = 100_000;
+
 /// Match a string against a glob pattern.
 ///
 /// Returns true if the pattern matches the entire input string.
@@ -24,12 +29,15 @@
 /// assert!(!glob_match("*.txt", "main.rs"));
 /// ```
 pub fn glob_match(pattern: &str, input: &str) -> bool {
+    use std::cell::Cell;
+
     // Expand braces first, then match each expanded pattern
     let expanded = expand_braces(pattern);
+    let calls = Cell::new(0usize);
     for pat in expanded {
         let pat_chars: Vec<char> = pat.chars().collect();
         let input_chars: Vec<char> = input.chars().collect();
-        if match_recursive(&pat_chars, 0, &input_chars, 0) {
+        if match_bounded(&pat_chars, 0, &input_chars, 0, &calls) {
             return true;
         }
     }
@@ -130,8 +138,23 @@ fn split_brace_alternatives(content: &str) -> Vec<String> {
     alternatives
 }
 
-/// Recursive matching with backtracking for `*`.
-fn match_recursive(pattern: &[char], pi: usize, input: &[char], ii: usize) -> bool {
+/// Work-bounded recursive matching with backtracking for `*`.
+///
+/// Returns `false` (non-match) if total recursive calls exceed `MAX_MATCH_CALLS`,
+/// preventing ReDoS from adversarial patterns.
+fn match_bounded(
+    pattern: &[char],
+    pi: usize,
+    input: &[char],
+    ii: usize,
+    calls: &std::cell::Cell<usize>,
+) -> bool {
+    let count = calls.get() + 1;
+    calls.set(count);
+    if count > MAX_MATCH_CALLS {
+        return false;
+    }
+
     // Both exhausted - match!
     if pi >= pattern.len() && ii >= input.len() {
         return true;
@@ -157,7 +180,7 @@ fn match_recursive(pattern: &[char], pi: usize, input: &[char], ii: usize) -> bo
 
             // Try matching star with 0, 1, 2, ... characters
             for skip in 0..=(input.len() - ii) {
-                if match_recursive(pattern, next_pi, input, ii + skip) {
+                if match_bounded(pattern, next_pi, input, ii + skip, calls) {
                     return true;
                 }
             }
@@ -169,7 +192,7 @@ fn match_recursive(pattern: &[char], pi: usize, input: &[char], ii: usize) -> bo
             if ii >= input.len() {
                 return false;
             }
-            match_recursive(pattern, pi + 1, input, ii + 1)
+            match_bounded(pattern, pi + 1, input, ii + 1, calls)
         }
 
         '[' => {
@@ -181,7 +204,7 @@ fn match_recursive(pattern: &[char], pi: usize, input: &[char], ii: usize) -> bo
             // Parse character class
             let (matches, end_idx) = parse_char_class(&pattern[pi..], input[ii]);
             if matches {
-                match_recursive(pattern, pi + end_idx, input, ii + 1)
+                match_bounded(pattern, pi + end_idx, input, ii + 1, calls)
             } else {
                 false
             }
@@ -193,7 +216,7 @@ fn match_recursive(pattern: &[char], pi: usize, input: &[char], ii: usize) -> bo
                 return false;
             }
             if pattern[pi + 1] == input[ii] {
-                match_recursive(pattern, pi + 2, input, ii + 1)
+                match_bounded(pattern, pi + 2, input, ii + 1, calls)
             } else {
                 false
             }
@@ -205,7 +228,7 @@ fn match_recursive(pattern: &[char], pi: usize, input: &[char], ii: usize) -> bo
                 return false;
             }
             if c == input[ii] {
-                match_recursive(pattern, pi + 1, input, ii + 1)
+                match_bounded(pattern, pi + 1, input, ii + 1, calls)
             } else {
                 false
             }
@@ -636,5 +659,15 @@ mod tests {
         let mut result = expand_braces("{a,b}{1,2}");
         result.sort();
         assert_eq!(result, vec!["a1", "a2", "b1", "b2"]);
+    }
+
+    #[test]
+    fn redos_protection() {
+        // Adversarial pattern: *a*a*a*...*a causes O(n^k) backtracking without depth limits.
+        // With MAX_MATCH_DEPTH protection, this must complete quickly (non-match is acceptable).
+        let pattern = format!("{}b", "*a".repeat(50));
+        let input = "a".repeat(100);
+        // The important thing is that this returns in bounded time, not that it matches.
+        let _result = glob_match(&pattern, &input);
     }
 }
