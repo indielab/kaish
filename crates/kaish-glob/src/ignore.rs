@@ -7,6 +7,11 @@ use std::path::Path;
 use crate::WalkerFs;
 use crate::glob::glob_match;
 
+/// Maximum size for .gitignore files (1 MiB). Files larger than this are
+/// rejected to prevent accidental memory exhaustion from corrupt/adversarial
+/// gitignore files.
+const MAX_GITIGNORE_SIZE: usize = 1_048_576;
+
 /// A compiled ignore rule from a gitignore file.
 #[derive(Debug, Clone)]
 struct IgnoreRule {
@@ -175,11 +180,21 @@ impl IgnoreFilter {
     }
 
     /// Load patterns from a gitignore file via `WalkerFs`.
+    ///
+    /// Rejects files larger than 1 MiB to prevent memory exhaustion.
     pub async fn from_gitignore(
         path: &Path,
         fs: &impl WalkerFs,
     ) -> Result<Self, crate::WalkerError> {
         let content = fs.read_file(path).await?;
+        if content.len() > MAX_GITIGNORE_SIZE {
+            return Err(crate::WalkerError::Io(format!(
+                "{}: gitignore too large ({} bytes, max {})",
+                path.display(),
+                content.len(),
+                MAX_GITIGNORE_SIZE,
+            )));
+        }
         let text = String::from_utf8_lossy(&content);
 
         let mut filter = Self::new();
@@ -330,5 +345,65 @@ mod tests {
         assert!(filter.is_ignored(Path::new("logs/app.log"), false));
         assert!(!filter.is_ignored(Path::new("other/app.log"), false));
         assert!(!filter.is_ignored(Path::new("app.log"), false));
+    }
+
+    mod async_tests {
+        use super::*;
+        use crate::{WalkerDirEntry, WalkerError, WalkerFs};
+        use std::collections::HashMap;
+        use std::path::PathBuf;
+
+        struct MemEntry;
+        impl WalkerDirEntry for MemEntry {
+            fn name(&self) -> &str { "" }
+            fn is_dir(&self) -> bool { false }
+            fn is_file(&self) -> bool { true }
+            fn is_symlink(&self) -> bool { false }
+        }
+
+        /// Minimal FS for testing gitignore loading.
+        struct SingleFileFs(HashMap<PathBuf, Vec<u8>>);
+
+        #[async_trait::async_trait]
+        impl WalkerFs for SingleFileFs {
+            type DirEntry = MemEntry;
+            async fn list_dir(&self, _: &Path) -> Result<Vec<MemEntry>, WalkerError> {
+                Ok(vec![])
+            }
+            async fn read_file(&self, path: &Path) -> Result<Vec<u8>, WalkerError> {
+                self.0.get(path)
+                    .cloned()
+                    .ok_or_else(|| WalkerError::NotFound(path.display().to_string()))
+            }
+            async fn is_dir(&self, _: &Path) -> bool { false }
+            async fn exists(&self, path: &Path) -> bool { self.0.contains_key(path) }
+        }
+
+        #[tokio::test]
+        async fn test_oversized_gitignore_rejected() {
+            let oversized = vec![b'#'; super::MAX_GITIGNORE_SIZE + 1];
+            let mut files = HashMap::new();
+            files.insert(PathBuf::from("/.gitignore"), oversized);
+            let fs = SingleFileFs(files);
+
+            let result = IgnoreFilter::from_gitignore(Path::new("/.gitignore"), &fs).await;
+            assert!(result.is_err());
+            let err = result.unwrap_err().to_string();
+            assert!(err.contains("too large"), "expected 'too large' in: {err}");
+        }
+
+        #[tokio::test]
+        async fn test_normal_gitignore_accepted() {
+            let content = b"*.log\n# comment\ntarget/\n".to_vec();
+            let mut files = HashMap::new();
+            files.insert(PathBuf::from("/.gitignore"), content);
+            let fs = SingleFileFs(files);
+
+            let filter = IgnoreFilter::from_gitignore(Path::new("/.gitignore"), &fs)
+                .await
+                .unwrap();
+            assert!(filter.is_ignored(Path::new("app.log"), false));
+            assert!(filter.is_ignored(Path::new("target"), true));
+        }
     }
 }
