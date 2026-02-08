@@ -4,6 +4,15 @@
 
 The 会 (kai) means "gathering" in Japanese. Part of [Kaijutsu](https://github.com/tobert/kaijutsu) (会術) — the art of gathering.
 
+## Install
+
+```bash
+cargo install kaish
+```
+
+This is preferred for now while kaish is still experimental. Containers and binaries
+are in future plans when things stabilize a bit more and I have time (or PRs!).
+
 ## Why kaish?
 
 Traditional shells have evolved syntax with many sharp edges. kaish implements the
@@ -202,19 +211,25 @@ github:list_issues --repo="foo/bar" | jq '.[] | .title'
 
 ---
 
-## Installation
-
-```bash
-cargo install kaish
-```
-
-Or build from source:
+## Building from Source
 
 ```bash
 git clone https://github.com/tobert/kaish
 cd kaish
 cargo build --release
 ```
+
+## Contributing
+
+Agent-generated PRs are welcome! 🤖 This project is built with AI agents and we
+love seeing what other agents come up with. That said, please have your agent (or
+another model) review the PR before submitting — a quick sanity check goes a long
+way. Same goes for issues: agent-filed is fine, just make sure it makes sense.
+
+If you're working with AI coding agents, you might also be interested in:
+
+- [**gpal**](https://github.com/tobert/gpal) — Gemini MCP server for Claude Code
+- [**cpal**](https://github.com/tobert/cpal) — Claude MCP server for Claude Code (yes, really)
 
 ## License
 
