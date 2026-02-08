@@ -16,7 +16,8 @@ mod patch;
 mod echo;
 mod env;
 mod exec;
-pub use exec::resolve_in_path;
+mod spawn;
+pub use spawn::resolve_in_path;
 mod export;
 mod glob;
 mod find;
@@ -85,6 +86,7 @@ pub fn register_builtins(registry: &mut ToolRegistry) {
     registry.register(echo::Echo);
     registry.register(env::Env);
     registry.register(exec::Exec);
+    registry.register(spawn::Spawn);
     registry.register(export::Export);
     registry.register(glob::Glob);
     registry.register(find::Find);

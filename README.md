@@ -103,7 +103,7 @@ everywhere, a `jq` that always uses the same filter syntax, an `awk` that never 
 | **Files** | basename, cat, cd, chmod, cp, dirname, find, glob, ln, ls, mkdir, mktemp, mv, pwd, read, readlink, realpath, rm, stat, tee, touch, tree, write |
 | **JSON** | jq |
 | **Git** | git (init, clone, status, add, commit, log, diff, branch, checkout, worktree) |
-| **System** | date, echo, env, exec, export, help, hostname, jobs, kill, printf, ps, seq, set, sleep, test/\[\[, tokens, uname, unset, validate, vars, wait, which |
+| **System** | date, echo, env, exec, export, help, hostname, jobs, kill, printf, ps, seq, set, sleep, spawn, test/\[\[, tokens, uname, unset, validate, vars, wait, which |
 | **Parallel** | scatter, gather |
 | **Meta** | assert, diff, false, mounts, patch, tools, true |
 
@@ -195,7 +195,7 @@ done
 seq 1 10 | scatter as=N limit=4 | echo "processing $N" | gather
 ```
 
-The kernel runs builtins in-process (no exec), making it fast and predictable.
+The kernel runs builtins in-process (no fork/exec), making it fast and predictable.
 
 #### MCP Client Mode
 
@@ -228,8 +228,8 @@ way. Same goes for issues: agent-filed is fine, just make sure it makes sense.
 
 If you're working with AI coding agents, you might also be interested in:
 
-- [**gpal**](https://github.com/tobert/gpal) — Gemini MCP server for Claude Code
-- [**cpal**](https://github.com/tobert/cpal) — Claude MCP server for Claude Code (yes, really)
+- [**gpal**](https://github.com/tobert/gpal) — Gemini as an MCP server (pairs well with Claude Code)
+- [**cpal**](https://github.com/tobert/cpal) — Claude as an MCP server (pairs well with Gemini CLI)
 
 ## License
 

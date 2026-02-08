@@ -114,7 +114,7 @@ enum EntryType {
 struct OutputNode {
   name @0 :Text;                  # Primary identifier (filename, key, label)
   entryType @1 :EntryType;        # Rendering hint (colors, icons)
-  text @2 :Text;                  # Text content (for echo, cat, exec)
+  text @2 :Text;                  # Text content (for echo, cat, spawn)
   cells @3 :List(Text);           # Additional columns (for ls -l, ps, env)
   children @4 :List(OutputNode);  # Child nodes (for tree, find)
 }
