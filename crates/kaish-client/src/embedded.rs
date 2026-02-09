@@ -81,6 +81,22 @@ impl EmbeddedClient {
     pub fn kernel(&self) -> &Kernel {
         &self.kernel
     }
+
+    /// Execute with a per-statement output callback.
+    ///
+    /// Each statement's result is passed to `on_output` as it completes.
+    /// External commands in interactive mode already stream via `Stdio::inherit()`;
+    /// this callback handles builtins and other captured output.
+    pub async fn execute_streaming(
+        &self,
+        input: &str,
+        on_output: &mut dyn FnMut(&ExecResult),
+    ) -> ClientResult<ExecResult> {
+        self.kernel
+            .execute_streaming(input, on_output)
+            .await
+            .map_err(|e| ClientError::Execution(e.to_string()))
+    }
 }
 
 #[async_trait(?Send)]

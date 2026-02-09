@@ -113,6 +113,12 @@ pub struct KernelConfig {
     /// errors early. Set to true to skip validation for performance or to
     /// allow dynamic/external commands.
     pub skip_validation: bool,
+
+    /// When true, standalone external commands inherit stdio for real-time output.
+    ///
+    /// Set by script runner and REPL for human-visible output.
+    /// Not set by MCP server (output must be captured for structured responses).
+    pub interactive: bool,
 }
 
 /// Get the default sandbox root ($HOME).
@@ -130,6 +136,7 @@ impl Default for KernelConfig {
             vfs_mode: VfsMountMode::Sandboxed { root: None },
             cwd: home,
             skip_validation: false,
+            interactive: false,
         }
     }
 }
@@ -143,6 +150,7 @@ impl KernelConfig {
             vfs_mode: VfsMountMode::Sandboxed { root: None },
             cwd: home,
             skip_validation: false,
+            interactive: false,
         }
     }
 
@@ -154,6 +162,7 @@ impl KernelConfig {
             vfs_mode: VfsMountMode::Sandboxed { root: None },
             cwd: home,
             skip_validation: false,
+            interactive: false,
         }
     }
 
@@ -168,6 +177,7 @@ impl KernelConfig {
             vfs_mode: VfsMountMode::Passthrough,
             cwd,
             skip_validation: false,
+            interactive: false,
         }
     }
 
@@ -182,6 +192,7 @@ impl KernelConfig {
             vfs_mode: VfsMountMode::Sandboxed { root: None },
             cwd: home,
             skip_validation: false,
+            interactive: false,
         }
     }
 
@@ -194,6 +205,7 @@ impl KernelConfig {
             vfs_mode: VfsMountMode::Sandboxed { root: Some(root.clone()) },
             cwd: root,
             skip_validation: false,
+            interactive: false,
         }
     }
 
@@ -206,6 +218,7 @@ impl KernelConfig {
             vfs_mode: VfsMountMode::NoLocal,
             cwd: PathBuf::from("/"),
             skip_validation: false,
+            interactive: false,
         }
     }
 
@@ -224,6 +237,12 @@ impl KernelConfig {
     /// Skip pre-execution validation.
     pub fn with_skip_validation(mut self, skip: bool) -> Self {
         self.skip_validation = skip;
+        self
+    }
+
+    /// Enable interactive mode (external commands inherit stdio).
+    pub fn with_interactive(mut self, interactive: bool) -> Self {
+        self.interactive = interactive;
         self
     }
 }
@@ -251,6 +270,8 @@ pub struct Kernel {
     exec_ctx: RwLock<ExecContext>,
     /// Whether to skip pre-execution validation.
     skip_validation: bool,
+    /// When true, standalone external commands inherit stdio for real-time output.
+    interactive: bool,
 }
 
 impl Kernel {
@@ -291,6 +312,7 @@ impl Kernel {
             runner,
             exec_ctx: RwLock::new(exec_ctx),
             skip_validation: config.skip_validation,
+            interactive: config.interactive,
         })
     }
 
@@ -391,6 +413,7 @@ impl Kernel {
             runner,
             exec_ctx: RwLock::new(exec_ctx),
             skip_validation: config.skip_validation,
+            interactive: config.interactive,
         })
     }
 
@@ -463,6 +486,7 @@ impl Kernel {
             runner,
             exec_ctx: RwLock::new(exec_ctx),
             skip_validation: config.skip_validation,
+            interactive: config.interactive,
         })
     }
 
@@ -475,7 +499,22 @@ impl Kernel {
     ///
     /// Returns the result of the last statement executed.
     pub async fn execute(&self, input: &str) -> Result<ExecResult> {
+        self.execute_streaming(input, &mut |_| {}).await
+    }
 
+    /// Execute kaish source code with a per-statement callback.
+    ///
+    /// Each statement's result is passed to `on_output` as it completes,
+    /// allowing callers to flush output incrementally (e.g., print builtin
+    /// output immediately rather than buffering until the script finishes).
+    ///
+    /// External commands in interactive mode already stream to the terminal
+    /// via `Stdio::inherit()`, so the callback mainly handles builtins.
+    pub async fn execute_streaming(
+        &self,
+        input: &str,
+        on_output: &mut dyn FnMut(&ExecResult),
+    ) -> Result<ExecResult> {
         let program = parse(input).map_err(|errors| {
             let msg = errors
                 .iter()
@@ -520,18 +559,20 @@ impl Kernel {
             }
             let flow = self.execute_stmt_flow(&stmt).await?;
             match flow {
-                ControlFlow::Normal(r) => accumulate_result(&mut result, &r),
+                ControlFlow::Normal(r) => {
+                    on_output(&r);
+                    accumulate_result(&mut result, &r);
+                }
                 ControlFlow::Exit { code } => {
-                    // Exit terminates execution immediately
                     let exit_result = ExecResult::success(code.to_string());
                     return Ok(exit_result);
                 }
                 ControlFlow::Return { value } => {
-                    // Return at top level just returns the value
+                    on_output(&value);
                     result = value;
                 }
                 ControlFlow::Break { result: r, .. } | ControlFlow::Continue { result: r, .. } => {
-                    // Break/continue at top level just returns the result
+                    on_output(&r);
                     result = r;
                 }
             }
@@ -1831,8 +1872,18 @@ impl Kernel {
         } else {
             std::process::Stdio::null()
         });
-        cmd.stdout(std::process::Stdio::piped());
-        cmd.stderr(std::process::Stdio::piped());
+
+        // In interactive mode, standalone commands (no piped stdin) inherit
+        // the terminal's stdout/stderr so output streams in real-time.
+        let inherit_output = self.interactive && stdin_data.is_none();
+
+        if inherit_output {
+            cmd.stdout(std::process::Stdio::inherit());
+            cmd.stderr(std::process::Stdio::inherit());
+        } else {
+            cmd.stdout(std::process::Stdio::piped());
+            cmd.stderr(std::process::Stdio::piped());
+        }
 
         // Spawn the process
         let mut child = match cmd.spawn() {
@@ -1859,68 +1910,90 @@ impl Kernel {
             // Drop stdin to signal EOF
         }
 
-        // Create bounded streams for output capture (prevents OOM from large output)
-        let stdout_stream = Arc::new(BoundedStream::new(DEFAULT_STREAM_MAX_SIZE));
-        let stderr_stream = Arc::new(BoundedStream::new(DEFAULT_STREAM_MAX_SIZE));
+        if inherit_output {
+            // Output goes directly to terminal — just wait for exit
+            let status = match child.wait().await {
+                Ok(s) => s,
+                Err(e) => {
+                    return Ok(Some(ExecResult::failure(
+                        1,
+                        format!("{}: failed to wait: {}", name, e),
+                    )));
+                }
+            };
 
-        // Take pipes and spawn drain tasks
-        let stdout_pipe = child.stdout.take();
-        let stderr_pipe = child.stderr.take();
+            let code = status.code().unwrap_or_else(|| {
+                #[cfg(unix)]
+                {
+                    use std::os::unix::process::ExitStatusExt;
+                    128 + status.signal().unwrap_or(0)
+                }
+                #[cfg(not(unix))]
+                {
+                    -1
+                }
+            }) as i64;
 
-        let stdout_clone = stdout_stream.clone();
-        let stderr_clone = stderr_stream.clone();
+            // stdout/stderr already went to the terminal
+            Ok(Some(ExecResult::from_output(code, String::new(), String::new())))
+        } else {
+            // Capture output via bounded streams
+            let stdout_stream = Arc::new(BoundedStream::new(DEFAULT_STREAM_MAX_SIZE));
+            let stderr_stream = Arc::new(BoundedStream::new(DEFAULT_STREAM_MAX_SIZE));
 
-        let stdout_task = stdout_pipe.map(|pipe| {
-            tokio::spawn(async move {
-                drain_to_stream(pipe, stdout_clone).await;
-            })
-        });
+            let stdout_pipe = child.stdout.take();
+            let stderr_pipe = child.stderr.take();
 
-        let stderr_task = stderr_pipe.map(|pipe| {
-            tokio::spawn(async move {
-                drain_to_stream(pipe, stderr_clone).await;
-            })
-        });
+            let stdout_clone = stdout_stream.clone();
+            let stderr_clone = stderr_stream.clone();
 
-        // Wait for process to exit
-        let status = match child.wait().await {
-            Ok(s) => s,
-            Err(e) => {
-                return Ok(Some(ExecResult::failure(
-                    1,
-                    format!("{}: failed to wait: {}", name, e),
-                )));
+            let stdout_task = stdout_pipe.map(|pipe| {
+                tokio::spawn(async move {
+                    drain_to_stream(pipe, stdout_clone).await;
+                })
+            });
+
+            let stderr_task = stderr_pipe.map(|pipe| {
+                tokio::spawn(async move {
+                    drain_to_stream(pipe, stderr_clone).await;
+                })
+            });
+
+            let status = match child.wait().await {
+                Ok(s) => s,
+                Err(e) => {
+                    return Ok(Some(ExecResult::failure(
+                        1,
+                        format!("{}: failed to wait: {}", name, e),
+                    )));
+                }
+            };
+
+            if let Some(task) = stdout_task {
+                // Ignore join error — the drain task logs its own errors
+                let _ = task.await;
             }
-        };
+            if let Some(task) = stderr_task {
+                let _ = task.await;
+            }
 
-        // Wait for drain tasks to complete
-        if let Some(task) = stdout_task {
-            // Ignore join error - the drain task logs its own errors
-            let _ = task.await;
+            let code = status.code().unwrap_or_else(|| {
+                #[cfg(unix)]
+                {
+                    use std::os::unix::process::ExitStatusExt;
+                    128 + status.signal().unwrap_or(0)
+                }
+                #[cfg(not(unix))]
+                {
+                    -1
+                }
+            }) as i64;
+
+            let stdout = stdout_stream.read_string().await;
+            let stderr = stderr_stream.read_string().await;
+
+            Ok(Some(ExecResult::from_output(code, stdout, stderr)))
         }
-        if let Some(task) = stderr_task {
-            let _ = task.await;
-        }
-
-        // Extract exit code
-        let code = status.code().unwrap_or_else(|| {
-            // Process was killed by signal
-            #[cfg(unix)]
-            {
-                use std::os::unix::process::ExitStatusExt;
-                128 + status.signal().unwrap_or(0)
-            }
-            #[cfg(not(unix))]
-            {
-                -1
-            }
-        }) as i64;
-
-        // Read final output from streams
-        let stdout = stdout_stream.read_string().await;
-        let stderr = stderr_stream.read_string().await;
-
-        Ok(Some(ExecResult::from_output(code, stdout, stderr)))
     }
 
     // --- Variable Access ---

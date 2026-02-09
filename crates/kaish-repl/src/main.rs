@@ -115,7 +115,7 @@ Examples:
 
 /// Run a script file.
 fn run_script(path: &str) -> Result<ExitCode> {
-    use kaish_client::{EmbeddedClient, KernelClient};
+    use kaish_client::EmbeddedClient;
     use kaish_kernel::{Kernel, KernelConfig};
 
     // Read the script
@@ -129,26 +129,25 @@ fn run_script(path: &str) -> Result<ExitCode> {
         source
     };
 
-    // Scripts run like an interactive session: real cwd, passthrough filesystem
-    let config = KernelConfig::repl();
+    // Interactive mode: external commands inherit stdio for real-time output
+    let config = KernelConfig::repl().with_interactive(true);
     let kernel = Kernel::new(config)
         .context("Failed to create kernel")?;
 
     let client = EmbeddedClient::new(kernel);
 
-    // Execute the script
+    // Execute with streaming: builtins flush immediately via callback,
+    // external commands already stream via Stdio::inherit()
     let rt = tokio::runtime::Runtime::new()?;
-    let result = rt.block_on(client.execute(&source))?;
+    let result = rt.block_on(client.execute_streaming(&source, &mut |r| {
+        if !r.out.is_empty() {
+            print!("{}", r.out);
+        }
+        if !r.err.is_empty() {
+            eprint!("{}", r.err);
+        }
+    }))?;
 
-    // Print output
-    if !result.out.is_empty() {
-        print!("{}", result.out);
-    }
-    if !result.err.is_empty() {
-        eprint!("{}", result.err);
-    }
-
-    // Return exit code
     if result.ok() {
         Ok(ExitCode::SUCCESS)
     } else {
@@ -158,25 +157,25 @@ fn run_script(path: &str) -> Result<ExitCode> {
 
 /// Execute a command string and exit.
 fn run_command(cmd: &str) -> Result<ExitCode> {
-    use kaish_client::{EmbeddedClient, KernelClient};
+    use kaish_client::EmbeddedClient;
     use kaish_kernel::{Kernel, KernelConfig};
 
-    // Use REPL config for full filesystem access (users expect -c to behave like interactive)
-    let config = KernelConfig::repl();
+    // Interactive mode: external commands inherit stdio for real-time output
+    let config = KernelConfig::repl().with_interactive(true);
     let kernel = Kernel::new(config)
         .context("Failed to create kernel")?;
 
     let client = EmbeddedClient::new(kernel);
 
     let rt = tokio::runtime::Runtime::new()?;
-    let result = rt.block_on(client.execute(cmd))?;
-
-    if !result.out.is_empty() {
-        print!("{}", result.out);
-    }
-    if !result.err.is_empty() {
-        eprint!("{}", result.err);
-    }
+    let result = rt.block_on(client.execute_streaming(cmd, &mut |r| {
+        if !r.out.is_empty() {
+            print!("{}", r.out);
+        }
+        if !r.err.is_empty() {
+            eprint!("{}", r.err);
+        }
+    }))?;
 
     if result.ok() {
         Ok(ExitCode::SUCCESS)
