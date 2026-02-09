@@ -3,7 +3,6 @@
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
-use rmcp::model::RawContent;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
@@ -36,12 +35,7 @@ async fn execute(client: &McpClient, script: &str) -> Result<ExecuteResult> {
     let mut args = serde_json::Map::new();
     args.insert("script".into(), json!(script));
     let result = client.call_tool("execute", Some(args)).await?;
-    let content = result.content.first().context("No content")?;
-    let text = match &content.raw {
-        RawContent::Text(t) => &t.text,
-        _ => anyhow::bail!("Expected text"),
-    };
-    serde_json::from_str(text).context("Failed to parse")
+    result.into_typed().context("Failed to parse ExecuteResult from structured_content")
 }
 
 // =============================================================================

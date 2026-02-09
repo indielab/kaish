@@ -121,21 +121,23 @@ impl KaishServerHandler {
                 .await
                 .map_err(|e| McpError::internal_error(e.to_string(), None))?;
 
-        // Format the result as JSON for structured output
-        let result_json = serde_json::to_string_pretty(&result)
+        // Content blocks: plain text for human/LLM consumption
+        let mut content = Vec::new();
+        content.push(Content::text(&result.stdout));
+        if !result.stderr.is_empty() {
+            content.push(Content::text(format!("[stderr] {}", result.stderr)));
+        }
+
+        // Structured metadata for programmatic consumers (e.g. into_typed())
+        let structured = serde_json::to_value(&result)
             .map_err(|e| McpError::internal_error(e.to_string(), None))?;
 
-        if result.ok {
-            Ok(CallToolResult::success(vec![Content::text(result_json)]))
-        } else {
-            // Still return the result, but mark as error
-            Ok(CallToolResult {
-                content: vec![Content::text(result_json)],
-                is_error: Some(true),
-                structured_content: None,
-                meta: None,
-            })
-        }
+        Ok(CallToolResult {
+            content,
+            structured_content: Some(structured),
+            is_error: Some(!result.ok),
+            meta: None,
+        })
     }
 
     /// Get help for kaish syntax, builtins, VFS, and capabilities.
@@ -369,5 +371,86 @@ mod tests {
             assert!(text.text.contains("echo"));
             assert!(text.text.contains("grep"));
         }
+    }
+
+    #[tokio::test]
+    async fn test_execute_output_format() {
+        let config = McpServerConfig::default();
+        let handler = KaishServerHandler::new(config).expect("handler creation failed");
+
+        let input = Parameters(ExecuteInput {
+            script: "echo hello".to_string(),
+            cwd: None,
+            env: None,
+            timeout_ms: None,
+        });
+        let result = handler.execute(input).await.expect("execute failed");
+
+        // content[0] should be plain text stdout, not JSON
+        if let RawContent::Text(text) = &result.content[0].raw {
+            assert_eq!(text.text.trim(), "hello");
+            assert!(
+                !text.text.contains(r#""code""#),
+                "content should be plain text, not JSON"
+            );
+        } else {
+            panic!("Expected text content");
+        }
+
+        // structured_content should have the full metadata
+        let structured = result.structured_content.expect("should have structured_content");
+        assert_eq!(structured["code"], 0);
+        assert_eq!(structured["ok"], true);
+        assert_eq!(structured["stdout"].as_str().unwrap().trim(), "hello");
+
+        // is_error should be false for success
+        assert_eq!(result.is_error, Some(false));
+    }
+
+    #[tokio::test]
+    async fn test_execute_error_format() {
+        let config = McpServerConfig::default();
+        let handler = KaishServerHandler::new(config).expect("handler creation failed");
+
+        let input = Parameters(ExecuteInput {
+            script: "nonexistent_command_xyz".to_string(),
+            cwd: None,
+            env: None,
+            timeout_ms: None,
+        });
+        let result = handler.execute(input).await.expect("execute failed");
+
+        // is_error should be true
+        assert_eq!(result.is_error, Some(true));
+
+        // structured_content should have error details
+        let structured = result.structured_content.expect("should have structured_content");
+        assert_eq!(structured["ok"], false);
+        assert_eq!(structured["code"], 127);
+    }
+
+    #[tokio::test]
+    async fn test_execute_stderr_content() {
+        let config = McpServerConfig::default();
+        let handler = KaishServerHandler::new(config).expect("handler creation failed");
+
+        // A command that fails produces stderr
+        let input = Parameters(ExecuteInput {
+            script: "nonexistent_command_xyz".to_string(),
+            cwd: None,
+            env: None,
+            timeout_ms: None,
+        });
+        let result = handler.execute(input).await.expect("execute failed");
+
+        // Should have a stderr content block with [stderr] prefix
+        let stderr_block = result.content.iter().find(|c| {
+            if let RawContent::Text(t) = &c.raw {
+                t.text.starts_with("[stderr]")
+            } else {
+                false
+            }
+        });
+        assert!(stderr_block.is_some(), "should have a [stderr] content block");
     }
 }

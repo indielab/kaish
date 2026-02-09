@@ -6,7 +6,6 @@
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
-use rmcp::model::RawContent;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
@@ -69,19 +68,7 @@ async fn execute_script_with_opts(
 
     let result = client.call_tool("execute", Some(args)).await?;
 
-    // Extract text content from the result
-    let content = result
-        .content
-        .first()
-        .context("No content in result")?;
-
-    // The content is Annotated<RawContent>, access via .raw
-    let text = match &content.raw {
-        RawContent::Text(text_content) => &text_content.text,
-        _ => anyhow::bail!("Expected text content"),
-    };
-
-    serde_json::from_str(text).context("Failed to parse ExecuteResult")
+    result.into_typed().context("Failed to parse ExecuteResult from structured_content")
 }
 
 // =============================================================================
