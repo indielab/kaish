@@ -35,7 +35,33 @@ async fn execute(client: &McpClient, script: &str) -> Result<ExecuteResult> {
     let mut args = serde_json::Map::new();
     args.insert("script".into(), json!(script));
     let result = client.call_tool("execute", Some(args)).await?;
-    result.into_typed().context("Failed to parse ExecuteResult from structured_content")
+
+    // structured_content is only present on error/stderr.
+    // For clean success, reconstruct from content text blocks.
+    if let Ok(typed) = result.clone().into_typed::<ExecuteResult>() {
+        return Ok(typed);
+    }
+
+    let is_error = result.is_error.unwrap_or(false);
+    let mut stdout = String::new();
+    let mut stderr = String::new();
+    for block in &result.content {
+        if let Some(text) = block.raw.as_text() {
+            if text.text.starts_with("[stderr] ") {
+                stderr.push_str(text.text.trim_start_matches("[stderr] "));
+            } else {
+                stdout.push_str(&text.text);
+            }
+        }
+    }
+
+    Ok(ExecuteResult {
+        code: if is_error { 1 } else { 0 },
+        stdout,
+        stderr,
+        data: None,
+        ok: !is_error,
+    })
 }
 
 // =============================================================================

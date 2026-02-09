@@ -561,7 +561,12 @@ impl Kernel {
             match flow {
                 ControlFlow::Normal(r) => {
                     on_output(&r);
+                    // Carry the last statement's structured output for MCP TOON encoding.
+                    // Must be done here (not in accumulate_result) because accumulate_result
+                    // is also used in loops where per-iteration output would be wrong.
+                    let last_output = r.output.clone();
                     accumulate_result(&mut result, &r);
+                    result.output = last_output;
                 }
                 ControlFlow::Exit { code } => {
                     let exit_result = ExecResult::success(code.to_string());

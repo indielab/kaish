@@ -68,7 +68,35 @@ async fn execute_script_with_opts(
 
     let result = client.call_tool("execute", Some(args)).await?;
 
-    result.into_typed().context("Failed to parse ExecuteResult from structured_content")
+    // structured_content is only present on error/stderr.
+    // For clean success, reconstruct from content text blocks.
+    if let Ok(typed) = result.clone().into_typed::<ExecuteResult>() {
+        return Ok(typed);
+    }
+
+    let is_error = result.is_error.unwrap_or(false);
+    let mut stdout = String::new();
+    let mut stderr = String::new();
+    for block in &result.content {
+        if let Some(text) = block.raw.as_text() {
+            if text.text.starts_with("[stderr] ") {
+                stderr.push_str(text.text.trim_start_matches("[stderr] "));
+            } else {
+                stdout.push_str(&text.text);
+            }
+        }
+    }
+
+    // Try to parse stdout as JSON for the data field
+    let data = serde_json::from_str(&stdout).ok();
+
+    Ok(ExecuteResult {
+        code: if is_error { 1 } else { 0 },
+        stdout,
+        stderr,
+        data,
+        ok: !is_error,
+    })
 }
 
 // =============================================================================

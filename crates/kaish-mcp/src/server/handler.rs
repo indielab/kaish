@@ -128,13 +128,19 @@ impl KaishServerHandler {
             content.push(Content::text(format!("[stderr] {}", result.stderr)));
         }
 
-        // Structured metadata for programmatic consumers (e.g. into_typed())
-        let structured = serde_json::to_value(&result)
-            .map_err(|e| McpError::internal_error(e.to_string(), None))?;
+        // Only include structured metadata when there's something beyond stdout
+        // (errors, stderr, non-zero exit). Clean success → just the text.
+        let structured_content = if !result.ok || !result.stderr.is_empty() {
+            let structured = serde_json::to_value(&result)
+                .map_err(|e| McpError::internal_error(e.to_string(), None))?;
+            Some(structured)
+        } else {
+            None
+        };
 
         Ok(CallToolResult {
             content,
-            structured_content: Some(structured),
+            structured_content,
             is_error: Some(!result.ok),
             meta: None,
         })
@@ -386,22 +392,19 @@ mod tests {
         });
         let result = handler.execute(input).await.expect("execute failed");
 
-        // content[0] should be plain text stdout, not JSON
+        // content[0] should be plain text (echo is simple text, not TOON-encoded)
         if let RawContent::Text(text) = &result.content[0].raw {
             assert_eq!(text.text.trim(), "hello");
             assert!(
                 !text.text.contains(r#""code""#),
-                "content should be plain text, not JSON"
+                "content should be plain text, not JSON metadata"
             );
         } else {
             panic!("Expected text content");
         }
 
-        // structured_content should have the full metadata
-        let structured = result.structured_content.expect("should have structured_content");
-        assert_eq!(structured["code"], 0);
-        assert_eq!(structured["ok"], true);
-        assert_eq!(structured["stdout"].as_str().unwrap().trim(), "hello");
+        // Clean success → no structured_content (just text content blocks)
+        assert!(result.structured_content.is_none(), "success should not have structured_content");
 
         // is_error should be false for success
         assert_eq!(result.is_error, Some(false));

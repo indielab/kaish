@@ -225,6 +225,7 @@ mod tests {
         let result = execute(params, &[], 30_000).await.expect("execute failed");
         assert!(result.ok);
         assert_eq!(result.code, 0);
+        // Simple text passes through unchanged (no TOON encoding)
         assert_eq!(result.stdout.trim(), "hello");
     }
 
@@ -242,6 +243,7 @@ mod tests {
 
         let result = execute(params, &[], 30_000).await.expect("execute failed");
         assert!(result.ok);
+        // Simple text passes through unchanged (no TOON encoding)
         assert_eq!(result.stdout.trim(), "hello world");
     }
 
@@ -311,5 +313,55 @@ mod tests {
         assert!(!result.ok);
         assert_eq!(result.code, 42);
         assert_eq!(result.stderr, "error message");
+    }
+
+    #[tokio::test]
+    async fn test_execute_explicit_json_flag() {
+        // `echo hello --json` applies JSON at the kernel level
+        let params = ExecuteParams {
+            script: "echo hello --json".to_string(),
+            cwd: None,
+            env: None,
+            timeout_ms: None,
+        };
+
+        let result = execute(params, &[], 30_000).await.expect("execute failed");
+        assert!(result.ok);
+        // Should be valid JSON, not TOON-wrapped JSON
+        let parsed: serde_json::Value = serde_json::from_str(&result.stdout).expect("valid JSON");
+        assert_eq!(parsed, serde_json::json!("hello\n"));
+    }
+
+    #[tokio::test]
+    async fn test_execute_structured_as_canonical_text() {
+        // Structured builtins return readable canonical text by default
+        let params = ExecuteParams {
+            script: "mounts".to_string(),
+            cwd: None,
+            env: None,
+            timeout_ms: None,
+        };
+
+        let result = execute(params, &[], 30_000).await.expect("execute failed");
+        assert!(result.ok);
+        // Canonical text: tab-separated values, one per line
+        assert!(result.stdout.contains("/"), "should contain mount paths");
+        assert!(result.stdout.contains("rw"), "should contain mount modes");
+    }
+
+    #[tokio::test]
+    async fn test_execute_simple_text_not_toon_encoded() {
+        // Simple text (echo, cat) should NOT be TOON-encoded
+        let params = ExecuteParams {
+            script: "echo hello world".to_string(),
+            cwd: None,
+            env: None,
+            timeout_ms: None,
+        };
+
+        let result = execute(params, &[], 30_000).await.expect("execute failed");
+        assert!(result.ok);
+        // Plain text, not TOON-quoted
+        assert_eq!(result.stdout.trim(), "hello world");
     }
 }
