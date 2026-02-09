@@ -8,8 +8,9 @@ use std::sync::Arc;
 use rmcp::handler::server::router::tool::ToolRouter;
 use rmcp::handler::server::wrapper::Parameters;
 use rmcp::model::{
-    Annotated, CallToolResult, Content, Implementation, ListResourcesResult, PaginatedRequestParams,
-    ProtocolVersion, RawResource, ReadResourceRequestParams, ReadResourceResult, ResourceContents,
+    Annotated, CallToolResult, Content, Implementation, ListResourceTemplatesResult,
+    ListResourcesResult, PaginatedRequestParams, ProtocolVersion, RawResource,
+    RawResourceTemplate, ReadResourceRequestParams, ReadResourceResult, ResourceContents,
     ServerCapabilities, ServerInfo,
 };
 use rmcp::schemars::{self, JsonSchema};
@@ -167,7 +168,7 @@ impl KaishServerHandler {
 impl rmcp::ServerHandler for KaishServerHandler {
     fn get_info(&self) -> ServerInfo {
         ServerInfo {
-            protocol_version: ProtocolVersion::V_2024_11_05,
+            protocol_version: ProtocolVersion::LATEST,
             capabilities: ServerCapabilities::builder()
                 .enable_tools()
                 .enable_resources()
@@ -177,14 +178,42 @@ impl rmcp::ServerHandler for KaishServerHandler {
                 "kaish (会sh) — Predictable shell for MCP tool orchestration.\n\n\
                  Bourne-like syntax without the gotchas (no word splitting, no glob expansion, \
                  no backticks). Strict validation catches errors before execution. \
-                 Builtins run in-process; use `exec` for external commands.\n\n\
+                 Builtins run in-process; external commands work via PATH fallback \
+                 (just type `cargo build`, `git status`, etc.).\n\n\
                  Tools:\n\
                  • execute — Run shell scripts (pipes, redirects, builtins, loops, functions)\n\
                  • help — Discover syntax, builtins, VFS mounts, capabilities\n\n\
+                 Resources available via `kaish://vfs/{path}` URIs.\n\n\
                  Use 'help' first to learn what's available."
                     .to_string(),
             ),
         }
+    }
+
+    async fn list_resource_templates(
+        &self,
+        _request: Option<PaginatedRequestParams>,
+        _context: RequestContext<RoleServer>,
+    ) -> Result<ListResourceTemplatesResult, McpError> {
+        Ok(ListResourceTemplatesResult {
+            resource_templates: vec![Annotated {
+                raw: RawResourceTemplate {
+                    uri_template: "kaish://vfs/{+path}".to_string(),
+                    name: "VFS File".to_string(),
+                    title: Some("Virtual Filesystem".to_string()),
+                    description: Some(
+                        "Access files and directories through kaish's VFS. \
+                         Paths mirror the native filesystem under $HOME."
+                            .to_string(),
+                    ),
+                    mime_type: None,
+                    icons: None,
+                },
+                annotations: None,
+            }],
+            next_cursor: None,
+            meta: None,
+        })
     }
 
     async fn list_resources(

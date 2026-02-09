@@ -52,6 +52,9 @@ jobs --cleanup            # remove completed jobs
 
 # Parallel processing
 seq 1 10 | scatter as=N limit=4 | echo "processing $N" | gather
+
+# Explicit subprocess control (env, cwd, timeout)
+spawn --cwd /tmp --timeout 5000 -- make -j4
 ```
 
 ## Key Differences from Bash
