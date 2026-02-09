@@ -34,7 +34,25 @@ Verify the repo is ready for release:
 
 If any check fails, stop and report. Do not proceed.
 
-## Phase 2: Code Review
+## Phase 2: Docs Consistency Check
+
+If any builtins were added, removed, or recategorized since the last tag,
+verify that documentation matches the actual tool registry. Launch a Task
+subagent (Explore type) to:
+
+1. List every builtin tool name from `crates/kaish-kernel/src/tools/builtin/`
+   (each file's `fn name(&self)` return value)
+2. Compare against the builtin table in `README.md` (the `| Category | Tools |` table)
+3. Compare against the category match arms in `crates/kaish-kernel/src/help.rs`
+   (`format_tool_list` function)
+4. Check for hardcoded tool counts anywhere in docs (`README.md`, `docs/help/*.md`)
+
+Report any mismatches: ghost entries (listed but don't exist), missing entries
+(exist but not listed), wrong categories, stale counts. Fix them before proceeding.
+
+If no builtins changed since the last tag, skip this phase.
+
+## Phase 3: Code Review
 
 Before releasing, get a second opinion on changes since the last release tag.
 
@@ -48,7 +66,7 @@ Before releasing, get a second opinion on changes since the last release tag.
 4. Report the review summary to the user
 5. Ask the user to confirm proceeding with the release
 
-## Phase 3: Version Bump
+## Phase 4: Version Bump
 
 The workspace has a specific versioning structure. ALL of these must be updated to `$ARGUMENTS`:
 
@@ -74,19 +92,19 @@ crates/kaish-repl/Cargo.toml   → kaish-kernel version, kaish-client version
 
 After editing, run `cargo check --all` to verify the versions resolve correctly.
 
-## Phase 4: Commit and Tag
+## Phase 5: Commit and Tag
 
 1. Stage all modified Cargo.toml files by name (never `git add -A`)
 2. Commit with message: `chore: bump to v$ARGUMENTS`
 3. Create annotated tag: `git tag -a v$ARGUMENTS -m "Release v$ARGUMENTS"`
 4. Run `git status` to verify clean tree
 
-## Phase 5: Push
+## Phase 6: Push
 
 1. Ask the user to confirm pushing to origin
 2. Push commit and tag: `git push origin main && git push origin v$ARGUMENTS`
 
-## Phase 6: Publish to crates.io
+## Phase 7: Publish to crates.io
 
 Publish in dependency order. Each crate must be available on crates.io before
 its dependents can be published. Wait 15 seconds between publishes.
@@ -111,7 +129,7 @@ already published — skip it and continue with the next one.
 If a publish fails because a dependency isn't available yet, wait 30 seconds
 and retry once.
 
-## Phase 7: Verify
+## Phase 8: Verify
 
 1. Check the release is visible: `cargo search kaish-repl`
 2. Report the published versions to the user

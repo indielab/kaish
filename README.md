@@ -2,7 +2,7 @@
 
 **A predictable shell for AI agents** — Bourne-like syntax without the gotchas.
 
-The 会 (kai) means "gathering" in Japanese. Part of [Kaijutsu](https://github.com/tobert/kaijutsu) (会術) — the art of gathering.
+The 会 (kai) means "gathering" in Japanese — a shell that gathers tools together.
 
 ## Install
 
@@ -70,7 +70,7 @@ seq 1 10 | scatter as=N limit=4 | echo "processing $N" | gather
 | Feature | Description |
 |---------|-------------|
 | **Bourne-compatible** | Variables, pipes, control flow, functions — familiar syntax |
-| **66 builtins** | grep, jq, git, find, sed, awk, diff, patch, and more |
+| **Builtins** | grep, jq, git, find, sed, awk, diff, patch, and more — all in-process |
 | **Structured data** | Commands return typed arrays — `for i in $(seq 1 5)` iterates 5 values, not word-split text |
 | **Strict validation** | Errors caught before execution with clear messages |
 | **Virtual filesystem** | Unified access: `/mnt/local` (home), `/scratch` (memory), `/v/jobs` (observability) |
@@ -82,7 +82,7 @@ See [Language Reference](docs/LANGUAGE.md) for complete syntax. Use `help builti
 
 ## Builtins
 
-kaish ships 66 builtins that run in-process — no subprocesses, no PATH lookups, no platform
+kaish builtins run in-process — no subprocesses, no PATH lookups, no platform
 variance. They exist because agents need tools they can verify: a `grep` that behaves identically
 everywhere, a `jq` that always uses the same filter syntax, an `awk` that never surprises.
 
@@ -99,13 +99,13 @@ everywhere, a `jq` that always uses the same filter syntax, an `awk` that never 
 
 | Category | Tools |
 |----------|-------|
-| **Text** | awk, cut, grep, head, sed, sort, split, tail, tr, uniq, wc |
-| **Files** | basename, cat, cd, chmod, cp, dirname, find, glob, ln, ls, mkdir, mktemp, mv, pwd, read, readlink, realpath, rm, stat, tee, touch, tree, write |
+| **Text** | awk, cut, diff, grep, head, sed, sort, split, tail, tr, uniq, wc |
+| **Files** | basename, cat, cd, cp, dirname, find, glob, ln, ls, mkdir, mktemp, mv, patch, pwd, read, readlink, realpath, rm, stat, tee, touch, tree, write |
 | **JSON** | jq |
 | **Git** | git (init, clone, status, add, commit, log, diff, branch, checkout, worktree) |
-| **System** | date, echo, env, exec, export, help, hostname, jobs, kill, printf, ps, seq, set, sleep, spawn, test/\[\[, tokens, uname, unset, validate, vars, wait, which |
+| **System** | date, echo, env, exec, export, help, hostname, jobs, printf, ps, seq, set, sleep, spawn, test/\[\[, tokens, uname, unset, validate, vars, wait, which |
 | **Parallel** | scatter, gather |
-| **Meta** | assert, diff, false, mounts, patch, tools, true |
+| **Meta** | assert, false, mounts, tools, true |
 
 ---
 
