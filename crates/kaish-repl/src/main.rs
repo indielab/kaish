@@ -129,8 +129,8 @@ fn run_script(path: &str) -> Result<ExitCode> {
         source
     };
 
-    // Create kernel with transient state (scripts don't persist by default)
-    let config = KernelConfig::transient();
+    // Scripts run like an interactive session: real cwd, passthrough filesystem
+    let config = KernelConfig::repl();
     let kernel = Kernel::new(config)
         .context("Failed to create kernel")?;
 
