@@ -55,12 +55,12 @@ impl HelpTopic {
     }
 }
 
-// Embed markdown files at compile time.
-const OVERVIEW: &str = include_str!("../docs/help/overview.md");
-const SYNTAX: &str = include_str!("../docs/help/syntax.md");
-const VFS: &str = include_str!("../docs/help/vfs.md");
-const SCATTER: &str = include_str!("../docs/help/scatter.md");
-const LIMITS: &str = include_str!("../docs/help/limits.md");
+// Embed markdown files at compile time from the repo-root docs/help/ directory.
+const OVERVIEW: &str = include_str!("../../../docs/help/overview.md");
+const SYNTAX: &str = include_str!("../../../docs/help/syntax.md");
+const VFS: &str = include_str!("../../../docs/help/vfs.md");
+const SCATTER: &str = include_str!("../../../docs/help/scatter.md");
+const LIMITS: &str = include_str!("../../../docs/help/limits.md");
 
 /// Get help content for a topic.
 ///
