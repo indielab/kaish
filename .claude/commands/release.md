@@ -9,6 +9,19 @@ Follow each phase in order. Stop and report to the user if any phase fails.
 
 $ARGUMENTS is the new version number (e.g. `0.2.0`). If not provided, ask the user.
 
+## Phase 0: Version Sanity Check
+
+Before doing any work, parse the current version from `Cargo.toml` and compare
+with the requested version. Flag and confirm with the user if:
+
+- **Major bump** (e.g. `0.x.y` → `1.0.0`) — "This is a major version bump. Intentional?"
+- **Minor skip** (e.g. `0.1.4` → `0.5.0`) — "This skips minor versions 0.2–0.4. Intentional?"
+- **Downgrade** — "The requested version is lower than the current version. Typo?"
+- **Same version** — "This version is already set. Nothing to release."
+
+Normal increments (patch bump like `0.1.4` → `0.1.5`, or minor bump like
+`0.1.4` → `0.2.0`) proceed without asking.
+
 ## Phase 1: Pre-flight Checks
 
 Verify the repo is ready for release:
@@ -18,7 +31,6 @@ Verify the repo is ready for release:
 3. Run `cargo clippy --all` — must be 0 warnings
 4. Run `cargo test --all` — all must pass
 5. Run `cargo insta test --check` — no pending snapshots
-6. Check current version: `grep '^version' Cargo.toml` and compare with the requested version
 
 If any check fails, stop and report. Do not proceed.
 
