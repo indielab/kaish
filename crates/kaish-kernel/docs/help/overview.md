@@ -27,7 +27,7 @@ git status
 date +%Y-%m-%d
 
 # Pipes and filters
-ls /l | grep "\.rs$" | head lines=5
+ls -l | grep "\.rs$" | head lines=5
 
 # Iteration with glob
 for f in $(glob "*.json"); do

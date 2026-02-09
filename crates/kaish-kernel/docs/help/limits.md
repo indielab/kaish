@@ -12,7 +12,7 @@ These bash features are omitted by design:
 | Shell glob expansion `*.txt` | Tools handle their own patterns |
 | Process substitution `<(cmd)` | Use temp files |
 | Backticks `` `cmd` `` | Use `$(cmd)` |
-| Single bracket tests `[ ]` | Use `[[ ]]` |
+| Single bracket tests `[ ]` | Supported, but prefer `[[ ]]` |
 | Aliases, `eval` | Explicit is better |
 | Implicit word splitting | Use `split` explicitly |
 
@@ -78,7 +78,7 @@ cargo build  # Error: cannot run external from virtual directory
 | Bash Behavior | kaish Behavior |
 |---------------|----------------|
 | `for i in $VAR` splits on IFS | No splitting; iterates once |
-| `[ -f file ]` | Not supported; use `[[ ]]` |
+| `[ -f file ]` | Supported via builtin; prefer `[[ ]]` |
 | `*.txt` expands at shell | Passed literally to tools |
 | Regex in `=~` is unquoted | Quotes allowed: `=~ "\.rs$"` |
 

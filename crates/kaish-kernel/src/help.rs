@@ -127,26 +127,34 @@ fn format_tool_list(schemas: &[ToolSchema]) -> String {
     // Find max name length for alignment
     let max_len = schemas.iter().map(|s| s.name.len()).max().unwrap_or(0);
 
-    // Group tools by rough category based on name patterns
+    // Group tools by category based on name.
+    // Keep in sync with actual builtins in tools/builtin/.
     let mut text_tools = Vec::new();
     let mut file_tools = Vec::new();
     let mut system_tools = Vec::new();
     let mut json_tools = Vec::new();
+    let mut parallel_tools = Vec::new();
+    let mut process_tools = Vec::new();
+    let mut introspection_tools = Vec::new();
     let mut other_tools = Vec::new();
 
     for schema in schemas {
         let entry = (schema.name.as_str(), schema.description.as_str());
         match schema.name.as_str() {
             "grep" | "sed" | "awk" | "cut" | "tr" | "sort" | "uniq" | "wc" | "head" | "tail"
-            | "split" => text_tools.push(entry),
-            "cat" | "ls" | "cd" | "pwd" | "mkdir" | "rm" | "cp" | "mv" | "touch" | "chmod"
+            | "split" | "diff" => text_tools.push(entry),
+            "cat" | "ls" | "tree" | "cd" | "pwd" | "mkdir" | "rm" | "cp" | "mv" | "touch"
             | "ln" | "readlink" | "write" | "glob" | "find" | "stat" | "dirname" | "basename"
-            | "realpath" => file_tools.push(entry),
+            | "realpath" | "mktemp" | "patch" => file_tools.push(entry),
             "echo" | "printf" | "read" | "sleep" | "date" | "env" | "export" | "set" | "unset"
-            | "source" | "exit" | "return" | "break" | "continue" | "true" | "false" | "test"
-            | "help" | "jobs" | "wait" | "kill" | "ps" | "whoami" | "hostname" | "which"
-            | "type" | "hash" | "xargs" | "tee" | "seq" | "validate" => system_tools.push(entry),
+            | "true" | "false" | "test" | "[" | "assert" | "seq" | "tee" | "hostname"
+            | "uname" | "which" => system_tools.push(entry),
             "jq" => json_tools.push(entry),
+            "scatter" | "gather" => parallel_tools.push(entry),
+            "exec" | "spawn" | "jobs" | "wait" | "ps" | "git" => process_tools.push(entry),
+            "help" | "validate" | "vars" | "mounts" | "tools" | "tokens" => {
+                introspection_tools.push(entry)
+            }
             _ => other_tools.push(entry),
         }
     }
@@ -164,9 +172,12 @@ fn format_tool_list(schemas: &[ToolSchema]) -> String {
     };
 
     output.push_str(&format_group("Text Processing", &text_tools, max_len));
-    output.push_str(&format_group("Files & I/O", &file_tools, max_len));
+    output.push_str(&format_group("Files & Directories", &file_tools, max_len));
     output.push_str(&format_group("JSON", &json_tools, max_len));
-    output.push_str(&format_group("System & Shell", &system_tools, max_len));
+    output.push_str(&format_group("Processes & Jobs", &process_tools, max_len));
+    output.push_str(&format_group("Parallel (散/集)", &parallel_tools, max_len));
+    output.push_str(&format_group("Shell & System", &system_tools, max_len));
+    output.push_str(&format_group("Introspection", &introspection_tools, max_len));
     output.push_str(&format_group("Other", &other_tools, max_len));
 
     output.push_str("---\n");

@@ -1,6 +1,6 @@
 # 散/集 (Scatter/Gather) — Parallel Processing
 
-Experimental fan-out parallelism for processing items concurrently.
+Fan-out parallelism for processing items concurrently.
 
 ## Basic Syntax
 
@@ -11,13 +11,19 @@ input | scatter as=VAR limit=N | process $VAR | gather
 - **散 (scatter)** — fan out input to parallel workers
 - **集 (gather)** — collect results back
 
-## Parameters
+## Scatter Parameters
 
 | Parameter | Description | Default |
 |-----------|-------------|---------|
-| `as=VAR` | Variable name for each item | required |
-| `limit=N` | Max concurrent workers | 4 |
-| `progress=true` | Show progress indicator | false |
+| `as=VAR` | Variable name for each item | `ITEM` |
+| `limit=N` | Max concurrent workers | 8 |
+
+## Gather Parameters
+
+| Parameter | Description | Default |
+|-----------|-------------|---------|
+| `first=N` | Take first N results only (0 = all) | 0 |
+| `format=FMT` | Output format: `lines` or `json` | `lines` |
 
 ## Examples
 
@@ -33,16 +39,22 @@ glob "*.json" | scatter as=FILE limit=4 | jq ".name" $FILE | gather
 seq 1 20 | scatter as=N limit=4 | echo "result: $((N * N))" | gather
 ```
 
-### With Progress
+### First N Results
 
 ```bash
-seq 1 100 \
-    | scatter as=N limit=4 \
-    | sleep 0.1 && echo "done $N" \
-    | gather progress=true
+seq 1 100 | scatter as=N limit=8 | echo "done $N" | gather first=10
 ```
 
-### Transform Data
+### Transform Data to JSON
+
+```bash
+seq 1 10 \
+    | scatter as=N limit=4 \
+    | echo "{\"id\": $N, \"square\": $((N * N))}" \
+    | gather format=json
+```
+
+### Pipe Gathered Results
 
 ```bash
 seq 1 10 \
@@ -75,7 +87,6 @@ seq 1 10 \
 
 ## Performance Tips
 
-- Start with `limit=4`, increase based on workload
+- Default `limit=8` works well for mixed workloads
 - CPU-bound tasks: limit to number of cores
 - I/O-bound tasks: higher limits often help
-- Monitor with `progress=true` for long operations

@@ -30,7 +30,7 @@ For agent/MCP use, paths look native but access is restricted to `$HOME`:
 ```
 /                memory root (catches paths outside sandbox)
 /home/user/      user's home directory (sandboxed)
-/tmp/            in-memory temporary storage
+/tmp/            real /tmp (for interop with other processes)
 /v/              memory storage for blobs
 /scratch/        ephemeral in-memory storage
 ```
@@ -62,7 +62,8 @@ cat /scratch/cache.txt         # read it back
 
 ## /tmp — Temporary Storage
 
-Another in-memory location, following Unix conventions.
+Maps to the real `/tmp` directory for interop with external processes.
+In sandboxed mode, this is the only path outside `$HOME` with real filesystem access.
 
 ```bash
 write /tmp/temp.json '{"key": "value"}'
