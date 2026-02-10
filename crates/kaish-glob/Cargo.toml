@@ -1,10 +1,12 @@
 [package]
 name = "kaish-glob"
 description = "Glob matching and async file walking with gitignore support"
-version = "0.1.6"
+version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 authors.workspace = true
 license.workspace = true
+homepage.workspace = true
 repository.workspace = true
 keywords.workspace = true
 categories.workspace = true

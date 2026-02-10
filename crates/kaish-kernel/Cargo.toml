@@ -3,12 +3,15 @@ name = "kaish-kernel"
 description = "Core kernel for kaish: lexer, parser, interpreter, and runtime"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 authors.workspace = true
 license.workspace = true
+homepage.workspace = true
 repository.workspace = true
 keywords.workspace = true
 categories.workspace = true
 readme = "../../README.md"
+exclude = ["tests/snapshots/"]
 
 [dependencies]
 kaish-glob = { path = "../kaish-glob", version = "0.1.6" }
@@ -47,6 +50,9 @@ jaq-json = { workspace = true }
 
 # Token counting (BPE tokenization)
 tiktoken-rs = { workspace = true }
+
+# TOON (Token-Oriented Object Notation)
+toon-format = { workspace = true }
 
 # XDG paths
 directories = { workspace = true }

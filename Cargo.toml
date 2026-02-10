@@ -12,8 +12,11 @@ members = [
 [workspace.package]
 version = "0.1.6"
 edition = "2024"
+rust-version = "1.85"
 authors = ["Amy Tobey <tobert@gmail.com>"]
+description = "kaish (会sh) — a predictable shell for MCP tool orchestration"
 license = "MIT"
+homepage = "https://github.com/tobert/kaish"
 repository = "https://github.com/tobert/kaish"
 keywords = ["shell", "mcp", "ai", "agent", "cli"]
 categories = ["command-line-utilities", "development-tools"]
@@ -79,6 +82,9 @@ procfs = "0.18"
 
 # Token counting (BPE tokenization)
 tiktoken-rs = "0.9"
+
+# TOON (Token-Oriented Object Notation)
+toon-format = "0.4"
 
 # Testing
 proptest = "1"
