@@ -47,7 +47,6 @@ impl KaishServerHandler {
         // Mount memory at root for safety (catches paths outside sandbox)
         vfs.mount("/", MemoryFs::new());
         vfs.mount("/v", MemoryFs::new());
-        vfs.mount("/scratch", MemoryFs::new());
 
         // Real /tmp for interop with other processes
         vfs.mount("/tmp", LocalFs::new(PathBuf::from("/tmp")));

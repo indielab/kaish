@@ -197,15 +197,15 @@ async fn test_background_job_inherits_cwd() {
     let kernel = setup().await;
 
     // Create a test directory and cd into it
-    kernel.execute("mkdir -p /scratch/testdir").await.unwrap();
-    kernel.execute("cd /scratch/testdir").await.unwrap();
+    kernel.execute("mkdir -p /tmp/testdir").await.unwrap();
+    kernel.execute("cd /tmp/testdir").await.unwrap();
     kernel.execute("pwd &").await.unwrap();
 
     wait_for_job(&kernel, 1, Duration::from_secs(1)).await;
 
     let result = kernel.execute("cat /v/jobs/1/stdout").await.unwrap();
     assert!(
-        result.out.contains("/scratch/testdir"),
+        result.out.contains("/tmp/testdir"),
         "expected cwd in output, got: {}",
         result.out
     );

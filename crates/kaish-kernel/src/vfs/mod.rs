@@ -2,7 +2,7 @@
 //!
 //! The VFS provides a unified interface over multiple filesystem backends:
 //!
-//! - **MemoryFs**: In-memory ephemeral storage (for `/scratch`)
+//! - **MemoryFs**: In-memory ephemeral storage (for `/v`, tests)
 //! - **LocalFs**: Real filesystem access (for mounted worktrees)
 //! - **VfsRouter**: Routes paths to mounted backends
 //!
@@ -12,7 +12,7 @@
 //!
 //! ```text
 //! /                      # kernel root
-//! ├── /scratch/          # MemoryFs (ephemeral)
+//! ├── /v/                # MemoryFs (blobs, jobs)
 //! ├── /mnt/project/      # LocalFs (worktree, rw)
 //! └── /mnt/reference/    # LocalFs (repo, ro)
 //! ```

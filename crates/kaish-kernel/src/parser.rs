@@ -2596,7 +2596,7 @@ ITEMS="alpha beta gamma"
 
 echo "Starting ${NAME} v${VERSION}"
 cat "README.md" | grep pattern="install" | head count=5
-fetch url="https://api.example.com/status" timeout=${TIMEOUT} > "/scratch/status.json"
+fetch url="https://api.example.com/status" timeout=${TIMEOUT} > "/tmp/status.json"
 echo "Items: ${ITEMS}"
 "#;
         let result = parse(script).unwrap();

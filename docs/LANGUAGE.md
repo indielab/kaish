@@ -372,7 +372,7 @@ date +%Y-%m-%d                     # formatted date
 4. stdin/stdout flow correctly through pipelines
 
 **Constraints:**
-- External commands require a real filesystem working directory (not `/scratch/`)
+- External commands require a real filesystem working directory (not `/v/`)
 - No PTY/TTY support — interactive tools like `vim` won't work
 - Output is captured (not streamed) — large outputs may be truncated
 
@@ -439,7 +439,7 @@ VFS mounts provide unified resource access:
 
 ```
 /                  → kernel root (current working directory)
-/scratch/          → in-memory ephemeral storage
+/tmp/              → temporary storage (real filesystem)
 /mnt/<name>/       → mounted local paths
 /git/              → git repository introspection (status, log, diff, blame)
 ```
@@ -481,7 +481,7 @@ Features that ShellCheck warns about (word splitting, glob expansion, backticks)
 | **Typed params** | None | `name:string` | Tool definitions with validation |
 | **Arithmetic** | `$(( ))` | `$((expr))` with comparisons | Integer arithmetic + `>`, `<`, `==` returning 1/0 |
 | **Scatter/gather** | None | `散/集` | Built-in parallelism *(experimental)* |
-| **VFS** | None | `/scratch/`, `/mnt/`, `/git/` | Unified resource access |
+| **VFS** | None | `/tmp/`, `/v/`, `/git/` | Unified resource access |
 | **Pre-validation** | None | `validate` builtin | Catch errors before execution |
 | **Strict validation** | Guesses | Rejects `TRUE`, `yes`, `123abc` | Agent-friendly, fail-fast |
 

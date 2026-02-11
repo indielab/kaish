@@ -13,7 +13,6 @@ For human-operated REPL sessions, native paths work directly:
 ```
 /                native filesystem root
 /v/              memory storage for blobs
-/scratch/        ephemeral in-memory storage
 ```
 
 Example:
@@ -32,7 +31,6 @@ For agent/MCP use, paths look native but access is restricted to `$HOME`:
 /home/user/      user's home directory (sandboxed)
 /tmp/            real /tmp (for interop with other processes)
 /v/              memory storage for blobs
-/scratch/        ephemeral in-memory storage
 ```
 
 Example:
@@ -51,19 +49,12 @@ The sandbox can be restricted further (e.g., to `~/src`) via configuration.
 - In passthrough mode, all paths work
 - In sandboxed mode, only paths under the sandbox root work
 
-## /scratch — Ephemeral Memory
-
-In-memory storage for temporary data. Fast, but lost when session ends.
-
-```bash
-echo "temp data" > /scratch/cache.txt
-cat /scratch/cache.txt         # read it back
-```
-
 ## /tmp — Temporary Storage
 
-Maps to the real `/tmp` directory for interop with external processes.
-In sandboxed mode, this is the only path outside `$HOME` with real filesystem access.
+Maps to the real `/tmp` directory. On Linux, `/tmp` is typically tmpfs (in-memory),
+so it's both fast and ephemeral. In sandboxed mode, this is the only path outside
+`$HOME` with real filesystem access. Files written here are visible to external
+commands.
 
 ```bash
 write /tmp/temp.json '{"key": "value"}'
@@ -133,8 +124,8 @@ cd /home/atobey/src/kaish
 ls src/
 cat src/main.rs | head -20
 
-# Use scratch for intermediate data
-ls src/*.rs | write /scratch/rust_files.txt
+# Use /tmp for intermediate data
+ls src/*.rs | write /tmp/rust_files.txt
 
 # Check git status
 cat /git/status

@@ -73,7 +73,7 @@ seq 1 10 | scatter as=N limit=4 | echo "processing $N" | gather
 | **Builtins** | grep, jq, git, find, sed, awk, diff, patch, and more — all in-process |
 | **Structured data** | Commands return typed arrays — `for i in $(seq 1 5)` iterates 5 values, not word-split text |
 | **Strict validation** | Errors caught before execution with clear messages |
-| **Virtual filesystem** | Unified access: native `$HOME` paths (sandboxed), `/scratch` (memory), `/v/jobs` (observability) |
+| **Virtual filesystem** | Unified access: native `$HOME` paths (sandboxed), `/tmp`, `/v/jobs` (observability) |
 | **Scatter/gather** | Built-in parallelism with 散/集 |
 
 See [Language Reference](docs/LANGUAGE.md) for complete syntax. Use `help builtins` or `help <tool>` for per-tool docs.
@@ -169,7 +169,7 @@ ${VAR:-default}, $((arithmetic)), scatter/gather parallelism.
 
 NOT supported: process substitution <(), backticks, eval, aliases.
 
-Paths: Native paths work within $HOME (e.g., /home/user/src/project). /scratch/ = ephemeral memory.
+Paths: Native paths work within $HOME (e.g., /home/user/src/project). /tmp for temp files.
 ```
 
 Output is clean text by default — simple commands return plain text, structured

@@ -58,7 +58,6 @@ pub enum VfsMountMode {
     /// Mounts:
     /// - `/` → LocalFs("/")
     /// - `/v` → MemoryFs (blob storage)
-    /// - `/scratch` → MemoryFs (ephemeral)
     Passthrough,
 
     /// Transparent sandbox — paths look native but access is restricted.
@@ -70,9 +69,8 @@ pub enum VfsMountMode {
     /// Mounts:
     /// - `/` → MemoryFs (catches paths outside sandbox)
     /// - `{root}` → LocalFs(root)  (e.g., `/home/user` → LocalFs)
-    /// - `/tmp` → MemoryFs
+    /// - `/tmp` → LocalFs("/tmp")
     /// - `/v` → MemoryFs (blob storage)
-    /// - `/scratch` → MemoryFs
     Sandboxed {
         /// Root path for local filesystem. Defaults to `$HOME`.
         /// Can be restricted further, e.g., `~/src`.
@@ -88,7 +86,6 @@ pub enum VfsMountMode {
     /// - `/` → MemoryFs
     /// - `/tmp` → MemoryFs
     /// - `/v` → MemoryFs
-    /// - `/scratch` → MemoryFs
     NoLocal,
 }
 
@@ -327,15 +324,13 @@ impl Kernel {
             VfsMountMode::Passthrough => {
                 // LocalFs at "/" — native paths work directly
                 vfs.mount("/", LocalFs::new(PathBuf::from("/")));
-                // Memory for blobs and scratch
+                // Memory for blobs
                 vfs.mount("/v", MemoryFs::new());
-                vfs.mount("/scratch", MemoryFs::new());
             }
             VfsMountMode::Sandboxed { root } => {
                 // Memory at root for safety (catches paths outside sandbox)
                 vfs.mount("/", MemoryFs::new());
                 vfs.mount("/v", MemoryFs::new());
-                vfs.mount("/scratch", MemoryFs::new());
 
                 // Real /tmp for interop with other processes
                 vfs.mount("/tmp", LocalFs::new(PathBuf::from("/tmp")));
@@ -358,7 +353,6 @@ impl Kernel {
                 vfs.mount("/", MemoryFs::new());
                 vfs.mount("/tmp", MemoryFs::new());
                 vfs.mount("/v", MemoryFs::new());
-                vfs.mount("/scratch", MemoryFs::new());
             }
         }
 
@@ -453,7 +447,7 @@ impl Kernel {
         vfs.mount("/v/jobs", JobFs::new(jobs.clone()));
         // Mount MemoryFs for blob storage
         vfs.mount("/v/blobs", MemoryFs::new());
-        // Mount MemoryFs for scratch space
+        // Mount MemoryFs for ephemeral data
         vfs.mount("/v/scratch", MemoryFs::new());
 
         let vfs = Arc::new(vfs);
@@ -1963,7 +1957,7 @@ impl Kernel {
     ///
     /// # Requirements
     /// - Command must be found in PATH
-    /// - Current working directory must be on a real filesystem (not virtual like /scratch)
+    /// - Current working directory must be on a real filesystem (not virtual like /v)
     ///
     /// # Returns
     /// - `Ok(Some(result))` if command was found and executed

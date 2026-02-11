@@ -48,7 +48,7 @@ External commands (via PATH fallback) have constraints:
 |------------|--------|------------|
 | No PTY/TTY | Commands run with piped I/O | Use builtins or non-interactive modes |
 | Output captured | Not streamed, may be truncated | Large output: redirect to file |
-| Virtual cwd fails | `/scratch/` isn't real filesystem | `cd` to real directory first |
+| Virtual cwd fails | `/v/` isn't real filesystem | `cd` to real directory first |
 
 ```bash
 # This works (real cwd)
@@ -56,7 +56,7 @@ cd /home/user
 cargo build
 
 # This fails (virtual cwd)
-cd /scratch
+cd /v
 cargo build  # Error: cannot run external from virtual directory
 ```
 
@@ -92,8 +92,8 @@ for i in $(split "$VAR"); do echo $i; done
 
 **Need temp file for process substitution?**
 ```bash
-cmd1 > /scratch/temp.txt
-cmd2 /scratch/temp.txt
+cmd1 > /tmp/temp.txt
+cmd2 /tmp/temp.txt
 ```
 
 **Need glob expansion?**

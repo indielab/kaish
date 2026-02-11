@@ -1,6 +1,6 @@
 //! In-memory filesystem implementation.
 //!
-//! Used for `/scratch` and testing. All data is ephemeral.
+//! Used for `/v` and testing. All data is ephemeral.
 
 use super::traits::{DirEntry, EntryType, Filesystem, Metadata};
 use async_trait::async_trait;
