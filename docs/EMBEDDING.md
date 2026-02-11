@@ -269,19 +269,13 @@ The `kaish_kernel` crate exports these types at the crate root for convenience:
 `KernelConfig` provides these options:
 
 ```rust
-let config = KernelConfig {
-    // Mount local filesystem at /mnt/local
-    mount_local: true,
-
-    // Root for local mount (defaults to $HOME)
-    local_root: Some(PathBuf::from("/custom/root")),
-
-    // Initial working directory
-    cwd: PathBuf::from("/mnt/local"),
-
-    // Skip pre-execution validation (for performance)
-    skip_validation: false,
-};
+// Sandboxed to a specific root (defaults to $HOME)
+let config = KernelConfig::named("my-kernel")
+    .with_vfs_mode(VfsMountMode::Sandboxed {
+        root: Some(PathBuf::from("/custom/root")),
+    })
+    .with_cwd(PathBuf::from("/custom/root"))
+    .with_skip_validation(false);
 ```
 
 ## Job Output Capture
