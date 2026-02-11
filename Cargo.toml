@@ -83,9 +83,6 @@ procfs = "0.18"
 # Token counting (BPE tokenization)
 tiktoken-rs = "0.9"
 
-# TOON (Token-Oriented Object Notation)
-toon-format = "0.4"
-
 # Testing
 proptest = "1"
 rstest = "0.26"

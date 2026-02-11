@@ -304,13 +304,12 @@ pub fn validate_against_schema(args: &ToolArgs, schema: &ToolSchema) -> Vec<Vali
 }
 
 // ============================================================
-// Global Output Flags (--json, --toon)
+// Global Output Flags (--json)
 // ============================================================
 
 /// Registry of global output format flags.
 const GLOBAL_OUTPUT_FLAGS: &[(&str, OutputFormat)] = &[
     ("json", OutputFormat::Json),
-    ("toon", OutputFormat::Toon),
 ];
 
 /// Check if a flag name is a global output flag.

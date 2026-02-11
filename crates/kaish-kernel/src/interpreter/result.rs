@@ -289,16 +289,6 @@ impl OutputData {
             .join("\n")
     }
 
-    /// Serialize to TOON format for `--toon` flag handling.
-    ///
-    /// Converts to JSON value first, then encodes as TOON.
-    /// TOON is ~40% fewer tokens than JSON for tabular data.
-    pub fn to_toon(&self) -> String {
-        let json_value = self.to_json();
-        toon_format::encode_default(&json_value)
-            .unwrap_or_else(|_| self.to_canonical_string())
-    }
-
     /// Serialize to a JSON value for `--json` flag handling.
     ///
     /// Bare data, no envelope — optimized for `jq` patterns.
@@ -367,7 +357,7 @@ impl OutputData {
 }
 
 // ============================================================
-// Output Format (Global --json / --toon flags)
+// Output Format (Global --json flag)
 // ============================================================
 
 /// Output serialization format, requested via global flags.
@@ -375,8 +365,6 @@ impl OutputData {
 pub enum OutputFormat {
     /// JSON serialization via OutputData::to_json()
     Json,
-    /// TOON serialization via OutputData::to_toon() — compact token-efficient format.
-    Toon,
 }
 
 /// Transform an ExecResult into the requested output format.
@@ -399,19 +387,6 @@ pub fn apply_output_format(mut result: ExecResult, format: OutputFormat) -> Exec
                     .unwrap_or_else(|_| "null".to_string())
             };
             result.out = json_str;
-            // Clear sentinel — format already applied, prevents double-encoding
-            result.output = None;
-            result
-        }
-        OutputFormat::Toon => {
-            let toon_str = if let Some(ref output) = result.output {
-                output.to_toon()
-            } else {
-                // Text-only: encode as TOON string primitive
-                toon_format::encode_default(&result.out)
-                    .unwrap_or_else(|_| result.out.clone())
-            };
-            result.out = toon_str;
             // Clear sentinel — format already applied, prevents double-encoding
             result.output = None;
             result
@@ -778,71 +753,6 @@ mod tests {
         assert_eq!(output.to_json(), serde_json::json!([]));
     }
 
-    // --toon tests
-
-    #[test]
-    fn to_toon_text() {
-        let output = OutputData::text("hello world");
-        let toon = output.to_toon();
-        // TOON encodes a bare string — should round-trip via decode
-        let decoded = toon_format::decode_default::<serde_json::Value>(&toon).expect("valid TOON");
-        assert_eq!(decoded, serde_json::json!("hello world"));
-    }
-
-    #[test]
-    fn to_toon_table() {
-        let output = OutputData::table(
-            vec!["NAME".into(), "SIZE".into()],
-            vec![
-                OutputNode::new("foo.rs").with_cells(vec!["1024".into()]),
-                OutputNode::new("bar/").with_cells(vec!["4096".into()]),
-            ],
-        );
-        let toon = output.to_toon();
-        let decoded = toon_format::decode_default::<serde_json::Value>(&toon).expect("valid TOON");
-        assert_eq!(decoded, serde_json::json!([
-            {"NAME": "foo.rs", "SIZE": "1024"},
-            {"NAME": "bar/", "SIZE": "4096"},
-        ]));
-    }
-
-    #[test]
-    fn to_toon_flat_list() {
-        let output = OutputData::nodes(vec![
-            OutputNode::new("alpha"),
-            OutputNode::new("bravo"),
-            OutputNode::new("charlie"),
-        ]);
-        let toon = output.to_toon();
-        let decoded = toon_format::decode_default::<serde_json::Value>(&toon).expect("valid TOON");
-        assert_eq!(decoded, serde_json::json!(["alpha", "bravo", "charlie"]));
-    }
-
-    #[test]
-    fn apply_output_format_toon() {
-        let output = OutputData::table(
-            vec!["KEY".into(), "VALUE".into()],
-            vec![
-                OutputNode::new("HOME").with_cells(vec!["/home/user".into()]),
-            ],
-        );
-        let result = ExecResult::with_output(output);
-        let formatted = apply_output_format(result, OutputFormat::Toon);
-        // Should be valid TOON that round-trips to the same JSON
-        let decoded = toon_format::decode_default::<serde_json::Value>(&formatted.out).expect("valid TOON");
-        assert_eq!(decoded, serde_json::json!([
-            {"KEY": "HOME", "VALUE": "/home/user"},
-        ]));
-    }
-
-    #[test]
-    fn apply_output_format_toon_text_only() {
-        let result = ExecResult::success("just text");
-        let formatted = apply_output_format(result, OutputFormat::Toon);
-        let decoded = toon_format::decode_default::<serde_json::Value>(&formatted.out).expect("valid TOON");
-        assert_eq!(decoded, serde_json::json!("just text"));
-    }
-
     #[test]
     fn apply_output_format_clears_sentinel() {
         let output = OutputData::table(
@@ -854,17 +764,12 @@ mod tests {
 
         let formatted = apply_output_format(result, OutputFormat::Json);
         assert!(formatted.output.is_none(), "after Json: sentinel cleared");
-
-        let output = OutputData::nodes(vec![OutputNode::new("a")]);
-        let result = ExecResult::with_output(output);
-        let formatted = apply_output_format(result, OutputFormat::Toon);
-        assert!(formatted.output.is_none(), "after Toon: sentinel cleared");
     }
 
     #[test]
     fn apply_output_format_no_double_encoding() {
         // Simulate: user runs `ls --json` → kernel applies Json, clears sentinel
-        // Then MCP would try to apply Toon, but sentinel is gone → no-op
+        // A second apply_output_format call sees output=None → no-op
         let output = OutputData::nodes(vec![
             OutputNode::new("file1"),
             OutputNode::new("file2"),
@@ -876,10 +781,7 @@ mod tests {
         let json_out = after_json.out.clone();
         assert!(after_json.output.is_none(), "sentinel cleared by Json");
 
-        // Second pass: MCP tries Toon, but output is None and out is non-empty
-        // This should encode the JSON string as a TOON string primitive
-        // But in practice, MCP checks `output.is_some()` first and skips.
-        // Verify the sentinel pattern works:
+        // Verify the sentinel pattern works — output is None, so no re-encoding
         assert!(after_json.output.is_none());
         // The JSON output should be valid JSON
         let parsed: serde_json::Value = serde_json::from_str(&json_out).expect("valid JSON");

@@ -51,9 +51,6 @@ jaq-json = { workspace = true }
 # Token counting (BPE tokenization)
 tiktoken-rs = { workspace = true }
 
-# TOON (Token-Oriented Object Notation)
-toon-format = { workspace = true }
-
 # XDG paths
 directories = { workspace = true }
 
