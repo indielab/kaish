@@ -1407,21 +1407,25 @@ impl Kernel {
                     (ec.cwd.clone(), ec.prev_cwd.clone())
                 };
 
-                let result = self.execute_pipeline(pipeline).await?;
-                self.update_last_result(&result).await;
+                // Capture result without `?` — restore state unconditionally
+                let run_result = self.execute_pipeline(pipeline).await;
 
-                // Restore scope (preserving last_result) and cwd
+                // Restore scope and cwd regardless of success/failure
                 {
                     let mut scope = self.scope.write().await;
-                    let last_result = scope.last_result().clone();
                     *scope = saved_scope;
-                    scope.set_last_result(last_result);
+                    if let Ok(ref r) = run_result {
+                        scope.set_last_result(r.clone());
+                    }
                 }
                 {
                     let mut ec = self.exec_ctx.write().await;
                     ec.cwd = saved_cwd.0;
                     ec.prev_cwd = saved_cwd.1;
                 }
+
+                // Now propagate the error
+                let result = run_result?;
 
                 // Prefer structured data (enables `for i in $(cmd)` iteration)
                 if let Some(data) = &result.data {
@@ -1573,20 +1577,25 @@ impl Kernel {
                     (ec.cwd.clone(), ec.prev_cwd.clone())
                 };
 
-                let result = self.execute_pipeline(pipeline).await?;
+                // Capture result without `?` — restore state unconditionally
+                let run_result = self.execute_pipeline(pipeline).await;
 
-                // Restore scope (preserving last_result) and cwd
+                // Restore scope and cwd regardless of success/failure
                 {
                     let mut scope = self.scope.write().await;
-                    let last_result = scope.last_result().clone();
                     *scope = saved_scope;
-                    scope.set_last_result(last_result);
+                    if let Ok(ref r) = run_result {
+                        scope.set_last_result(r.clone());
+                    }
                 }
                 {
                     let mut ec = self.exec_ctx.write().await;
                     ec.cwd = saved_cwd.0;
                     ec.prev_cwd = saved_cwd.1;
                 }
+
+                // Now propagate the error
+                let result = run_result?;
 
                 Ok(result.out.trim_end_matches('\n').to_string())
             }
@@ -1645,6 +1654,10 @@ impl Kernel {
         let mut last_code = 0i64;
         let mut last_data: Option<Value> = None;
 
+        // Track execution error for propagation after cleanup
+        let mut exec_error: Option<anyhow::Error> = None;
+        let mut exit_code: Option<i64> = None;
+
         for stmt in &def.body {
             match self.execute_stmt_flow(stmt).await {
                 Ok(flow) => {
@@ -1656,7 +1669,6 @@ impl Kernel {
                             last_data = r.data;
                         }
                         ControlFlow::Return { value } => {
-                            // Return from this function with the value
                             accumulated_out.push_str(&value.out);
                             accumulated_err.push_str(&value.err);
                             last_code = value.code;
@@ -1664,14 +1676,10 @@ impl Kernel {
                             break;
                         }
                         ControlFlow::Exit { code } => {
-                            // Exit propagates through - pop frame, restore positional params and return
-                            let mut scope = self.scope.write().await;
-                            scope.pop_frame();
-                            scope.set_positional(saved_positional.0.clone(), saved_positional.1.clone());
-                            return Ok(ExecResult::failure(code, "exit"));
+                            exit_code = Some(code);
+                            break;
                         }
                         ControlFlow::Break { result: r, .. } | ControlFlow::Continue { result: r, .. } => {
-                            // Break/continue outside a loop - treat as normal
                             accumulated_out.push_str(&r.out);
                             accumulated_err.push_str(&r.err);
                             last_code = r.code;
@@ -1680,32 +1688,34 @@ impl Kernel {
                     }
                 }
                 Err(e) => {
-                    // Pop frame and restore positional params on error
-                    let mut scope = self.scope.write().await;
-                    scope.pop_frame();
-                    scope.set_positional(saved_positional.0.clone(), saved_positional.1.clone());
-                    return Err(e);
+                    exec_error = Some(e);
+                    break;
                 }
             }
         }
 
-        let result = ExecResult {
-            code: last_code,
-            out: accumulated_out,
-            err: accumulated_err,
-            data: last_data,
-            output: None,
-        };
-
-        // 4. Pop scope frame and restore original positional parameters
+        // 4. Pop scope frame and restore original positional parameters (unconditionally)
         {
             let mut scope = self.scope.write().await;
             scope.pop_frame();
             scope.set_positional(saved_positional.0, saved_positional.1);
         }
 
-        // 5. Return final result
-        Ok(result)
+        // 5. Propagate error or exit after cleanup
+        if let Some(e) = exec_error {
+            return Err(e);
+        }
+        if let Some(code) = exit_code {
+            return Ok(ExecResult::failure(code, "exit"));
+        }
+
+        Ok(ExecResult {
+            code: last_code,
+            out: accumulated_out,
+            err: accumulated_err,
+            data: last_data,
+            output: None,
+        })
     }
 
     /// Execute the `source` / `.` command to include and run a script.
@@ -1891,8 +1901,11 @@ impl Kernel {
                 std::mem::replace(&mut *scope, isolated_scope)
             };
 
-            // Execute script statements
+            // Execute script statements — track outcome for cleanup
             let mut result = ExecResult::success("");
+            let mut exec_error: Option<anyhow::Error> = None;
+            let mut exit_code: Option<i64> = None;
+
             for stmt in program.statements {
                 if matches!(stmt, crate::ast::Stmt::Empty) {
                     continue;
@@ -1907,10 +1920,8 @@ impl Kernel {
                                 break;
                             }
                             ControlFlow::Exit { code } => {
-                                // Restore scope and return
-                                let mut scope = self.scope.write().await;
-                                *scope = original_scope;
-                                return Ok(Some(ExecResult::failure(code, "exit")));
+                                exit_code = Some(code);
+                                break;
                             }
                             ControlFlow::Break { result: r, .. } | ControlFlow::Continue { result: r, .. } => {
                                 result = r;
@@ -1918,18 +1929,24 @@ impl Kernel {
                         }
                     }
                     Err(e) => {
-                        // Restore original scope on error
-                        let mut scope = self.scope.write().await;
-                        *scope = original_scope;
-                        return Err(e.context(format!("script: {}", script_path.display())));
+                        exec_error = Some(e);
+                        break;
                     }
                 }
             }
 
-            // Restore original scope
+            // Restore original scope unconditionally
             {
                 let mut scope = self.scope.write().await;
                 *scope = original_scope;
+            }
+
+            // Propagate error or exit after cleanup
+            if let Some(e) = exec_error {
+                return Err(e.context(format!("script: {}", script_path.display())));
+            }
+            if let Some(code) = exit_code {
+                return Ok(Some(ExecResult::failure(code, "exit")));
             }
 
             return Ok(Some(result));
