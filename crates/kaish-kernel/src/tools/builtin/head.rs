@@ -41,7 +41,17 @@ impl Tool for Head {
             .example("First 100 bytes", "head -c 100 file.txt")
     }
 
-    async fn execute(&self, args: ToolArgs, ctx: &mut ExecContext) -> ExecResult {
+    async fn execute(&self, mut args: ToolArgs, ctx: &mut ExecContext) -> ExecResult {
+        // Handle POSIX shorthand: head -3 file → head -n 3 file
+        // Lexer tokenizes "-3" as Int(-3), which lands in positional[0].
+        if let Some(Value::Int(n)) = args.positional.first() {
+            if *n < 0 {
+                let count = n.unsigned_abs() as i64;
+                args.named.insert("lines".to_string(), Value::Int(count));
+                args.positional.remove(0);
+            }
+        }
+
         // Get input: from file or stdin
         let input = match args.get_string("path", 0) {
             Some(path) => {
@@ -313,6 +323,30 @@ mod tests {
         assert!(result.ok());
         let lines: Vec<&str> = result.out.lines().collect();
         assert_eq!(lines.len(), 3);
+    }
+
+    #[tokio::test]
+    async fn test_head_posix_dash_number() {
+        // Bug 5: head -3 should be shorthand for head -n 3
+        let mut ctx = make_ctx().await;
+        let mut args = ToolArgs::new();
+        args.positional.push(Value::Int(-3)); // lexer produces Int(-3) for "-3"
+        args.positional.push(Value::String("/lines.txt".into()));
+        let result = Head.execute(args, &mut ctx).await;
+        assert!(result.ok());
+        assert_eq!(result.out.lines().count(), 3);
+    }
+
+    #[tokio::test]
+    async fn test_head_posix_dash_number_stdin() {
+        // head -5 with stdin
+        let mut ctx = make_ctx().await;
+        ctx.set_stdin("a\nb\nc\nd\ne\nf\ng\n".to_string());
+        let mut args = ToolArgs::new();
+        args.positional.push(Value::Int(-5));
+        let result = Head.execute(args, &mut ctx).await;
+        assert!(result.ok());
+        assert_eq!(result.out.lines().count(), 5);
     }
 
     #[tokio::test]

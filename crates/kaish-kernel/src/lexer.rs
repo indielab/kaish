@@ -1098,7 +1098,9 @@ fn preprocess_heredocs(source: &str) -> (String, Vec<(String, String)>) {
                 continue;
             }
 
-            // Skip to newline
+            // Buffer text after delimiter word (e.g., " | jq" in "cat <<EOF | jq")
+            // This must be emitted AFTER the heredoc marker, not before.
+            let mut after_delimiter = String::new();
             while let Some(&c) = chars.peek() {
                 if c == '\n' {
                     chars.next();
@@ -1111,7 +1113,7 @@ fn preprocess_heredocs(source: &str) -> (String, Vec<(String, String)>) {
                     break;
                 }
                 if let Some(ch) = chars.next() {
-                    result.push(ch);
+                    after_delimiter.push(ch);
                 }
             }
 
@@ -1188,10 +1190,12 @@ fn preprocess_heredocs(source: &str) -> (String, Vec<(String, String)>) {
             let marker = format!("__KAISH_HEREDOC_{}__", unique_marker_id());
             heredocs.push((marker.clone(), content));
 
-            // Output << and marker
+            // Output <<marker first, then any text that followed the delimiter
+            // (e.g., " | jq") so the heredoc attaches to the correct command.
             result.push_str("<<");
             result.push_str(&marker);
-            result.push('\n'); // Preserve newline after here-doc
+            result.push_str(&after_delimiter);
+            result.push('\n');
         } else {
             result.push(ch);
         }
@@ -2519,5 +2523,29 @@ mod tests {
         assert_eq!(Token::InvalidNumberIdent.category(), TokenCategory::Error);
         assert_eq!(Token::InvalidFloatNoLeading.category(), TokenCategory::Error);
         assert_eq!(Token::InvalidFloatNoTrailing.category(), TokenCategory::Error);
+    }
+
+    #[test]
+    fn test_heredoc_piped_to_command() {
+        // Bug 4: "cat <<EOF | jq" should produce: cat <<heredoc | jq
+        // Not: cat | jq <<heredoc
+        let tokens = tokenize("cat <<EOF | jq\n{\"key\": \"val\"}\nEOF").unwrap();
+        let heredoc_pos = tokens.iter().position(|t| matches!(t.token, Token::HereDoc(_)));
+        let pipe_pos = tokens.iter().position(|t| matches!(t.token, Token::Pipe));
+        assert!(heredoc_pos.is_some(), "should have a heredoc token");
+        assert!(pipe_pos.is_some(), "should have a pipe token");
+        assert!(
+            pipe_pos.unwrap() > heredoc_pos.unwrap(),
+            "Pipe must come after heredoc, got heredoc at {}, pipe at {}. Tokens: {:?}",
+            heredoc_pos.unwrap(), pipe_pos.unwrap(), tokens,
+        );
+    }
+
+    #[test]
+    fn test_heredoc_standalone_still_works() {
+        // Regression: standalone heredoc (no pipe) must still work
+        let tokens = tokenize("cat <<EOF\nhello\nEOF").unwrap();
+        assert!(tokens.iter().any(|t| matches!(t.token, Token::HereDoc(_))));
+        assert!(!tokens.iter().any(|t| matches!(t.token, Token::Pipe)));
     }
 }

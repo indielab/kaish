@@ -1,0 +1,46 @@
+#!/usr/bin/env kaish
+# scan.kai — kaish scans itself
+
+# Built-in git (git2-rs — no fork, no exec)
+git log --oneline | head -n 5
+
+# 散/集 scatter/gather: parallel analysis across 8 workers
+echo ""
+echo "Lines of code per crate:"
+glob "crates/*/src/lib.rs" \
+    | scatter as=F limit=8 \
+    | wc -l "$F" \
+    | gather \
+    | sort -k 2 -rn
+
+# Parallel computation → structured JSON → jq
+echo ""
+echo "Squares (parallel, as JSON):"
+seq 1 6 \
+    | scatter as=N limit=4 \
+    | echo "{\"n\": $N, \"sq\": $((N * N))}" \
+    | gather format=json \
+    | jq '[.[] | .out | fromjson] | sort_by(.n)' -r
+
+# for-in-$(glob) — now works! (was broken before v0.1.8)
+echo ""
+echo "Crate Cargo.toml files:"
+for TOML in $(glob "crates/*/Cargo.toml"); do
+    echo "  📦 $TOML"
+done
+
+# Case with brace patterns — Bourne syntax, kaish extensions
+echo ""
+for F in "main.rs" "app.tsx" "notes.md"; do
+    case $F in
+        *.rs)          echo "🦀 $F" ;;
+        *.{js,ts,tsx}) echo "🌐 $F" ;;
+        *)             echo "📄 $F" ;;
+    esac
+done
+
+# Bourne-compatible arithmetic + JSON introspection
+SUM=0
+for N in $(seq 1 100); do SUM=$((SUM + N)); done
+echo ""
+echo "sum(1..100) = $SUM  ·  $(tools --json | jq 'length' -r) builtins  ·  user: ${USER:-unknown}"

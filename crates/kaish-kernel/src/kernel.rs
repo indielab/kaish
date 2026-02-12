@@ -1374,6 +1374,16 @@ impl Kernel {
                 // Prefer structured data (enables `for i in $(cmd)` iteration)
                 if let Some(data) = &result.data {
                     Ok(data.clone())
+                } else if let Some(ref output) = result.output {
+                    // Flat non-text node lists (glob, ls, tree) → iterable array
+                    if output.is_flat() && !output.is_simple_text() && !output.root.is_empty() {
+                        let items: Vec<serde_json::Value> = output.root.iter()
+                            .map(|n| serde_json::Value::String(n.display_name().to_string()))
+                            .collect();
+                        Ok(Value::Json(serde_json::Value::Array(items)))
+                    } else {
+                        Ok(Value::String(result.out.trim_end().to_string()))
+                    }
                 } else {
                     // Otherwise return stdout as single string (NO implicit splitting)
                     Ok(Value::String(result.out.trim_end().to_string()))
@@ -3790,6 +3800,47 @@ AFTER="yes"'"#)
         let stdout = kernel.execute("cat /v/jobs/1/stdout").await.expect("stdout check failed");
         assert!(stdout.ok());
         assert!(stdout.out.contains("hello"));
+    }
+
+    #[tokio::test]
+    async fn test_heredoc_piped_to_command() {
+        // Bug 4: heredoc content should pipe through to next command
+        let kernel = Kernel::transient().expect("kernel");
+        let result = kernel.execute("cat <<EOF | cat\nhello world\nEOF").await.expect("exec");
+        assert!(result.ok(), "heredoc | cat failed: {}", result.err);
+        assert_eq!(result.out.trim(), "hello world");
+    }
+
+    #[tokio::test]
+    async fn test_for_loop_glob_iterates() {
+        // Bug 1: for F in $(glob ...) should iterate per file, not once
+        let kernel = Kernel::transient().expect("kernel");
+        kernel.execute("echo a > /tmp/kaish_glob_test_a.txt").await.unwrap();
+        kernel.execute("echo b > /tmp/kaish_glob_test_b.txt").await.unwrap();
+        let result = kernel.execute(r#"
+            N=0
+            for F in $(glob "/tmp/kaish_glob_test_*.txt"); do
+                N=$((N + 1))
+            done
+            echo $N
+        "#).await.unwrap();
+        assert!(result.ok(), "for glob failed: {}", result.err);
+        assert_eq!(result.out.trim(), "2", "Should iterate 2 files, got: {}", result.out);
+        kernel.execute("rm /tmp/kaish_glob_test_a.txt").await.unwrap();
+        kernel.execute("rm /tmp/kaish_glob_test_b.txt").await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_command_subst_echo_not_iterable() {
+        // Regression guard: $(echo "a b c") must remain a single string
+        let kernel = Kernel::transient().expect("kernel");
+        let result = kernel.execute(r#"
+            N=0
+            for X in $(echo "a b c"); do N=$((N + 1)); done
+            echo $N
+        "#).await.unwrap();
+        assert!(result.ok());
+        assert_eq!(result.out.trim(), "1", "echo should be one item: {}", result.out);
     }
 
 }

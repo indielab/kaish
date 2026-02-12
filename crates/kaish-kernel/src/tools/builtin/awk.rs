@@ -1408,6 +1408,16 @@ impl std::fmt::Display for AwkValue {
     }
 }
 
+impl super::format_string::FormatArg for AwkValue {
+    fn as_format_string(&self) -> String { self.to_string() }
+    fn as_format_int(&self) -> i64 { self.to_number() as i64 }
+    fn as_format_float(&self) -> f64 { self.to_number() }
+    fn as_format_char(&self) -> Option<char> {
+        let n = self.to_number() as u32;
+        char::from_u32(n)
+    }
+}
+
 impl AwkValue {
 
     fn to_number(&self) -> f64 {
@@ -2172,78 +2182,7 @@ impl AwkRuntime {
     }
 
     fn sprintf(&self, format: &str, args: &[AwkValue]) -> Result<String, String> {
-        let mut output = String::new();
-        let mut arg_index = 0;
-        let mut chars = format.chars().peekable();
-
-        while let Some(c) = chars.next() {
-            if c == '%' {
-                match chars.next() {
-                    Some('%') => output.push('%'),
-                    Some('s') => {
-                        let val = args.get(arg_index).map(|v| v.to_string()).unwrap_or_default();
-                        output.push_str(&val);
-                        arg_index += 1;
-                    }
-                    Some('d') | Some('i') => {
-                        let val = args.get(arg_index).map(|v| v.to_number() as i64).unwrap_or(0);
-                        output.push_str(&val.to_string());
-                        arg_index += 1;
-                    }
-                    Some('f') | Some('g') | Some('e') => {
-                        let val = args.get(arg_index).map(|v| v.to_number()).unwrap_or(0.0);
-                        output.push_str(&format!("{:.6}", val));
-                        arg_index += 1;
-                    }
-                    Some('x') => {
-                        let val = args.get(arg_index).map(|v| v.to_number() as i64).unwrap_or(0);
-                        output.push_str(&format!("{:x}", val));
-                        arg_index += 1;
-                    }
-                    Some('X') => {
-                        let val = args.get(arg_index).map(|v| v.to_number() as i64).unwrap_or(0);
-                        output.push_str(&format!("{:X}", val));
-                        arg_index += 1;
-                    }
-                    Some('o') => {
-                        let val = args.get(arg_index).map(|v| v.to_number() as i64).unwrap_or(0);
-                        output.push_str(&format!("{:o}", val));
-                        arg_index += 1;
-                    }
-                    Some('c') => {
-                        let val = args.get(arg_index).and_then(|v| {
-                            let n = v.to_number() as u32;
-                            char::from_u32(n)
-                        });
-                        if let Some(ch) = val {
-                            output.push(ch);
-                        }
-                        arg_index += 1;
-                    }
-                    Some(ch) => {
-                        output.push('%');
-                        output.push(ch);
-                    }
-                    None => output.push('%'),
-                }
-            } else if c == '\\' {
-                match chars.next() {
-                    Some('n') => output.push('\n'),
-                    Some('t') => output.push('\t'),
-                    Some('r') => output.push('\r'),
-                    Some('\\') => output.push('\\'),
-                    Some(ch) => {
-                        output.push('\\');
-                        output.push(ch);
-                    }
-                    None => output.push('\\'),
-                }
-            } else {
-                output.push(c);
-            }
-        }
-
-        Ok(output)
+        Ok(super::format_string::format_string(format, args))
     }
 }
 
@@ -2709,5 +2648,45 @@ test result: ok. 629 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out";
         let result = Awk.execute(args, &mut ctx).await;
         assert!(result.ok());
         assert_eq!(result.out, "世界\n");
+    }
+
+    #[tokio::test]
+    async fn test_awk_printf_width() {
+        // Bug 7: awk printf "%10s" should right-align to 10 chars
+        let mut ctx = make_ctx().await;
+        ctx.set_stdin("hello".to_string());
+
+        let mut args = ToolArgs::new();
+        args.positional.push(Value::String("{printf \"%10s|\\n\", $1}".into()));
+
+        let result = Awk.execute(args, &mut ctx).await;
+        assert!(result.ok());
+        assert_eq!(result.out, "     hello|\n");
+    }
+
+    #[tokio::test]
+    async fn test_awk_printf_left_align() {
+        let mut ctx = make_ctx().await;
+        ctx.set_stdin("hi".to_string());
+
+        let mut args = ToolArgs::new();
+        args.positional.push(Value::String("{printf \"%-10s|\", $1}".into()));
+
+        let result = Awk.execute(args, &mut ctx).await;
+        assert!(result.ok());
+        assert_eq!(result.out, "hi        |");
+    }
+
+    #[tokio::test]
+    async fn test_awk_printf_zero_pad() {
+        let mut ctx = make_ctx().await;
+        ctx.set_stdin("42".to_string());
+
+        let mut args = ToolArgs::new();
+        args.positional.push(Value::String("{printf \"%06d\", $1}".into()));
+
+        let result = Awk.execute(args, &mut ctx).await;
+        assert!(result.ok());
+        assert_eq!(result.out, "000042");
     }
 }

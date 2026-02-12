@@ -5,9 +5,51 @@ use async_trait::async_trait;
 use crate::ast::Value;
 use crate::interpreter::{ExecResult, OutputData};
 use crate::tools::{ExecContext, ParamSchema, Tool, ToolArgs, ToolSchema};
+use super::format_string::{self, FormatArg};
 
 /// Printf tool: formatted output.
 pub struct Printf;
+
+impl FormatArg for Value {
+    fn as_format_string(&self) -> String {
+        match self {
+            Value::String(s) => s.clone(),
+            Value::Int(i) => i.to_string(),
+            Value::Float(f) => f.to_string(),
+            Value::Bool(b) => b.to_string(),
+            Value::Null => String::new(),
+            Value::Json(json) => json.to_string(),
+            Value::Blob(blob) => format!("[blob: {} {}]", blob.formatted_size(), blob.content_type),
+        }
+    }
+
+    fn as_format_int(&self) -> i64 {
+        match self {
+            Value::Int(i) => *i,
+            Value::Float(f) => *f as i64,
+            Value::String(s) => s.parse().unwrap_or(0),
+            Value::Bool(b) => if *b { 1 } else { 0 },
+            _ => 0,
+        }
+    }
+
+    fn as_format_float(&self) -> f64 {
+        match self {
+            Value::Float(f) => *f,
+            Value::Int(i) => *i as f64,
+            Value::String(s) => s.parse().unwrap_or(0.0),
+            _ => 0.0,
+        }
+    }
+
+    fn as_format_char(&self) -> Option<char> {
+        match self {
+            Value::String(s) => s.chars().next(),
+            Value::Int(i) => char::from_u32(*i as u32),
+            _ => None,
+        }
+    }
+}
 
 #[async_trait]
 impl Tool for Printf {
@@ -36,121 +78,19 @@ impl Tool for Printf {
             None => return ExecResult::failure(1, "printf: missing format argument"),
         };
 
-        // Collect remaining positional args
         let format_args: Vec<&Value> = args.positional.iter().skip(1).collect();
-        let mut arg_index = 0;
-
-        let mut output = String::new();
-        let mut chars = format.chars().peekable();
-
-        while let Some(c) = chars.next() {
-            if c == '%' {
-                match chars.next() {
-                    Some('%') => output.push('%'),
-                    Some('s') => {
-                        let val = format_args.get(arg_index).map(|v| value_to_string(v));
-                        output.push_str(&val.unwrap_or_default());
-                        arg_index += 1;
-                    }
-                    Some('d') | Some('i') => {
-                        let val = format_args.get(arg_index).map(|v| value_to_int(v));
-                        output.push_str(&val.unwrap_or(0).to_string());
-                        arg_index += 1;
-                    }
-                    Some('f') => {
-                        let val = format_args.get(arg_index).map(|v| value_to_float(v));
-                        output.push_str(&format!("{:.6}", val.unwrap_or(0.0)));
-                        arg_index += 1;
-                    }
-                    Some('x') => {
-                        let val = format_args.get(arg_index).map(|v| value_to_int(v));
-                        output.push_str(&format!("{:x}", val.unwrap_or(0)));
-                        arg_index += 1;
-                    }
-                    Some('X') => {
-                        let val = format_args.get(arg_index).map(|v| value_to_int(v));
-                        output.push_str(&format!("{:X}", val.unwrap_or(0)));
-                        arg_index += 1;
-                    }
-                    Some('o') => {
-                        let val = format_args.get(arg_index).map(|v| value_to_int(v));
-                        output.push_str(&format!("{:o}", val.unwrap_or(0)));
-                        arg_index += 1;
-                    }
-                    Some('c') => {
-                        let val = format_args.get(arg_index).and_then(|v| match v {
-                            Value::String(s) => s.chars().next(),
-                            Value::Int(i) => char::from_u32(*i as u32),
-                            _ => None,
-                        });
-                        if let Some(ch) = val {
-                            output.push(ch);
-                        }
-                        arg_index += 1;
-                    }
-                    Some(ch) => {
-                        output.push('%');
-                        output.push(ch);
-                    }
-                    None => output.push('%'),
-                }
-            } else if c == '\\' {
-                match chars.next() {
-                    Some('n') => output.push('\n'),
-                    Some('t') => output.push('\t'),
-                    Some('r') => output.push('\r'),
-                    Some('\\') => output.push('\\'),
-                    Some('0') => output.push('\0'),
-                    Some(ch) => {
-                        output.push('\\');
-                        output.push(ch);
-                    }
-                    None => output.push('\\'),
-                }
-            } else {
-                output.push(c);
-            }
-        }
+        let output = format_string::format_string(&format, &format_args);
 
         ExecResult::with_output(OutputData::text(output))
     }
 }
 
-fn value_to_string(v: &Value) -> String {
-    match v {
-        Value::String(s) => s.clone(),
-        Value::Int(i) => i.to_string(),
-        Value::Float(f) => f.to_string(),
-        Value::Bool(b) => b.to_string(),
-        Value::Null => String::new(),
-        Value::Json(json) => json.to_string(),
-        Value::Blob(blob) => format!("[blob: {} {}]", blob.formatted_size(), blob.content_type),
-    }
-}
-
-fn value_to_int(v: &Value) -> i64 {
-    match v {
-        Value::Int(i) => *i,
-        Value::Float(f) => *f as i64,
-        Value::String(s) => s.parse().unwrap_or(0),
-        Value::Bool(b) => {
-            if *b {
-                1
-            } else {
-                0
-            }
-        }
-        _ => 0,
-    }
-}
-
-fn value_to_float(v: &Value) -> f64 {
-    match v {
-        Value::Float(f) => *f,
-        Value::Int(i) => *i as f64,
-        Value::String(s) => s.parse().unwrap_or(0.0),
-        _ => 0.0,
-    }
+/// FormatArg impl for references (used by printf which collects &Value)
+impl FormatArg for &Value {
+    fn as_format_string(&self) -> String { (*self).as_format_string() }
+    fn as_format_int(&self) -> i64 { (*self).as_format_int() }
+    fn as_format_float(&self) -> f64 { (*self).as_format_float() }
+    fn as_format_char(&self) -> Option<char> { (*self).as_format_char() }
 }
 
 #[cfg(test)]
@@ -254,5 +194,72 @@ mod tests {
         let mut ctx = make_ctx();
         let result = Printf.execute(ToolArgs::new(), &mut ctx).await;
         assert!(!result.ok());
+    }
+
+    #[tokio::test]
+    async fn test_printf_left_align_width() {
+        // Bug 6: "%-16s" should left-align to 16 chars
+        let mut ctx = make_ctx();
+        let mut args = ToolArgs::new();
+        args.positional.push(Value::String("%-16s|\\n".into()));
+        args.positional.push(Value::String("Name".into()));
+        let result = Printf.execute(args, &mut ctx).await;
+        assert!(result.ok());
+        assert_eq!(result.out, "Name            |\n");
+    }
+
+    #[tokio::test]
+    async fn test_printf_zero_pad_int() {
+        let mut ctx = make_ctx();
+        let mut args = ToolArgs::new();
+        args.positional.push(Value::String("%08d\\n".into()));
+        args.positional.push(Value::String("42".into()));
+        let result = Printf.execute(args, &mut ctx).await;
+        assert!(result.ok());
+        assert_eq!(result.out, "00000042\n");
+    }
+
+    #[tokio::test]
+    async fn test_printf_precision_float() {
+        let mut ctx = make_ctx();
+        let mut args = ToolArgs::new();
+        args.positional.push(Value::String("%.2f\\n".into()));
+        args.positional.push(Value::String("3.14159".into()));
+        let result = Printf.execute(args, &mut ctx).await;
+        assert!(result.ok());
+        assert_eq!(result.out, "3.14\n");
+    }
+
+    #[tokio::test]
+    async fn test_printf_right_align_width() {
+        let mut ctx = make_ctx();
+        let mut args = ToolArgs::new();
+        args.positional.push(Value::String("%10s|\\n".into()));
+        args.positional.push(Value::String("hello".into()));
+        let result = Printf.execute(args, &mut ctx).await;
+        assert!(result.ok());
+        assert_eq!(result.out, "     hello|\n");
+    }
+
+    #[tokio::test]
+    async fn test_printf_width_int() {
+        let mut ctx = make_ctx();
+        let mut args = ToolArgs::new();
+        args.positional.push(Value::String("%6d\\n".into()));
+        args.positional.push(Value::Int(42));
+        let result = Printf.execute(args, &mut ctx).await;
+        assert!(result.ok());
+        assert_eq!(result.out, "    42\n");
+    }
+
+    #[tokio::test]
+    async fn test_printf_hex_width() {
+        let mut ctx = make_ctx();
+        let mut args = ToolArgs::new();
+        args.positional.push(Value::String("%08x\\n".into()));
+        args.positional.push(Value::Int(255));
+        let result = Printf.execute(args, &mut ctx).await;
+        assert!(result.ok());
+        assert_eq!(result.out, "000000ff\n");
     }
 }

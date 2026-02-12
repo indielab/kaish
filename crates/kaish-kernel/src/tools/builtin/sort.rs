@@ -151,12 +151,49 @@ fn compare_lines(
     };
 
     if numeric {
-        let num_a: f64 = val_a.trim().parse().unwrap_or(0.0);
-        let num_b: f64 = val_b.trim().parse().unwrap_or(0.0);
+        let num_a = extract_leading_number(val_a);
+        let num_b = extract_leading_number(val_b);
         num_a.partial_cmp(&num_b).unwrap_or(Ordering::Equal)
     } else {
         val_a.cmp(val_b)
     }
+}
+
+/// Extract the leading numeric prefix from a string, like GNU sort -n.
+/// "33 foo" → 33.0, "  -12.5xyz" → -12.5, "abc" → 0.0
+fn extract_leading_number(s: &str) -> f64 {
+    let s = s.trim_start();
+    if s.is_empty() {
+        return 0.0;
+    }
+
+    let mut end = 0;
+    let chars: Vec<char> = s.chars().collect();
+
+    // Optional sign
+    if end < chars.len() && (chars[end] == '-' || chars[end] == '+') {
+        end += 1;
+    }
+
+    // Digits before decimal
+    while end < chars.len() && chars[end].is_ascii_digit() {
+        end += 1;
+    }
+
+    // Optional decimal point + digits
+    if end < chars.len() && chars[end] == '.' {
+        end += 1;
+        while end < chars.len() && chars[end].is_ascii_digit() {
+            end += 1;
+        }
+    }
+
+    if end == 0 || (end == 1 && (chars[0] == '-' || chars[0] == '+' || chars[0] == '.')) {
+        return 0.0;
+    }
+
+    let num_str: String = chars[..end].iter().collect();
+    num_str.parse().unwrap_or(0.0)
 }
 
 #[cfg(test)]
@@ -387,6 +424,32 @@ mod tests {
         let result = Sort.execute(args, &mut ctx).await;
         assert!(result.ok());
         assert!(result.out.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_sort_numeric_with_suffix() {
+        // Bug 2: sort -n should extract leading numeric prefix, not parse whole line
+        let mut ctx = make_ctx().await;
+        ctx.set_stdin("33 foo\n11 bar\n22 baz\n".to_string());
+        let mut args = ToolArgs::new();
+        args.flags.insert("n".to_string());
+        let result = Sort.execute(args, &mut ctx).await;
+        assert!(result.ok());
+        let lines: Vec<&str> = result.out.lines().collect();
+        assert_eq!(lines, vec!["11 bar", "22 baz", "33 foo"]);
+    }
+
+    #[tokio::test]
+    async fn test_sort_numeric_with_suffix_reverse() {
+        let mut ctx = make_ctx().await;
+        ctx.set_stdin("33 a\n89 b\n24 c\n".to_string());
+        let mut args = ToolArgs::new();
+        args.flags.insert("n".to_string());
+        args.flags.insert("r".to_string());
+        let result = Sort.execute(args, &mut ctx).await;
+        assert!(result.ok());
+        let lines: Vec<&str> = result.out.lines().collect();
+        assert_eq!(lines, vec!["89 b", "33 a", "24 c"]);
     }
 
     #[tokio::test]

@@ -21,6 +21,7 @@ pub use spawn::resolve_in_path;
 mod export;
 mod glob;
 mod find;
+pub(crate) mod format_string;
 mod gather;
 mod git;
 mod grep;

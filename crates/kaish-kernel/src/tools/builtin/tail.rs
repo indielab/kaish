@@ -41,7 +41,17 @@ impl Tool for Tail {
             .example("Last 1000 bytes", "tail -c 1000 file.txt")
     }
 
-    async fn execute(&self, args: ToolArgs, ctx: &mut ExecContext) -> ExecResult {
+    async fn execute(&self, mut args: ToolArgs, ctx: &mut ExecContext) -> ExecResult {
+        // Handle POSIX shorthand: tail -3 file → tail -n 3 file
+        // Lexer tokenizes "-3" as Int(-3), which lands in positional[0].
+        if let Some(Value::Int(n)) = args.positional.first() {
+            if *n < 0 {
+                let count = n.unsigned_abs() as i64;
+                args.named.insert("lines".to_string(), Value::Int(count));
+                args.positional.remove(0);
+            }
+        }
+
         // Get input: from file or stdin
         let input = match args.get_string("path", 0) {
             Some(path) => {
@@ -322,6 +332,33 @@ mod tests {
         assert!(result.ok());
         let lines: Vec<&str> = result.out.lines().collect();
         assert_eq!(lines, vec!["one", "two", "three"]);
+    }
+
+    #[tokio::test]
+    async fn test_tail_posix_dash_number() {
+        // Bug 5: tail -3 should be shorthand for tail -n 3
+        let mut ctx = make_ctx().await;
+        let mut args = ToolArgs::new();
+        args.positional.push(Value::Int(-3)); // lexer produces Int(-3) for "-3"
+        args.positional.push(Value::String("/lines.txt".into()));
+        let result = Tail.execute(args, &mut ctx).await;
+        assert!(result.ok());
+        assert_eq!(result.out.lines().count(), 3);
+        assert!(result.out.contains("line 12")); // should be last 3 lines
+    }
+
+    #[tokio::test]
+    async fn test_tail_posix_dash_number_stdin() {
+        let mut ctx = make_ctx().await;
+        ctx.set_stdin("a\nb\nc\nd\ne\nf\ng\n".to_string());
+        let mut args = ToolArgs::new();
+        args.positional.push(Value::Int(-3));
+        let result = Tail.execute(args, &mut ctx).await;
+        assert!(result.ok());
+        assert_eq!(result.out.lines().count(), 3);
+        assert!(result.out.contains("e"));
+        assert!(result.out.contains("f"));
+        assert!(result.out.contains("g"));
     }
 
     #[tokio::test]

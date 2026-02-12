@@ -48,6 +48,12 @@ impl Tool for Git {
                 Value::Null,
                 "Additional arguments for the subcommand",
             ))
+            .param(ParamSchema::optional(
+                "count",
+                "int",
+                Value::Null,
+                "Number of entries to show (-n)",
+            ).with_aliases(["-n"]))
     }
 
     async fn execute(&self, args: ToolArgs, ctx: &mut ExecContext) -> ExecResult {
@@ -298,9 +304,9 @@ async fn git_log(args: &ToolArgs, ctx: &ExecContext) -> ExecResult {
         Err(e) => return e,
     };
 
-    // Get count (-n flag)
+    // Get count (-n / count param)
     let count = args
-        .get_named("n")
+        .get("count", usize::MAX)
         .and_then(|v| match v {
             Value::Int(i) => Some(*i as usize),
             Value::String(s) => s.parse().ok(),
@@ -764,6 +770,31 @@ mod tests {
         let result = Git.execute(args, &mut ctx).await;
         assert!(result.ok());
         assert!(result.out.contains("Test commit message"));
+
+        cleanup(&dir).await;
+    }
+
+    #[tokio::test]
+    async fn test_git_log_n_limits_output() {
+        // Bug 3: git log -n 3 should only return 3 commits
+        let (mut ctx, dir) = setup_git_repo().await;
+
+        // Create 5 commits
+        for i in 1..=5 {
+            fs::write(dir.join(format!("file{}.txt", i)), format!("content {}", i).as_bytes()).await.unwrap();
+            let git = GitVfs::open(&dir).unwrap();
+            git.add(&[&format!("file{}.txt", i)]).unwrap();
+            git.commit(&format!("Commit {}", i), None).unwrap();
+        }
+
+        let mut args = ToolArgs::new();
+        args.positional.push(Value::String("log".into()));
+        args.flags.insert("oneline".into());
+        args.named.insert("count".into(), Value::Int(3));
+
+        let result = Git.execute(args, &mut ctx).await;
+        assert!(result.ok(), "log failed: {}", result.err);
+        assert_eq!(result.out.lines().count(), 3, "Expected 3 lines, got: {}", result.out);
 
         cleanup(&dir).await;
     }
