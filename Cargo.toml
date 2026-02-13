@@ -91,6 +91,7 @@ tiktoken-rs = "0.9"
 proptest = "1"
 rstest = "0.26"
 insta = "1.46"
+tempfile = "3"
 
 [workspace.lints.rust]
 unsafe_code = "forbid"

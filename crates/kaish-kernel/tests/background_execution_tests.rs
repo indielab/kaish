@@ -196,16 +196,17 @@ async fn test_background_job_inherits_env() {
 async fn test_background_job_inherits_cwd() {
     let kernel = setup().await;
 
-    // Create a test directory and cd into it
-    kernel.execute("mkdir -p /tmp/testdir").await.unwrap();
-    kernel.execute("cd /tmp/testdir").await.unwrap();
+    // Create a unique test directory in the in-memory VFS and cd into it
+    let dir = format!("/tmp/test_cwd_{}", std::process::id());
+    kernel.execute(&format!("mkdir -p {dir}")).await.unwrap();
+    kernel.execute(&format!("cd {dir}")).await.unwrap();
     kernel.execute("pwd &").await.unwrap();
 
     wait_for_job(&kernel, 1, Duration::from_secs(1)).await;
 
     let result = kernel.execute("cat /v/jobs/1/stdout").await.unwrap();
     assert!(
-        result.out.contains("/tmp/testdir"),
+        result.out.contains(&dir),
         "expected cwd in output, got: {}",
         result.out
     );

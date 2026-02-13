@@ -3940,19 +3940,21 @@ AFTER="yes"'"#)
     async fn test_for_loop_glob_iterates() {
         // Bug 1: for F in $(glob ...) should iterate per file, not once
         let kernel = Kernel::transient().expect("kernel");
-        kernel.execute("echo a > /tmp/kaish_glob_test_a.txt").await.unwrap();
-        kernel.execute("echo b > /tmp/kaish_glob_test_b.txt").await.unwrap();
-        let result = kernel.execute(r#"
+        let dir = format!("/tmp/kaish_test_glob_{}", std::process::id());
+        kernel.execute(&format!("mkdir -p {dir}")).await.unwrap();
+        kernel.execute(&format!("echo a > {dir}/a.txt")).await.unwrap();
+        kernel.execute(&format!("echo b > {dir}/b.txt")).await.unwrap();
+        let result = kernel.execute(&format!(r#"
             N=0
-            for F in $(glob "/tmp/kaish_glob_test_*.txt"); do
+            for F in $(glob "{dir}/*.txt"); do
                 N=$((N + 1))
             done
             echo $N
-        "#).await.unwrap();
+        "#)).await.unwrap();
         assert!(result.ok(), "for glob failed: {}", result.err);
         assert_eq!(result.out.trim(), "2", "Should iterate 2 files, got: {}", result.out);
-        kernel.execute("rm /tmp/kaish_glob_test_a.txt").await.unwrap();
-        kernel.execute("rm /tmp/kaish_glob_test_b.txt").await.unwrap();
+        kernel.execute(&format!("rm {dir}/a.txt")).await.unwrap();
+        kernel.execute(&format!("rm {dir}/b.txt")).await.unwrap();
     }
 
     #[tokio::test]
