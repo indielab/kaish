@@ -67,6 +67,109 @@ impl MemoryFs {
         result
     }
 
+    /// Maximum symlink follow depth (matches Linux ELOOP limit).
+    const MAX_SYMLINK_DEPTH: usize = 40;
+
+    /// Read a file, following symlinks with depth limit.
+    fn read_inner(&self, path: &Path, depth: usize) -> std::pin::Pin<Box<dyn std::future::Future<Output = io::Result<Vec<u8>>> + Send + '_>> {
+        let path = path.to_path_buf();
+        Box::pin(async move {
+            if depth > Self::MAX_SYMLINK_DEPTH {
+                return Err(io::Error::other(
+                    "too many levels of symbolic links",
+                ));
+            }
+            let normalized = Self::normalize(&path);
+            let entries = self.entries.read().await;
+
+            match entries.get(&normalized) {
+                Some(Entry::File { data, .. }) => Ok(data.clone()),
+                Some(Entry::Directory { .. }) => Err(io::Error::new(
+                    io::ErrorKind::IsADirectory,
+                    format!("is a directory: {}", path.display()),
+                )),
+                Some(Entry::Symlink { target, .. }) => {
+                    let target = target.clone();
+                    drop(entries);
+                    self.read_inner(&target, depth + 1).await
+                }
+                None => Err(io::Error::new(
+                    io::ErrorKind::NotFound,
+                    format!("not found: {}", path.display()),
+                )),
+            }
+        })
+    }
+
+    /// Stat a file, following symlinks with depth limit.
+    fn stat_inner(&self, path: &Path, depth: usize) -> std::pin::Pin<Box<dyn std::future::Future<Output = io::Result<Metadata>> + Send + '_>> {
+        let path = path.to_path_buf();
+        Box::pin(async move {
+            if depth > Self::MAX_SYMLINK_DEPTH {
+                return Err(io::Error::other(
+                    "too many levels of symbolic links",
+                ));
+            }
+            let normalized = Self::normalize(&path);
+
+            if normalized.as_os_str().is_empty() {
+                return Ok(Metadata {
+                    is_dir: true,
+                    is_file: false,
+                    is_symlink: false,
+                    size: 0,
+                    modified: Some(SystemTime::now()),
+                });
+            }
+
+            let entry_info: Option<(Metadata, Option<PathBuf>)> = {
+                let entries = self.entries.read().await;
+                match entries.get(&normalized) {
+                    Some(Entry::File { data, modified }) => Some((
+                        Metadata {
+                            is_dir: false,
+                            is_file: true,
+                            is_symlink: false,
+                            size: data.len() as u64,
+                            modified: Some(*modified),
+                        },
+                        None,
+                    )),
+                    Some(Entry::Directory { modified }) => Some((
+                        Metadata {
+                            is_dir: true,
+                            is_file: false,
+                            is_symlink: false,
+                            size: 0,
+                            modified: Some(*modified),
+                        },
+                        None,
+                    )),
+                    Some(Entry::Symlink { target, .. }) => Some((
+                        Metadata {
+                            is_dir: false,
+                            is_file: false,
+                            is_symlink: false,
+                            size: 0,
+                            modified: None,
+                        },
+                        Some(target.clone()),
+                    )),
+                    None => None,
+                }
+            };
+
+            match entry_info {
+                Some((meta, None)) => Ok(meta),
+                Some((_, Some(target))) => self.stat_inner(&target, depth + 1).await,
+                None => Err(io::Error::new(
+                    io::ErrorKind::NotFound,
+                    format!("not found: {}", path.display()),
+                )),
+            }
+        })
+    }
+
     /// Ensure all parent directories exist.
     async fn ensure_parents(&self, path: &Path) -> io::Result<()> {
         let mut entries = self.entries.write().await;
@@ -87,26 +190,7 @@ impl MemoryFs {
 #[async_trait]
 impl Filesystem for MemoryFs {
     async fn read(&self, path: &Path) -> io::Result<Vec<u8>> {
-        let normalized = Self::normalize(path);
-        let entries = self.entries.read().await;
-
-        match entries.get(&normalized) {
-            Some(Entry::File { data, .. }) => Ok(data.clone()),
-            Some(Entry::Directory { .. }) => Err(io::Error::new(
-                io::ErrorKind::IsADirectory,
-                format!("is a directory: {}", path.display()),
-            )),
-            Some(Entry::Symlink { target, .. }) => {
-                // Clone target before dropping lock to follow the symlink
-                let target = target.clone();
-                drop(entries);
-                self.read(&target).await
-            }
-            None => Err(io::Error::new(
-                io::ErrorKind::NotFound,
-                format!("not found: {}", path.display()),
-            )),
-        }
+        self.read_inner(path, 0).await
     }
 
     async fn write(&self, path: &Path, data: &[u8]) -> io::Result<()> {
@@ -197,71 +281,7 @@ impl Filesystem for MemoryFs {
     }
 
     async fn stat(&self, path: &Path) -> io::Result<Metadata> {
-        let normalized = Self::normalize(path);
-
-        // Handle root directory
-        if normalized.as_os_str().is_empty() {
-            return Ok(Metadata {
-                is_dir: true,
-                is_file: false,
-                is_symlink: false,
-                size: 0,
-                modified: Some(SystemTime::now()),
-            });
-        }
-
-        // First, check what kind of entry this is
-        let entry_info: Option<(Metadata, Option<PathBuf>)> = {
-            let entries = self.entries.read().await;
-            match entries.get(&normalized) {
-                Some(Entry::File { data, modified }) => Some((
-                    Metadata {
-                        is_dir: false,
-                        is_file: true,
-                        is_symlink: false,
-                        size: data.len() as u64,
-                        modified: Some(*modified),
-                    },
-                    None, // No symlink target to follow
-                )),
-                Some(Entry::Directory { modified }) => Some((
-                    Metadata {
-                        is_dir: true,
-                        is_file: false,
-                        is_symlink: false,
-                        size: 0,
-                        modified: Some(*modified),
-                    },
-                    None,
-                )),
-                Some(Entry::Symlink { target, .. }) => {
-                    // Need to follow symlink - save the target
-                    Some((
-                        Metadata {
-                            is_dir: false,
-                            is_file: false,
-                            is_symlink: false,
-                            size: 0,
-                            modified: None, // Will be overwritten by target
-                        },
-                        Some(target.clone()),
-                    ))
-                }
-                None => None,
-            }
-        };
-
-        match entry_info {
-            Some((meta, None)) => Ok(meta),
-            Some((_, Some(target))) => {
-                // Follow the symlink
-                self.stat(&target).await
-            }
-            None => Err(io::Error::new(
-                io::ErrorKind::NotFound,
-                format!("not found: {}", path.display()),
-            )),
-        }
+        self.stat_inner(path, 0).await
     }
 
     async fn lstat(&self, path: &Path) -> io::Result<Metadata> {
@@ -919,5 +939,38 @@ mod tests {
         let result = fs.read_link(Path::new("dir")).await;
         assert!(result.is_err());
         assert_eq!(result.unwrap_err().kind(), io::ErrorKind::InvalidInput);
+    }
+
+    #[tokio::test]
+    async fn test_symlink_circular_read_returns_error() {
+        // Bug F: circular symlinks should return error, not stack overflow
+        let fs = MemoryFs::new();
+        fs.symlink(Path::new("b"), Path::new("a")).await.unwrap();
+        fs.symlink(Path::new("a"), Path::new("b")).await.unwrap();
+
+        let result = fs.read(Path::new("a")).await;
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(
+            err.to_string().contains("symbolic links"),
+            "expected symlink loop error, got: {}",
+            err
+        );
+    }
+
+    #[tokio::test]
+    async fn test_symlink_circular_stat_returns_error() {
+        let fs = MemoryFs::new();
+        fs.symlink(Path::new("b"), Path::new("a")).await.unwrap();
+        fs.symlink(Path::new("a"), Path::new("b")).await.unwrap();
+
+        let result = fs.stat(Path::new("a")).await;
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(
+            err.to_string().contains("symbolic links"),
+            "expected symlink loop error, got: {}",
+            err
+        );
     }
 }

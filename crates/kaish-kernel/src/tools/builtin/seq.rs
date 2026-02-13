@@ -123,14 +123,15 @@ impl Tool for Seq {
         // Generate sequence
         let mut numbers = Vec::new();
         let mut current = first;
+        let tolerance = increment.abs() * 1e-10;
 
         if increment > 0.0 {
-            while current <= last + f64::EPSILON {
+            while current <= last + tolerance {
                 numbers.push(current);
                 current += increment;
             }
         } else {
-            while current >= last - f64::EPSILON {
+            while current >= last - tolerance {
                 numbers.push(current);
                 current += increment;
             }
@@ -314,6 +315,21 @@ mod tests {
         assert!(result.ok());
         let lines: Vec<&str> = result.out.lines().collect();
         assert_eq!(lines.len(), 3); // 1.0, 1.5, 2.0
+    }
+
+    #[tokio::test]
+    async fn test_seq_float_boundary() {
+        // Bug C: seq 0.1 0.1 1.0 must produce exactly 10 values
+        let mut ctx = make_ctx();
+        let mut args = ToolArgs::new();
+        args.positional.push(Value::Float(0.1));
+        args.positional.push(Value::Float(0.1));
+        args.positional.push(Value::Float(1.0));
+
+        let result = Seq.execute(args, &mut ctx).await;
+        assert!(result.ok());
+        let lines: Vec<&str> = result.out.lines().collect();
+        assert_eq!(lines.len(), 10, "expected 10 values, got {}: {:?}", lines.len(), lines);
     }
 
     #[tokio::test]

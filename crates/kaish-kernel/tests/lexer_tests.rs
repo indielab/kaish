@@ -100,7 +100,7 @@ fn format_token(token: &Token) -> String {
         // Literals
         Token::String(s) => format!("STRING({})", escape_for_display(s)),
         Token::SingleString(s) => format!("SINGLESTRING({})", s),
-        Token::HereDoc(s) => format!("HEREDOC({})", escape_for_display(s)),
+        Token::HereDoc(d) => format!("HEREDOC({}, literal={})", escape_for_display(&d.content), d.literal),
         Token::VarRef(s) => format!("VARREF({})", s),
         Token::SimpleVarRef(s) => format!("SIMPLEVARREF({})", s),
         Token::Positional(n) => format!("POSITIONAL({})", n),

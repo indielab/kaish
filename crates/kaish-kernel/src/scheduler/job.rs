@@ -3,6 +3,7 @@
 //! Provides the `JobManager` for tracking background jobs started with `&`.
 
 use std::collections::HashMap;
+use std::io;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
@@ -253,6 +254,18 @@ impl Job {
         }
     }
 
+    /// Remove any temp files associated with this job.
+    pub fn cleanup_files(&mut self) {
+        if let Some(path) = self.output_file.take() {
+            if let Err(e) = std::fs::remove_file(&path) {
+                // Ignore "not found" — file may not have been written
+                if e.kind() != io::ErrorKind::NotFound {
+                    tracing::warn!("Failed to clean up job output file {}: {}", path.display(), e);
+                }
+            }
+        }
+    }
+
     /// Get the result if completed, without waiting.
     pub fn try_result(&self) -> Option<&ExecResult> {
         self.result.as_ref()
@@ -337,12 +350,16 @@ impl JobManager {
         let handle = tokio::spawn(future);
         let job = Job::new(id, command, handle);
 
-        // Can't await here, so use try_lock or spawn a task to insert
+        // Try synchronous insert first (succeeds if lock is uncontended)
         let jobs = self.jobs.clone();
-        tokio::spawn(async move {
-            let mut jobs = jobs.lock().await;
-            jobs.insert(id, job);
-        });
+        if let Ok(mut guard) = jobs.try_lock() {
+            guard.insert(id, job);
+        } else {
+            tokio::spawn(async move {
+                let mut jobs = jobs.lock().await;
+                jobs.insert(id, job);
+            });
+        }
 
         id
     }
@@ -431,10 +448,17 @@ impl JobManager {
         count
     }
 
-    /// Remove completed jobs from tracking.
+    /// Remove completed jobs from tracking and clean up their temp files.
     pub async fn cleanup(&self) {
         let mut jobs = self.jobs.lock().await;
-        jobs.retain(|_, job| !job.is_done());
+        jobs.retain(|_, job| {
+            if job.is_done() {
+                job.cleanup_files();
+                false
+            } else {
+                true
+            }
+        });
     }
 
     /// Check if a specific job exists.
@@ -606,6 +630,39 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_cleanup_removes_temp_files() {
+        // Bug K: cleanup should remove temp files
+        let manager = JobManager::new();
+
+        let id = manager.spawn("output job".to_string(), async {
+            ExecResult::success("some output that gets written to a temp file")
+        });
+
+        // Wait for completion (triggers output file creation)
+        tokio::time::sleep(Duration::from_millis(10)).await;
+        let result = manager.wait(id).await;
+        assert!(result.is_some());
+
+        // Get the output file path before cleanup
+        let output_file = {
+            let jobs = manager.jobs.lock().await;
+            jobs.get(&id).and_then(|j| j.output_file().cloned())
+        };
+
+        // Cleanup should remove the job and its files
+        manager.cleanup().await;
+
+        // If an output file was created, it should be gone now
+        if let Some(path) = output_file {
+            assert!(
+                !path.exists(),
+                "temp file should be removed after cleanup: {}",
+                path.display()
+            );
+        }
+    }
+
+    #[tokio::test]
     async fn test_register_with_channel() {
         let manager = JobManager::new();
         let (tx, rx) = oneshot::channel();
@@ -618,6 +675,24 @@ mod tests {
         let result = manager.wait(id).await;
         assert!(result.is_some());
         assert_eq!(result.unwrap().out, "from channel");
+    }
+
+    #[tokio::test]
+    async fn test_spawn_immediately_available() {
+        // Bug J: job should be queryable immediately after spawn()
+        let manager = JobManager::new();
+
+        let id = manager.spawn("instant".to_string(), async {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            ExecResult::success("done")
+        });
+
+        // Should be immediately visible without any sleep
+        let exists = manager.exists(id).await;
+        assert!(exists, "job should be immediately available after spawn()");
+
+        let info = manager.get(id).await;
+        assert!(info.is_some(), "job info should be available immediately");
     }
 
     #[tokio::test]

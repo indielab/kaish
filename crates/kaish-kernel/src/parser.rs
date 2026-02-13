@@ -8,7 +8,7 @@ use crate::ast::{
     Pipeline, Program, Redirect, RedirectKind, Stmt, StringPart, StringTestOp, TestCmpOp, TestExpr,
     ToolDef, Value, VarPath, VarSegment, WhileLoop,
 };
-use crate::lexer::{self, Token};
+use crate::lexer::{self, HereDocData, Token};
 use chumsky::{input::ValueInput, prelude::*};
 
 /// Span type used throughout the parser.
@@ -832,6 +832,9 @@ where
         select! { Token::Star => "*".to_string() },
         select! { Token::Question => "?".to_string() },
         select! { Token::Dot => ".".to_string() },
+        select! { Token::Path(p) => p },
+        select! { Token::VarRef(v) => v },
+        select! { Token::SimpleVarRef(v) => format!("${}", v) },
         // Character class: [a-z], [!abc], [^abc], etc.
         just(Token::LBracket)
             .ignore_then(
@@ -1076,11 +1079,30 @@ where
     .map(|(kind, target)| Redirect { kind, target });
 
     // Here-doc redirect: << content
+    // Quoted delimiters (<<'EOF' or <<"EOF") produce literal heredocs (no expansion).
+    // Unquoted delimiters produce interpolated heredocs (variables are expanded).
     let heredoc_redirect = just(Token::HereDocStart)
-        .ignore_then(select! { Token::HereDoc(content) => content })
-        .map(|content| Redirect {
-            kind: RedirectKind::HereDoc,
-            target: Expr::Literal(Value::String(content)),
+        .ignore_then(select! { Token::HereDoc(data) => data })
+        .map(|data: HereDocData| {
+            let target = if data.literal {
+                Expr::Literal(Value::String(data.content))
+            } else {
+                let parts = parse_interpolated_string(&data.content);
+                // If there's only one literal part, simplify to Expr::Literal
+                if parts.len() == 1 {
+                    if let StringPart::Literal(text) = &parts[0] {
+                        return Redirect {
+                            kind: RedirectKind::HereDoc,
+                            target: Expr::Literal(Value::String(text.clone())),
+                        };
+                    }
+                }
+                Expr::Interpolated(parts)
+            };
+            Redirect {
+                kind: RedirectKind::HereDoc,
+                target,
+            }
         });
 
     // Merge stderr to stdout: 2>&1 (no target needed - implicit)

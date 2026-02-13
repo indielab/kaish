@@ -111,7 +111,10 @@ fn expand_char_set(spec: &str) -> Vec<char> {
             }
 
             match class_name.as_str() {
-                "alpha" => chars.extend('a'..='z'),
+                "alpha" => {
+                    chars.extend('a'..='z');
+                    chars.extend('A'..='Z');
+                }
                 "upper" => chars.extend('A'..='Z'),
                 "lower" => chars.extend('a'..='z'),
                 "digit" => chars.extend('0'..='9'),
@@ -291,6 +294,22 @@ mod tests {
         assert_eq!(expand_char_set("0-2"), vec!['0', '1', '2']);
         assert!(expand_char_set("[:digit:]").len() == 10);
         assert!(expand_char_set("[:alpha:]").contains(&'m'));
+        assert!(expand_char_set("[:alpha:]").contains(&'M'));
+        assert_eq!(expand_char_set("[:alpha:]").len(), 52);
+    }
+
+    #[tokio::test]
+    async fn test_tr_delete_alpha_class() {
+        let mut ctx = make_ctx();
+        ctx.set_stdin("ABC123def456".to_string());
+
+        let mut args = ToolArgs::new();
+        args.positional.push(Value::String("[:alpha:]".into()));
+        args.flags.insert("d".to_string());
+
+        let result = Tr.execute(args, &mut ctx).await;
+        assert!(result.ok());
+        assert_eq!(result.out, "123456");
     }
 
     // --- Additional tests for common patterns ---

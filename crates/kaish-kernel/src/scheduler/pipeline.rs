@@ -114,8 +114,15 @@ fn setup_stdin_redirects(cmd: &Command, ctx: &mut ExecContext) {
                     }
             }
             RedirectKind::HereDoc => {
-                if let Expr::Literal(Value::String(content)) = &redir.target {
-                    ctx.set_stdin(content.clone());
+                match &redir.target {
+                    Expr::Literal(Value::String(content)) => {
+                        ctx.set_stdin(content.clone());
+                    }
+                    expr => {
+                        if let Some(value) = eval_simple_expr(expr, ctx) {
+                            ctx.set_stdin(value_to_string(&value));
+                        }
+                    }
                 }
             }
             _ => {}
@@ -304,11 +311,6 @@ impl PipelineRunner {
 
             // Apply post-execution redirects
             last_result = apply_redirects(last_result, &cmd.redirects, ctx).await;
-
-            // If command failed, stop the pipeline
-            if !last_result.ok() {
-                return last_result;
-            }
 
             // Pass stdout and structured data to next command's stdin (unless last command)
             if i < last_idx {
@@ -725,10 +727,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_pipeline_stops_on_failure() {
+    async fn test_pipeline_continues_on_failure() {
+        // Standard shell semantics: pipeline runs all commands,
+        // exit code comes from the last command
         let (runner, mut ctx, dispatcher) = make_runner_and_ctx().await;
 
         // cat /nonexistent | grep "hello"
+        // cat fails but grep still runs (on empty input), grep returns 1 (no match)
         let cat_cmd = make_cmd("cat", vec!["/nonexistent"]);
         let grep_cmd = Command {
             name: "grep".to_string(),
@@ -737,7 +742,21 @@ mod tests {
         };
 
         let result = runner.run(&[cat_cmd, grep_cmd], &mut ctx, &dispatcher).await;
+        // Exit code comes from last command (grep), not from cat
         assert!(!result.ok());
+    }
+
+    #[tokio::test]
+    async fn test_pipeline_last_command_exit_code() {
+        // echo hello | cat — both succeed, pipeline succeeds
+        let (runner, mut ctx, dispatcher) = make_runner_and_ctx().await;
+
+        let echo_cmd = make_cmd("echo", vec!["hello"]);
+        let cat_cmd = make_cmd("cat", vec![]);
+
+        let result = runner.run(&[echo_cmd, cat_cmd], &mut ctx, &dispatcher).await;
+        assert!(result.ok());
+        assert!(result.out.contains("hello"));
     }
 
     #[tokio::test]

@@ -96,6 +96,48 @@ impl LocalFs {
         Ok(canonical)
     }
 
+    /// Resolve a path within the root WITHOUT following symlinks.
+    ///
+    /// Used by `lstat()` and `read_link()` which must not follow symlinks.
+    /// Validates that the path stays within the sandbox by normalizing
+    /// path components (resolving `.` and `..`) without canonicalization.
+    fn resolve_no_follow(&self, path: &Path) -> io::Result<PathBuf> {
+        let path = path.strip_prefix("/").unwrap_or(path);
+
+        let mut normalized = self.root.clone();
+        for component in path.components() {
+            match component {
+                std::path::Component::ParentDir => {
+                    if normalized == self.root {
+                        return Err(io::Error::new(
+                            io::ErrorKind::PermissionDenied,
+                            "path escapes root",
+                        ));
+                    }
+                    normalized.pop();
+                    if !normalized.starts_with(&self.root) {
+                        return Err(io::Error::new(
+                            io::ErrorKind::PermissionDenied,
+                            "path escapes root",
+                        ));
+                    }
+                }
+                std::path::Component::Normal(c) => normalized.push(c),
+                std::path::Component::CurDir => {} // skip
+                _ => {}
+            }
+        }
+
+        // Final containment check
+        if !normalized.starts_with(&self.root) {
+            return Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "path escapes root",
+            ));
+        }
+        Ok(normalized)
+    }
+
     /// Check if write operations are allowed.
     fn check_writable(&self) -> io::Result<()> {
         if self.read_only {
@@ -175,9 +217,8 @@ impl Filesystem for LocalFs {
     }
 
     async fn lstat(&self, path: &Path) -> io::Result<Metadata> {
-        // lstat doesn't follow symlinks - we need to avoid canonicalizing the path
-        let path = path.strip_prefix("/").unwrap_or(path);
-        let full_path = self.root.join(path);
+        // lstat doesn't follow symlinks - validate containment without canonicalization
+        let full_path = self.resolve_no_follow(path)?;
 
         // Use symlink_metadata which doesn't follow symlinks
         let meta = fs::symlink_metadata(&full_path).await?;
@@ -192,15 +233,19 @@ impl Filesystem for LocalFs {
     }
 
     async fn read_link(&self, path: &Path) -> io::Result<PathBuf> {
-        let path = path.strip_prefix("/").unwrap_or(path);
-        let full_path = self.root.join(path);
+        let full_path = self.resolve_no_follow(path)?;
         fs::read_link(&full_path).await
     }
 
     async fn symlink(&self, target: &Path, link: &Path) -> io::Result<()> {
         self.check_writable()?;
-        let path = link.strip_prefix("/").unwrap_or(link);
-        let link_path = self.root.join(path);
+
+        // Validate absolute symlink targets stay within sandbox
+        if target.is_absolute() {
+            self.resolve(target)?;
+        }
+
+        let link_path = self.resolve_no_follow(link)?;
 
         // Ensure parent directory exists
         if let Some(parent) = link_path.parent() {
@@ -375,6 +420,77 @@ mod tests {
         // Trying to escape via .. should fail
         let result = fs.read(Path::new("../../../etc/passwd")).await;
         assert!(result.is_err());
+
+        cleanup(&dir).await;
+    }
+
+    #[tokio::test]
+    async fn test_lstat_path_escape_blocked() {
+        // Bug H: lstat must validate path containment
+        let (fs, dir) = setup().await;
+
+        let result = fs.lstat(Path::new("../../etc/passwd")).await;
+        assert!(result.is_err());
+        assert_eq!(result.unwrap_err().kind(), io::ErrorKind::PermissionDenied);
+
+        cleanup(&dir).await;
+    }
+
+    #[tokio::test]
+    async fn test_read_link_path_escape_blocked() {
+        // Bug H: read_link must validate path containment
+        let (fs, dir) = setup().await;
+
+        let result = fs.read_link(Path::new("../../etc/passwd")).await;
+        assert!(result.is_err());
+        assert_eq!(result.unwrap_err().kind(), io::ErrorKind::PermissionDenied);
+
+        cleanup(&dir).await;
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_lstat_on_valid_symlink() {
+        // Regression: lstat should still work for valid symlinks
+        let (fs, dir) = setup().await;
+
+        fs.write(Path::new("target.txt"), b"content").await.unwrap();
+        fs.symlink(Path::new("target.txt"), Path::new("link.txt"))
+            .await
+            .unwrap();
+
+        let meta = fs.lstat(Path::new("link.txt")).await.unwrap();
+        assert!(meta.is_symlink, "lstat should report symlink type");
+
+        cleanup(&dir).await;
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_symlink_absolute_target_escape_blocked() {
+        // Bug I: absolute symlink targets must stay within sandbox
+        let (fs, dir) = setup().await;
+
+        let result = fs
+            .symlink(Path::new("/etc/passwd"), Path::new("escape_link"))
+            .await;
+        assert!(result.is_err());
+        assert_eq!(result.unwrap_err().kind(), io::ErrorKind::PermissionDenied);
+
+        cleanup(&dir).await;
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_symlink_relative_target_allowed() {
+        // Regression: relative symlink targets should still be allowed
+        let (fs, dir) = setup().await;
+
+        fs.write(Path::new("target.txt"), b"content").await.unwrap();
+        let result = fs
+            .symlink(Path::new("target.txt"), Path::new("rel_link"))
+            .await;
+        assert!(result.is_ok());
 
         cleanup(&dir).await;
     }

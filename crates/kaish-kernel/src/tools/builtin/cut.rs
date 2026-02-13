@@ -78,6 +78,10 @@ impl Tool for Cut {
             .get_string("characters", usize::MAX)
             .or_else(|| args.get_string("c", usize::MAX));
 
+        if delimiter.chars().count() > 1 {
+            return ExecResult::failure(1, "cut: delimiter must be a single character");
+        }
+
         if fields.is_none() && characters.is_none() {
             return ExecResult::failure(1, "cut: must specify either -f or -c");
         }
@@ -386,6 +390,23 @@ mod tests {
         let result = Cut.execute(args, &mut ctx).await;
         assert!(result.ok());
         assert_eq!(result.out.trim(), "a,c,d,e,g");
+    }
+
+    #[tokio::test]
+    async fn test_cut_multi_char_delimiter_error() {
+        // Bug L: multi-character delimiter should error, not silently truncate
+        let mut ctx = make_ctx().await;
+        ctx.set_stdin("a::b::c\n".to_string());
+
+        let mut args = ToolArgs::new();
+        args.named
+            .insert("delimiter".to_string(), Value::String("::".into()));
+        args.named
+            .insert("fields".to_string(), Value::String("1".into()));
+
+        let result = Cut.execute(args, &mut ctx).await;
+        assert!(!result.ok());
+        assert!(result.err.contains("single character"));
     }
 
     #[tokio::test]

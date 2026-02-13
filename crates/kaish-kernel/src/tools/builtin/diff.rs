@@ -10,7 +10,7 @@
 //! ```
 
 use async_trait::async_trait;
-use similar::{ChangeTag, TextDiff};
+use similar::TextDiff;
 use std::path::Path;
 
 use crate::ast::Value;
@@ -117,15 +117,16 @@ impl Tool for Diff {
         // Generate diff using similar's built-in unified format
         let diff = TextDiff::from_lines(&content1, &content2);
 
+        let plain = diff
+            .unified_diff()
+            .context_radius(context_lines)
+            .header(&file1, &file2)
+            .to_string();
+
         let output = if colorize {
-            // Manual colorized output
-            format_colorized_diff(&diff, &file1, &file2, context_lines)
+            colorize_unified_output(&plain)
         } else {
-            // Use similar's built-in unified diff
-            diff.unified_diff()
-                .context_radius(context_lines)
-                .header(&file1, &file2)
-                .to_string()
+            plain
         };
 
         // Exit code 1 if files differ (POSIX convention)
@@ -135,43 +136,31 @@ impl Tool for Diff {
     }
 }
 
-/// Format a colorized unified diff.
-fn format_colorized_diff<'a>(
-    diff: &TextDiff<'a, 'a, 'a, str>,
-    file1: &str,
-    file2: &str,
-    _context: usize,
-) -> String {
-    let mut output = String::new();
+/// Apply ANSI color codes to pre-formatted unified diff output.
+fn colorize_unified_output(plain: &str) -> String {
+    let mut output = String::with_capacity(plain.len() + 256);
 
-    // Header
-    output.push_str(&format!("\x1b[1m--- {}\x1b[0m\n", file1));
-    output.push_str(&format!("\x1b[1m+++ {}\x1b[0m\n", file2));
-
-    // Simple approach: iterate all changes with coloring
-    // This is a simplified version that outputs all changes
-    output.push_str("@@ -1 +1 @@\n");
-
-    for change in diff.iter_all_changes() {
-        match change.tag() {
-            ChangeTag::Equal => {
-                output.push(' ');
-                output.push_str(change.value());
-            }
-            ChangeTag::Delete => {
-                output.push_str("\x1b[31m-");
-                output.push_str(change.value());
-                output.push_str("\x1b[0m");
-            }
-            ChangeTag::Insert => {
-                output.push_str("\x1b[32m+");
-                output.push_str(change.value());
-                output.push_str("\x1b[0m");
-            }
+    for line in plain.lines() {
+        if line.starts_with("---") || line.starts_with("+++") {
+            output.push_str("\x1b[1m");
+            output.push_str(line);
+            output.push_str("\x1b[0m");
+        } else if line.starts_with("@@") {
+            output.push_str("\x1b[36m");
+            output.push_str(line);
+            output.push_str("\x1b[0m");
+        } else if line.starts_with('-') {
+            output.push_str("\x1b[31m");
+            output.push_str(line);
+            output.push_str("\x1b[0m");
+        } else if line.starts_with('+') {
+            output.push_str("\x1b[32m");
+            output.push_str(line);
+            output.push_str("\x1b[0m");
+        } else {
+            output.push_str(line);
         }
-        if !change.value().ends_with('\n') {
-            output.push('\n');
-        }
+        output.push('\n');
     }
 
     output
@@ -256,6 +245,76 @@ mod tests {
         let result = Diff.execute(args, &mut ctx).await;
         assert_eq!(result.code, 2);
         assert!(result.err.contains("nonexistent.txt"));
+    }
+
+    #[tokio::test]
+    async fn test_diff_correct_hunk_header() {
+        // Bug G: hunk header should show actual line positions, not always @@ -1 +1 @@
+        let mut vfs = VfsRouter::new();
+        let mem = MemoryFs::new();
+        mem.write(
+            Path::new("a.txt"),
+            b"line1\nline2\nline3\nline4\nline5\nline6\n",
+        )
+        .await
+        .unwrap();
+        mem.write(
+            Path::new("b.txt"),
+            b"line1\nline2\nline3\nline4\nchanged5\nline6\n",
+        )
+        .await
+        .unwrap();
+        vfs.mount("/", mem);
+        let mut ctx = ExecContext::new(Arc::new(vfs));
+
+        let mut args = ToolArgs::new();
+        args.positional.push(Value::String("a.txt".into()));
+        args.positional.push(Value::String("b.txt".into()));
+
+        let result = Diff.execute(args, &mut ctx).await;
+        assert_eq!(result.code, 1);
+        // The hunk header should reference line 5, not line 1
+        assert!(
+            result.out.contains("@@ -") && !result.out.contains("@@ -1 +1 @@"),
+            "hunk header should show correct line positions: {}",
+            result.out
+        );
+    }
+
+    #[tokio::test]
+    async fn test_diff_colorized_correct_hunk_header() {
+        // Colorized diff should also have correct hunk headers
+        let mut vfs = VfsRouter::new();
+        let mem = MemoryFs::new();
+        mem.write(
+            Path::new("a.txt"),
+            b"line1\nline2\nline3\nline4\nline5\nline6\n",
+        )
+        .await
+        .unwrap();
+        mem.write(
+            Path::new("b.txt"),
+            b"line1\nline2\nline3\nline4\nchanged5\nline6\n",
+        )
+        .await
+        .unwrap();
+        vfs.mount("/", mem);
+        let mut ctx = ExecContext::new(Arc::new(vfs));
+
+        let mut args = ToolArgs::new();
+        args.positional.push(Value::String("a.txt".into()));
+        args.positional.push(Value::String("b.txt".into()));
+        args.flags.insert("color".to_string());
+
+        let result = Diff.execute(args, &mut ctx).await;
+        assert_eq!(result.code, 1);
+        // Should contain ANSI codes and correct hunk header (not -1 +1)
+        assert!(result.out.contains("\x1b["), "should have ANSI codes");
+        assert!(
+            !result.out.contains("@@ -1 +1 @@"),
+            "should not have hardcoded hunk header: {}",
+            result.out
+        );
     }
 
     #[tokio::test]

@@ -146,6 +146,15 @@ impl fmt::Display for LexerError {
 /// Tokens that carry semantic values (strings, numbers, identifiers) include
 /// the parsed value directly. This ensures the parser has access to actual
 /// data, not just token types.
+/// Here-doc content data.
+/// `literal` is true when the delimiter was quoted (<<'EOF' or <<"EOF"),
+/// meaning no variable expansion should occur.
+#[derive(Debug, Clone, PartialEq)]
+pub struct HereDocData {
+    pub content: String,
+    pub literal: bool,
+}
+
 #[derive(Logos, Debug, Clone, PartialEq)]
 #[logos(error = LexerError)]
 #[logos(skip r"[ \t]+")]
@@ -434,7 +443,7 @@ pub enum Token {
 
     /// Here-doc content: synthesized by preprocessing, not directly lexed.
     /// Contains the full content of the here-doc (without the delimiter lines).
-    HereDoc(String),
+    HereDoc(HereDocData),
 
     /// Integer literal - value is the parsed i64
     #[regex(r"-?[0-9]+", lex_int, priority = 2)]
@@ -831,7 +840,7 @@ impl fmt::Display for Token {
             Token::MinusAlone => write!(f, "-"),
             Token::String(s) => write!(f, "STRING({:?})", s),
             Token::SingleString(s) => write!(f, "SINGLESTRING({:?})", s),
-            Token::HereDoc(s) => write!(f, "HEREDOC({:?})", s),
+            Token::HereDoc(d) => write!(f, "HEREDOC({:?}, literal={})", d.content, d.literal),
             Token::VarRef(v) => write!(f, "VARREF({})", v),
             Token::SimpleVarRef(v) => write!(f, "SIMPLEVARREF({})", v),
             Token::Positional(n) => write!(f, "${}", n),
@@ -1045,9 +1054,9 @@ fn preprocess_arithmetic(source: &str) -> Result<ArithmeticPreprocessResult, Lex
 /// Becomes:
 ///   `cat <<__HEREDOC_0__`
 /// With heredocs[0] = ("__HEREDOC_0__", "hello\nworld")
-fn preprocess_heredocs(source: &str) -> (String, Vec<(String, String)>) {
+fn preprocess_heredocs(source: &str) -> (String, Vec<(String, String, bool)>) {
     let mut result = String::with_capacity(source.len());
-    let mut heredocs: Vec<(String, String)> = Vec::new();
+    let mut heredocs: Vec<(String, String, bool)> = Vec::new();
     let mut chars = source.chars().peekable();
 
     while let Some(ch) = chars.next() {
@@ -1134,11 +1143,9 @@ fn preprocess_heredocs(source: &str) -> (String, Vec<(String, String)>) {
                             // Found end of here-doc
                             break;
                         }
-                        // Add line to content
-                        if !content.is_empty() || !current_line.is_empty() {
-                            content.push_str(&current_line);
-                            content.push('\n');
-                        }
+                        // Add line to content (including empty lines)
+                        content.push_str(&current_line);
+                        content.push('\n');
                         current_line.clear();
                     }
                     Some('\r') => {
@@ -1154,10 +1161,8 @@ fn preprocess_heredocs(source: &str) -> (String, Vec<(String, String)>) {
                         if trimmed == delimiter {
                             break;
                         }
-                        if !content.is_empty() || !current_line.is_empty() {
-                            content.push_str(&current_line);
-                            content.push('\n');
-                        }
+                        content.push_str(&current_line);
+                        content.push('\n');
                         current_line.clear();
                     }
                     Some(c) => {
@@ -1188,7 +1193,7 @@ fn preprocess_heredocs(source: &str) -> (String, Vec<(String, String)>) {
 
             // Create a unique marker for this here-doc (collision-resistant)
             let marker = format!("__KAISH_HEREDOC_{}__", unique_marker_id());
-            heredocs.push((marker.clone(), content));
+            heredocs.push((marker.clone(), content, quoted));
 
             // Output <<marker first, then any text that followed the delimiter
             // (e.g., " | jq") so the heredoc attaches to the correct command.
@@ -1268,9 +1273,9 @@ pub fn tokenize(source: &str) -> Result<Vec<Spanned<Token>>, Vec<Spanned<LexerEr
                 && let Token::Ident(ref name) = tokens[i + 1].token
                     && name.starts_with("__KAISH_HEREDOC_") && name.ends_with("__") {
                         // Find the corresponding content
-                        if let Some((_, content)) = heredocs.iter().find(|(marker, _)| marker == name) {
+                        if let Some((_, content, literal)) = heredocs.iter().find(|(marker, _, _)| marker == name) {
                             final_tokens.push(Spanned::new(Token::HereDocStart, tokens[i].span.clone()));
-                            final_tokens.push(Spanned::new(Token::HereDoc(content.clone()), tokens[i + 1].span.clone()));
+                            final_tokens.push(Spanned::new(Token::HereDoc(HereDocData { content: content.clone(), literal: *literal }), tokens[i + 1].span.clone()));
                             i += 2;
                             continue;
                         }
@@ -2320,7 +2325,7 @@ mod tests {
         assert_eq!(tokens, vec![
             Token::Ident("cat".to_string()),
             Token::HereDocStart,
-            Token::HereDoc("hello\nworld".to_string()),
+            Token::HereDoc(HereDocData { content: "hello\nworld".to_string(), literal: false }),
             Token::Newline,
         ]);
     }
@@ -2332,7 +2337,7 @@ mod tests {
         assert_eq!(tokens, vec![
             Token::Ident("cat".to_string()),
             Token::HereDocStart,
-            Token::HereDoc("".to_string()),
+            Token::HereDoc(HereDocData { content: "".to_string(), literal: false }),
             Token::Newline,
         ]);
     }
@@ -2344,7 +2349,7 @@ mod tests {
         assert_eq!(tokens, vec![
             Token::Ident("cat".to_string()),
             Token::HereDocStart,
-            Token::HereDoc("$VAR and \"quoted\" 'single'".to_string()),
+            Token::HereDoc(HereDocData { content: "$VAR and \"quoted\" 'single'".to_string(), literal: false }),
             Token::Newline,
         ]);
     }
@@ -2356,7 +2361,7 @@ mod tests {
         assert_eq!(tokens, vec![
             Token::Ident("cat".to_string()),
             Token::HereDocStart,
-            Token::HereDoc("line1\nline2\nline3".to_string()),
+            Token::HereDoc(HereDocData { content: "line1\nline2\nline3".to_string(), literal: false }),
             Token::Newline,
         ]);
     }
@@ -2368,7 +2373,7 @@ mod tests {
         assert_eq!(tokens, vec![
             Token::Ident("cat".to_string()),
             Token::HereDocStart,
-            Token::HereDoc("hello".to_string()),
+            Token::HereDoc(HereDocData { content: "hello".to_string(), literal: false }),
             Token::Newline,
             Token::Ident("echo".to_string()),
             Token::Ident("goodbye".to_string()),
@@ -2383,7 +2388,7 @@ mod tests {
         assert_eq!(tokens, vec![
             Token::Ident("cat".to_string()),
             Token::HereDocStart,
-            Token::HereDoc("\thello\n\tworld".to_string()),
+            Token::HereDoc(HereDocData { content: "\thello\n\tworld".to_string(), literal: false }),
             Token::Newline,
         ]);
     }
@@ -2482,7 +2487,7 @@ mod tests {
         // Strings
         assert_eq!(Token::String("test".to_string()).category(), TokenCategory::String);
         assert_eq!(Token::SingleString("test".to_string()).category(), TokenCategory::String);
-        assert_eq!(Token::HereDoc("test".to_string()).category(), TokenCategory::String);
+        assert_eq!(Token::HereDoc(HereDocData { content: "test".to_string(), literal: false }).category(), TokenCategory::String);
 
         // Numbers
         assert_eq!(Token::Int(42).category(), TokenCategory::Number);
@@ -2547,5 +2552,55 @@ mod tests {
         let tokens = tokenize("cat <<EOF\nhello\nEOF").unwrap();
         assert!(tokens.iter().any(|t| matches!(t.token, Token::HereDoc(_))));
         assert!(!tokens.iter().any(|t| matches!(t.token, Token::Pipe)));
+    }
+
+    #[test]
+    fn test_heredoc_preserves_leading_empty_lines() {
+        // Bug B: heredoc starting with a blank line must preserve it
+        let tokens = tokenize("cat <<EOF\n\nhello\nEOF").unwrap();
+        let heredoc = tokens.iter().find_map(|t| {
+            if let Token::HereDoc(data) = &t.token {
+                Some(data.clone())
+            } else {
+                None
+            }
+        });
+        assert!(heredoc.is_some(), "should have a heredoc token");
+        let data = heredoc.unwrap();
+        assert!(data.content.starts_with('\n'), "leading empty line must be preserved, got: {:?}", data.content);
+        assert_eq!(data.content, "\nhello");
+    }
+
+    #[test]
+    fn test_heredoc_quoted_delimiter_sets_literal() {
+        // Bug N: quoted delimiter (<<'EOF') should set literal=true
+        let tokens = tokenize("cat <<'EOF'\nhello $HOME\nEOF").unwrap();
+        let heredoc = tokens.iter().find_map(|t| {
+            if let Token::HereDoc(data) = &t.token {
+                Some(data.clone())
+            } else {
+                None
+            }
+        });
+        assert!(heredoc.is_some(), "should have a heredoc token");
+        let data = heredoc.unwrap();
+        assert!(data.literal, "quoted delimiter should set literal=true");
+        assert_eq!(data.content, "hello $HOME");
+    }
+
+    #[test]
+    fn test_heredoc_unquoted_delimiter_not_literal() {
+        // Bug N: unquoted delimiter (<<EOF) should have literal=false
+        let tokens = tokenize("cat <<EOF\nhello $HOME\nEOF").unwrap();
+        let heredoc = tokens.iter().find_map(|t| {
+            if let Token::HereDoc(data) = &t.token {
+                Some(data.clone())
+            } else {
+                None
+            }
+        });
+        assert!(heredoc.is_some(), "should have a heredoc token");
+        let data = heredoc.unwrap();
+        assert!(!data.literal, "unquoted delimiter should have literal=false");
     }
 }

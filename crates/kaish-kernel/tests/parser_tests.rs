@@ -661,6 +661,18 @@ fn parser_case_optional_lparen() {
     parse_and_snapshot("case_optional_lparen", "case \"x\" in\n    (foo) echo \"foo\" ;;\nesac");
 }
 
+#[test]
+fn parser_case_with_path_pattern() {
+    // Bug M: paths should work in case patterns
+    parse_and_snapshot("case_path_pattern", "case $file in\n    /tmp/*) echo \"temp\" ;;\nesac");
+}
+
+#[test]
+fn parser_case_with_varref_pattern() {
+    // Bug M: variable refs should work in case patterns
+    parse_and_snapshot("case_varref_pattern", "case $input in\n    $expected) echo \"match\" ;;\nesac");
+}
+
 // =============================================================================
 // KNOWN FAILURES - Issues to be fixed
 // =============================================================================

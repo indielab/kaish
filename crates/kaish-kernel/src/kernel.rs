@@ -645,7 +645,18 @@ impl Kernel {
                     for stmt in &for_loop.body {
                         let mut flow = self.execute_stmt_flow(stmt).await?;
                         match &mut flow {
-                            ControlFlow::Normal(r) => accumulate_result(&mut result, r),
+                            ControlFlow::Normal(r) => {
+                                accumulate_result(&mut result, r);
+                                if !r.ok() {
+                                    let scope = self.scope.read().await;
+                                    if scope.error_exit_enabled() {
+                                        drop(scope);
+                                        let mut scope = self.scope.write().await;
+                                        scope.pop_frame();
+                                        return Ok(ControlFlow::exit_code(r.code));
+                                    }
+                                }
+                            }
                             ControlFlow::Break { .. } => {
                                 if flow.decrement_level() {
                                     // Break handled at this level
@@ -696,7 +707,15 @@ impl Kernel {
                     for stmt in &while_loop.body {
                         let mut flow = self.execute_stmt_flow(stmt).await?;
                         match &mut flow {
-                            ControlFlow::Normal(r) => accumulate_result(&mut result, r),
+                            ControlFlow::Normal(r) => {
+                                accumulate_result(&mut result, r);
+                                if !r.ok() {
+                                    let scope = self.scope.read().await;
+                                    if scope.error_exit_enabled() {
+                                        return Ok(ControlFlow::exit_code(r.code));
+                                    }
+                                }
+                            }
                             ControlFlow::Break { .. } => {
                                 if flow.decrement_level() {
                                     // Break handled at this level
@@ -3000,6 +3019,50 @@ mod tests {
         assert!(result.is_some(), "RESULT should be set");
     }
 
+    #[tokio::test]
+    async fn test_set_e_exits_in_for_loop() {
+        let kernel = Kernel::transient().expect("failed to create kernel");
+
+        kernel.execute("set -e").await.expect("set -e failed");
+
+        kernel
+            .execute(r#"
+                REACHED="no"
+                for x in 1 2 3; do
+                    false
+                    REACHED="yes"
+                done
+            "#)
+            .await
+            .ok();
+
+        // With set -e, false should trigger exit; REACHED should remain "no"
+        let reached = kernel.get_var("REACHED").await;
+        assert_eq!(reached, Some(Value::String("no".into())),
+            "set -e should exit on failure in for loop body");
+    }
+
+    #[tokio::test]
+    async fn test_for_loop_continues_without_set_e() {
+        let kernel = Kernel::transient().expect("failed to create kernel");
+
+        // Without set -e, for loop should continue normally
+        kernel
+            .execute(r#"
+                COUNT=0
+                for x in 1 2 3; do
+                    false
+                    COUNT=$((COUNT + 1))
+                done
+            "#)
+            .await
+            .ok();
+
+        let count = kernel.get_var("COUNT").await;
+        assert_eq!(count, Some(Value::String("3".into())),
+            "without set -e, loop should complete all iterations");
+    }
+
     // ═══════════════════════════════════════════════════════════════════════════
     // Source Tests
     // ═══════════════════════════════════════════════════════════════════════════
@@ -3386,6 +3449,52 @@ AFTER="yes"'"#)
         assert!(result.out.contains("line1"), "output: {}", result.out);
         assert!(result.out.contains("line2"), "output: {}", result.out);
         assert!(result.out.contains("line3"), "output: {}", result.out);
+    }
+
+    #[tokio::test]
+    async fn test_heredoc_variable_expansion() {
+        // Bug N: unquoted heredoc should expand variables
+        let kernel = Kernel::transient().expect("failed to create kernel");
+
+        kernel.execute("GREETING=hello").await.expect("set var");
+
+        let result = kernel
+            .execute("cat <<EOF\n$GREETING world\nEOF")
+            .await
+            .expect("heredoc expansion failed");
+
+        assert!(result.ok(), "heredoc expansion failed: {}", result.err);
+        assert_eq!(result.out.trim(), "hello world");
+    }
+
+    #[tokio::test]
+    async fn test_heredoc_quoted_no_expansion() {
+        // Bug N: quoted heredoc (<<'EOF') should NOT expand variables
+        let kernel = Kernel::transient().expect("failed to create kernel");
+
+        kernel.execute("GREETING=hello").await.expect("set var");
+
+        let result = kernel
+            .execute("cat <<'EOF'\n$GREETING world\nEOF")
+            .await
+            .expect("quoted heredoc failed");
+
+        assert!(result.ok(), "quoted heredoc failed: {}", result.err);
+        assert_eq!(result.out.trim(), "$GREETING world");
+    }
+
+    #[tokio::test]
+    async fn test_heredoc_default_value_expansion() {
+        // Bug N: ${VAR:-default} should expand in unquoted heredocs
+        let kernel = Kernel::transient().expect("failed to create kernel");
+
+        let result = kernel
+            .execute("cat <<EOF\n${UNSET:-fallback}\nEOF")
+            .await
+            .expect("heredoc default expansion failed");
+
+        assert!(result.ok(), "heredoc default expansion failed: {}", result.err);
+        assert_eq!(result.out.trim(), "fallback");
     }
 
     // ═══════════════════════════════════════════════════════════════════════════
