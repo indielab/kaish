@@ -814,10 +814,10 @@ mod tests {
     async fn test_scatter_gather_simple() {
         let (runner, mut ctx, dispatcher) = make_runner_and_ctx().await;
 
-        // echo "a\nb\nc" | scatter | echo ${ITEM} | gather
-        let echo_cmd = Command {
-            name: "echo".to_string(),
-            args: vec![Arg::Positional(Expr::Literal(Value::String("a\nb\nc".to_string())))],
+        // split "a b c" | scatter | echo ${ITEM} | gather
+        let split_cmd = Command {
+            name: "split".to_string(),
+            args: vec![Arg::Positional(Expr::Literal(Value::String("a b c".to_string())))],
             redirects: vec![],
         };
         let scatter_cmd = make_cmd("scatter", vec![]);
@@ -828,8 +828,8 @@ mod tests {
         };
         let gather_cmd = make_cmd("gather", vec![]);
 
-        let result = runner.run(&[echo_cmd, scatter_cmd, process_cmd, gather_cmd], &mut ctx, &dispatcher).await;
-        assert!(result.ok());
+        let result = runner.run(&[split_cmd, scatter_cmd, process_cmd, gather_cmd], &mut ctx, &dispatcher).await;
+        assert!(result.ok(), "scatter with structured data should succeed: {}", result.err);
         // Each echo should output the item
         assert!(result.out.contains("a"));
         assert!(result.out.contains("b"));
@@ -860,11 +860,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_scatter_gather_with_stdin() {
+    async fn test_scatter_gather_with_structured_stdin() {
         let (runner, mut ctx, dispatcher) = make_runner_and_ctx().await;
 
-        // Set stdin directly and use scatter | echo | gather
-        ctx.set_stdin("x\ny\nz".to_string());
+        // Set structured stdin data (as if piped from split/seq)
+        let data = Value::Json(serde_json::json!(["x", "y", "z"]));
+        ctx.set_stdin_with_data("x\ny\nz".to_string(), Some(data));
 
         let scatter_cmd = make_cmd("scatter", vec![]);
         let process_cmd = Command {
@@ -875,7 +876,7 @@ mod tests {
         let gather_cmd = make_cmd("gather", vec![]);
 
         let result = runner.run(&[scatter_cmd, process_cmd, gather_cmd], &mut ctx, &dispatcher).await;
-        assert!(result.ok());
+        assert!(result.ok(), "scatter with structured stdin should succeed: {}", result.err);
         assert!(result.out.contains("x"));
         assert!(result.out.contains("y"));
         assert!(result.out.contains("z"));
@@ -885,8 +886,9 @@ mod tests {
     async fn test_scatter_gather_json_input() {
         let (runner, mut ctx, dispatcher) = make_runner_and_ctx().await;
 
-        // JSON array input
-        ctx.set_stdin(r#"["one", "two", "three"]"#.to_string());
+        // Structured JSON array input (as if from split/seq)
+        let data = Value::Json(serde_json::json!(["one", "two", "three"]));
+        ctx.set_stdin_with_data(r#"["one", "two", "three"]"#.to_string(), Some(data));
 
         let scatter_cmd = make_cmd("scatter", vec![]);
         let process_cmd = Command {
@@ -897,7 +899,7 @@ mod tests {
         let gather_cmd = make_cmd("gather", vec![]);
 
         let result = runner.run(&[scatter_cmd, process_cmd, gather_cmd], &mut ctx, &dispatcher).await;
-        assert!(result.ok());
+        assert!(result.ok(), "scatter with JSON data should succeed: {}", result.err);
         assert!(result.out.contains("one"));
         assert!(result.out.contains("two"));
         assert!(result.out.contains("three"));
@@ -907,10 +909,10 @@ mod tests {
     async fn test_scatter_gather_with_post_gather() {
         let (runner, mut ctx, dispatcher) = make_runner_and_ctx().await;
 
-        // echo "a\nb" | scatter | echo ${ITEM} | gather | grep "a"
-        let echo_cmd = Command {
-            name: "echo".to_string(),
-            args: vec![Arg::Positional(Expr::Literal(Value::String("a\nb".to_string())))],
+        // split "a b" | scatter | echo ${ITEM} | gather | grep "a"
+        let split_cmd = Command {
+            name: "split".to_string(),
+            args: vec![Arg::Positional(Expr::Literal(Value::String("a b".to_string())))],
             redirects: vec![],
         };
         let scatter_cmd = make_cmd("scatter", vec![]);
@@ -926,8 +928,8 @@ mod tests {
             redirects: vec![],
         };
 
-        let result = runner.run(&[echo_cmd, scatter_cmd, process_cmd, gather_cmd, grep_cmd], &mut ctx, &dispatcher).await;
-        assert!(result.ok());
+        let result = runner.run(&[split_cmd, scatter_cmd, process_cmd, gather_cmd, grep_cmd], &mut ctx, &dispatcher).await;
+        assert!(result.ok(), "scatter with post_gather should succeed: {}", result.err);
         assert!(result.out.contains("a"));
         assert!(!result.out.contains("b"));
     }
@@ -936,7 +938,9 @@ mod tests {
     async fn test_scatter_custom_var_name() {
         let (runner, mut ctx, dispatcher) = make_runner_and_ctx().await;
 
-        ctx.set_stdin("test1\ntest2".to_string());
+        // Provide structured data (as if from split/seq)
+        let data = Value::Json(serde_json::json!(["test1", "test2"]));
+        ctx.set_stdin_with_data("test1\ntest2".to_string(), Some(data));
 
         // scatter as=URL | echo ${URL} | gather
         let scatter_cmd = Command {
@@ -955,7 +959,7 @@ mod tests {
         let gather_cmd = make_cmd("gather", vec![]);
 
         let result = runner.run(&[scatter_cmd, process_cmd, gather_cmd], &mut ctx, &dispatcher).await;
-        assert!(result.ok());
+        assert!(result.ok(), "scatter with custom var should succeed: {}", result.err);
         assert!(result.out.contains("test1"));
         assert!(result.out.contains("test2"));
     }

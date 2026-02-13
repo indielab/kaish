@@ -162,6 +162,18 @@ impl<'a> Validator<'a> {
 
     /// Validate a pipeline.
     fn validate_pipeline(&mut self, pipe: &Pipeline) {
+        // Check for scatter without gather
+        let has_scatter = pipe.commands.iter().any(|c| c.name == "scatter");
+        let has_gather = pipe.commands.iter().any(|c| c.name == "gather");
+        if has_scatter && !has_gather {
+            self.issues.push(
+                ValidationIssue::error(
+                    IssueCode::ScatterWithoutGather,
+                    "scatter without gather — parallel results would be lost",
+                ).with_suggestion("add gather: ... | scatter | cmd | gather")
+            );
+        }
+
         for cmd in &pipe.commands {
             self.validate_command(cmd);
         }
@@ -862,5 +874,58 @@ mod tests {
         let issues = validator.validate(&program);
         // echo is text output, so should NOT warn
         assert!(!issues.iter().any(|i| i.code == IssueCode::ShellGlobPattern));
+    }
+
+    #[test]
+    fn validates_scatter_without_gather() {
+        let (registry, user_tools) = make_validator();
+        let validator = Validator::new(&registry, &user_tools);
+
+        let program = Program {
+            statements: vec![Stmt::Pipeline(Pipeline {
+                commands: vec![
+                    Command { name: "seq".to_string(), args: vec![
+                        Arg::Positional(Expr::Literal(Value::String("1".into()))),
+                        Arg::Positional(Expr::Literal(Value::String("3".into()))),
+                    ], redirects: vec![] },
+                    Command { name: "scatter".to_string(), args: vec![], redirects: vec![] },
+                    Command { name: "echo".to_string(), args: vec![
+                        Arg::Positional(Expr::Literal(Value::String("hi".into()))),
+                    ], redirects: vec![] },
+                ],
+                background: false,
+            })],
+        };
+
+        let issues = validator.validate(&program);
+        assert!(issues.iter().any(|i| i.code == IssueCode::ScatterWithoutGather),
+            "should flag scatter without gather: {:?}", issues);
+    }
+
+    #[test]
+    fn allows_scatter_with_gather() {
+        let (registry, user_tools) = make_validator();
+        let validator = Validator::new(&registry, &user_tools);
+
+        let program = Program {
+            statements: vec![Stmt::Pipeline(Pipeline {
+                commands: vec![
+                    Command { name: "seq".to_string(), args: vec![
+                        Arg::Positional(Expr::Literal(Value::String("1".into()))),
+                        Arg::Positional(Expr::Literal(Value::String("3".into()))),
+                    ], redirects: vec![] },
+                    Command { name: "scatter".to_string(), args: vec![], redirects: vec![] },
+                    Command { name: "echo".to_string(), args: vec![
+                        Arg::Positional(Expr::Literal(Value::String("hi".into()))),
+                    ], redirects: vec![] },
+                    Command { name: "gather".to_string(), args: vec![], redirects: vec![] },
+                ],
+                background: false,
+            })],
+        };
+
+        let issues = validator.validate(&program);
+        assert!(!issues.iter().any(|i| i.code == IssueCode::ScatterWithoutGather),
+            "scatter with gather should pass: {:?}", issues);
     }
 }

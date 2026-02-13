@@ -113,19 +113,24 @@ impl ScatterGatherRunner {
 
         // Run pre-scatter commands to get input.
         // Uses run_sequential to avoid async recursion (scatter → run → scatter).
-        let input = if pre_scatter.is_empty() {
+        let (text, data) = if pre_scatter.is_empty() {
             // Use existing stdin
-            ctx.take_stdin().unwrap_or_default()
+            let data = ctx.take_stdin_data();
+            let text = ctx.take_stdin().unwrap_or_default();
+            (text, data)
         } else {
             let result = runner.run_sequential(pre_scatter, ctx, &*self.dispatcher).await;
             if !result.ok() {
                 return result;
             }
-            result.out
+            (result.out, result.data)
         };
 
-        // Split input into items
-        let items = split_input(&input);
+        // Extract items from structured data or text
+        let items = match extract_items(data.as_ref(), &text) {
+            Ok(items) => items,
+            Err(msg) => return ExecResult::failure(1, msg),
+        };
         if items.is_empty() {
             return ExecResult::success("");
         }
@@ -232,28 +237,32 @@ impl ScatterGatherRunner {
     }
 }
 
-/// Split input into items (by newlines or JSON array).
-fn split_input(input: &str) -> Vec<String> {
-    let trimmed = input.trim();
+/// Extract items from structured data or text.
+///
+/// kaish does not split implicitly — this function requires structured data
+/// (JSON array from split/seq/glob/find) for multi-item input. Single-line
+/// text is treated as one item. Multi-line text without structured data is
+/// an error.
+pub fn extract_items(data: Option<&Value>, text: &str) -> Result<Vec<String>, String> {
+    // 1. Structured data (JSON array from split/seq/glob/find) — use it
+    if let Some(Value::Json(serde_json::Value::Array(arr))) = data {
+        return Ok(arr.iter().map(|v| match v {
+            serde_json::Value::String(s) => s.clone(),
+            other => other.to_string(),
+        }).collect());
+    }
+    if let Some(Value::String(s)) = data {
+        return Ok(vec![s.clone()]);
+    }
 
-    // Try to parse as JSON array first
-    if trimmed.starts_with('[')
-        && let Ok(arr) = serde_json::from_str::<Vec<serde_json::Value>>(trimmed) {
-            return arr
-                .into_iter()
-                .map(|v| match v {
-                    serde_json::Value::String(s) => s,
-                    other => other.to_string(),
-                })
-                .collect();
-        }
+    // 2. Empty — return empty
+    let trimmed = text.trim();
+    if trimmed.is_empty() {
+        return Ok(vec![]);
+    }
 
-    // Fall back to line splitting
-    trimmed
-        .lines()
-        .map(|s| s.to_string())
-        .filter(|s| !s.is_empty())
-        .collect()
+    // 3. Raw text without structured data — one item (no implicit splitting)
+    Ok(vec![trimmed.to_string()])
 }
 
 /// Gather results into output string.
@@ -330,31 +339,51 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_split_input_lines() {
-        let input = "one\ntwo\nthree\n";
-        let items = split_input(input);
-        assert_eq!(items, vec!["one", "two", "three"]);
-    }
-
-    #[test]
-    fn test_split_input_json_array() {
-        let input = r#"["a", "b", "c"]"#;
-        let items = split_input(input);
+    fn test_extract_items_structured_json_array() {
+        let data = Value::Json(serde_json::json!(["a", "b", "c"]));
+        let items = extract_items(Some(&data), "").unwrap();
         assert_eq!(items, vec!["a", "b", "c"]);
     }
 
     #[test]
-    fn test_split_input_json_mixed() {
-        let input = r#"[1, "two", true]"#;
-        let items = split_input(input);
+    fn test_extract_items_structured_mixed_types() {
+        let data = Value::Json(serde_json::json!([1, "two", true]));
+        let items = extract_items(Some(&data), "").unwrap();
         assert_eq!(items, vec!["1", "two", "true"]);
     }
 
     #[test]
-    fn test_split_input_empty() {
-        let input = "";
-        let items = split_input(input);
+    fn test_extract_items_structured_string() {
+        let data = Value::String("single".into());
+        let items = extract_items(Some(&data), "").unwrap();
+        assert_eq!(items, vec!["single"]);
+    }
+
+    #[test]
+    fn test_extract_items_single_line_text() {
+        let items = extract_items(None, "hello").unwrap();
+        assert_eq!(items, vec!["hello"]);
+    }
+
+    #[test]
+    fn test_extract_items_empty() {
+        let items = extract_items(None, "").unwrap();
         assert!(items.is_empty());
+    }
+
+    #[test]
+    fn test_extract_items_multiline_is_one_item() {
+        // No implicit splitting — multi-line text is one item
+        let items = extract_items(None, "one\ntwo\nthree").unwrap();
+        assert_eq!(items, vec!["one\ntwo\nthree"]);
+    }
+
+    #[test]
+    fn test_extract_items_structured_overrides_text() {
+        // Structured data takes priority over text
+        let data = Value::Json(serde_json::json!(["x", "y"]));
+        let items = extract_items(Some(&data), "ignored\ntext").unwrap();
+        assert_eq!(items, vec!["x", "y"]);
     }
 
     #[test]

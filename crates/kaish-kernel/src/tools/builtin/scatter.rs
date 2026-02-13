@@ -1,21 +1,20 @@
 //! scatter — Fan out input items for parallel processing.
 //!
-//! Scatter reads input (lines or JSON array), splits into items,
-//! and sets up parallel execution context. Used with `gather` to
-//! collect results.
+//! Scatter requires structured data from upstream (split/seq/glob/find).
+//! kaish does not split implicitly — pipe through `split` first.
 //!
 //! # Usage
 //!
 //! ```text
-//! echo "a\nb\nc" | scatter | process ${ITEM} | gather
-//! scatter as=URL limit=4                      # bind to ${URL}, max 4 parallel
+//! split "a,b,c" "," | scatter | process ${ITEM} | gather
+//! seq 1 10 | scatter as=N limit=4 | process ${N} | gather
 //! ```
 
 use async_trait::async_trait;
 
 use crate::ast::Value;
 use crate::interpreter::{ExecResult, OutputData};
-use crate::scheduler::parse_scatter_options;
+use crate::scheduler::{extract_items, parse_scatter_options};
 use crate::tools::{ExecContext, ParamSchema, Tool, ToolArgs, ToolSchema};
 
 /// Scatter tool: fan out items for parallel processing.
@@ -51,9 +50,14 @@ impl Tool for Scatter {
         // Parse options for reporting
         let opts = parse_scatter_options(&args);
 
-        // Get input
-        let input = ctx.take_stdin().unwrap_or_default();
-        let items = split_items(&input);
+        // Get structured data and text from stdin
+        let data = ctx.take_stdin_data();
+        let text = ctx.take_stdin().unwrap_or_default();
+
+        let items = match extract_items(data.as_ref(), &text) {
+            Ok(items) => items,
+            Err(msg) => return ExecResult::failure(1, msg),
+        };
 
         if items.is_empty() {
             return ExecResult::with_output(OutputData::text(""));
@@ -73,61 +77,21 @@ impl Tool for Scatter {
     }
 }
 
-/// Split input into items (by newlines or JSON array).
-fn split_items(input: &str) -> Vec<String> {
-    let trimmed = input.trim();
-
-    // Try to parse as JSON array first
-    if trimmed.starts_with('[')
-        && let Ok(arr) = serde_json::from_str::<Vec<serde_json::Value>>(trimmed) {
-            return arr
-                .into_iter()
-                .map(|v| match v {
-                    serde_json::Value::String(s) => s,
-                    other => other.to_string(),
-                })
-                .collect();
-        }
-
-    // Fall back to line splitting
-    trimmed
-        .lines()
-        .map(|s| s.to_string())
-        .filter(|s| !s.is_empty())
-        .collect()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    #[test]
-    fn test_split_items_lines() {
-        let items = split_items("one\ntwo\nthree");
-        assert_eq!(items, vec!["one", "two", "three"]);
-    }
-
-    #[test]
-    fn test_split_items_json() {
-        let items = split_items(r#"["a", "b", "c"]"#);
-        assert_eq!(items, vec!["a", "b", "c"]);
-    }
-
-    #[test]
-    fn test_split_items_empty() {
-        let items = split_items("");
-        assert!(items.is_empty());
-    }
-
     #[tokio::test]
-    async fn test_scatter_with_input() {
+    async fn test_scatter_with_structured_data() {
         use crate::vfs::{MemoryFs, VfsRouter};
         use std::sync::Arc;
 
         let mut vfs = VfsRouter::new();
         vfs.mount("/", MemoryFs::new());
         let mut ctx = ExecContext::new(Arc::new(vfs));
-        ctx.set_stdin("item1\nitem2\nitem3".to_string());
+        // Simulate output from split/seq — structured JSON array
+        let data = Value::Json(serde_json::json!(["item1", "item2", "item3"]));
+        ctx.set_stdin_with_data("item1\nitem2\nitem3".to_string(), Some(data));
 
         let result = Scatter.execute(ToolArgs::new(), &mut ctx).await;
         assert!(result.ok());
@@ -150,6 +114,39 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_scatter_multiline_is_one_item() {
+        use crate::vfs::{MemoryFs, VfsRouter};
+        use std::sync::Arc;
+
+        let mut vfs = VfsRouter::new();
+        vfs.mount("/", MemoryFs::new());
+        let mut ctx = ExecContext::new(Arc::new(vfs));
+        // Multi-line text without structured data = one item (no implicit splitting)
+        ctx.set_stdin("a\nb\nc".to_string());
+
+        let result = Scatter.execute(ToolArgs::new(), &mut ctx).await;
+        assert!(result.ok());
+        assert!(result.out.contains("1 items"), "should be 1 item: {}", result.out);
+    }
+
+    #[tokio::test]
+    async fn test_scatter_single_line_text() {
+        use crate::vfs::{MemoryFs, VfsRouter};
+        use std::sync::Arc;
+
+        let mut vfs = VfsRouter::new();
+        vfs.mount("/", MemoryFs::new());
+        let mut ctx = ExecContext::new(Arc::new(vfs));
+        // Single-line text is fine — one item
+        ctx.set_stdin("hello".to_string());
+
+        let result = Scatter.execute(ToolArgs::new(), &mut ctx).await;
+        assert!(result.ok());
+        assert!(result.out.contains("1 items"));
+        assert!(result.out.contains("hello"));
+    }
+
+    #[tokio::test]
     async fn test_scatter_with_options() {
         use crate::vfs::{MemoryFs, VfsRouter};
         use std::sync::Arc;
@@ -157,7 +154,8 @@ mod tests {
         let mut vfs = VfsRouter::new();
         vfs.mount("/", MemoryFs::new());
         let mut ctx = ExecContext::new(Arc::new(vfs));
-        ctx.set_stdin("a\nb".to_string());
+        let data = Value::Json(serde_json::json!(["a", "b"]));
+        ctx.set_stdin_with_data("a\nb".to_string(), Some(data));
 
         let mut args = ToolArgs::new();
         args.named.insert("as".to_string(), Value::String("URL".to_string()));

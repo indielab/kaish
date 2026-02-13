@@ -59,6 +59,8 @@ pub enum IssueCode {
     ForLoopScalarVar,
     /// Unquoted glob pattern that won't expand (kaish has no implicit globbing).
     ShellGlobPattern,
+    /// scatter without gather — parallel results would be lost.
+    ScatterWithoutGather,
 }
 
 impl IssueCode {
@@ -83,6 +85,7 @@ impl IssueCode {
             IssueCode::ExtraPositionalArgs => "W005",
             IssueCode::ForLoopScalarVar => "E012",
             IssueCode::ShellGlobPattern => "E013",
+            IssueCode::ScatterWithoutGather => "E014",
         }
     }
 
@@ -99,7 +102,8 @@ impl IssueCode {
             | IssueCode::InvalidCount
             | IssueCode::DiffNeedsTwoFiles
             | IssueCode::ForLoopScalarVar
-            | IssueCode::ShellGlobPattern => Severity::Error,
+            | IssueCode::ShellGlobPattern
+            | IssueCode::ScatterWithoutGather => Severity::Error,
 
             // These are warnings because context matters:
             // - MissingRequiredArg: might be provided by pipeline stdin or environment

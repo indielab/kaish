@@ -525,3 +525,99 @@ async fn validation_allows_printf_pattern() {
 
     assert!(result.is_ok(), "printf with pattern should pass validation");
 }
+
+// ============================================================================
+// Scatter/gather validation tests (E014)
+// ============================================================================
+
+#[tokio::test]
+async fn validation_blocks_scatter_without_gather() {
+    let kernel = make_kernel().await;
+    let result = kernel.execute("seq 1 3 | scatter | echo hi").await;
+
+    assert!(result.is_err(), "scatter without gather should fail validation");
+    let err = result.unwrap_err().to_string();
+    assert!(
+        err.contains("gather") || err.contains("E014"),
+        "error should mention gather or E014: {}",
+        err
+    );
+}
+
+#[tokio::test]
+async fn validation_allows_scatter_with_gather() {
+    let kernel = make_kernel().await;
+    // seq | scatter | echo | gather should pass validation
+    let result = kernel.execute("seq 1 3 | scatter | echo \"hi\" | gather").await;
+
+    assert!(result.is_ok(), "scatter with gather should pass validation: {:?}", result.err());
+}
+
+// ============================================================================
+// Scatter/gather explicit splitting pipeline tests
+// ============================================================================
+
+#[tokio::test]
+async fn scatter_seq_structured_data() {
+    let kernel = make_kernel().await;
+    // seq produces structured JSON array, scatter consumes it
+    let result = kernel.execute(r#"seq 1 3 | scatter | echo "$ITEM" | gather"#).await;
+
+    assert!(result.is_ok(), "seq | scatter | gather should pass: {:?}", result.err());
+    let exec = result.unwrap();
+    assert!(exec.ok(), "pipeline should succeed: {}", exec.err);
+    assert!(exec.out.contains("1"), "should contain 1: {}", exec.out);
+    assert!(exec.out.contains("2"), "should contain 2: {}", exec.out);
+    assert!(exec.out.contains("3"), "should contain 3: {}", exec.out);
+}
+
+#[tokio::test]
+async fn scatter_split_structured_data() {
+    let kernel = make_kernel().await;
+    // split produces structured JSON array, scatter consumes it
+    let result = kernel.execute(r#"split "a,b,c" "," | scatter as=X | echo "got $X" | gather"#).await;
+
+    assert!(result.is_ok(), "split | scatter | gather should pass: {:?}", result.err());
+    let exec = result.unwrap();
+    assert!(exec.ok(), "pipeline should succeed: {}", exec.err);
+    assert!(exec.out.contains("got a"), "should contain 'got a': {}", exec.out);
+    assert!(exec.out.contains("got b"), "should contain 'got b': {}", exec.out);
+    assert!(exec.out.contains("got c"), "should contain 'got c': {}", exec.out);
+}
+
+#[tokio::test]
+async fn scatter_split_stdin_pipe() {
+    let kernel = make_kernel().await;
+    // echo | split | scatter — split reads from stdin
+    let result = kernel.execute(r#"echo "x,y,z" | split "," | scatter as=V | echo "got $V" | gather"#).await;
+
+    assert!(result.is_ok(), "echo | split | scatter should pass: {:?}", result.err());
+    let exec = result.unwrap();
+    assert!(exec.ok(), "pipeline should succeed: {}", exec.err);
+    assert!(exec.out.contains("got x"), "should contain 'got x': {}", exec.out);
+    assert!(exec.out.contains("got y"), "should contain 'got y': {}", exec.out);
+    assert!(exec.out.contains("got z"), "should contain 'got z': {}", exec.out);
+}
+
+#[tokio::test]
+async fn scatter_single_item() {
+    let kernel = make_kernel().await;
+    // Single-line text (no splitting needed)
+    let result = kernel.execute(r#"echo "hello" | scatter | echo "$ITEM" | gather"#).await;
+
+    assert!(result.is_ok(), "single item scatter should pass: {:?}", result.err());
+    let exec = result.unwrap();
+    assert!(exec.ok(), "pipeline should succeed: {}", exec.err);
+    assert!(exec.out.contains("hello"), "should contain 'hello': {}", exec.out);
+}
+
+#[tokio::test]
+async fn scatter_empty_input() {
+    let kernel = make_kernel().await;
+    // Empty input to scatter should succeed with no output
+    let result = kernel.execute(r#"split "" "," | scatter | echo "$ITEM" | gather"#).await;
+
+    assert!(result.is_ok(), "empty scatter should pass: {:?}", result.err());
+    let exec = result.unwrap();
+    assert!(exec.ok(), "pipeline should succeed: {}", exec.err);
+}

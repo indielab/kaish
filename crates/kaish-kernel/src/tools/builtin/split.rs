@@ -46,10 +46,11 @@ impl Tool for Split {
 
     fn schema(&self) -> ToolSchema {
         ToolSchema::new("split", "Split a string into an array")
-            .param(ParamSchema::required(
+            .param(ParamSchema::optional(
                 "string",
                 "string",
-                "String to split",
+                Value::Null,
+                "String to split (reads from stdin if omitted)",
             ))
             .param(ParamSchema::optional(
                 "delimiter",
@@ -73,17 +74,28 @@ impl Tool for Split {
             .example("Split on delimiter", "split \"a:b:c\" \":\"")
             .example("Split on regex", "split \"a1b2c3\" -r \"[0-9]\"")
             .example("Limit splits", "split \"a:b:c:d\" \":\" --limit=2")
+            .example("Split stdin", "echo \"a,b,c\" | split \",\"")
+            .example("Split stdin on whitespace", "echo \"a b c\" | split")
     }
 
-    async fn execute(&self, args: ToolArgs, _ctx: &mut ExecContext) -> ExecResult {
-        // Get the input string
-        let input = match args.get_string("string", 0) {
-            Some(s) => s,
-            None => return ExecResult::failure(1, "split: missing string argument"),
+    async fn execute(&self, args: ToolArgs, ctx: &mut ExecContext) -> ExecResult {
+        // Determine input string and delimiter position.
+        // When stdin is available AND there's no explicit string= named arg,
+        // read input from stdin and shift positionals so pos[0] = delimiter.
+        let has_named_string = args.named.contains_key("string");
+        let stdin = ctx.take_stdin();
+        let (input, delim_idx) = if let Some(s) = stdin.filter(|s| !s.is_empty() && !has_named_string) {
+            // Stdin mode: input from pipe, positional[0] is the delimiter
+            (s.trim_end_matches('\n').to_string(), 0usize)
+        } else if let Some(s) = args.get_string("string", 0) {
+            // Positional/named mode: first arg is the string
+            (s, 1usize)
+        } else {
+            return ExecResult::failure(1, "split: no input (provide string argument or pipe stdin)");
         };
 
-        // Get optional parameters
-        let delimiter = args.get_string("delimiter", 1);
+        // Get optional parameters — delimiter position shifts when using stdin
+        let delimiter = args.get_string("delimiter", delim_idx);
         let regex_pat = args.get_string("regex", usize::MAX)
             .or_else(|| args.get_string("r", usize::MAX));
         let limit = args.get("limit", usize::MAX)
@@ -260,6 +272,53 @@ mod tests {
         let result = Split.execute(args, &mut ctx).await;
         assert!(result.ok());
         // Default whitespace split should handle multiple spaces
+        assert_eq!(result.out, "a\nb\nc");
+    }
+
+    #[tokio::test]
+    async fn test_split_stdin_with_delimiter() {
+        let mut ctx = make_ctx();
+        ctx.set_stdin("a,b,c".to_string());
+        let mut args = ToolArgs::new();
+        // Delimiter is positional[0] when reading from stdin
+        args.positional.push(Value::String(",".into()));
+
+        let result = Split.execute(args, &mut ctx).await;
+        assert!(result.ok());
+        assert_eq!(result.out, "a\nb\nc");
+    }
+
+    #[tokio::test]
+    async fn test_split_stdin_whitespace() {
+        let mut ctx = make_ctx();
+        ctx.set_stdin("hello world foo".to_string());
+        let args = ToolArgs::new();
+
+        let result = Split.execute(args, &mut ctx).await;
+        assert!(result.ok());
+        assert_eq!(result.out, "hello\nworld\nfoo");
+    }
+
+    #[tokio::test]
+    async fn test_split_no_input_error() {
+        let mut ctx = make_ctx();
+        let args = ToolArgs::new();
+
+        let result = Split.execute(args, &mut ctx).await;
+        assert!(!result.ok());
+        assert!(result.err.contains("no input"));
+    }
+
+    #[tokio::test]
+    async fn test_split_stdin_trailing_newline() {
+        let mut ctx = make_ctx();
+        // Pipelines typically produce trailing newlines
+        ctx.set_stdin("a,b,c\n".to_string());
+        let mut args = ToolArgs::new();
+        args.positional.push(Value::String(",".into()));
+
+        let result = Split.execute(args, &mut ctx).await;
+        assert!(result.ok());
         assert_eq!(result.out, "a\nb\nc");
     }
 }

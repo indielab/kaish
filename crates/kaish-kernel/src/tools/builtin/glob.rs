@@ -194,6 +194,12 @@ impl Tool for Glob {
             })
             .collect();
 
+        // Build JSON array for structured pipeline flow (same pattern as seq/split/find)
+        let json_array: Vec<serde_json::Value> = nodes
+            .iter()
+            .map(|n| serde_json::Value::String(n.name.clone()))
+            .collect();
+
         // Null-separated mode returns plain text for xargs compatibility
         if null_sep {
             let output: String = nodes.iter()
@@ -203,7 +209,9 @@ impl Tool for Glob {
             return ExecResult::success(output);
         }
 
-        ExecResult::with_output(OutputData::nodes(nodes))
+        let mut result = ExecResult::with_output(OutputData::nodes(nodes));
+        result.data = Some(Value::Json(serde_json::Value::Array(json_array)));
+        result
     }
 }
 
@@ -313,6 +321,31 @@ mod tests {
         let result = Glob.execute(args, &mut ctx).await;
         assert!(result.ok());
         assert!(result.out.contains(".hidden"));
+    }
+
+    #[tokio::test]
+    async fn test_glob_result_data() {
+        let mut ctx = make_ctx().await;
+        let mut args = ToolArgs::new();
+        args.positional.push(Value::String("**/*.rs".into()));
+
+        let result = Glob.execute(args, &mut ctx).await;
+        assert!(result.ok());
+        // result.data should be a JSON array of path strings
+        let data = result.data.expect("glob should set result.data");
+        if let Value::Json(serde_json::Value::Array(arr)) = data {
+            assert!(!arr.is_empty(), "should have matched .rs files");
+            // All entries should be strings
+            for entry in &arr {
+                assert!(entry.is_string(), "each entry should be a string: {:?}", entry);
+            }
+            // Should contain our test files
+            let paths: Vec<&str> = arr.iter().filter_map(|v| v.as_str()).collect();
+            assert!(paths.iter().any(|p| p.contains("main.rs")));
+            assert!(paths.iter().any(|p| p.contains("lib.rs")));
+        } else {
+            panic!("Expected JSON array, got: {:?}", data);
+        }
     }
 
     #[tokio::test]

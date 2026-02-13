@@ -26,7 +26,7 @@ use std::sync::Arc;
 use anyhow::Result;
 use async_trait::async_trait;
 
-use crate::ast::Command;
+use crate::ast::{Command, Value};
 use crate::backend::BackendError;
 use crate::interpreter::{apply_output_format, ExecResult};
 use crate::scheduler::build_tool_args;
@@ -111,6 +111,10 @@ impl CommandDispatcher for BackendDispatcher {
                     tool_result.stderr,
                 );
                 exec.output = tool_result.output;
+                // Restore structured data from ToolResult (preserved through backend roundtrip)
+                if let Some(json_data) = tool_result.data {
+                    exec.data = Some(Value::Json(json_data));
+                }
                 exec
             }
             Err(BackendError::ToolNotFound(_)) => {
