@@ -23,15 +23,14 @@ pub struct ResourceWatcher {
     path_to_uri: RwLock<HashMap<PathBuf, String>>,
     uri_to_path: RwLock<HashMap<String, PathBuf>>,
     watcher: Mutex<Option<RecommendedWatcher>>,
-    peer: Arc<OnceLock<Peer<RoleServer>>>,
 }
 
 impl ResourceWatcher {
-    pub fn new() -> Arc<Self> {
+    /// Create a new watcher sharing the handler's peer storage.
+    pub fn new(peer: Arc<OnceLock<Peer<RoleServer>>>) -> Arc<Self> {
         // Bounded channel — intermediate events can be dropped since MCP
         // notifications are idempotent ("this URI changed").
         let (event_tx, event_rx) = mpsc::channel::<PathBuf>(256);
-        let peer = Arc::new(OnceLock::new());
 
         let watcher = Self::create_watcher(event_tx);
         if watcher.is_none() {
@@ -43,7 +42,6 @@ impl ResourceWatcher {
             path_to_uri: RwLock::new(HashMap::new()),
             uri_to_path: RwLock::new(HashMap::new()),
             watcher: Mutex::new(watcher),
-            peer: peer.clone(),
         });
 
         // Weak ref breaks the cycle: watcher → notify closure → tx → task → watcher.
@@ -52,13 +50,6 @@ impl ResourceWatcher {
         tokio::spawn(Self::notification_task(watcher_weak, peer, event_rx));
 
         this
-    }
-
-    /// Store the MCP peer handle for sending notifications.
-    /// Called from the subscribe handler where context is available.
-    pub fn set_peer(&self, peer: Peer<RoleServer>) {
-        // OnceLock::set returns Err if already set — that's fine, same peer.
-        let _ = self.peer.set(peer);
     }
 
     /// Subscribe to updates for a resource URI.
@@ -173,9 +164,13 @@ impl ResourceWatcher {
 mod tests {
     use super::*;
 
+    fn test_peer() -> Arc<OnceLock<Peer<RoleServer>>> {
+        Arc::new(OnceLock::new())
+    }
+
     #[tokio::test]
     async fn test_subscribe_unsubscribe() {
-        let watcher = ResourceWatcher::new();
+        let watcher = ResourceWatcher::new(test_peer());
 
         watcher
             .subscribe("kaish://vfs/tmp".to_string(), None)
@@ -188,7 +183,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_multiple_subscriptions() {
-        let watcher = ResourceWatcher::new();
+        let watcher = ResourceWatcher::new(test_peer());
 
         watcher
             .subscribe("kaish://vfs/a".to_string(), None)
@@ -205,14 +200,14 @@ mod tests {
 
     #[tokio::test]
     async fn test_unsubscribe_nonexistent() {
-        let watcher = ResourceWatcher::new();
+        let watcher = ResourceWatcher::new(test_peer());
         // Should not panic
         watcher.unsubscribe("kaish://vfs/nonexistent").await;
     }
 
     #[tokio::test]
     async fn test_duplicate_subscribe() {
-        let watcher = ResourceWatcher::new();
+        let watcher = ResourceWatcher::new(test_peer());
 
         watcher
             .subscribe("kaish://vfs/a".to_string(), None)
@@ -234,7 +229,7 @@ mod tests {
         // Canonicalize to match what ResourceWatcher stores internally
         let canonical = std::fs::canonicalize(&file).unwrap();
 
-        let watcher = ResourceWatcher::new();
+        let watcher = ResourceWatcher::new(test_peer());
         let uri = "kaish://vfs/tmp/kaish-path-map-test/mapped.txt".to_string();
 
         watcher.subscribe(uri.clone(), Some(file.clone())).await;
@@ -256,7 +251,7 @@ mod tests {
         std::fs::write(&file, "").unwrap();
         let canonical = std::fs::canonicalize(&file).unwrap();
 
-        let watcher = ResourceWatcher::new();
+        let watcher = ResourceWatcher::new(test_peer());
         let uri = "kaish://vfs/tmp/test.txt".to_string();
 
         watcher.subscribe(uri.clone(), Some(file.clone())).await;
@@ -281,7 +276,7 @@ mod tests {
         std::fs::write(&file_path, "initial").unwrap();
         let canonical = std::fs::canonicalize(&file_path).unwrap();
 
-        let watcher = ResourceWatcher::new();
+        let watcher = ResourceWatcher::new(test_peer());
         let uri = "kaish://vfs/tmp/kaish-watcher-test/watched.txt".to_string();
 
         // Subscribe with the real path

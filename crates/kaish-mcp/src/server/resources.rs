@@ -3,7 +3,6 @@
 //! Exposes VFS contents as MCP resources with the `kaish://vfs/` URI scheme.
 
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 
 use anyhow::{bail, Context, Result};
 use kaish_kernel::vfs::{Filesystem, VfsRouter};
@@ -54,7 +53,7 @@ pub struct ResourceInfo {
 
 /// List resources under a VFS path.
 pub async fn list_resources(
-    vfs: &Arc<VfsRouter>,
+    vfs: &VfsRouter,
     path: &Path,
 ) -> Result<Vec<ResourceInfo>> {
     let entries = vfs.list(path).await.context("Failed to list VFS path")?;
@@ -97,7 +96,7 @@ pub async fn list_resources(
 ///
 /// Returns an error if the file exceeds `MAX_RESOURCE_SIZE` (16 MB) to prevent OOM.
 pub async fn read_resource(
-    vfs: &Arc<VfsRouter>,
+    vfs: &VfsRouter,
     path: &Path,
 ) -> Result<ResourceContent> {
     let metadata = vfs.stat(path).await.context("Failed to stat VFS path")?;

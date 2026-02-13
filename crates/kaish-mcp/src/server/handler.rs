@@ -5,7 +5,7 @@
 //! notifications, prompt routing, and resource subscriptions.
 
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 use anyhow::Context as _;
 
@@ -16,17 +16,20 @@ use rmcp::handler::server::wrapper::Parameters;
 use rmcp::model::{
     Annotated, CallToolRequestParams, CallToolResult, Content, GetPromptRequestParams,
     GetPromptResult, Implementation, ListPromptsResult, ListResourceTemplatesResult,
-    ListResourcesResult, ListToolsResult, PaginatedRequestParams, ProgressNotificationParam,
-    ProtocolVersion, RawResource, RawResourceTemplate, ReadResourceRequestParams,
-    ReadResourceResult, ResourceContents, ServerCapabilities, ServerInfo,
-    SubscribeRequestParams, UnsubscribeRequestParams,
+    ListResourcesResult, ListToolsResult, LoggingLevel, LoggingMessageNotificationParam,
+    PaginatedRequestParams, ProgressNotificationParam, ProtocolVersion, RawResource,
+    RawResourceTemplate, ReadResourceRequestParams, ReadResourceResult, ResourceContents,
+    ServerCapabilities, ServerInfo, SetLevelRequestParams, SubscribeRequestParams,
+    UnsubscribeRequestParams,
 };
 use rmcp::schemars::{self, JsonSchema};
-use rmcp::service::{RequestContext, RoleServer};
+use rmcp::service::{NotificationContext, Peer, RequestContext, RoleServer};
 use rmcp::ErrorData as McpError;
 use rmcp::model::{PromptMessage, PromptMessageRole};
 use rmcp::{prompt, prompt_router, tool, tool_router};
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
+use tokio::sync::RwLock;
 
 use kaish_kernel::help::{get_help, HelpTopic};
 use kaish_kernel::vfs::{LocalFs, MemoryFs, VfsRouter};
@@ -41,14 +44,33 @@ use super::subscriptions::ResourceWatcher;
 pub struct KaishServerHandler {
     /// Server configuration.
     config: McpServerConfig,
-    /// VFS router for resource access.
-    vfs: Arc<VfsRouter>,
+    /// VFS router for resource access. RwLock allows roots to mount dynamically.
+    vfs: Arc<RwLock<VfsRouter>>,
     /// Tool router.
     tool_router: ToolRouter<Self>,
     /// Prompt router.
     prompt_router: PromptRouter<Self>,
     /// Resource watcher (subscription tracking + file watching).
     watcher: Arc<ResourceWatcher>,
+    /// MCP peer handle, shared with ResourceWatcher.
+    peer: Arc<OnceLock<Peer<RoleServer>>>,
+    /// Minimum logging level requested by client. None = logging not requested.
+    log_level: Arc<RwLock<Option<LoggingLevel>>>,
+}
+
+/// Map LoggingLevel to a numeric severity for comparison.
+/// Debug=0 (least severe) through Emergency=7 (most severe).
+fn severity(level: LoggingLevel) -> u8 {
+    match level {
+        LoggingLevel::Debug => 0,
+        LoggingLevel::Info => 1,
+        LoggingLevel::Notice => 2,
+        LoggingLevel::Warning => 3,
+        LoggingLevel::Error => 4,
+        LoggingLevel::Critical => 5,
+        LoggingLevel::Alert => 6,
+        LoggingLevel::Emergency => 7,
+    }
 }
 
 impl KaishServerHandler {
@@ -80,13 +102,67 @@ impl KaishServerHandler {
         let mount_point = local_root.to_string_lossy().to_string();
         vfs.mount(&mount_point, LocalFs::new(local_root));
 
+        let peer = Arc::new(OnceLock::new());
+
         Ok(Self {
             config,
-            vfs: Arc::new(vfs),
+            vfs: Arc::new(RwLock::new(vfs)),
             tool_router: Self::tool_router(),
             prompt_router: Self::prompt_router(),
-            watcher: ResourceWatcher::new(),
+            watcher: ResourceWatcher::new(peer.clone()),
+            peer,
+            log_level: Arc::new(RwLock::new(None)),
         })
+    }
+
+    /// Capture the peer handle on first contact. Idempotent.
+    fn ensure_peer(&self, peer: &Peer<RoleServer>) {
+        // OnceLock::set returns Err if already set — that's fine, same peer.
+        let _ = self.peer.set(peer.clone());
+    }
+
+    /// Send a structured log message to the client if logging is enabled
+    /// and the message meets the minimum severity threshold.
+    async fn log_to_client(&self, level: LoggingLevel, logger: &str, data: impl Into<Value>) {
+        let min_level = *self.log_level.read().await;
+        if min_level.is_none_or(|min| severity(level) < severity(min)) {
+            return;
+        }
+        if let Some(peer) = self.peer.get() {
+            // Explicitly ignored: logging notifications are best-effort
+            let _ = peer
+                .notify_logging_message(LoggingMessageNotificationParam {
+                    level,
+                    logger: Some(logger.to_string()),
+                    data: data.into(),
+                })
+                .await;
+        }
+    }
+
+    /// Fetch client roots and mount them in the VFS.
+    async fn refresh_roots(&self) {
+        let Some(peer) = self.peer.get() else { return };
+        let roots = match peer.list_roots().await {
+            Ok(result) => result.roots,
+            Err(e) => {
+                tracing::warn!(error = %e, "Failed to list roots");
+                return;
+            }
+        };
+
+        let mut vfs = self.vfs.write().await;
+        for root in &roots {
+            if let Some(path_str) = root.uri.strip_prefix("file://") {
+                let path = PathBuf::from(path_str);
+                let mount_point = path.to_string_lossy().to_string();
+                // Only mount if not already mounted (don't clobber existing mounts)
+                if !vfs.list_mounts().iter().any(|m| m.path == path) && path.exists() {
+                    tracing::info!(path = %path.display(), name = ?root.name, "Mounting client root");
+                    vfs.mount(&mount_point, LocalFs::new(path));
+                }
+            }
+        }
     }
 }
 
@@ -259,7 +335,7 @@ impl KaishServerHandler {
 }
 
 // Manual ServerHandler impl — replaces #[tool_handler] for full control
-// over progress notifications, prompts, and subscriptions.
+// over progress notifications, prompts, subscriptions, logging, and roots.
 impl rmcp::ServerHandler for KaishServerHandler {
     fn get_info(&self) -> ServerInfo {
         ServerInfo {
@@ -269,6 +345,7 @@ impl rmcp::ServerHandler for KaishServerHandler {
                 .enable_resources()
                 .enable_resources_subscribe()
                 .enable_prompts()
+                .enable_logging()
                 .build(),
             server_info: Implementation::from_build_env(),
             instructions: Some(
@@ -278,11 +355,49 @@ impl rmcp::ServerHandler for KaishServerHandler {
                  Builtins run in-process; external commands work via PATH fallback \
                  (just type `cargo build`, `git status`, etc.).\n\n\
                  Tools:\n\
-                 • execute — Run shell scripts (pipes, redirects, builtins, loops, functions)\n\n\
+                 • execute — Run shell scripts (pipes, redirects, builtins, loops, functions)\n\
+                 • help — Discover syntax, builtins, VFS mounts, capabilities\n\n\
                  Resources available via `kaish://vfs/{path}` URIs.\n\n\
                  Use 'help' tool for details."
                     .to_string(),
             ),
+        }
+    }
+
+    // -- Lifecycle --
+
+    fn on_initialized(
+        &self,
+        context: NotificationContext<RoleServer>,
+    ) -> impl std::future::Future<Output = ()> + Send + '_ {
+        self.ensure_peer(&context.peer);
+        async {
+            self.refresh_roots().await;
+        }
+    }
+
+    fn on_roots_list_changed(
+        &self,
+        context: NotificationContext<RoleServer>,
+    ) -> impl std::future::Future<Output = ()> + Send + '_ {
+        self.ensure_peer(&context.peer);
+        async {
+            self.refresh_roots().await;
+        }
+    }
+
+    // -- Logging --
+
+    fn set_level(
+        &self,
+        request: SetLevelRequestParams,
+        context: RequestContext<RoleServer>,
+    ) -> impl std::future::Future<Output = Result<(), McpError>> + Send + '_ {
+        self.ensure_peer(&context.peer);
+        async move {
+            *self.log_level.write().await = Some(request.level);
+            tracing::info!(level = ?request.level, "Client set logging level");
+            Ok(())
         }
     }
 
@@ -305,6 +420,10 @@ impl rmcp::ServerHandler for KaishServerHandler {
         request: CallToolRequestParams,
         context: RequestContext<RoleServer>,
     ) -> Result<CallToolResult, McpError> {
+        self.ensure_peer(&context.peer);
+
+        let tool_name = request.name.clone();
+
         // Extract progress token from request metadata
         use rmcp::model::RequestParamsMeta;
         let progress_token = request.progress_token();
@@ -323,17 +442,45 @@ impl rmcp::ServerHandler for KaishServerHandler {
                 .await;
         }
 
+        self.log_to_client(
+            LoggingLevel::Info,
+            "kaish",
+            Value::String(format!("Executing: {}", tool_name)),
+        )
+        .await;
+
         // Dispatch to tool router
         let tcc = ToolCallContext::new(self, request, context);
         let result = self.tool_router.call(tcc).await;
 
-        // Send "complete" progress notification (need to re-check token since context moved)
+        // Post-call logging
+        match &result {
+            Ok(_) => {
+                self.log_to_client(
+                    LoggingLevel::Debug,
+                    "kaish",
+                    Value::String(format!("Complete: {}", tool_name)),
+                )
+                .await;
+            }
+            Err(e) => {
+                self.log_to_client(
+                    LoggingLevel::Warning,
+                    "kaish",
+                    Value::String(format!("Error in {}: {}", tool_name, e.message)),
+                )
+                .await;
+            }
+        }
+
+        // Notify resource list changed — scripts may create/delete files
+        if let Some(peer) = self.peer.get() {
+            // Explicitly ignored: notification is best-effort
+            let _ = peer.notify_resource_list_changed().await;
+        }
+
+        // Log progress completion
         if let Some(token) = progress_token {
-            // Re-acquire peer from self — we can't use context.peer after move.
-            // Progress token was captured before the move, so we just log completion.
-            // Note: The peer was moved into ToolCallContext. For post-call progress,
-            // we'd need to restructure. For now, start-only progress is the pattern
-            // (the result itself signals completion).
             tracing::debug!(
                 progress_token = ?token,
                 "Tool call complete (progress token tracked)"
@@ -375,7 +522,7 @@ impl rmcp::ServerHandler for KaishServerHandler {
         self.prompt_router.get_prompt(prompt_context).await
     }
 
-    // -- Resources (unchanged) --
+    // -- Resources --
 
     async fn list_resource_templates(
         &self,
@@ -408,7 +555,8 @@ impl rmcp::ServerHandler for KaishServerHandler {
         _request: Option<PaginatedRequestParams>,
         _context: RequestContext<RoleServer>,
     ) -> Result<ListResourcesResult, McpError> {
-        let resources = resources::list_resources(&self.vfs, std::path::Path::new("/"))
+        let vfs = self.vfs.read().await;
+        let resources = resources::list_resources(&vfs, std::path::Path::new("/"))
             .await
             .map_err(|e| McpError::internal_error(e.to_string(), None))?;
 
@@ -447,7 +595,8 @@ impl rmcp::ServerHandler for KaishServerHandler {
             McpError::invalid_request(format!("Invalid resource URI: {}", uri), None)
         })?;
 
-        let content = resources::read_resource(&self.vfs, &path)
+        let vfs = self.vfs.read().await;
+        let content = resources::read_resource(&vfs, &path)
             .await
             .map_err(|e| McpError::internal_error(e.to_string(), None))?;
 
@@ -483,10 +632,11 @@ impl rmcp::ServerHandler for KaishServerHandler {
         context: RequestContext<RoleServer>,
     ) -> Result<(), McpError> {
         tracing::info!(uri = %request.uri, "Resource subscription added");
-        self.watcher.set_peer(context.peer.clone());
+        self.ensure_peer(&context.peer);
 
+        let vfs = self.vfs.read().await;
         let real_path = parse_resource_uri(&request.uri)
-            .and_then(|vfs_path| self.vfs.resolve_real_path(&vfs_path));
+            .and_then(|vfs_path| vfs.resolve_real_path(&vfs_path));
 
         self.watcher.subscribe(request.uri, real_path).await;
         Ok(())
@@ -539,6 +689,7 @@ mod tests {
         assert!(info.capabilities.tools.is_some());
         assert!(info.capabilities.resources.is_some());
         assert!(info.capabilities.prompts.is_some());
+        assert!(info.capabilities.logging.is_some());
 
         // Subscribe is advertised (backed by notify file watcher)
         let resources = info.capabilities.resources.unwrap();
@@ -629,5 +780,47 @@ mod tests {
             stderr_block.is_some(),
             "should have a [stderr] content block"
         );
+    }
+
+    #[test]
+    fn test_severity_ordering() {
+        assert!(severity(LoggingLevel::Debug) < severity(LoggingLevel::Info));
+        assert!(severity(LoggingLevel::Info) < severity(LoggingLevel::Notice));
+        assert!(severity(LoggingLevel::Notice) < severity(LoggingLevel::Warning));
+        assert!(severity(LoggingLevel::Warning) < severity(LoggingLevel::Error));
+        assert!(severity(LoggingLevel::Error) < severity(LoggingLevel::Critical));
+        assert!(severity(LoggingLevel::Critical) < severity(LoggingLevel::Alert));
+        assert!(severity(LoggingLevel::Alert) < severity(LoggingLevel::Emergency));
+    }
+
+    #[tokio::test]
+    async fn test_set_level_stores_level() {
+        let config = McpServerConfig::default();
+        let handler = KaishServerHandler::new(config).expect("handler creation failed");
+
+        // Initially no level set
+        assert!(handler.log_level.read().await.is_none());
+
+        // Simulate set_level by writing directly (no peer needed for storage test)
+        *handler.log_level.write().await = Some(LoggingLevel::Warning);
+        assert_eq!(*handler.log_level.read().await, Some(LoggingLevel::Warning));
+
+        // Update to a different level
+        *handler.log_level.write().await = Some(LoggingLevel::Debug);
+        assert_eq!(*handler.log_level.read().await, Some(LoggingLevel::Debug));
+    }
+
+    #[tokio::test]
+    async fn test_log_to_client_without_peer() {
+        let config = McpServerConfig::default();
+        let handler = KaishServerHandler::new(config).expect("handler creation failed");
+
+        // Enable logging at Debug level
+        *handler.log_level.write().await = Some(LoggingLevel::Debug);
+
+        // Should not panic even without a peer — just a no-op
+        handler
+            .log_to_client(LoggingLevel::Info, "test", Value::String("hello".into()))
+            .await;
     }
 }
