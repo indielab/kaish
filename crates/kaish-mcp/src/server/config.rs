@@ -118,6 +118,7 @@ pub struct ResourceMountConfig {
     pub vfs_path: String,
 }
 
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -176,4 +177,5 @@ vfs_path = "/"
         let config: McpServerConfig = toml::from_str(toml).expect("parse failed");
         assert_eq!(config.name, "kaish");
     }
+
 }

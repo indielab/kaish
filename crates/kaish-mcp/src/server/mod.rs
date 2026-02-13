@@ -30,7 +30,9 @@
 pub mod config;
 pub mod execute;
 pub mod handler;
+pub mod prompts;
 pub mod resources;
+pub mod subscriptions;
 
 pub use config::McpServerConfig;
 pub use handler::KaishServerHandler;

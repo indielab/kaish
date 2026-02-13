@@ -1,22 +1,31 @@
 //! MCP server handler implementation.
 //!
 //! Implements the rmcp::ServerHandler trait to expose kaish as an MCP server.
+//! Manual impl (no `#[tool_handler]`) for full control over progress
+//! notifications, prompt routing, and resource subscriptions.
 
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use anyhow::Context as _;
+
+use rmcp::handler::server::router::prompt::PromptRouter;
 use rmcp::handler::server::router::tool::ToolRouter;
+use rmcp::handler::server::tool::ToolCallContext;
 use rmcp::handler::server::wrapper::Parameters;
 use rmcp::model::{
-    Annotated, CallToolResult, Content, Implementation, ListResourceTemplatesResult,
-    ListResourcesResult, PaginatedRequestParams, ProtocolVersion, RawResource,
-    RawResourceTemplate, ReadResourceRequestParams, ReadResourceResult, ResourceContents,
-    ServerCapabilities, ServerInfo,
+    Annotated, CallToolRequestParams, CallToolResult, Content, GetPromptRequestParams,
+    GetPromptResult, Implementation, ListPromptsResult, ListResourceTemplatesResult,
+    ListResourcesResult, ListToolsResult, PaginatedRequestParams, ProgressNotificationParam,
+    ProtocolVersion, RawResource, RawResourceTemplate, ReadResourceRequestParams,
+    ReadResourceResult, ResourceContents, ServerCapabilities, ServerInfo,
+    SubscribeRequestParams, UnsubscribeRequestParams,
 };
 use rmcp::schemars::{self, JsonSchema};
 use rmcp::service::{RequestContext, RoleServer};
 use rmcp::ErrorData as McpError;
-use rmcp::{tool, tool_handler, tool_router};
+use rmcp::model::{PromptMessage, PromptMessageRole};
+use rmcp::{prompt, prompt_router, tool, tool_router};
 use serde::{Deserialize, Serialize};
 
 use kaish_kernel::help::{get_help, HelpTopic};
@@ -25,6 +34,7 @@ use kaish_kernel::vfs::{LocalFs, MemoryFs, VfsRouter};
 use super::config::McpServerConfig;
 use super::execute::{self, ExecuteParams};
 use super::resources::{self, parse_resource_uri, ResourceContent};
+use super::subscriptions::SubscriptionTracker;
 
 /// The kaish MCP server handler.
 #[derive(Clone)]
@@ -35,6 +45,10 @@ pub struct KaishServerHandler {
     vfs: Arc<VfsRouter>,
     /// Tool router.
     tool_router: ToolRouter<Self>,
+    /// Prompt router.
+    prompt_router: PromptRouter<Self>,
+    /// Resource subscription tracker.
+    subscriptions: Arc<SubscriptionTracker>,
 }
 
 impl KaishServerHandler {
@@ -48,8 +62,12 @@ impl KaishServerHandler {
         vfs.mount("/", MemoryFs::new());
         vfs.mount("/v", MemoryFs::new());
 
-        // Real /tmp for interop with other processes
-        vfs.mount("/tmp", LocalFs::new(PathBuf::from("/tmp")));
+        // Per-handler /tmp — isolated but on-disk for interop with external commands.
+        // Uses PID for uniqueness (one process = one session in stdio mode).
+        let tmp_dir = std::env::temp_dir().join(format!("kaish-{}", std::process::id()));
+        std::fs::create_dir_all(&tmp_dir)
+            .context("Failed to create per-handler /tmp directory")?;
+        vfs.mount("/tmp", LocalFs::new(tmp_dir));
 
         // Mount local filesystem at its real path for transparent access.
         // If HOME is not set, use a safe temp directory.
@@ -66,6 +84,8 @@ impl KaishServerHandler {
             config,
             vfs: Arc::new(vfs),
             tool_router: Self::tool_router(),
+            prompt_router: Self::prompt_router(),
+            subscriptions: SubscriptionTracker::new(),
         })
     }
 }
@@ -88,16 +108,6 @@ pub struct ExecuteInput {
     /// Timeout in milliseconds (default: 30000).
     #[schemars(description = "Timeout in milliseconds (default: 30000)")]
     pub timeout_ms: Option<u64>,
-}
-
-/// Help tool input schema.
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
-pub struct HelpInput {
-    /// Help topic or tool name.
-    #[schemars(
-        description = "Topic: 'overview', 'syntax', 'builtins', 'vfs', 'scatter', 'limits', or a tool name"
-    )]
-    pub topic: Option<String>,
 }
 
 #[tool_router]
@@ -150,34 +160,106 @@ impl KaishServerHandler {
             meta: None,
         })
     }
+}
 
-    /// Get help for kaish syntax, builtins, VFS, and capabilities.
-    #[tool(
-        description = "Get help for kaish syntax, builtins, VFS, and capabilities. Call without topic for overview."
+#[prompt_router(vis = "pub(crate)")]
+impl KaishServerHandler {
+    #[prompt(
+        name = "kaish-overview",
+        description = "What kaish is, topic list, quick examples"
     )]
-    async fn help(&self, input: Parameters<HelpInput>) -> Result<CallToolResult, McpError> {
-        let topic_str = input.0.topic.as_deref().unwrap_or("overview");
-        let topic = HelpTopic::parse_topic(topic_str);
+    pub(crate) async fn prompt_overview(&self) -> Result<GetPromptResult, McpError> {
+        let content = get_help(&HelpTopic::Overview, &[]);
+        Ok(GetPromptResult {
+            description: Some("kaish overview and quick reference".to_string()),
+            messages: vec![PromptMessage::new_text(PromptMessageRole::User, content)],
+        })
+    }
 
-        // For builtins topic, we need tool schemas from a temporary kernel
-        let content = if matches!(topic, HelpTopic::Builtins) || matches!(topic, HelpTopic::Tool(_))
-        {
-            // Create a temporary kernel to get tool schemas (isolated, no local fs needed)
-            let config = kaish_kernel::KernelConfig::isolated()
-                .with_skip_validation(true);
-            let kernel = kaish_kernel::Kernel::new(config)
-                .map_err(|e| McpError::internal_error(e.to_string(), None))?;
-            let schemas = kernel.tool_schemas();
-            get_help(&topic, &schemas)
+    #[prompt(
+        name = "kaish-syntax",
+        description = "Variables, quoting, pipes, control flow reference"
+    )]
+    pub(crate) async fn prompt_syntax(&self) -> Result<GetPromptResult, McpError> {
+        let content = get_help(&HelpTopic::Syntax, &[]);
+        Ok(GetPromptResult {
+            description: Some("kaish language syntax reference".to_string()),
+            messages: vec![PromptMessage::new_text(PromptMessageRole::User, content)],
+        })
+    }
+
+    #[prompt(
+        name = "kaish-builtins",
+        description = "List of all available builtins with descriptions"
+    )]
+    pub(crate) async fn prompt_builtins(
+        &self,
+        Parameters(params): Parameters<super::prompts::BuiltinsParams>,
+    ) -> Result<GetPromptResult, McpError> {
+        let (topic, description) = if let Some(tool_name) = params.tool {
+            (
+                HelpTopic::Tool(tool_name.clone()),
+                format!("Help for builtin: {}", tool_name),
+            )
         } else {
-            get_help(&topic, &[])
+            (
+                HelpTopic::Builtins,
+                "All available kaish builtins".to_string(),
+            )
         };
 
-        Ok(CallToolResult::success(vec![Content::text(content)]))
+        // Create a temporary kernel to get tool schemas
+        let config = kaish_kernel::KernelConfig::isolated().with_skip_validation(true);
+        let kernel = kaish_kernel::Kernel::new(config)
+            .map_err(|e| McpError::internal_error(e.to_string(), None))?;
+        let schemas = kernel.tool_schemas();
+        let content = get_help(&topic, &schemas);
+
+        Ok(GetPromptResult {
+            description: Some(description),
+            messages: vec![PromptMessage::new_text(PromptMessageRole::User, content)],
+        })
+    }
+
+    #[prompt(
+        name = "kaish-vfs",
+        description = "Virtual filesystem mounts, paths, backends"
+    )]
+    pub(crate) async fn prompt_vfs(&self) -> Result<GetPromptResult, McpError> {
+        let content = get_help(&HelpTopic::Vfs, &[]);
+        Ok(GetPromptResult {
+            description: Some("kaish VFS (virtual filesystem) reference".to_string()),
+            messages: vec![PromptMessage::new_text(PromptMessageRole::User, content)],
+        })
+    }
+
+    #[prompt(
+        name = "kaish-scatter",
+        description = "Parallel processing with scatter/gather (散/集)"
+    )]
+    pub(crate) async fn prompt_scatter(&self) -> Result<GetPromptResult, McpError> {
+        let content = get_help(&HelpTopic::Scatter, &[]);
+        Ok(GetPromptResult {
+            description: Some("Scatter/gather parallel processing reference".to_string()),
+            messages: vec![PromptMessage::new_text(PromptMessageRole::User, content)],
+        })
+    }
+
+    #[prompt(
+        name = "kaish-limits",
+        description = "Known limitations and workarounds"
+    )]
+    pub(crate) async fn prompt_limits(&self) -> Result<GetPromptResult, McpError> {
+        let content = get_help(&HelpTopic::Limits, &[]);
+        Ok(GetPromptResult {
+            description: Some("Known limitations and workarounds".to_string()),
+            messages: vec![PromptMessage::new_text(PromptMessageRole::User, content)],
+        })
     }
 }
 
-#[tool_handler]
+// Manual ServerHandler impl — replaces #[tool_handler] for full control
+// over progress notifications, prompts, and subscriptions.
 impl rmcp::ServerHandler for KaishServerHandler {
     fn get_info(&self) -> ServerInfo {
         ServerInfo {
@@ -185,6 +267,8 @@ impl rmcp::ServerHandler for KaishServerHandler {
             capabilities: ServerCapabilities::builder()
                 .enable_tools()
                 .enable_resources()
+
+                .enable_prompts()
                 .build(),
             server_info: Implementation::from_build_env(),
             instructions: Some(
@@ -194,14 +278,104 @@ impl rmcp::ServerHandler for KaishServerHandler {
                  Builtins run in-process; external commands work via PATH fallback \
                  (just type `cargo build`, `git status`, etc.).\n\n\
                  Tools:\n\
-                 • execute — Run shell scripts (pipes, redirects, builtins, loops, functions)\n\
-                 • help — Discover syntax, builtins, VFS mounts, capabilities\n\n\
+                 • execute — Run shell scripts (pipes, redirects, builtins, loops, functions)\n\n\
                  Resources available via `kaish://vfs/{path}` URIs.\n\n\
-                 Use 'help' first to learn what's available."
+                 Use 'help' tool for details."
                     .to_string(),
             ),
         }
     }
+
+    // -- Tools (manual dispatch with progress notifications) --
+
+    async fn list_tools(
+        &self,
+        _request: Option<PaginatedRequestParams>,
+        _context: RequestContext<RoleServer>,
+    ) -> Result<ListToolsResult, McpError> {
+        Ok(ListToolsResult {
+            tools: self.tool_router.list_all(),
+            meta: None,
+            next_cursor: None,
+        })
+    }
+
+    async fn call_tool(
+        &self,
+        request: CallToolRequestParams,
+        context: RequestContext<RoleServer>,
+    ) -> Result<CallToolResult, McpError> {
+        // Extract progress token from request metadata
+        use rmcp::model::RequestParamsMeta;
+        let progress_token = request.progress_token();
+
+        // Send "starting" progress notification
+        if let Some(ref token) = progress_token {
+            // Explicitly ignored: progress notifications are best-effort
+            let _ = context
+                .peer
+                .notify_progress(ProgressNotificationParam {
+                    progress_token: token.clone(),
+                    progress: 0.0,
+                    total: Some(1.0),
+                    message: Some("Starting".to_string()),
+                })
+                .await;
+        }
+
+        // Dispatch to tool router
+        let tcc = ToolCallContext::new(self, request, context);
+        let result = self.tool_router.call(tcc).await;
+
+        // Send "complete" progress notification (need to re-check token since context moved)
+        if let Some(token) = progress_token {
+            // Re-acquire peer from self — we can't use context.peer after move.
+            // Progress token was captured before the move, so we just log completion.
+            // Note: The peer was moved into ToolCallContext. For post-call progress,
+            // we'd need to restructure. For now, start-only progress is the pattern
+            // (the result itself signals completion).
+            tracing::debug!(
+                progress_token = ?token,
+                "Tool call complete (progress token tracked)"
+            );
+        }
+
+        result
+    }
+
+    fn get_tool(&self, name: &str) -> Option<rmcp::model::Tool> {
+        self.tool_router.get(name).cloned()
+    }
+
+    // -- Prompts --
+
+    async fn list_prompts(
+        &self,
+        _request: Option<PaginatedRequestParams>,
+        _context: RequestContext<RoleServer>,
+    ) -> Result<ListPromptsResult, McpError> {
+        Ok(ListPromptsResult {
+            prompts: self.prompt_router.list_all(),
+            meta: None,
+            next_cursor: None,
+        })
+    }
+
+    async fn get_prompt(
+        &self,
+        request: GetPromptRequestParams,
+        context: RequestContext<RoleServer>,
+    ) -> Result<GetPromptResult, McpError> {
+        let prompt_context = rmcp::handler::server::prompt::PromptContext::new(
+            self,
+            request.name,
+            request.arguments,
+            context,
+        );
+        self.prompt_router.get_prompt(prompt_context).await
+    }
+
+    // -- Resources (unchanged) --
 
     async fn list_resource_templates(
         &self,
@@ -234,27 +408,24 @@ impl rmcp::ServerHandler for KaishServerHandler {
         _request: Option<PaginatedRequestParams>,
         _context: RequestContext<RoleServer>,
     ) -> Result<ListResourcesResult, McpError> {
-        // List root VFS resources
         let resources = resources::list_resources(&self.vfs, std::path::Path::new("/"))
             .await
             .map_err(|e| McpError::internal_error(e.to_string(), None))?;
 
         let mcp_resources: Vec<Annotated<RawResource>> = resources
             .into_iter()
-            .map(|r| {
-                Annotated {
-                    raw: RawResource {
-                        uri: r.uri,
-                        name: r.name,
-                        title: None,
-                        description: r.description,
-                        mime_type: r.mime_type,
-                        size: None,
-                        icons: None,
-                        meta: None,
-                    },
-                    annotations: None,
-                }
+            .map(|r| Annotated {
+                raw: RawResource {
+                    uri: r.uri,
+                    name: r.name,
+                    title: None,
+                    description: r.description,
+                    mime_type: r.mime_type,
+                    size: None,
+                    icons: None,
+                    meta: None,
+                },
+                annotations: None,
             })
             .collect();
 
@@ -303,6 +474,28 @@ impl rmcp::ServerHandler for KaishServerHandler {
 
         Ok(ReadResourceResult { contents })
     }
+
+    // -- Subscriptions --
+
+    async fn subscribe(
+        &self,
+        request: SubscribeRequestParams,
+        _context: RequestContext<RoleServer>,
+    ) -> Result<(), McpError> {
+        tracing::info!(uri = %request.uri, "Resource subscription added");
+        self.subscriptions.subscribe(request.uri).await;
+        Ok(())
+    }
+
+    async fn unsubscribe(
+        &self,
+        request: UnsubscribeRequestParams,
+        _context: RequestContext<RoleServer>,
+    ) -> Result<(), McpError> {
+        tracing::info!(uri = %request.uri, "Resource subscription removed");
+        self.subscriptions.unsubscribe(&request.uri).await;
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -327,61 +520,24 @@ mod tests {
         assert!(info.instructions.is_some());
         let instructions = info.instructions.unwrap();
         assert!(instructions.contains("execute"));
-        assert!(instructions.contains("help"));
     }
 
-    #[tokio::test]
-    async fn test_help_overview() {
+    #[test]
+    fn test_get_info_capabilities() {
+        use rmcp::ServerHandler;
+
         let config = McpServerConfig::default();
         let handler = KaishServerHandler::new(config).expect("handler creation failed");
+        let info = handler.get_info();
 
-        let input = Parameters(HelpInput { topic: None });
-        let result = handler.help(input).await.expect("help failed");
+        // Verify all expected capabilities are enabled
+        assert!(info.capabilities.tools.is_some());
+        assert!(info.capabilities.resources.is_some());
+        assert!(info.capabilities.prompts.is_some());
 
-        assert!(!result.is_error.unwrap_or(false));
-        assert!(!result.content.is_empty());
-
-        // Check that the overview content is returned
-        if let RawContent::Text(text) = &result.content[0].raw {
-            assert!(text.text.contains("kaish"));
-            assert!(text.text.contains("help syntax"));
-        } else {
-            panic!("Expected text content");
-        }
-    }
-
-    #[tokio::test]
-    async fn test_help_syntax() {
-        let config = McpServerConfig::default();
-        let handler = KaishServerHandler::new(config).expect("handler creation failed");
-
-        let input = Parameters(HelpInput {
-            topic: Some("syntax".to_string()),
-        });
-        let result = handler.help(input).await.expect("help failed");
-
-        assert!(!result.is_error.unwrap_or(false));
-        if let RawContent::Text(text) = &result.content[0].raw {
-            assert!(text.text.contains("Variables"));
-        }
-    }
-
-    #[tokio::test]
-    async fn test_help_builtins() {
-        let config = McpServerConfig::default();
-        let handler = KaishServerHandler::new(config).expect("handler creation failed");
-
-        let input = Parameters(HelpInput {
-            topic: Some("builtins".to_string()),
-        });
-        let result = handler.help(input).await.expect("help failed");
-
-        assert!(!result.is_error.unwrap_or(false));
-        if let RawContent::Text(text) = &result.content[0].raw {
-            // Should list actual builtins from the kernel
-            assert!(text.text.contains("echo"));
-            assert!(text.text.contains("grep"));
-        }
+        // Subscribe is NOT advertised (VFS doesn't emit change events yet)
+        let resources = info.capabilities.resources.unwrap();
+        assert!(!resources.subscribe.unwrap_or(false));
     }
 
     #[tokio::test]
@@ -409,7 +565,10 @@ mod tests {
         }
 
         // Clean success → no structured_content (just text content blocks)
-        assert!(result.structured_content.is_none(), "success should not have structured_content");
+        assert!(
+            result.structured_content.is_none(),
+            "success should not have structured_content"
+        );
 
         // is_error should be false for success
         assert_eq!(result.is_error, Some(false));
@@ -432,7 +591,9 @@ mod tests {
         assert_eq!(result.is_error, Some(true));
 
         // structured_content should have error details
-        let structured = result.structured_content.expect("should have structured_content");
+        let structured = result
+            .structured_content
+            .expect("should have structured_content");
         assert_eq!(structured["ok"], false);
         assert_eq!(structured["code"], 127);
     }
@@ -459,6 +620,9 @@ mod tests {
                 false
             }
         });
-        assert!(stderr_block.is_some(), "should have a [stderr] content block");
+        assert!(
+            stderr_block.is_some(),
+            "should have a [stderr] content block"
+        );
     }
 }

@@ -1,21 +1,23 @@
 //! kaish-mcp: MCP server binary for kaish.
 //!
-//! This binary runs kaish as an MCP server over stdio transport.
+//! # Transport: stdio only
+//!
+//! kaish-mcp communicates exclusively over stdio. A shell server that exposes
+//! `$HOME` must not bind a network socket — any HTTP listener would make the
+//! user's filesystem reachable from the network.
+//!
+//! The secure remote-access pattern is:
+//!
+//! 1. `kaish serve` runs a persistent kernel over a Unix socket
+//!    (`$XDG_RUNTIME_DIR/kaish/<name>.sock`, mode 0600, Cap'n Proto RPC).
+//! 2. MCP clients connect to `kaish-mcp` over stdio (the security boundary).
+//! 3. Container runtimes work naturally: `docker exec`, `kubectl exec`, etc.
+//!    all provide a stdio pipe that kaish-mcp plugs into directly.
 //!
 //! # Usage
 //!
 //! ```bash
-//! # Run directly
 //! kaish-mcp
-//!
-//! # Configure in Claude Code's .mcp.json:
-//! # {
-//! #   "mcpServers": {
-//! #     "kaish": {
-//! #       "command": "kaish-mcp"
-//! #     }
-//! #   }
-//! # }
 //! ```
 
 use anyhow::{Context, Result};
@@ -75,10 +77,8 @@ async fn main() -> Result<()> {
         config.mcp_servers.len()
     );
 
-    // Create handler
     let handler = KaishServerHandler::new(config).context("Failed to create server handler")?;
 
-    // Create stdio transport and run the server
     tracing::info!("Serving on stdio");
 
     let service = handler
@@ -86,7 +86,6 @@ async fn main() -> Result<()> {
         .await
         .context("Failed to start MCP service")?;
 
-    // Wait for the service to complete
     service.waiting().await?;
 
     tracing::info!("Server shutdown complete");

@@ -18,7 +18,9 @@ path = "src/main.rs"
 
 [dependencies]
 kaish-kernel = { path = "../kaish-kernel", version = "0.2.0" }
-rmcp = { version = "0.14", default-features = true, features = ["client", "transport-child-process", "server", "transport-io", "macros"] }
+rmcp = { version = "0.15", default-features = true, features = [
+    "client", "transport-child-process", "server", "transport-io", "macros",
+] }
 tokio = { workspace = true }
 tokio-util = { workspace = true }
 async-trait = { workspace = true }
