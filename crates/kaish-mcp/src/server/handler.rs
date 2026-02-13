@@ -34,7 +34,7 @@ use kaish_kernel::vfs::{LocalFs, MemoryFs, VfsRouter};
 use super::config::McpServerConfig;
 use super::execute::{self, ExecuteParams};
 use super::resources::{self, parse_resource_uri, ResourceContent};
-use super::subscriptions::SubscriptionTracker;
+use super::subscriptions::ResourceWatcher;
 
 /// The kaish MCP server handler.
 #[derive(Clone)]
@@ -47,8 +47,8 @@ pub struct KaishServerHandler {
     tool_router: ToolRouter<Self>,
     /// Prompt router.
     prompt_router: PromptRouter<Self>,
-    /// Resource subscription tracker.
-    subscriptions: Arc<SubscriptionTracker>,
+    /// Resource watcher (subscription tracking + file watching).
+    watcher: Arc<ResourceWatcher>,
 }
 
 impl KaishServerHandler {
@@ -85,7 +85,7 @@ impl KaishServerHandler {
             vfs: Arc::new(vfs),
             tool_router: Self::tool_router(),
             prompt_router: Self::prompt_router(),
-            subscriptions: SubscriptionTracker::new(),
+            watcher: ResourceWatcher::new(),
         })
     }
 }
@@ -267,7 +267,7 @@ impl rmcp::ServerHandler for KaishServerHandler {
             capabilities: ServerCapabilities::builder()
                 .enable_tools()
                 .enable_resources()
-
+                .enable_resources_subscribe()
                 .enable_prompts()
                 .build(),
             server_info: Implementation::from_build_env(),
@@ -480,10 +480,15 @@ impl rmcp::ServerHandler for KaishServerHandler {
     async fn subscribe(
         &self,
         request: SubscribeRequestParams,
-        _context: RequestContext<RoleServer>,
+        context: RequestContext<RoleServer>,
     ) -> Result<(), McpError> {
         tracing::info!(uri = %request.uri, "Resource subscription added");
-        self.subscriptions.subscribe(request.uri).await;
+        self.watcher.set_peer(context.peer.clone());
+
+        let real_path = parse_resource_uri(&request.uri)
+            .and_then(|vfs_path| self.vfs.resolve_real_path(&vfs_path));
+
+        self.watcher.subscribe(request.uri, real_path).await;
         Ok(())
     }
 
@@ -493,7 +498,7 @@ impl rmcp::ServerHandler for KaishServerHandler {
         _context: RequestContext<RoleServer>,
     ) -> Result<(), McpError> {
         tracing::info!(uri = %request.uri, "Resource subscription removed");
-        self.subscriptions.unsubscribe(&request.uri).await;
+        self.watcher.unsubscribe(&request.uri).await;
         Ok(())
     }
 }
@@ -503,15 +508,15 @@ mod tests {
     use super::*;
     use rmcp::model::RawContent;
 
-    #[test]
-    fn test_handler_creation() {
+    #[tokio::test]
+    async fn test_handler_creation() {
         let config = McpServerConfig::default();
         let handler = KaishServerHandler::new(config).expect("handler creation failed");
         assert_eq!(handler.config.name, "kaish");
     }
 
-    #[test]
-    fn test_get_info() {
+    #[tokio::test]
+    async fn test_get_info() {
         use rmcp::ServerHandler;
 
         let config = McpServerConfig::default();
@@ -522,8 +527,8 @@ mod tests {
         assert!(instructions.contains("execute"));
     }
 
-    #[test]
-    fn test_get_info_capabilities() {
+    #[tokio::test]
+    async fn test_get_info_capabilities() {
         use rmcp::ServerHandler;
 
         let config = McpServerConfig::default();
@@ -535,9 +540,9 @@ mod tests {
         assert!(info.capabilities.resources.is_some());
         assert!(info.capabilities.prompts.is_some());
 
-        // Subscribe is NOT advertised (VFS doesn't emit change events yet)
+        // Subscribe is advertised (backed by notify file watcher)
         let resources = info.capabilities.resources.unwrap();
-        assert!(!resources.subscribe.unwrap_or(false));
+        assert!(resources.subscribe.unwrap_or(false));
     }
 
     #[tokio::test]
