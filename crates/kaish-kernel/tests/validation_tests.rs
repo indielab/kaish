@@ -4,11 +4,20 @@
 //! for scripts with Error-level issues, while allowing scripts with
 //! only Warning-level issues to execute.
 
-use kaish_kernel::Kernel;
+use std::path::PathBuf;
+
+use kaish_kernel::{Kernel, KernelConfig};
 
 /// Helper to create a transient kernel for testing.
 async fn make_kernel() -> Kernel {
     Kernel::transient().expect("should create kernel")
+}
+
+/// Helper to create a kernel with CWD in the repo (for tests that run external commands).
+fn make_repo_kernel() -> Kernel {
+    let config = KernelConfig::repl()
+        .with_cwd(PathBuf::from(env!("CARGO_MANIFEST_DIR")));
+    Kernel::new(config).expect("should create kernel")
 }
 
 // ============================================================================
@@ -372,9 +381,9 @@ async fn validation_allows_grep_pattern() {
 
 #[tokio::test]
 async fn validation_allows_find_pattern() {
-    let kernel = make_kernel().await;
-    // find takes -name patterns internally (must be quoted)
-    let result = kernel.execute("find . -name \"*.rs\"").await;
+    // Use repo-scoped kernel so `find .` walks the crate dir, not $HOME
+    let kernel = make_repo_kernel();
+    let result = kernel.execute("find . -name \"*.rs\" -maxdepth 2").await;
 
     // Should pass validation (find handles its own patterns)
     assert!(result.is_ok(), "find with pattern should pass validation");

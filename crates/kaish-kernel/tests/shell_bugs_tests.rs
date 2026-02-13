@@ -831,10 +831,10 @@ async fn test_compound_short_circuit_or() {
 async fn test_short_flag_with_value_head() {
     let kernel = Kernel::transient().unwrap();
     // Write a test file
-    kernel.execute(r#"printf "1\n2\n3\n4\n5\n6\n7\n8\n9\n10\n" > /tmp/lines.txt"#).await.unwrap();
+    kernel.execute(r#"printf "1\n2\n3\n4\n5\n6\n7\n8\n9\n10\n" > /tmp/kaish_test_head.txt"#).await.unwrap();
 
     // head -n 3 should return first 3 lines
-    let result = kernel.execute("head -n 3 /tmp/lines.txt").await.unwrap();
+    let result = kernel.execute("head -n 3 /tmp/kaish_test_head.txt").await.unwrap();
     assert!(result.ok(), "head -n 3 should succeed: err={}", result.err);
     let lines: Vec<&str> = result.out.trim().lines().collect();
     assert_eq!(lines, vec!["1", "2", "3"], "head -n 3 should return first 3 lines, got: {:?}", lines);
@@ -843,10 +843,10 @@ async fn test_short_flag_with_value_head() {
 #[tokio::test]
 async fn test_short_flag_with_value_tail() {
     let kernel = Kernel::transient().unwrap();
-    kernel.execute(r#"printf "1\n2\n3\n4\n5\n6\n7\n8\n9\n10\n" > /tmp/lines.txt"#).await.unwrap();
+    kernel.execute(r#"printf "1\n2\n3\n4\n5\n6\n7\n8\n9\n10\n" > /tmp/kaish_test_tail.txt"#).await.unwrap();
 
     // tail -n 3 should return last 3 lines
-    let result = kernel.execute("tail -n 3 /tmp/lines.txt").await.unwrap();
+    let result = kernel.execute("tail -n 3 /tmp/kaish_test_tail.txt").await.unwrap();
     assert!(result.ok(), "tail -n 3 should succeed: err={}", result.err);
     let lines: Vec<&str> = result.out.trim().lines().collect();
     assert_eq!(lines, vec!["8", "9", "10"], "tail -n 3 should return last 3 lines, got: {:?}", lines);
