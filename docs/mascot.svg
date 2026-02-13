@@ -1,0 +1,81 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512">
+  <defs>
+    <linearGradient id="shellGrad3" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#F2996E"/>
+      <stop offset="100%" stop-color="#C25A32"/>
+    </linearGradient>
+    <filter id="glow3">
+      <feGaussianBlur stdDeviation="4" result="blur"/>
+      <feMerge><feMergeNode in="blur"/><feMergeNode in="SourceGraphic"/></feMerge>
+    </filter>
+  </defs>
+
+  <!-- background -->
+  <circle cx="256" cy="256" r="250" fill="#1A1A2E"/>
+
+  <!-- large 会 kanji as the shell itself -->
+  <text x="256" y="210" text-anchor="middle" dominant-baseline="central"
+        font-family="Noto Sans JP, sans-serif" font-size="200" font-weight="900"
+        fill="url(#shellGrad3)" opacity="0.9">会</text>
+
+  <!-- circuit overlay on kanji -->
+  <g fill="none" stroke="#66D9EF" stroke-width="2" opacity="0.6" filter="url(#glow3)">
+    <path d="M180,120 L256,120 L256,145"/>
+    <path d="M256,120 L332,120"/>
+    <path d="M160,170 L200,170 L200,195 L256,195"/>
+    <path d="M256,195 L312,195 L312,170 L352,170"/>
+    <path d="M180,240 L215,240 L215,260"/>
+    <path d="M297,260 L297,240 L332,240"/>
+  </g>
+  <g fill="#66D9EF" filter="url(#glow3)">
+    <circle cx="180" cy="120" r="4"/>
+    <circle cx="332" cy="120" r="4"/>
+    <circle cx="160" cy="170" r="4"/>
+    <circle cx="352" cy="170" r="4"/>
+    <circle cx="180" cy="240" r="4"/>
+    <circle cx="332" cy="240" r="4"/>
+  </g>
+
+  <!-- crab features below the kanji-shell -->
+  <!-- body -->
+  <ellipse cx="256" cy="330" rx="80" ry="30" fill="#F09060" opacity="0.9"/>
+
+  <!-- claws -->
+  <g fill="#E07850" stroke="#C25A32" stroke-width="2">
+    <path d="M176,320 Q125,285 100,300 Q85,310 90,325 Q98,345 120,338 Q148,330 176,338 Z"/>
+    <path d="M100,300 Q88,285 78,290" fill="none" stroke="#C25A32" stroke-width="3" stroke-linecap="round"/>
+    <path d="M100,300 Q92,282 82,280" fill="none" stroke="#C25A32" stroke-width="3" stroke-linecap="round"/>
+    <path d="M336,320 Q387,285 412,300 Q427,310 422,325 Q414,345 392,338 Q364,330 336,338 Z"/>
+    <path d="M412,300 Q424,285 434,290" fill="none" stroke="#C25A32" stroke-width="3" stroke-linecap="round"/>
+    <path d="M412,300 Q420,282 430,280" fill="none" stroke="#C25A32" stroke-width="3" stroke-linecap="round"/>
+  </g>
+
+  <!-- eyes -->
+  <path d="M220,310 Q210,280 198,268" fill="none" stroke="#F09060" stroke-width="8" stroke-linecap="round"/>
+  <circle cx="198" cy="263" r="15" fill="#FFFFFF" stroke="#C25A32" stroke-width="2"/>
+  <circle cx="202" cy="261" r="8" fill="#2D1B14"/>
+  <circle cx="205" cy="258" r="3" fill="#FFFFFF"/>
+
+  <path d="M292,310 Q302,280 314,268" fill="none" stroke="#F09060" stroke-width="8" stroke-linecap="round"/>
+  <circle cx="314" cy="263" r="15" fill="#FFFFFF" stroke="#C25A32" stroke-width="2"/>
+  <circle cx="318" cy="261" r="8" fill="#2D1B14"/>
+  <circle cx="321" cy="258" r="3" fill="#FFFFFF"/>
+
+  <!-- legs -->
+  <g fill="none" stroke="#E07850" stroke-width="5" stroke-linecap="round">
+    <path d="M195,342 Q168,370 148,378"/>
+    <path d="M190,350 Q165,385 140,400"/>
+    <path d="M317,342 Q344,370 364,378"/>
+    <path d="M322,350 Q347,385 372,400"/>
+  </g>
+
+  <!-- smile -->
+  <path d="M240,340 Q256,352 272,340" fill="none" stroke="#C25A32" stroke-width="2.5" stroke-linecap="round"/>
+
+  <!-- bottom text -->
+  <text x="256" y="440" text-anchor="middle" font-family="monospace" font-size="28"
+        fill="#66D9EF" filter="url(#glow3)" letter-spacing="4">kaish</text>
+  <text x="256" y="465" text-anchor="middle" font-family="Noto Sans JP, sans-serif"
+        font-size="16" fill="#3A7A8A" letter-spacing="1">会sh</text>
+</svg>

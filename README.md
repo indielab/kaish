@@ -1,5 +1,9 @@
 # kaish (会sh)
 
+<p align="center">
+  <img src="docs/mascot.svg" alt="Kai — the kaish mascot" width="256">
+</p>
+
 A predictable shell for AI agents. A distilled Bourne-like shell with builtin
 core utilities. Kaish is embeddable, has stronger validation ahead of execution,
 and can embed MCPs as commands.
