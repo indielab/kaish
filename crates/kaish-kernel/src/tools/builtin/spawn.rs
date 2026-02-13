@@ -43,7 +43,7 @@ impl Tool for Spawn {
                 "argv",
                 "string",
                 Value::Null,
-                "Arguments as space-separated string or JSON array",
+                "Arguments as JSON array (e.g. [\"arg1\", \"arg2\"]) or single string",
             ))
             .param(ParamSchema::optional(
                 "env",
@@ -258,12 +258,19 @@ fn value_to_string(value: &Value) -> String {
 /// Extract an array of strings from a Value.
 ///
 /// Supports:
-/// - String: split on whitespace (shell-style)
+/// - JSON array (Value::Json): use elements directly
 /// - JSON array string: parse and extract string items
+/// - Plain string: one-element array (no implicit splitting)
 fn extract_string_array(value: &Value) -> Vec<String> {
     match value {
+        Value::Json(serde_json::Value::Array(arr)) => {
+            arr.iter().map(|v| match v {
+                serde_json::Value::String(s) => s.clone(),
+                other => other.to_string(),
+            }).collect()
+        }
         Value::String(s) => {
-            // Try to parse as JSON array first
+            // Try to parse as JSON array
             if s.starts_with('[')
                 && let Ok(arr) = serde_json::from_str::<Vec<serde_json::Value>>(s) {
                     return arr
@@ -271,8 +278,8 @@ fn extract_string_array(value: &Value) -> Vec<String> {
                         .filter_map(|v| v.as_str().map(String::from))
                         .collect();
                 }
-            // Otherwise split on whitespace
-            s.split_whitespace().map(String::from).collect()
+            // Plain string is one argument — no implicit whitespace splitting
+            vec![s.clone()]
         }
         _ => vec![],
     }
@@ -391,7 +398,7 @@ mod tests {
             .insert("command".to_string(), Value::String("echo".into()));
         args.named.insert(
             "argv".to_string(),
-            Value::String("hello from PATH".into()),
+            Value::String(r#"["hello", "from", "PATH"]"#.into()),
         );
 
         let result = Spawn.execute(args, &mut ctx).await;

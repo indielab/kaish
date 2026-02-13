@@ -488,6 +488,13 @@ impl ExecResult {
     }
 
     /// Create a result from raw output streams.
+    ///
+    /// **JSON auto-detection**: On success (code 0), stdout is checked for valid
+    /// JSON. If it parses, the result is stored in `.data` as structured data.
+    /// This enables `for i in $(external-command)` to iterate over JSON arrays
+    /// returned by MCP tools and external commands. This is intentional — external
+    /// tools communicate structured data via JSON stdout, and kaish makes it
+    /// available for iteration without requiring manual `jq` parsing.
     pub fn from_output(code: i64, stdout: impl Into<String>, stderr: impl Into<String>) -> Self {
         let out = stdout.into();
         let data = if code == 0 {
