@@ -2294,11 +2294,11 @@ impl CommandDispatcher for Kernel {
 /// the exit code to match the new result. Used to preserve output from
 /// multiple statements, loop iterations, and command chains.
 fn accumulate_result(accumulated: &mut ExecResult, new: &ExecResult) {
-    if !accumulated.out.is_empty() && !new.out.is_empty() {
+    if !accumulated.out.is_empty() && !new.out.is_empty() && !accumulated.out.ends_with('\n') {
         accumulated.out.push('\n');
     }
     accumulated.out.push_str(&new.out);
-    if !accumulated.err.is_empty() && !new.err.is_empty() {
+    if !accumulated.err.is_empty() && !new.err.is_empty() && !accumulated.err.ends_with('\n') {
         accumulated.err.push('\n');
     }
     accumulated.err.push_str(&new.err);
@@ -3968,6 +3968,84 @@ AFTER="yes"'"#)
         "#).await.unwrap();
         assert!(result.ok());
         assert_eq!(result.out.trim(), "1", "echo should be one item: {}", result.out);
+    }
+
+    // -- accumulate_result / newline tests --
+
+    #[test]
+    fn test_accumulate_no_double_newlines() {
+        // When output already ends with \n, accumulate should not add another
+        let mut acc = ExecResult::success("line1\n");
+        let new = ExecResult::success("line2\n");
+        accumulate_result(&mut acc, &new);
+        assert_eq!(acc.out, "line1\nline2\n");
+        assert!(!acc.out.contains("\n\n"), "should not have double newlines: {:?}", acc.out);
+    }
+
+    #[test]
+    fn test_accumulate_adds_separator_when_needed() {
+        // When output does NOT end with \n, accumulate adds one
+        let mut acc = ExecResult::success("line1");
+        let new = ExecResult::success("line2");
+        accumulate_result(&mut acc, &new);
+        assert_eq!(acc.out, "line1\nline2");
+    }
+
+    #[test]
+    fn test_accumulate_empty_into_nonempty() {
+        let mut acc = ExecResult::success("");
+        let new = ExecResult::success("hello\n");
+        accumulate_result(&mut acc, &new);
+        assert_eq!(acc.out, "hello\n");
+    }
+
+    #[test]
+    fn test_accumulate_nonempty_into_empty() {
+        let mut acc = ExecResult::success("hello\n");
+        let new = ExecResult::success("");
+        accumulate_result(&mut acc, &new);
+        assert_eq!(acc.out, "hello\n");
+    }
+
+    #[test]
+    fn test_accumulate_stderr_no_double_newlines() {
+        let mut acc = ExecResult::failure(1, "err1\n");
+        let new = ExecResult::failure(1, "err2\n");
+        accumulate_result(&mut acc, &new);
+        assert!(!acc.err.contains("\n\n"), "stderr should not have double newlines: {:?}", acc.err);
+    }
+
+    #[tokio::test]
+    async fn test_multiple_echo_no_blank_lines() {
+        let kernel = Kernel::transient().expect("kernel");
+        let result = kernel
+            .execute("echo one\necho two\necho three")
+            .await
+            .expect("execution failed");
+        assert!(result.ok());
+        assert_eq!(result.out, "one\ntwo\nthree\n");
+    }
+
+    #[tokio::test]
+    async fn test_for_loop_no_blank_lines() {
+        let kernel = Kernel::transient().expect("kernel");
+        let result = kernel
+            .execute(r#"for X in a b c; do echo "item: ${X}"; done"#)
+            .await
+            .expect("execution failed");
+        assert!(result.ok());
+        assert_eq!(result.out, "item: a\nitem: b\nitem: c\n");
+    }
+
+    #[tokio::test]
+    async fn test_for_command_subst_no_blank_lines() {
+        let kernel = Kernel::transient().expect("kernel");
+        let result = kernel
+            .execute(r#"for N in $(seq 1 3); do echo "n=${N}"; done"#)
+            .await
+            .expect("execution failed");
+        assert!(result.ok());
+        assert_eq!(result.out, "n=1\nn=2\nn=3\n");
     }
 
 }
