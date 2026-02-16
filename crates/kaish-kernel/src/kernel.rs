@@ -2156,6 +2156,8 @@ impl Kernel {
         // Handle stdin
         cmd.stdin(if stdin_data.is_some() {
             std::process::Stdio::piped()
+        } else if self.interactive {
+            std::process::Stdio::inherit()
         } else {
             std::process::Stdio::null()
         });
