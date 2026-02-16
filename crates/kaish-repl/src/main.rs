@@ -139,6 +139,8 @@ fn run_script(path: &str) -> Result<ExitCode> {
     // Execute with streaming: builtins flush immediately via callback,
     // external commands already stream via Stdio::inherit()
     let rt = tokio::runtime::Runtime::new()?;
+    // Set $0 to the script path
+    rt.block_on(client.kernel().set_positional(path, vec![]));
     let result = rt.block_on(client.execute_streaming(&source, &mut |r| {
         if !r.out.is_empty() {
             print!("{}", r.out);

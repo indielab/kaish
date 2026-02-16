@@ -440,9 +440,6 @@ impl Kernel {
     ///
     /// Returns the result of the last statement executed.
     pub async fn execute(&self, input: &str) -> Result<ExecResult> {
-        // Alias expansion: replace the first word if it matches an alias
-        let expanded = self.expand_alias(input).await;
-        let input = expanded.as_deref().unwrap_or(input);
         self.execute_streaming(input, &mut |_| {}).await
     }
 
@@ -1092,14 +1089,38 @@ impl Kernel {
     }
 
     /// Execute a single command.
-    #[tracing::instrument(level = "info", skip(self, args), fields(command = %name), err)]
     async fn execute_command(&self, name: &str, args: &[Arg]) -> Result<ExecResult> {
+        self.execute_command_depth(name, args, 0).await
+    }
+
+    #[tracing::instrument(level = "info", skip(self, args, alias_depth), fields(command = %name), err)]
+    async fn execute_command_depth(&self, name: &str, args: &[Arg], alias_depth: u8) -> Result<ExecResult> {
         // Special built-ins
         match name {
             "true" => return Ok(ExecResult::success("")),
             "false" => return Ok(ExecResult::failure(1, "")),
             "source" | "." => return self.execute_source(args).await,
             _ => {}
+        }
+
+        // Alias expansion (with recursion limit)
+        if alias_depth < 10 {
+            let alias_value = {
+                let ctx = self.exec_ctx.read().await;
+                ctx.aliases.get(name).cloned()
+            };
+            if let Some(alias_val) = alias_value {
+                // Split alias value into command + args
+                let parts: Vec<&str> = alias_val.split_whitespace().collect();
+                if let Some((alias_cmd, alias_args)) = parts.split_first() {
+                    let mut new_args: Vec<Arg> = alias_args
+                        .iter()
+                        .map(|a| Arg::Positional(Expr::Literal(Value::String(a.to_string()))))
+                        .collect();
+                    new_args.extend_from_slice(args);
+                    return Box::pin(self.execute_command_depth(alias_cmd, &new_args, alias_depth + 1)).await;
+                }
+            }
         }
 
         // Check user-defined tools first
@@ -1156,7 +1177,9 @@ impl Kernel {
                         // Fall through to "command not found"
                     }
                     Err(e) => {
-                        return Ok(ExecResult::failure(1, e.to_string()));
+                        // Backend dispatch is last-resort lookup — if it fails
+                        // for any reason, the command simply doesn't exist.
+                        tracing::debug!("backend error for {name}: {e}");
                     }
                 }
 
@@ -2217,6 +2240,12 @@ impl Kernel {
         scope.set(name.to_string(), value);
     }
 
+    /// Set positional parameters ($0 script name and $1-$9 args).
+    pub async fn set_positional(&self, script_name: impl Into<String>, args: Vec<String>) {
+        let mut scope = self.scope.write().await;
+        scope.set_positional(script_name, args);
+    }
+
     /// List all variables.
     pub async fn list_vars(&self) -> Vec<(String, Value)> {
         let scope = self.scope.read().await;
@@ -2242,28 +2271,6 @@ impl Kernel {
     pub async fn last_result(&self) -> ExecResult {
         let scope = self.scope.read().await;
         scope.last_result().clone()
-    }
-
-    // --- Aliases ---
-
-    /// Expand aliases in the input string (first word only, non-recursive).
-    ///
-    /// Returns `Some(expanded)` if the first word matched an alias, `None` otherwise.
-    async fn expand_alias(&self, input: &str) -> Option<String> {
-        let trimmed = input.trim_start();
-        if trimmed.is_empty() {
-            return None;
-        }
-        // Extract the first word
-        let first_word_end = trimmed.find(|c: char| c.is_whitespace()).unwrap_or(trimmed.len());
-        let first_word = &trimmed[..first_word_end];
-        let rest = &trimmed[first_word_end..];
-
-        let ctx = self.exec_ctx.read().await;
-        let alias_value = ctx.aliases.get(first_word)?.clone();
-        drop(ctx);
-
-        Some(format!("{}{}", alias_value, rest))
     }
 
     // --- Tools ---
@@ -2354,6 +2361,7 @@ impl Kernel {
             let ec = self.exec_ctx.read().await;
             ctx.cwd = ec.cwd.clone();
             ctx.prev_cwd = ec.prev_cwd.clone();
+            ctx.aliases = ec.aliases.clone();
         }
 
         Ok(result)
