@@ -40,7 +40,7 @@ use crate::parser::parse;
 use crate::scheduler::{drain_to_stream, is_bool_type, schema_param_lookup, BoundedStream, JobManager, PipelineRunner, DEFAULT_STREAM_MAX_SIZE};
 use crate::tools::{extract_output_format, register_builtins, resolve_in_path, ExecContext, ToolArgs, ToolRegistry};
 use crate::validator::{Severity, Validator};
-use crate::vfs::{JobFs, LocalFs, MemoryFs, VfsRouter};
+use crate::vfs::{BuiltinFs, JobFs, LocalFs, MemoryFs, VfsRouter};
 
 /// VFS mount mode determines how the local filesystem is exposed.
 ///
@@ -272,6 +272,9 @@ pub struct Kernel {
     skip_validation: bool,
     /// When true, standalone external commands inherit stdio for real-time output.
     interactive: bool,
+    /// Terminal state for job control (interactive mode only, Unix only).
+    #[cfg(unix)]
+    terminal_state: Option<Arc<crate::terminal::TerminalState>>,
 }
 
 impl Kernel {
@@ -282,8 +285,6 @@ impl Kernel {
 
         // Mount JobFs for job observability at /v/jobs
         vfs.mount("/v/jobs", JobFs::new(jobs.clone()));
-
-        let vfs = Arc::new(vfs);
 
         Self::assemble(config, vfs, jobs, |vfs_ref, tools| {
             ExecContext::with_vfs_and_tools(vfs_ref.clone(), tools.clone())
@@ -382,12 +383,9 @@ impl Kernel {
         // Let caller add custom mounts (e.g., /v/docs, /v/g)
         configure_vfs(&mut vfs);
 
-        let vfs = Arc::new(vfs);
-
-        let overlay: Arc<dyn KernelBackend> =
-            Arc::new(VirtualOverlayBackend::new(backend, vfs.clone()));
-
-        Self::assemble(config, vfs, jobs, |_: &Arc<VfsRouter>, _: &Arc<ToolRegistry>| {
+        Self::assemble(config, vfs, jobs, |vfs_arc: &Arc<VfsRouter>, _: &Arc<ToolRegistry>| {
+            let overlay: Arc<dyn KernelBackend> =
+                Arc::new(VirtualOverlayBackend::new(backend, vfs_arc.clone()));
             ExecContext::with_backend(overlay)
         })
     }
@@ -399,7 +397,7 @@ impl Kernel {
     /// that already have their own storage can ignore these parameters.
     fn assemble(
         config: KernelConfig,
-        vfs: Arc<VfsRouter>,
+        mut vfs: VfsRouter,
         jobs: Arc<JobManager>,
         make_ctx: impl FnOnce(&Arc<VfsRouter>, &Arc<ToolRegistry>) -> ExecContext,
     ) -> Result<Self> {
@@ -408,6 +406,11 @@ impl Kernel {
         let mut tools = ToolRegistry::new();
         register_builtins(&mut tools);
         let tools = Arc::new(tools);
+
+        // Mount BuiltinFs so `ls /v/bin` lists builtins
+        vfs.mount("/v/bin", BuiltinFs::new(tools.clone()));
+
+        let vfs = Arc::new(vfs);
 
         let runner = PipelineRunner::new(tools.clone());
 
@@ -428,12 +431,37 @@ impl Kernel {
             exec_ctx: RwLock::new(exec_ctx),
             skip_validation,
             interactive,
+            #[cfg(unix)]
+            terminal_state: None,
         })
     }
 
     /// Get the kernel name.
     pub fn name(&self) -> &str {
         &self.name
+    }
+
+    /// Initialize terminal state for interactive job control.
+    ///
+    /// Call this after kernel creation when running as an interactive REPL
+    /// and stdin is a TTY. Sets up process groups and signal handling.
+    #[cfg(unix)]
+    pub fn init_terminal(&mut self) {
+        if !self.interactive {
+            return;
+        }
+        match crate::terminal::TerminalState::init() {
+            Ok(state) => {
+                let state = Arc::new(state);
+                self.terminal_state = Some(state.clone());
+                // Set on exec_ctx so builtins (fg, bg, kill) can access it
+                self.exec_ctx.get_mut().terminal_state = Some(state);
+                tracing::debug!("terminal job control initialized");
+            }
+            Err(e) => {
+                tracing::warn!("failed to initialize terminal job control: {}", e);
+            }
+        }
     }
 
     /// Execute kaish source code.
@@ -926,6 +954,8 @@ impl Kernel {
                 job_manager: ec.job_manager.clone(),
                 pipeline_position: PipelinePosition::Only,
                 aliases: ec.aliases.clone(),
+                #[cfg(unix)]
+                terminal_state: ec.terminal_state.clone(),
             }
         }; // locks released
 
@@ -1121,6 +1151,14 @@ impl Kernel {
                     return Box::pin(self.execute_command_depth(alias_cmd, &new_args, alias_depth + 1)).await;
                 }
             }
+        }
+
+        // Handle /v/bin/ prefix — dispatch to builtins via virtual path
+        if let Some(builtin_name) = name.strip_prefix("/v/bin/") {
+            return match self.tools.get(builtin_name) {
+                Some(_) => Box::pin(self.execute_command_depth(builtin_name, args, alias_depth)).await,
+                None => Ok(ExecResult::failure(127, format!("command not found: {}", name))),
+            };
         }
 
         // Check user-defined tools first
@@ -2033,24 +2071,50 @@ impl Kernel {
     /// - `Err` on execution errors
     #[tracing::instrument(level = "debug", skip(self, args), fields(command = %name))]
     async fn try_execute_external(&self, name: &str, args: &[Arg]) -> Result<Option<ExecResult>> {
-        // Skip if name contains path separator (absolute/relative paths handled differently)
-        if name.contains('/') {
-            return Ok(None);
-        }
+        let executable = if name.contains('/') {
+            // Absolute or relative path — use directly
+            let path = std::path::Path::new(name);
+            if !path.exists() {
+                return Ok(Some(ExecResult::failure(
+                    127,
+                    format!("{}: No such file or directory", name),
+                )));
+            }
+            if !path.is_file() {
+                return Ok(Some(ExecResult::failure(
+                    126,
+                    format!("{}: Is a directory", name),
+                )));
+            }
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                let mode = std::fs::metadata(name)
+                    .map(|m| m.permissions().mode())
+                    .unwrap_or(0);
+                if mode & 0o111 == 0 {
+                    return Ok(Some(ExecResult::failure(
+                        126,
+                        format!("{}: Permission denied", name),
+                    )));
+                }
+            }
+            name.to_string()
+        } else {
+            // Get PATH from scope or environment
+            let path_var = {
+                let scope = self.scope.read().await;
+                scope
+                    .get("PATH")
+                    .map(value_to_string)
+                    .unwrap_or_else(|| std::env::var("PATH").unwrap_or_default())
+            };
 
-        // Get PATH from scope or environment
-        let path_var = {
-            let scope = self.scope.read().await;
-            scope
-                .get("PATH")
-                .map(value_to_string)
-                .unwrap_or_else(|| std::env::var("PATH").unwrap_or_default())
-        };
-
-        // Resolve command in PATH
-        let executable = match resolve_in_path(name, &path_var) {
-            Some(path) => path,
-            None => return Ok(None), // Not found - let caller handle error
+            // Resolve command in PATH
+            match resolve_in_path(name, &path_var) {
+                Some(path) => path,
+                None => return Ok(None), // Not found - let caller handle error
+            }
         };
 
         tracing::debug!(executable = %executable, "resolved external command");
@@ -2108,6 +2172,31 @@ impl Kernel {
             cmd.stderr(std::process::Stdio::piped());
         }
 
+        // On Unix with job control, put child in its own process group
+        // and restore default signal handlers (shell ignores SIGTSTP etc.
+        // but children should respond to them normally).
+        #[cfg(unix)]
+        if self.terminal_state.is_some() && inherit_output {
+            // SAFETY: setpgid and sigaction(SIG_DFL) are async-signal-safe per POSIX
+            #[allow(unsafe_code)]
+            unsafe {
+                cmd.pre_exec(|| {
+                    // Own process group
+                    nix::unistd::setpgid(nix::unistd::Pid::from_raw(0), nix::unistd::Pid::from_raw(0))
+                        .map_err(|e| std::io::Error::from_raw_os_error(e as i32))?;
+                    // Restore default signal handlers for job control signals
+                    use nix::libc::{sigaction, SIGTSTP, SIGTTOU, SIGTTIN, SIGINT, SIG_DFL};
+                    let mut sa: nix::libc::sigaction = std::mem::zeroed();
+                    sa.sa_sigaction = SIG_DFL;
+                    sigaction(SIGTSTP, &sa, std::ptr::null_mut());
+                    sigaction(SIGTTOU, &sa, std::ptr::null_mut());
+                    sigaction(SIGTTIN, &sa, std::ptr::null_mut());
+                    sigaction(SIGINT, &sa, std::ptr::null_mut());
+                    Ok(())
+                });
+            }
+        }
+
         // Spawn the process
         let mut child = match cmd.spawn() {
             Ok(child) => child,
@@ -2134,7 +2223,52 @@ impl Kernel {
         }
 
         if inherit_output {
-            // Output goes directly to terminal — just wait for exit
+            // Job control path: use waitpid with WUNTRACED for Ctrl-Z support
+            #[cfg(unix)]
+            if let Some(ref term) = self.terminal_state {
+                let child_id = child.id().unwrap_or(0);
+                let pid = nix::unistd::Pid::from_raw(child_id as i32);
+                let pgid = pid; // child is its own pgid leader
+
+                // Give the terminal to the child's process group
+                if let Err(e) = term.give_terminal_to(pgid) {
+                    tracing::warn!("failed to give terminal to child: {}", e);
+                }
+
+                let term_clone = term.clone();
+                let cmd_name = name.to_string();
+                let cmd_display = format!("{} {}", name, argv.join(" "));
+                let jobs = self.jobs.clone();
+
+                let code = tokio::task::block_in_place(move || {
+                    let result = term_clone.wait_for_foreground(pid);
+
+                    // Always reclaim the terminal
+                    if let Err(e) = term_clone.reclaim_terminal() {
+                        tracing::warn!("failed to reclaim terminal: {}", e);
+                    }
+
+                    match result {
+                        crate::terminal::WaitResult::Exited(code) => code as i64,
+                        crate::terminal::WaitResult::Signaled(sig) => 128 + sig as i64,
+                        crate::terminal::WaitResult::Stopped(_sig) => {
+                            // Register as a stopped job
+                            let rt = tokio::runtime::Handle::current();
+                            let job_id = rt.block_on(jobs.register_stopped(
+                                cmd_display,
+                                child_id,
+                                child_id, // pgid = pid for group leader
+                            ));
+                            eprintln!("\n[{}]+ Stopped\t{}", job_id, cmd_name);
+                            148 // 128 + SIGTSTP(20) on most systems, but we use a fixed value
+                        }
+                    }
+                });
+
+                return Ok(Some(ExecResult::from_output(code, String::new(), String::new())));
+            }
+
+            // Non-job-control path: simple wait
             let status = match child.wait().await {
                 Ok(s) => s,
                 Err(e) => {

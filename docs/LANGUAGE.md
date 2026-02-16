@@ -358,6 +358,14 @@ cargo build --release
 git status
 npm install
 
+# Absolute and relative paths work directly (no PATH lookup)
+/bin/echo hello                    # absolute path
+./myscript.sh                      # relative path
+
+# Virtual bin path runs builtins explicitly
+/v/bin/echo hello                  # builtin via virtual path
+ls /v/bin                          # list all builtins
+
 # Pipelines work with external commands
 cat file.txt | sort | uniq         # builtin | external | external
 cargo test 2>&1 | grep FAILED      # external | builtin
@@ -369,9 +377,11 @@ date +%Y-%m-%d                     # formatted date
 
 **How it works:**
 1. Kaish parses the command (handling quotes, variables, flags)
-2. If no builtin matches, kaish searches `PATH` for the executable
-3. Arguments are passed as a clean argv array (no shell re-parsing)
-4. stdin/stdout flow correctly through pipelines
+2. If the name contains `/`, it's used as a direct path (absolute or relative)
+3. `/v/bin/name` dispatches to the builtin `name`
+4. Otherwise, kaish searches `PATH` for the executable
+5. Arguments are passed as a clean argv array (no shell re-parsing)
+6. stdin/stdout flow correctly through pipelines
 
 **Constraints:**
 - External commands require a real filesystem working directory (not `/v/`)

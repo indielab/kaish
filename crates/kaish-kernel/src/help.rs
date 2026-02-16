@@ -151,7 +151,7 @@ fn format_tool_list(schemas: &[ToolSchema]) -> String {
             | "tee" | "hostname" | "uname" | "which" => system_tools.push(entry),
             "jq" => json_tools.push(entry),
             "scatter" | "gather" => parallel_tools.push(entry),
-            "exec" | "spawn" | "jobs" | "wait" | "ps" | "git" => process_tools.push(entry),
+            "exec" | "spawn" | "jobs" | "wait" | "ps" | "git" | "bg" | "fg" | "kill" => process_tools.push(entry),
             "help" | "validate" | "vars" | "mounts" | "tools" | "tokens" => {
                 introspection_tools.push(entry)
             }

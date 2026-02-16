@@ -63,11 +63,21 @@ jq '.key' /tmp/temp.json
 
 ## /v — Virtual Namespace
 
-Memory storage for blobs and other synthetic resources.
+Memory storage for blobs, builtins, and other synthetic resources.
 
 ```bash
 # Blobs are stored at /v/blobs/{id}
 ls /v/blobs/
+```
+
+### /v/bin — Builtin Commands
+
+Read-only listing of all registered builtin commands. Commands can be invoked
+via their `/v/bin/` path:
+
+```bash
+ls /v/bin                  # list all builtins
+/v/bin/echo hello          # run echo builtin explicitly
 ```
 
 ### /v/jobs — Job Observability

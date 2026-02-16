@@ -19,6 +19,7 @@
 //!
 //! The router finds the longest matching mount point and delegates operations.
 
+mod builtin_fs;
 mod git;
 mod jobfs;
 mod local;
@@ -26,6 +27,7 @@ mod memory;
 mod router;
 mod traits;
 
+pub use builtin_fs::BuiltinFs;
 pub use git::{FileStatus, GitVfs, LogEntry, StatusSummary, WorktreeInfo};
 pub use jobfs::JobFs;
 pub use local::LocalFs;

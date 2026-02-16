@@ -939,9 +939,10 @@ fn command_parser<'tokens, I>(
 where
     I: ValueInput<'tokens, Token = Token, Span = Span>,
 {
-    // Command name can be an identifier, 'true', 'false', or '.' (source alias)
+    // Command name can be an identifier, path, 'true', 'false', or '.' (source alias)
     let command_name = choice((
         ident_parser(),
+        path_parser(),
         just(Token::True).to("true".to_string()),
         just(Token::False).to("false".to_string()),
         just(Token::Dot).to(".".to_string()),

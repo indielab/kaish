@@ -107,7 +107,7 @@ everywhere, a `jq` that always uses the same filter syntax, an `awk` that never 
 | **Files** | basename, cat, cd, cp, dirname, find, glob, ln, ls, mkdir, mktemp, mv, patch, pwd, read, readlink, realpath, rm, stat, tee, touch, tree, write |
 | **JSON** | jq |
 | **Git** | git (init, clone, status, add, commit, log, diff, branch, checkout, worktree) |
-| **System** | alias, date, echo, env, exec, export, help, hostname, jobs, printf, ps, seq, set, sleep, spawn, test/\[\[, tokens, uname, unalias, unset, validate, vars, wait, which |
+| **System** | alias, bg, date, echo, env, exec, export, fg, help, hostname, jobs, kill, printf, ps, seq, set, sleep, spawn, test/\[\[, tokens, uname, unalias, unset, validate, vars, wait, which |
 | **Parallel** | scatter, gather |
 | **Meta** | assert, false, mounts, tools, true |
 
