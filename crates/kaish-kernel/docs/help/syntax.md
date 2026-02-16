@@ -198,6 +198,17 @@ cmd || {
 source utils.kai      # load script (shared scope)
 ```
 
+## Aliases
+
+```bash
+alias ll='ls -la'     # define alias
+alias                 # list all aliases
+alias ll              # show one alias
+unalias ll            # remove alias
+```
+
+Aliases expand the first word of a command before parsing. Not recursive.
+
 ## Background Jobs
 
 ```bash

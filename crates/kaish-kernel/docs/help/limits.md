@@ -12,7 +12,7 @@ These bash features are omitted by design:
 | Shell glob expansion `*.txt` | Tools handle their own patterns |
 | Process substitution `<(cmd)` | Use temp files |
 | Backticks `` `cmd` `` | Use `$(cmd)` |
-| Aliases, `eval` | Explicit is better |
+| `eval` | Explicit is better |
 | Implicit word splitting | Use `split` explicitly |
 
 **Note:** `[ ]` (single brackets) is supported as a builtin but `[[ ]]` is preferred.
@@ -30,6 +30,7 @@ These bash features are omitted by design:
 
 | Builtin | Limitation |
 |---------|------------|
+| `alias` | Expands first word only; not in pipelines or compound commands |
 | `set` | Only `-e` (exit on error) is supported |
 | `ps` | Linux-only (reads `/proc`) |
 | `git` | Operates on real filesystem, not VFS |

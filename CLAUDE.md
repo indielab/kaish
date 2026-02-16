@@ -157,6 +157,7 @@ crates/
 - `break`, `continue`, `return`, `exit` — control statements
 - `set -e` — exit on error mode
 - `source file` or `. file` — script sourcing
+- `alias name='cmd'` / `unalias name` — command aliases
 - `-x`, `--flag` — flag arguments
 - `key=value` — named arguments
 
@@ -171,7 +172,7 @@ crates/
 
 ### What's Intentionally Missing
 
-Process substitution `<(cmd)`, backticks, aliases, `eval`, shell-level glob expansion
+Process substitution `<(cmd)`, backticks, `eval`, shell-level glob expansion
 
 ## Testing Strategy
 

@@ -107,9 +107,35 @@ everywhere, a `jq` that always uses the same filter syntax, an `awk` that never 
 | **Files** | basename, cat, cd, cp, dirname, find, glob, ln, ls, mkdir, mktemp, mv, patch, pwd, read, readlink, realpath, rm, stat, tee, touch, tree, write |
 | **JSON** | jq |
 | **Git** | git (init, clone, status, add, commit, log, diff, branch, checkout, worktree) |
-| **System** | date, echo, env, exec, export, help, hostname, jobs, printf, ps, seq, set, sleep, spawn, test/\[\[, tokens, uname, unset, validate, vars, wait, which |
+| **System** | alias, date, echo, env, exec, export, help, hostname, jobs, printf, ps, seq, set, sleep, spawn, test/\[\[, tokens, uname, unalias, unset, validate, vars, wait, which |
 | **Parallel** | scatter, gather |
 | **Meta** | assert, false, mounts, tools, true |
+
+---
+
+## Configuration
+
+The REPL loads an init file on startup (first match wins):
+
+1. `$KAISH_INIT` (env var)
+2. `~/.config/kaish/init.kai`
+3. `~/.kaishrc`
+
+Use it for aliases, exports, and a custom prompt:
+
+```bash
+# ~/.config/kaish/init.kai
+alias ll='ls -la'
+alias gs='git status'
+export EDITOR=vim
+
+kaish_prompt() {
+    echo "$(pwd)> "
+}
+```
+
+The `kaish_prompt` function is called before each input line. If not defined,
+the default `会sh> ` prompt is used.
 
 ---
 

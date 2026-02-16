@@ -146,9 +146,9 @@ fn format_tool_list(schemas: &[ToolSchema]) -> String {
             "cat" | "ls" | "tree" | "cd" | "pwd" | "mkdir" | "rm" | "cp" | "mv" | "touch"
             | "ln" | "readlink" | "write" | "glob" | "find" | "stat" | "dirname" | "basename"
             | "realpath" | "mktemp" | "patch" => file_tools.push(entry),
-            "echo" | "printf" | "read" | "sleep" | "date" | "env" | "export" | "set" | "unset"
-            | "true" | "false" | "test" | "[" | "assert" | "seq" | "tee" | "hostname"
-            | "uname" | "which" => system_tools.push(entry),
+            "alias" | "unalias" | "echo" | "printf" | "read" | "sleep" | "date" | "env"
+            | "export" | "set" | "unset" | "true" | "false" | "test" | "[" | "assert" | "seq"
+            | "tee" | "hostname" | "uname" | "which" => system_tools.push(entry),
             "jq" => json_tools.push(entry),
             "scatter" | "gather" => parallel_tools.push(entry),
             "exec" | "spawn" | "jobs" | "wait" | "ps" | "git" => process_tools.push(entry),
