@@ -2171,9 +2171,15 @@ impl Kernel {
             std::process::Stdio::null()
         });
 
-        // In interactive mode, standalone commands (no piped stdin) inherit
+        // In interactive mode, standalone or last-in-pipeline commands inherit
         // the terminal's stdout/stderr so output streams in real-time.
-        let inherit_output = self.interactive && stdin_data.is_none();
+        // First/middle commands must capture stdout for the pipe — same as bash.
+        let pipeline_position = {
+            let ctx = self.exec_ctx.read().await;
+            ctx.pipeline_position
+        };
+        let inherit_output = self.interactive
+            && matches!(pipeline_position, PipelinePosition::Only | PipelinePosition::Last);
 
         if inherit_output {
             cmd.stdout(std::process::Stdio::inherit());
@@ -2492,6 +2498,7 @@ impl Kernel {
             ec.stdin = ctx.stdin.take();
             ec.stdin_data = ctx.stdin_data.take();
             ec.aliases = ctx.aliases.clone();
+            ec.pipeline_position = ctx.pipeline_position;
         }
 
         // 2. Execute via the full dispatch chain

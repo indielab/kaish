@@ -220,19 +220,7 @@ fn interactive_kernel() -> Kernel {
     Kernel::new(KernelConfig::repl().with_interactive(true)).expect("Failed to create kernel")
 }
 
-// TODO: Interactive stdin inheritance tests are disabled pending a design review
-// of how interactive mode interacts with pipelines. The current `inherit_output`
-// logic in kernel.rs:2167 (`self.interactive && stdin_data.is_none()`) doesn't
-// account for pipeline position — the first external command in a pipeline gets
-// stdout inherited to terminal instead of captured for the pipe. We need to:
-// 1. Read `man bash` to understand how bash handles interactive stdio in pipelines
-// 2. Fix inherit_output to check pipeline position
-// 3. Then write proper tests for the stdin inheritance behavior
-//
-// See also: kernel.rs:2156-2176 (stdin/stdout inheritance logic)
-
 #[tokio::test]
-#[ignore = "blocked on interactive stdio pipeline design review"]
 async fn non_interactive_stdin_is_dev_null() {
     let kernel = repl_kernel();
     // Use /bin/readlink to bypass the builtin — we need an external process
@@ -251,11 +239,14 @@ async fn non_interactive_stdin_is_dev_null() {
 }
 
 #[tokio::test]
-#[ignore = "blocked on interactive stdio pipeline design review"]
 async fn interactive_stdin_is_not_dev_null() {
     let kernel = interactive_kernel();
+    // Standalone interactive commands inherit stdout (real-time streaming),
+    // so we pipe through /bin/cat to capture output. Readlink is First in
+    // the pipeline: stdout is captured for the pipe, but stdin still inherits
+    // from the terminal (no piped input for the first command).
     let result = kernel
-        .execute("/bin/readlink /proc/self/fd/0")
+        .execute("/bin/readlink /proc/self/fd/0 | /bin/cat")
         .await
         .unwrap();
     assert!(result.ok(), "readlink should succeed: {:?}", result);
@@ -268,16 +259,19 @@ async fn interactive_stdin_is_not_dev_null() {
 }
 
 #[tokio::test]
-#[ignore = "blocked on interactive stdio pipeline design review"]
 async fn interactive_piped_stdin_still_works() {
     let kernel = interactive_kernel();
-    let result = kernel.execute("echo hello | /bin/cat").await.unwrap();
-    assert!(result.ok(), "pipe should succeed: {:?}", result);
+    // grep exits 0 only if it finds a match, so this verifies data flows
+    // through the pipe. In interactive mode the last command (grep) inherits
+    // stdout to the terminal, so we assert on exit code rather than output.
+    let result = kernel
+        .execute("echo hello | /bin/grep hello")
+        .await
+        .unwrap();
     assert_eq!(
-        result.out.trim(),
-        "hello",
-        "Piped stdin should pass data in interactive mode: {}",
-        result.out
+        result.code, 0,
+        "grep should find 'hello' in piped input (exit 0): {:?}",
+        result
     );
 }
 
