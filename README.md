@@ -197,7 +197,7 @@ Add to your MCP client configuration:
 Supports: pipes, redirects, here-docs, if/for/while, functions, builtins,
 ${VAR:-default}, $((arithmetic)), scatter/gather parallelism.
 
-NOT supported: process substitution <(), backticks, eval, aliases.
+NOT supported: process substitution <(), backticks, eval.
 
 Paths: Native paths work within $HOME (e.g., /home/user/src/project). /tmp for temp files.
 ```
