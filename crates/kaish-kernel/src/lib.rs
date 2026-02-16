@@ -27,6 +27,8 @@ pub mod scheduler;
 pub mod tools;
 pub mod validator;
 pub mod vfs;
+#[cfg(unix)]
+pub mod terminal;
 
 // Re-export kaish_glob as our glob/walker modules for backwards compatibility
 pub use kaish_glob as glob_crate;

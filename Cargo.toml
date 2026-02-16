@@ -94,7 +94,7 @@ insta = "1.46"
 tempfile = "3"
 
 [workspace.lints.rust]
-unsafe_code = "forbid"
+unsafe_code = "deny"
 
 [workspace.lints.clippy]
 unwrap_used = "deny"

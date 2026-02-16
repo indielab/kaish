@@ -29,6 +29,8 @@ impl std::fmt::Display for JobId {
 pub enum JobStatus {
     /// Job is currently running.
     Running,
+    /// Job was stopped by a signal (e.g., Ctrl-Z / SIGTSTP).
+    Stopped,
     /// Job completed successfully.
     Done,
     /// Job failed with an error.
@@ -39,6 +41,7 @@ impl std::fmt::Display for JobStatus {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             JobStatus::Running => write!(f, "Running"),
+            JobStatus::Stopped => write!(f, "Stopped"),
             JobStatus::Done => write!(f, "Done"),
             JobStatus::Failed => write!(f, "Failed"),
         }
@@ -56,6 +59,8 @@ pub struct JobInfo {
     pub status: JobStatus,
     /// Path to output file (if available).
     pub output_file: Option<PathBuf>,
+    /// OS process ID (if this is a stopped/foreground process).
+    pub pid: Option<u32>,
 }
 
 /// A background job.
@@ -76,6 +81,12 @@ pub struct Job {
     stdout_stream: Option<Arc<BoundedStream>>,
     /// Live stderr stream (bounded ring buffer).
     stderr_stream: Option<Arc<BoundedStream>>,
+    /// OS process ID (for stopped jobs).
+    pid: Option<u32>,
+    /// OS process group ID (for stopped jobs).
+    pgid: Option<u32>,
+    /// Whether this job is stopped (SIGTSTP).
+    stopped: bool,
 }
 
 impl Job {
@@ -90,6 +101,9 @@ impl Job {
             output_file: None,
             stdout_stream: None,
             stderr_stream: None,
+            pid: None,
+            pgid: None,
+            stopped: false,
         }
     }
 
@@ -104,6 +118,9 @@ impl Job {
             output_file: None,
             stdout_stream: None,
             stderr_stream: None,
+            pid: None,
+            pgid: None,
+            stopped: false,
         }
     }
 
@@ -126,6 +143,26 @@ impl Job {
             output_file: None,
             stdout_stream: Some(stdout),
             stderr_stream: Some(stderr),
+            pid: None,
+            pgid: None,
+            stopped: false,
+        }
+    }
+
+    /// Create a stopped job (from Ctrl-Z on a foreground process).
+    pub fn stopped(id: JobId, command: String, pid: u32, pgid: u32) -> Self {
+        Self {
+            id,
+            command,
+            handle: None,
+            result_rx: None,
+            result: None,
+            output_file: None,
+            stdout_stream: None,
+            stderr_stream: None,
+            pid: Some(pid),
+            pgid: Some(pgid),
+            stopped: true,
         }
     }
 
@@ -135,13 +172,21 @@ impl Job {
     }
 
     /// Check if the job has completed.
+    ///
+    /// Stopped jobs are not considered done.
     pub fn is_done(&mut self) -> bool {
+        if self.stopped {
+            return false;
+        }
         self.try_poll();
         self.result.is_some()
     }
 
     /// Get the job's status.
     pub fn status(&mut self) -> JobStatus {
+        if self.stopped {
+            return JobStatus::Stopped;
+        }
         self.try_poll();
         match &self.result {
             Some(r) if r.ok() => JobStatus::Done,
@@ -432,6 +477,7 @@ impl JobManager {
                 command: job.command.clone(),
                 status: job.status(),
                 output_file: job.output_file.clone(),
+                pid: job.pid,
             })
             .collect()
     }
@@ -475,6 +521,7 @@ impl JobManager {
             command: job.command.clone(),
             status: job.status(),
             output_file: job.output_file.clone(),
+            pid: job.pid,
         })
     }
 
@@ -518,6 +565,69 @@ impl JobManager {
     pub async fn list_ids(&self) -> Vec<JobId> {
         let jobs = self.jobs.lock().await;
         jobs.keys().copied().collect()
+    }
+
+    /// Register a stopped job (from Ctrl-Z on a foreground process).
+    pub async fn register_stopped(&self, command: String, pid: u32, pgid: u32) -> JobId {
+        let id = JobId(self.next_id.fetch_add(1, Ordering::SeqCst));
+        let job = Job::stopped(id, command, pid, pgid);
+        let mut jobs = self.jobs.lock().await;
+        jobs.insert(id, job);
+        id
+    }
+
+    /// Mark a job as stopped with its process info.
+    pub async fn stop_job(&self, id: JobId, pid: u32, pgid: u32) {
+        let mut jobs = self.jobs.lock().await;
+        if let Some(job) = jobs.get_mut(&id) {
+            job.stopped = true;
+            job.pid = Some(pid);
+            job.pgid = Some(pgid);
+        }
+    }
+
+    /// Mark a stopped job as resumed.
+    pub async fn resume_job(&self, id: JobId) {
+        let mut jobs = self.jobs.lock().await;
+        if let Some(job) = jobs.get_mut(&id) {
+            job.stopped = false;
+        }
+    }
+
+    /// Get the most recently stopped job.
+    pub async fn last_stopped(&self) -> Option<JobId> {
+        let mut jobs = self.jobs.lock().await;
+        // Find the highest-numbered stopped job
+        let mut best: Option<JobId> = None;
+        for job in jobs.values_mut() {
+            if job.stopped {
+                match best {
+                    None => best = Some(job.id),
+                    Some(b) if job.id.0 > b.0 => best = Some(job.id),
+                    _ => {}
+                }
+            }
+        }
+        best
+    }
+
+    /// Get process info (pid, pgid) for a job.
+    pub async fn get_process_info(&self, id: JobId) -> Option<(u32, u32)> {
+        let jobs = self.jobs.lock().await;
+        jobs.get(&id).and_then(|job| {
+            match (job.pid, job.pgid) {
+                (Some(pid), Some(pgid)) => Some((pid, pgid)),
+                _ => None,
+            }
+        })
+    }
+
+    /// Remove a job from tracking.
+    pub async fn remove(&self, id: JobId) {
+        let mut jobs = self.jobs.lock().await;
+        if let Some(mut job) = jobs.remove(&id) {
+            job.cleanup_files();
+        }
     }
 }
 

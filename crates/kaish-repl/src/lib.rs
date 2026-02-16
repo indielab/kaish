@@ -12,6 +12,7 @@
 pub mod format;
 
 use std::borrow::Cow;
+use std::io::IsTerminal;
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -427,9 +428,15 @@ pub struct Repl {
 impl Repl {
     /// Create a new REPL instance with passthrough filesystem access.
     pub fn new() -> Result<Self> {
-        let config = KernelConfig::repl();
-        let kernel = Kernel::new(config).context("Failed to create kernel")?;
+        let config = KernelConfig::repl().with_interactive(true);
+        let mut kernel = Kernel::new(config).context("Failed to create kernel")?;
         let runtime = Runtime::new().context("Failed to create tokio runtime")?;
+
+        // Initialize terminal job control if stdin is a TTY
+        #[cfg(unix)]
+        if std::io::stdin().is_terminal() {
+            kernel.init_terminal();
+        }
 
         Ok(Self {
             kernel: Arc::new(kernel),
@@ -440,8 +447,14 @@ impl Repl {
 
     /// Create a new REPL with a custom kernel configuration.
     pub fn with_config(config: KernelConfig) -> Result<Self> {
-        let kernel = Kernel::new(config).context("Failed to create kernel")?;
+        let mut kernel = Kernel::new(config).context("Failed to create kernel")?;
         let runtime = Runtime::new().context("Failed to create tokio runtime")?;
+
+        // Initialize terminal job control if stdin is a TTY
+        #[cfg(unix)]
+        if std::io::stdin().is_terminal() {
+            kernel.init_terminal();
+        }
 
         Ok(Self {
             kernel: Arc::new(kernel),

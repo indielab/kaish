@@ -60,6 +60,9 @@ capnp-rpc = { workspace = true }
 futures = { workspace = true }
 tokio-util = { workspace = true }
 
+[target.'cfg(unix)'.dependencies]
+nix = { version = "0.29", features = ["signal", "process", "term"] }
+
 [target.'cfg(target_os = "linux")'.dependencies]
 procfs = { workspace = true }
 

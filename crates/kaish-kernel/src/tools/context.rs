@@ -65,6 +65,9 @@ pub struct ExecContext {
     pub pipeline_position: PipelinePosition,
     /// Command aliases (name → expansion string).
     pub aliases: HashMap<String, String>,
+    /// Terminal state for job control (interactive mode, Unix only).
+    #[cfg(unix)]
+    pub terminal_state: Option<std::sync::Arc<crate::terminal::TerminalState>>,
 }
 
 impl ExecContext {
@@ -85,6 +88,8 @@ impl ExecContext {
             job_manager: None,
             pipeline_position: PipelinePosition::Only,
             aliases: HashMap::new(),
+            #[cfg(unix)]
+            terminal_state: None,
         }
     }
 
@@ -105,6 +110,8 @@ impl ExecContext {
             job_manager: None,
             pipeline_position: PipelinePosition::Only,
             aliases: HashMap::new(),
+            #[cfg(unix)]
+            terminal_state: None,
         }
     }
 
@@ -122,6 +129,8 @@ impl ExecContext {
             job_manager: None,
             pipeline_position: PipelinePosition::Only,
             aliases: HashMap::new(),
+            #[cfg(unix)]
+            terminal_state: None,
         }
     }
 
@@ -139,6 +148,8 @@ impl ExecContext {
             job_manager: None,
             pipeline_position: PipelinePosition::Only,
             aliases: HashMap::new(),
+            #[cfg(unix)]
+            terminal_state: None,
         }
     }
 
@@ -159,6 +170,8 @@ impl ExecContext {
             job_manager: None,
             pipeline_position: PipelinePosition::Only,
             aliases: HashMap::new(),
+            #[cfg(unix)]
+            terminal_state: None,
         }
     }
 
@@ -176,6 +189,8 @@ impl ExecContext {
             job_manager: None,
             pipeline_position: PipelinePosition::Only,
             aliases: HashMap::new(),
+            #[cfg(unix)]
+            terminal_state: None,
         }
     }
 
