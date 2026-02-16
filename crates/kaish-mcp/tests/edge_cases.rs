@@ -20,6 +20,11 @@ struct ExecuteResult {
     ok: bool,
 }
 
+async fn cleanup(client: &McpClient) {
+    // Explicitly ignored: cleanup errors are non-fatal in tests
+    let _ = client.disconnect().await;
+}
+
 async fn create_client() -> Result<Arc<McpClient>> {
     let client = McpClient::new(McpConfig {
         name: "kaish-edge".into(),
@@ -76,6 +81,7 @@ async fn test_unicode_emoji() {
     let result = execute(&client, r#"echo "Hello 🦀 Rust 会sh""#).await.unwrap();
     assert!(result.ok);
     assert_eq!(result.stdout.trim(), "Hello 🦀 Rust 会sh");
+    cleanup(&client).await;
 }
 
 #[tokio::test]
@@ -84,6 +90,7 @@ async fn test_unicode_cjk() {
     let result = execute(&client, r#"echo "日本語 中文 한국어""#).await.unwrap();
     assert!(result.ok);
     assert_eq!(result.stdout.trim(), "日本語 中文 한국어");
+    cleanup(&client).await;
 }
 
 #[tokio::test]
@@ -92,6 +99,7 @@ async fn test_unicode_in_variable() {
     let result = execute(&client, r#"NAME="会sh"; echo "Shell: ${NAME}""#).await.unwrap();
     assert!(result.ok);
     assert_eq!(result.stdout.trim(), "Shell: 会sh");
+    cleanup(&client).await;
 }
 
 #[tokio::test]
@@ -102,6 +110,7 @@ async fn test_special_chars_in_string() {
     assert!(result.ok);
     assert!(result.stdout.contains('\t'));
     assert!(result.stdout.contains('\n'));
+    cleanup(&client).await;
 }
 
 // =============================================================================
@@ -114,6 +123,7 @@ async fn test_empty_string_variable() {
     let result = execute(&client, r#"EMPTY=""; echo ">${EMPTY}<""#).await.unwrap();
     assert!(result.ok);
     assert_eq!(result.stdout.trim(), "><");
+    cleanup(&client).await;
 }
 
 #[tokio::test]
@@ -122,6 +132,7 @@ async fn test_empty_script() {
     let result = execute(&client, "").await.unwrap();
     assert!(result.ok);
     assert_eq!(result.code, 0);
+    cleanup(&client).await;
 }
 
 #[tokio::test]
@@ -129,6 +140,7 @@ async fn test_only_whitespace() {
     let client = create_client().await.unwrap();
     let result = execute(&client, "   \n\t\n   ").await.unwrap();
     assert!(result.ok);
+    cleanup(&client).await;
 }
 
 #[tokio::test]
@@ -136,6 +148,7 @@ async fn test_only_comments() {
     let client = create_client().await.unwrap();
     let result = execute(&client, "# this is a comment\n# another one").await.unwrap();
     assert!(result.ok);
+    cleanup(&client).await;
 }
 
 // =============================================================================
@@ -149,6 +162,7 @@ async fn test_division_by_zero() {
     // Should fail or return error - division by zero
     // Let's see what happens...
     println!("Division by zero result: {:?}", result);
+    cleanup(&client).await;
 }
 
 #[tokio::test]
@@ -156,6 +170,7 @@ async fn test_modulo_by_zero() {
     let client = create_client().await.unwrap();
     let result = execute(&client, "echo $((10 % 0))").await.unwrap();
     println!("Modulo by zero result: {:?}", result);
+    cleanup(&client).await;
 }
 
 #[tokio::test]
@@ -164,6 +179,7 @@ async fn test_negative_numbers() {
     let result = execute(&client, "echo $((-5 + 3))").await.unwrap();
     assert!(result.ok);
     assert_eq!(result.stdout.trim(), "-2");
+    cleanup(&client).await;
 }
 
 #[tokio::test]
@@ -173,6 +189,7 @@ async fn test_large_numbers() {
     let result = execute(&client, "echo $((9223372036854775807))").await.unwrap();
     assert!(result.ok);
     assert_eq!(result.stdout.trim(), "9223372036854775807");
+    cleanup(&client).await;
 }
 
 #[tokio::test]
@@ -181,6 +198,7 @@ async fn test_integer_overflow() {
     // What happens with overflow?
     let result = execute(&client, "echo $((9223372036854775807 + 1))").await.unwrap();
     println!("Overflow result: {:?}", result);
+    cleanup(&client).await;
 }
 
 // =============================================================================
@@ -193,6 +211,7 @@ async fn test_syntax_error_unclosed_quote() {
     let result = execute(&client, r#"echo "unclosed"#).await.unwrap();
     assert!(!result.ok, "Should fail on unclosed quote");
     println!("Unclosed quote error: {}", result.stderr);
+    cleanup(&client).await;
 }
 
 #[tokio::test]
@@ -201,6 +220,7 @@ async fn test_syntax_error_unclosed_brace() {
     let result = execute(&client, "echo ${VAR").await.unwrap();
     assert!(!result.ok, "Should fail on unclosed brace");
     println!("Unclosed brace error: {}", result.stderr);
+    cleanup(&client).await;
 }
 
 #[tokio::test]
@@ -209,6 +229,7 @@ async fn test_syntax_error_unclosed_paren() {
     let result = execute(&client, "echo $((1 + 2)").await.unwrap();
     assert!(!result.ok, "Should fail on unclosed paren");
     println!("Unclosed paren error: {}", result.stderr);
+    cleanup(&client).await;
 }
 
 #[tokio::test]
@@ -218,6 +239,7 @@ async fn test_syntax_error_bad_if() {
     // Missing fi
     assert!(!result.ok, "Should fail on missing fi");
     println!("Missing fi error: {}", result.stderr);
+    cleanup(&client).await;
 }
 
 // =============================================================================
@@ -231,6 +253,7 @@ async fn test_nested_quotes() {
     let result = execute(&client, r#"echo "it's working""#).await.unwrap();
     assert!(result.ok);
     assert_eq!(result.stdout.trim(), "it's working");
+    cleanup(&client).await;
 }
 
 #[tokio::test]
@@ -238,6 +261,7 @@ async fn test_escaped_quote() {
     let client = create_client().await.unwrap();
     let result = execute(&client, r#"echo "say \"hello\"""#).await.unwrap();
     println!("Escaped quote result: {:?}", result);
+    cleanup(&client).await;
 }
 
 #[tokio::test]
@@ -246,6 +270,7 @@ async fn test_dollar_in_single_quotes() {
     let result = execute(&client, r#"echo '$HOME'"#).await.unwrap();
     assert!(result.ok);
     assert_eq!(result.stdout.trim(), "$HOME");
+    cleanup(&client).await;
 }
 
 #[tokio::test]
@@ -253,6 +278,7 @@ async fn test_backslash_in_double_quotes() {
     let client = create_client().await.unwrap();
     let result = execute(&client, r#"echo "back\\slash""#).await.unwrap();
     println!("Backslash result: {:?}", result);
+    cleanup(&client).await;
 }
 
 // =============================================================================
@@ -274,6 +300,7 @@ async fn test_large_output() {
     assert!(result.ok);
     let line_count = result.stdout.lines().filter(|l| !l.is_empty()).count();
     assert_eq!(line_count, 1000, "Should have 1000 lines, got {}", line_count);
+    cleanup(&client).await;
 }
 
 // =============================================================================
@@ -294,6 +321,7 @@ async fn test_state_isolation() {
     assert!(result.ok);
     // Should be empty - variable shouldn't persist
     assert_eq!(result.stdout.trim(), "><", "Variable leaked between executions!");
+    cleanup(&client).await;
 }
 
 // =============================================================================
@@ -326,6 +354,7 @@ async fn test_concurrent_calls() {
     for (i, result) in results.iter().enumerate() {
         assert!(result.is_ok(), "Concurrent call {} failed: {:?}", i, result);
     }
+    cleanup(&client).await;
 }
 
 // =============================================================================
@@ -340,6 +369,7 @@ async fn test_dollar_dollar_pid() {
     // Should be a number
     let pid: i64 = result.stdout.trim().parse().expect("$$ should be a number");
     assert!(pid > 0, "$$ should be positive");
+    cleanup(&client).await;
 }
 
 #[tokio::test]
@@ -349,6 +379,7 @@ async fn test_positional_params_empty() {
     assert!(result.ok);
     // No positional params in MCP context
     println!("$# result: {}", result.stdout.trim());
+    cleanup(&client).await;
 }
 
 // =============================================================================
@@ -361,6 +392,7 @@ async fn test_pipeline_with_failure() {
     // First command fails
     let result = execute(&client, "false | echo piped").await.unwrap();
     println!("Pipeline with failure: {:?}", result);
+    cleanup(&client).await;
 }
 
 #[tokio::test]
@@ -369,6 +401,7 @@ async fn test_long_pipeline() {
     let result = execute(&client, "echo hello | cat | cat | cat | cat").await.unwrap();
     assert!(result.ok);
     assert_eq!(result.stdout.trim(), "hello");
+    cleanup(&client).await;
 }
 
 // =============================================================================
@@ -380,6 +413,7 @@ async fn test_semicolon_only() {
     let client = create_client().await.unwrap();
     let result = execute(&client, ";;;").await.unwrap();
     println!("Semicolons only: {:?}", result);
+    cleanup(&client).await;
 }
 
 #[tokio::test]
@@ -387,6 +421,7 @@ async fn test_many_semicolons() {
     let client = create_client().await.unwrap();
     let result = execute(&client, "echo a;; echo b;;; echo c").await.unwrap();
     println!("Many semicolons: {:?}", result);
+    cleanup(&client).await;
 }
 
 #[tokio::test]
@@ -396,6 +431,7 @@ async fn test_deeply_nested_arithmetic() {
     assert!(result.ok);
     // ((((1+2)*3)-4)/2)+1 = (((3*3)-4)/2)+1 = ((9-4)/2)+1 = (5/2)+1 = 2+1 = 3
     assert_eq!(result.stdout.trim(), "3");
+    cleanup(&client).await;
 }
 
 #[tokio::test]
@@ -404,4 +440,5 @@ async fn test_variable_in_variable_name() {
     // This is indirect expansion - ${!var} - probably not supported
     let result = execute(&client, r#"NAME=FOO; FOO=bar; echo "${!NAME}""#).await.unwrap();
     println!("Indirect expansion: {:?}", result);
+    cleanup(&client).await;
 }

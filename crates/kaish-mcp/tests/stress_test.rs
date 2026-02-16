@@ -18,6 +18,11 @@ struct ExecuteResult {
     ok: bool,
 }
 
+async fn cleanup(client: &McpClient) {
+    // Explicitly ignored: cleanup errors are non-fatal in tests
+    let _ = client.disconnect().await;
+}
+
 async fn create_client() -> Result<Arc<McpClient>> {
     let client = McpClient::new(McpConfig {
         name: "kaish-stress".into(),
@@ -75,6 +80,7 @@ async fn test_very_long_variable_name() {
     let script = format!("{}=hello; echo ${{{}}}", long_name, long_name);
     let result = execute(&client, &script).await.unwrap();
     println!("Long var name: ok={}, code={}", result.ok, result.code);
+    cleanup(&client).await;
 }
 
 #[tokio::test]
@@ -85,6 +91,7 @@ async fn test_very_long_string() {
     let result = execute(&client, &script).await.unwrap();
     assert!(result.ok);
     assert_eq!(result.stdout.trim().len(), 100_000);
+    cleanup(&client).await;
 }
 
 #[tokio::test]
@@ -99,6 +106,7 @@ async fn test_many_variables() {
     let result = execute(&client, &script).await.unwrap();
     assert!(result.ok);
     assert_eq!(result.stdout.trim(), "done");
+    cleanup(&client).await;
 }
 
 #[tokio::test]
@@ -109,6 +117,7 @@ async fn test_deeply_nested_braces() {
     let result = execute(&client, &script).await.unwrap();
     assert!(result.ok);
     assert_eq!(result.stdout.trim(), "deep");
+    cleanup(&client).await;
 }
 
 #[tokio::test]
@@ -122,6 +131,7 @@ async fn test_many_pipes() {
     let result = execute(&client, &script).await.unwrap();
     assert!(result.ok);
     assert_eq!(result.stdout.trim(), "hello");
+    cleanup(&client).await;
 }
 
 #[tokio::test]
@@ -133,6 +143,7 @@ async fn test_many_semicolons_stress() {
     assert!(result.ok);
     let lines: Vec<_> = result.stdout.trim().lines().filter(|l| !l.is_empty()).collect();
     assert_eq!(lines.len(), 1000);
+    cleanup(&client).await;
 }
 
 // =============================================================================
@@ -146,6 +157,7 @@ async fn test_equals_in_value() {
     let result = execute(&client, r#"URL="http://example.com?foo=bar"; echo ${URL}"#).await.unwrap();
     assert!(result.ok);
     assert_eq!(result.stdout.trim(), "http://example.com?foo=bar");
+    cleanup(&client).await;
 }
 
 #[tokio::test]
@@ -154,6 +166,7 @@ async fn test_dollar_at_end() {
     // Bare $ at end of string
     let result = execute(&client, r#"echo "cost: $""#).await.unwrap();
     println!("Dollar at end: {:?}", result);
+    cleanup(&client).await;
 }
 
 #[tokio::test]
@@ -162,6 +175,7 @@ async fn test_empty_expansion() {
     // ${}
     let result = execute(&client, r#"echo "${}" "#).await.unwrap();
     println!("Empty expansion: {:?}", result);
+    cleanup(&client).await;
 }
 
 #[tokio::test]
@@ -171,6 +185,7 @@ async fn test_newline_in_string() {
     assert!(result.ok);
     // Should have actual newline in output
     assert!(result.stdout.contains('\n'));
+    cleanup(&client).await;
 }
 
 #[tokio::test]
@@ -178,6 +193,7 @@ async fn test_tab_in_value() {
     let client = create_client().await.unwrap();
     let result = execute(&client, "VAR=\"a\tb\"; echo ${VAR}").await.unwrap();
     println!("Tab in value: {:?}", result);
+    cleanup(&client).await;
 }
 
 #[tokio::test]
@@ -187,6 +203,7 @@ async fn test_hash_in_string() {
     let result = execute(&client, r#"echo "hashtag #yolo""#).await.unwrap();
     assert!(result.ok);
     assert_eq!(result.stdout.trim(), "hashtag #yolo");
+    cleanup(&client).await;
 }
 
 #[tokio::test]
@@ -195,6 +212,7 @@ async fn test_semicolon_in_string() {
     let result = execute(&client, r#"echo "a;b;c""#).await.unwrap();
     assert!(result.ok);
     assert_eq!(result.stdout.trim(), "a;b;c");
+    cleanup(&client).await;
 }
 
 #[tokio::test]
@@ -203,6 +221,7 @@ async fn test_pipe_in_string() {
     let result = execute(&client, r#"echo "a|b|c""#).await.unwrap();
     assert!(result.ok);
     assert_eq!(result.stdout.trim(), "a|b|c");
+    cleanup(&client).await;
 }
 
 // =============================================================================
@@ -216,6 +235,7 @@ async fn test_complex_arithmetic() {
     // 1 + 6 - 2 + 2 = 7
     assert!(result.ok);
     assert_eq!(result.stdout.trim(), "7");
+    cleanup(&client).await;
 }
 
 #[tokio::test]
@@ -225,6 +245,7 @@ async fn test_arithmetic_with_parens() {
     // 3 * 7 = 21
     assert!(result.ok);
     assert_eq!(result.stdout.trim(), "21");
+    cleanup(&client).await;
 }
 
 #[tokio::test]
@@ -233,6 +254,7 @@ async fn test_negative_result() {
     let result = execute(&client, "echo $((5 - 10))").await.unwrap();
     assert!(result.ok);
     assert_eq!(result.stdout.trim(), "-5");
+    cleanup(&client).await;
 }
 
 #[tokio::test]
@@ -241,6 +263,7 @@ async fn test_arithmetic_underflow() {
     // i64 min is -9223372036854775808
     let result = execute(&client, "echo $((-9223372036854775808 - 1))").await.unwrap();
     println!("Underflow: {:?}", result);
+    cleanup(&client).await;
 }
 
 // =============================================================================
@@ -261,6 +284,7 @@ async fn test_nested_if() {
     "#).await.unwrap();
     assert!(result.ok);
     assert_eq!(result.stdout.trim(), "deep");
+    cleanup(&client).await;
 }
 
 #[tokio::test]
@@ -276,6 +300,7 @@ async fn test_nested_loops() {
     assert!(result.ok);
     let lines: Vec<_> = result.stdout.trim().lines().filter(|l| !l.is_empty()).collect();
     assert_eq!(lines, vec!["1a", "1b", "2a", "2b"]);
+    cleanup(&client).await;
 }
 
 #[tokio::test]
@@ -292,6 +317,7 @@ async fn test_break_in_loop() {
     assert!(result.ok);
     let lines: Vec<_> = result.stdout.trim().lines().filter(|l| !l.is_empty()).collect();
     assert_eq!(lines, vec!["1", "2"]);
+    cleanup(&client).await;
 }
 
 #[tokio::test]
@@ -308,6 +334,7 @@ async fn test_continue_in_loop() {
     assert!(result.ok);
     let lines: Vec<_> = result.stdout.trim().lines().filter(|l| !l.is_empty()).collect();
     assert_eq!(lines, vec!["1", "2", "4", "5"]);
+    cleanup(&client).await;
 }
 
 // =============================================================================
@@ -323,6 +350,7 @@ async fn test_rapid_fire_100() {
         assert!(result.ok, "Failed at iteration {}", i);
         assert_eq!(result.stdout.trim(), i.to_string());
     }
+    cleanup(&client).await;
 }
 
 #[tokio::test]
@@ -344,6 +372,7 @@ async fn test_rapid_concurrent_50() {
         let (i, result) = handle.await.unwrap();
         assert!(result.is_ok(), "Failed at concurrent {}: {:?}", i, result);
     }
+    cleanup(&client).await;
 }
 
 // =============================================================================
@@ -366,6 +395,7 @@ async fn test_very_deep_nesting() {
 
     let result = execute(&client, &script).await.unwrap();
     println!("Very deep nesting: ok={}, stderr={}", result.ok, result.stderr);
+    cleanup(&client).await;
 }
 
 #[tokio::test]
@@ -376,6 +406,7 @@ async fn test_script_with_nullish_json() {
     assert!(result.ok);
     // The data field should parse this as JSON null
     println!("Null JSON: data={:?}", result.data);
+    cleanup(&client).await;
 }
 
 #[tokio::test]
@@ -388,4 +419,5 @@ async fn test_boolean_json() {
     let result = execute(&client, "echo false").await.unwrap();
     assert!(result.ok);
     println!("False JSON: data={:?}", result.data);
+    cleanup(&client).await;
 }

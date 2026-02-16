@@ -22,6 +22,11 @@ struct ExecuteResult {
     ok: bool,
 }
 
+async fn cleanup(client: &McpClient) {
+    // Explicitly ignored: cleanup errors are non-fatal in tests
+    let _ = client.disconnect().await;
+}
+
 /// Create a client connected to kaish-mcp.
 async fn create_client() -> Result<Arc<McpClient>> {
     let client = McpClient::new(McpConfig {
@@ -116,6 +121,7 @@ async fn test_tool_discovery() {
         "execute tool not found in: {:?}",
         tool_names
     );
+    cleanup(&client).await;
 }
 
 #[tokio::test]
@@ -129,6 +135,7 @@ async fn test_basic_echo() {
     assert!(result.ok, "command should succeed");
     assert_eq!(result.code, 0);
     assert_eq!(result.stdout.trim(), "hello");
+    cleanup(&client).await;
 }
 
 #[tokio::test]
@@ -150,6 +157,7 @@ async fn test_env_vars() {
 
     assert!(result.ok, "command should succeed");
     assert_eq!(result.stdout.trim(), "hello world");
+    cleanup(&client).await;
 }
 
 #[tokio::test]
@@ -165,6 +173,7 @@ async fn test_json_output() {
 
     let data = result.data.unwrap();
     assert_eq!(data.get("count"), Some(&json!(42)));
+    cleanup(&client).await;
 }
 
 #[tokio::test]
@@ -191,6 +200,7 @@ async fn test_arithmetic() {
         .expect("execute failed");
     assert!(result.ok);
     assert_eq!(result.stdout.trim(), "10");
+    cleanup(&client).await;
 }
 
 #[tokio::test]
@@ -214,6 +224,7 @@ async fn test_control_flow_if() {
 
     assert!(result.ok);
     assert_eq!(result.stdout.trim(), "big");
+    cleanup(&client).await;
 }
 
 #[tokio::test]
@@ -241,6 +252,7 @@ async fn test_control_flow_for() {
         .filter(|l| !l.is_empty())
         .collect();
     assert_eq!(lines, vec!["1", "2", "3"]);
+    cleanup(&client).await;
 }
 
 #[tokio::test]
@@ -270,6 +282,7 @@ async fn test_control_flow_while() {
         .filter(|l| !l.is_empty())
         .collect();
     assert_eq!(lines, vec!["0", "1", "2"]);
+    cleanup(&client).await;
 }
 
 #[tokio::test]
@@ -282,6 +295,7 @@ async fn test_command_failure() {
 
     assert!(!result.ok, "command should fail");
     assert_eq!(result.code, 127, "exit code should be 127 for not found");
+    cleanup(&client).await;
 }
 
 #[tokio::test]
@@ -307,6 +321,7 @@ async fn test_timeout() {
     assert!(!result.ok, "should fail due to timeout");
     assert_eq!(result.code, 124, "exit code 124 indicates timeout");
     assert!(result.stderr.contains("timed out"));
+    cleanup(&client).await;
 }
 
 #[tokio::test]
@@ -322,6 +337,7 @@ async fn test_multiple_executions() {
         assert!(result.ok);
         assert_eq!(result.stdout.trim(), i.to_string());
     }
+    cleanup(&client).await;
 }
 
 #[tokio::test]
@@ -355,6 +371,7 @@ async fn test_exit_status_variable() {
     // Note: The final exit status is 0 because echo succeeded
     assert!(result.ok);
     assert_eq!(result.stdout.trim(), "1");
+    cleanup(&client).await;
 }
 
 #[tokio::test]
@@ -376,6 +393,7 @@ async fn test_default_value_expansion() {
 
     assert!(result.ok);
     assert_eq!(result.stdout.trim(), "actual");
+    cleanup(&client).await;
 }
 
 #[tokio::test]
@@ -388,6 +406,7 @@ async fn test_string_length() {
 
     assert!(result.ok);
     assert_eq!(result.stdout.trim(), "5");
+    cleanup(&client).await;
 }
 
 #[tokio::test]
@@ -400,6 +419,7 @@ async fn test_printf_builtin() {
 
     assert!(result.ok);
     assert_eq!(result.stdout.trim(), "hello 42");
+    cleanup(&client).await;
 }
 
 #[tokio::test]
@@ -415,6 +435,7 @@ async fn test_true_false_builtins() {
         .await
         .expect("execute failed");
     assert_eq!(result.stdout.trim(), "1");
+    cleanup(&client).await;
 }
 
 #[tokio::test]
@@ -436,6 +457,7 @@ async fn test_variable_assignment_and_expansion() {
 
     assert!(result.ok);
     assert_eq!(result.stdout.trim(), "3");
+    cleanup(&client).await;
 }
 
 #[tokio::test]
@@ -457,6 +479,7 @@ async fn test_quoted_strings() {
 
     assert!(result.ok);
     assert_eq!(result.stdout.trim(), "hello world");
+    cleanup(&client).await;
 }
 
 #[tokio::test]
@@ -466,6 +489,7 @@ async fn test_resources_list() {
     // Access peer info to verify connection works
     let info = client.peer_info().await.expect("peer_info failed");
     assert!(info.contains("kaish"), "server info should mention kaish");
+    cleanup(&client).await;
 }
 
 #[tokio::test]
@@ -478,6 +502,7 @@ async fn test_pipeline() {
 
     assert!(result.ok);
     assert_eq!(result.stdout.trim(), "hello world");
+    cleanup(&client).await;
 }
 
 #[tokio::test]
@@ -496,6 +521,7 @@ async fn test_command_chaining_and() {
         .expect("execute failed");
     assert!(!result.ok);
     assert!(result.stdout.is_empty() || result.stdout.trim().is_empty());
+    cleanup(&client).await;
 }
 
 #[tokio::test]
@@ -514,4 +540,5 @@ async fn test_command_chaining_or() {
         .expect("execute failed");
     assert!(result.ok);
     assert!(result.stdout.is_empty() || result.stdout.trim().is_empty());
+    cleanup(&client).await;
 }

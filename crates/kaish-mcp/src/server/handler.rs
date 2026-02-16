@@ -371,9 +371,14 @@ impl rmcp::ServerHandler for KaishServerHandler {
         context: NotificationContext<RoleServer>,
     ) -> impl std::future::Future<Output = ()> + Send + '_ {
         self.ensure_peer(&context.peer);
-        async {
-            self.refresh_roots().await;
-        }
+        // Spawn as a background task — awaiting peer requests inline in a
+        // notification handler deadlocks the server's event loop because
+        // the loop can't process the response while it's blocked here.
+        let this = self.clone();
+        tokio::spawn(async move {
+            this.refresh_roots().await;
+        });
+        async {}
     }
 
     fn on_roots_list_changed(
@@ -381,9 +386,11 @@ impl rmcp::ServerHandler for KaishServerHandler {
         context: NotificationContext<RoleServer>,
     ) -> impl std::future::Future<Output = ()> + Send + '_ {
         self.ensure_peer(&context.peer);
-        async {
-            self.refresh_roots().await;
-        }
+        let this = self.clone();
+        tokio::spawn(async move {
+            this.refresh_roots().await;
+        });
+        async {}
     }
 
     // -- Logging --
