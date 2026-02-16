@@ -494,6 +494,15 @@ impl Kernel {
             anyhow::anyhow!("parse error: {}", msg)
         })?;
 
+        // AST display mode: show AST instead of executing
+        {
+            let scope = self.scope.read().await;
+            if scope.show_ast() {
+                let output = format!("{:#?}\n", program);
+                return Ok(ExecResult::with_output(crate::interpreter::OutputData::text(output)));
+            }
+        }
+
         // Pre-execution validation
         if !self.skip_validation {
             let user_tools = self.user_tools.read().await;

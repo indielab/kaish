@@ -1183,3 +1183,73 @@ fn glob_brace_expansion() {
     "#);
     assert!(outputs_contain(&outputs, &["supported lang"]));
 }
+
+// ============================================================================
+// kaish-* Builtins and Absolute Paths
+// ============================================================================
+
+#[test]
+fn absolute_path_bin_echo() {
+    // /bin/echo runs as an external command — it streams output to terminal
+    // (Stdio::inherit), so ExecResult.out is empty. We verify it succeeds (no error).
+    let outputs = run_script("/bin/echo hello");
+    let joined = outputs.join("\n");
+    assert!(!joined.contains("Error"), "Should not error: {}", joined);
+    assert!(!joined.contains("Unknown command"), "Should not say 'Unknown command': {}", joined);
+}
+
+#[test]
+fn absolute_path_nonexistent() {
+    let outputs = run_script("/nonexistent/thing");
+    let joined = outputs.join("\n");
+    // Should get an error, not "Unknown command"
+    assert!(!joined.contains("Unknown command"), "Should not say 'Unknown command': {}", joined);
+    assert!(!joined.is_empty(), "Should produce error output");
+}
+
+#[test]
+fn kaish_ast_one_shot() {
+    let outputs = run_script("kaish-ast 'echo hi'");
+    let joined = outputs.join("\n");
+    assert!(
+        joined.contains("Command") || joined.contains("Pipeline") || joined.contains("echo"),
+        "Should show AST: {}", joined
+    );
+}
+
+#[test]
+fn kaish_clear_resets() {
+    let outputs = run_script(r#"
+        X=42
+        kaish-clear
+        echo "${X:-empty}"
+    "#);
+    assert!(outputs_contain(&outputs, &["empty"]));
+}
+
+#[test]
+fn kaish_version_output() {
+    let outputs = run_script("kaish-version");
+    assert!(outputs_contain(&outputs, &["kaish"]));
+}
+
+#[test]
+fn kaish_status_output() {
+    let outputs = run_script("kaish-status");
+    let joined = outputs.join("\n");
+    assert!(joined.contains("variables"), "Should show variables: {}", joined);
+}
+
+#[test]
+fn exit_still_works() {
+    let mut repl = Repl::new().expect("Failed to create REPL");
+    let result = repl.process_line("exit");
+    assert!(matches!(result, ProcessResult::Exit));
+}
+
+#[test]
+fn quit_still_works() {
+    let mut repl = Repl::new().expect("Failed to create REPL");
+    let result = repl.process_line("quit");
+    assert!(matches!(result, ProcessResult::Exit));
+}

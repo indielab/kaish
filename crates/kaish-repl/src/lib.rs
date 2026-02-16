@@ -26,7 +26,6 @@ use rustyline::validate::{ValidationContext, ValidationResult, Validator};
 use rustyline::{Editor, Helper};
 use tokio::runtime::Runtime;
 
-use kaish_kernel::ast::Value;
 use kaish_kernel::interpreter::ExecResult;
 use kaish_kernel::{Kernel, KernelConfig};
 
@@ -40,15 +39,6 @@ pub enum ProcessResult {
     /// No output (empty line, etc.).
     Empty,
     /// Exit the REPL.
-    Exit,
-}
-
-/// Result from meta-command handling.
-#[derive(Debug)]
-enum MetaResult {
-    /// Continue with optional output
-    Continue(Option<String>),
-    /// Exit the REPL (caller should save history and exit)
     Exit,
 }
 
@@ -307,18 +297,6 @@ impl Completer for KaishHelper {
                     }
                 }
 
-                // Meta-commands when line starts with /
-                if prefix.starts_with('/') {
-                    for cmd in META_COMMANDS {
-                        if cmd.starts_with(prefix) {
-                            candidates.push(Pair {
-                                display: cmd.to_string(),
-                                replacement: cmd.to_string(),
-                            });
-                        }
-                    }
-                }
-
                 candidates.sort_by(|a, b| a.display.cmp(&b.display));
 
                 Ok((word_start, candidates))
@@ -408,21 +386,12 @@ impl Hinter for KaishHelper {
 
 impl Helper for KaishHelper {}
 
-// ── Meta-commands ───────────────────────────────────────────────────
-
-/// All meta-commands available for tab completion.
-const META_COMMANDS: &[&str] = &[
-    "/help", "/quit", "/q", "/exit", "/ast", "/scope", "/vars", "/result",
-    "/cwd", "/tools", "/jobs", "/state", "/session", "/reset",
-];
-
 // ── REPL core ───────────────────────────────────────────────────────
 
 /// REPL configuration and state.
 pub struct Repl {
     kernel: Arc<Kernel>,
     runtime: Runtime,
-    show_ast: bool,
 }
 
 impl Repl {
@@ -441,7 +410,6 @@ impl Repl {
         Ok(Self {
             kernel: Arc::new(kernel),
             runtime,
-            show_ast: false,
         })
     }
 
@@ -459,7 +427,6 @@ impl Repl {
         Ok(Self {
             kernel: Arc::new(kernel),
             runtime,
-            show_ast: false,
         })
     }
 
@@ -473,137 +440,22 @@ impl Repl {
     pub fn process_line(&mut self, line: &str) -> ProcessResult {
         let trimmed = line.trim();
 
-        // Handle meta-commands (both /cmd and cmd forms for common ones)
-        if trimmed.starts_with('/') {
-            return match self.handle_meta_command(trimmed) {
-                MetaResult::Continue(Some(output)) => ProcessResult::Output(output),
-                MetaResult::Continue(None) => ProcessResult::Empty,
-                MetaResult::Exit => ProcessResult::Exit,
-            };
-        }
-
-        // Also support shell-style meta-commands without slash
-        if let Some(meta_result) = self.try_shell_style_command(trimmed) {
-            return match meta_result {
-                MetaResult::Continue(Some(output)) => ProcessResult::Output(output),
-                MetaResult::Continue(None) => ProcessResult::Empty,
-                MetaResult::Exit => ProcessResult::Exit,
-            };
-        }
-
         // Skip empty lines
         if trimmed.is_empty() {
             return ProcessResult::Empty;
         }
 
-        // Show AST if enabled
-        if self.show_ast {
-            match kaish_kernel::parser::parse(trimmed) {
-                Ok(program) => return ProcessResult::Output(format!("{:#?}", program)),
-                Err(errors) => {
-                    let mut msg = String::from("Parse error:\n");
-                    for err in errors {
-                        msg.push_str(&format!("  {err}\n"));
-                    }
-                    return ProcessResult::Output(msg);
-                }
-            }
+        // Intercept exit/quit before kernel dispatch
+        if matches!(trimmed, "exit" | "quit") {
+            return ProcessResult::Exit;
         }
 
-        // Execute via kernel
+        // Execute via kernel (absolute paths, builtins, externals all go through here)
         let result = self.runtime.block_on(self.kernel.execute(trimmed));
 
         match result {
             Ok(exec_result) => ProcessResult::Output(format_result(&exec_result)),
             Err(e) => ProcessResult::Output(format!("Error: {}", e)),
-        }
-    }
-
-    /// Handle a meta-command (starts with /).
-    fn handle_meta_command(&mut self, cmd: &str) -> MetaResult {
-        let parts: Vec<&str> = cmd.split_whitespace().collect();
-        let command = parts.first().copied().unwrap_or("");
-
-        match command {
-            "/quit" | "/q" | "/exit" => MetaResult::Exit,
-            "/help" | "/h" | "/?" => MetaResult::Continue(Some(HELP_TEXT.to_string())),
-            "/ast" => {
-                self.show_ast = !self.show_ast;
-                MetaResult::Continue(Some(format!(
-                    "AST mode: {}",
-                    if self.show_ast { "ON" } else { "OFF" }
-                )))
-            }
-            "/scope" | "/vars" => {
-                let vars = self.runtime.block_on(self.kernel.list_vars());
-                if vars.is_empty() {
-                    MetaResult::Continue(Some("(no variables set)".to_string()))
-                } else {
-                    let mut output = String::from("Variables:\n");
-                    for (name, value) in vars {
-                        output.push_str(&format!("  {} = {}\n", name, format_value(&value)));
-                    }
-                    MetaResult::Continue(Some(output.trim_end().to_string()))
-                }
-            }
-            "/result" | "/$?" => {
-                let result = self.runtime.block_on(self.kernel.last_result());
-                MetaResult::Continue(Some(format_result(&result)))
-            }
-            "/cwd" => {
-                let cwd = self.runtime.block_on(self.kernel.cwd());
-                MetaResult::Continue(Some(cwd.to_string_lossy().to_string()))
-            }
-            "/tools" => {
-                let schemas = self.kernel.tool_schemas();
-                let names: Vec<_> = schemas.iter().map(|s| s.name.as_str()).collect();
-                MetaResult::Continue(Some(format!("Available tools: {}", names.join(", "))))
-            }
-            "/jobs" => {
-                let jobs = self.runtime.block_on(self.kernel.jobs().list());
-                if jobs.is_empty() {
-                    MetaResult::Continue(Some("(no background jobs)".to_string()))
-                } else {
-                    let mut output = String::from("Background jobs:\n");
-                    for job in jobs {
-                        output.push_str(&format!("  [{}] {} {}\n", job.id, job.status, job.command));
-                    }
-                    MetaResult::Continue(Some(output.trim_end().to_string()))
-                }
-            }
-            "/state" | "/session" => {
-                let vars = self.runtime.block_on(self.kernel.list_vars());
-                MetaResult::Continue(Some(format!(
-                    "Kernel: {}\nVariables: {}",
-                    self.kernel.name(),
-                    vars.len()
-                )))
-            }
-            "/clear-state" | "/reset" => {
-                if let Err(e) = self.runtime.block_on(self.kernel.reset()) {
-                    MetaResult::Continue(Some(format!("Reset failed: {}", e)))
-                } else {
-                    MetaResult::Continue(Some("Session reset (variables cleared)".to_string()))
-                }
-            }
-            _ => MetaResult::Continue(Some(format!(
-                "Unknown command: {}\nType /help or help for available commands.",
-                command
-            ))),
-        }
-    }
-
-    /// Try to handle a shell-style command (without leading /).
-    /// Returns Some(result) if it was a recognized command, None otherwise.
-    fn try_shell_style_command(&mut self, cmd: &str) -> Option<MetaResult> {
-        let parts: Vec<&str> = cmd.split_whitespace().collect();
-        let command = parts.first().copied().unwrap_or("");
-
-        match command {
-            "quit" | "exit" => Some(self.handle_meta_command("/quit")),
-            "help" => Some(self.handle_meta_command("/help")),
-            "reset" => Some(self.handle_meta_command("/reset")),
-            _ => None,
         }
     }
 }
@@ -616,19 +468,6 @@ impl Default for Repl {
 }
 
 // ── Formatting ──────────────────────────────────────────────────────
-
-/// Format a Value for display (with quotes on strings).
-fn format_value(value: &Value) -> String {
-    match value {
-        Value::Null => "null".to_string(),
-        Value::Bool(b) => b.to_string(),
-        Value::Int(i) => i.to_string(),
-        Value::Float(f) => f.to_string(),
-        Value::String(s) => format!("\"{}\"", s),
-        Value::Json(json) => json.to_string(),
-        Value::Blob(blob) => format!("[blob: {} {}]", blob.formatted_size(), blob.content_type),
-    }
-}
 
 /// Format an ExecResult for display.
 ///
@@ -672,19 +511,13 @@ fn format_result(result: &ExecResult) -> String {
 
 const HELP_TEXT: &str = r#"会sh — kaish REPL
 
-Meta Commands (use with or without /):
-  help, /help, /?   Show this help
-  quit, /quit, /q   Exit the REPL
-  reset, /reset     Clear in-memory state
-
-Slash-only commands:
-  /ast              Toggle AST display mode
-  /scope, /vars     Show all variables (alt: `vars` builtin)
-  /result, /$?      Show last command result
-  /cwd              Show current working directory
-  /tools            List available tools (alt: `tools` builtin)
-  /jobs             List background jobs
-  /state, /session  Show session info
+Session:
+  exit, quit          Exit the REPL
+  kaish-clear         Clear session state (variables, cwd)
+  kaish-ast [-on|-off] 'expr'  Toggle or one-shot AST display
+  kaish-status        Show kernel session info
+  kaish-version       Print kaish version
+  help [tool]         Show tool help
 
 Built-in Tools:
   echo [args...]    Print arguments
@@ -692,35 +525,24 @@ Built-in Tools:
   ls [path] [-la]   List directory (-a hidden, -l long)
   cd [path | -]     Change directory (- for previous)
   pwd               Print working directory
-  mkdir <path>      Create directory
-  rm <path> [-rf]   Remove file/directory
-  cp <src> <dst> [-r]  Copy file/directory
-  mv <src> <dst>    Move/rename
-  grep <pattern> [path] [-inv]  Search patterns
-  write <path> <content>  Write to file
-  date [format]     Current date/time
-  assert <cond>     Assert condition (for tests)
-  help [tool]       Show tool help
+  vars              Show all variables
+  tools             List available tools
   jobs              List background jobs
   wait [job_id]     Wait for background jobs
 
 External Commands:
   Commands not found as builtins are searched in PATH
   and executed as external processes (cargo, git, etc.)
+  Absolute paths work directly: /usr/bin/ps, /bin/echo
 
 Language:
   X=value           Assign a variable
   ${VAR}            Variable reference
-  ${VAR.field}      Nested access
   ${?.ok}           Last result access
   a | b | c         Pipeline (connects stdout → stdin)
   cmd &             Run in background
   if cond; then ... fi
   for X in arr; do ... done
-
-Multi-line:
-  Unclosed if/for/while blocks and quoted strings
-  automatically continue on the next line.
 
 Tab Completion:
   <Tab>             Complete commands, variables ($), or paths
@@ -804,7 +626,7 @@ fn resolve_prompt(repl: &Repl) -> String {
 /// Run the REPL.
 pub fn run() -> Result<()> {
     println!("会sh — kaish v{}", env!("CARGO_PKG_VERSION"));
-    println!("Type /help for commands, /quit to exit.");
+    println!("Type help for commands, exit to quit.");
 
     let mut repl = Repl::new()?;
 

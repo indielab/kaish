@@ -37,6 +37,8 @@ pub struct Scope {
     positional: Vec<String>,
     /// Error exit mode (set -e): exit on any command failure.
     error_exit: bool,
+    /// AST display mode (kaish-ast -on/-off): show AST instead of executing.
+    show_ast: bool,
     /// Current process ID ($$), captured at scope creation.
     pid: u32,
 }
@@ -51,6 +53,7 @@ impl Scope {
             script_name: String::new(),
             positional: Vec::new(),
             error_exit: false,
+            show_ast: false,
             pid: std::process::id(),
         }
     }
@@ -188,6 +191,16 @@ impl Scope {
     /// Set error-exit mode (set -e / set +e).
     pub fn set_error_exit(&mut self, enabled: bool) {
         self.error_exit = enabled;
+    }
+
+    /// Check if AST display mode is enabled (kaish-ast -on).
+    pub fn show_ast(&self) -> bool {
+        self.show_ast
+    }
+
+    /// Set AST display mode (kaish-ast -on / kaish-ast -off).
+    pub fn set_show_ast(&mut self, enabled: bool) {
+        self.show_ast = enabled;
     }
 
     /// Mark a variable as exported (visible to child processes).
