@@ -22,6 +22,12 @@ check "$X" "5" "arithmetic addition"
 Y=$((X * 4))
 check "$Y" "20" "arithmetic multiplication"
 
+# Arithmetic inside double quotes with apostrophe (Bug A regression test)
+check "It's $((1+1))" "It's 2" "arithmetic with apostrophe in double quotes"
+
+# Arithmetic in double-quoted string
+check "$((2+3)) items" "5 items" "arithmetic in double-quoted string"
+
 # String length
 STR="hello"
 check "${#STR}" "5" "string length"

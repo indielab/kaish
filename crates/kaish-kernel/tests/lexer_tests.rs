@@ -551,6 +551,21 @@ fn lexer_special_variables_in_context(#[case] input: &str, #[case] expected: &[&
     "X=$((1 + 2)); $(echo hello)",
     &["IDENT(X)", "EQ", "ARITH(1 + 2)", "SEMI", "CMDSUBST", "IDENT(echo)", "IDENT(hello)", "RPAREN"]
 )]
+// Bug A: single quote inside double quotes must not start quote mode
+#[case::single_quote_in_double_quotes(
+    r#"echo "It's $((1+1))""#,
+    &["IDENT(echo)", "STRING(It's ${__ARITH:1+1__})"]
+)]
+// Arithmetic in simple double-quoted string
+#[case::arith_in_double_quote_string(
+    r#"echo "$((2+3))""#,
+    &["IDENT(echo)", "STRING(${__ARITH:2+3__})"]
+)]
+// Bug B: paren in string inside command sub shouldn't break skipper
+#[case::paren_in_string_inside_cmd_sub(
+    r#"$(echo "foo ) bar")"#,
+    &["CMDSUBST", "IDENT(echo)", "STRING(foo ) bar)", "RPAREN"]
+)]
 fn lexer_arithmetic_in_command_substitution(#[case] input: &str, #[case] expected: &[&str]) {
     run_lexer_test(input, expected);
 }

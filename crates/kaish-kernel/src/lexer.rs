@@ -939,6 +939,104 @@ struct ArithmeticPreprocessResult {
     replacements: Vec<SpanReplacement>,
 }
 
+/// Skip a `$(...)` command substitution with quote-aware paren matching.
+///
+/// Copies the entire command substitution verbatim to `result`, handling
+/// single quotes, double quotes, and backslash escapes inside the sub so
+/// that parentheses within strings don't confuse the depth counter.
+///
+/// On entry, `i` points to the `$` of `$(`. On exit, `i` points past the
+/// closing `)`.
+fn skip_command_substitution(
+    chars: &[char],
+    i: &mut usize,
+    source_pos: &mut usize,
+    result: &mut String,
+) {
+    // Copy $(
+    result.push('$');
+    result.push('(');
+    *i += 2;
+    *source_pos += 2;
+
+    let mut depth: usize = 1;
+    let mut in_single_quote = false;
+    let mut in_double_quote = false;
+
+    while *i < chars.len() && depth > 0 {
+        let c = chars[*i];
+
+        if in_single_quote {
+            result.push(c);
+            *source_pos += c.len_utf8();
+            *i += 1;
+            if c == '\'' {
+                in_single_quote = false;
+            }
+            continue;
+        }
+
+        if in_double_quote {
+            if c == '\\' && *i + 1 < chars.len() {
+                let next = chars[*i + 1];
+                if next == '"' || next == '\\' || next == '$' || next == '`' {
+                    result.push(c);
+                    result.push(next);
+                    *source_pos += c.len_utf8() + next.len_utf8();
+                    *i += 2;
+                    continue;
+                }
+            }
+            if c == '"' {
+                in_double_quote = false;
+            }
+            result.push(c);
+            *source_pos += c.len_utf8();
+            *i += 1;
+            continue;
+        }
+
+        // Outside quotes
+        match c {
+            '\'' => {
+                in_single_quote = true;
+                result.push(c);
+                *source_pos += c.len_utf8();
+                *i += 1;
+            }
+            '"' => {
+                in_double_quote = true;
+                result.push(c);
+                *source_pos += c.len_utf8();
+                *i += 1;
+            }
+            '\\' if *i + 1 < chars.len() => {
+                result.push(c);
+                result.push(chars[*i + 1]);
+                *source_pos += c.len_utf8() + chars[*i + 1].len_utf8();
+                *i += 2;
+            }
+            '(' => {
+                depth += 1;
+                result.push(c);
+                *source_pos += c.len_utf8();
+                *i += 1;
+            }
+            ')' => {
+                depth -= 1;
+                result.push(c);
+                *source_pos += c.len_utf8();
+                *i += 1;
+            }
+            _ => {
+                result.push(c);
+                *source_pos += c.len_utf8();
+                *i += 1;
+            }
+        }
+    }
+}
+
 /// Preprocess arithmetic expressions in source code.
 ///
 /// Finds `$((expr))` patterns and replaces them with markers.
@@ -960,11 +1058,24 @@ fn preprocess_arithmetic(source: &str) -> Result<ArithmeticPreprocessResult, Lex
     let chars_vec: Vec<char> = source.chars().collect();
     let mut i = 0;
 
+    // Whether we're currently inside double quotes. Single quotes inside
+    // double quotes are literal characters, not quote delimiters.
+    let mut in_double_quote = false;
+
     while i < chars_vec.len() {
         let ch = chars_vec[i];
 
-        // Skip single-quoted strings — no expansion inside
-        if ch == '\'' {
+        // Backslash escape outside quotes — skip both chars verbatim
+        if !in_double_quote && ch == '\\' && i + 1 < chars_vec.len() {
+            result.push(ch);
+            result.push(chars_vec[i + 1]);
+            source_pos += ch.len_utf8() + chars_vec[i + 1].len_utf8();
+            i += 2;
+            continue;
+        }
+
+        // Single quote — only starts quote mode when NOT inside double quotes
+        if ch == '\'' && !in_double_quote {
             result.push(ch);
             i += 1;
             source_pos += 1;
@@ -981,29 +1092,32 @@ fn preprocess_arithmetic(source: &str) -> Result<ArithmeticPreprocessResult, Lex
             continue;
         }
 
+        // Double quote — toggle state (arithmetic is still expanded inside)
+        if ch == '"' {
+            in_double_quote = !in_double_quote;
+            result.push(ch);
+            i += 1;
+            source_pos += 1;
+            continue;
+        }
+
+        // Backslash escape inside double quotes — only \" and \\ are special
+        if in_double_quote && ch == '\\' && i + 1 < chars_vec.len() {
+            let next = chars_vec[i + 1];
+            if next == '"' || next == '\\' || next == '$' || next == '`' {
+                result.push(ch);
+                result.push(next);
+                source_pos += ch.len_utf8() + next.len_utf8();
+                i += 2;
+                continue;
+            }
+        }
+
         // Skip $(...) command substitutions — inner arithmetic belongs to the subcommand
         if ch == '$' && i + 1 < chars_vec.len() && chars_vec[i + 1] == '('
             && !(i + 2 < chars_vec.len() && chars_vec[i + 2] == '(')
         {
-            // Copy $( and track paren depth to find the matching )
-            result.push('$');
-            result.push('(');
-            i += 2;
-            source_pos += 2;
-            let mut depth: usize = 1;
-            while i < chars_vec.len() && depth > 0 {
-                let c = chars_vec[i];
-                match c {
-                    '(' => depth += 1,
-                    ')' => depth -= 1,
-                    _ => {}
-                }
-                if depth > 0 || c == ')' {
-                    result.push(c);
-                    source_pos += c.len_utf8();
-                    i += 1;
-                }
-            }
+            skip_command_substitution(&chars_vec, &mut i, &mut source_pos, &mut result);
             continue;
         }
 
