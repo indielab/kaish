@@ -2140,21 +2140,15 @@ impl Kernel {
     /// - `Err` on execution errors
     #[tracing::instrument(level = "debug", skip(self, args), fields(command = %name))]
     async fn try_execute_external(&self, name: &str, args: &[Arg]) -> Result<Option<ExecResult>> {
-        // Get real working directory for relative path resolution and child cwd
+        // Get real working directory for relative path resolution and child cwd.
+        // If the CWD is virtual (no real filesystem path), skip external command
+        // execution entirely — return None so the dispatch can fall through to
+        // backend-registered tools.
         let real_cwd = {
             let ctx = self.exec_ctx.read().await;
             match ctx.backend.resolve_real_path(&ctx.cwd) {
                 Some(p) => p,
-                None => {
-                    return Ok(Some(ExecResult::failure(
-                        1,
-                        format!(
-                            "{}: cannot run external command from virtual directory '{}'",
-                            name,
-                            ctx.cwd.display()
-                        ),
-                    )));
-                }
+                None => return Ok(None),
             }
         };
 
