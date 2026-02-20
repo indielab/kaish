@@ -160,6 +160,14 @@ pub fn kernels_dir() -> PathBuf {
     data_dir().join("kernels")
 }
 
+/// Get the spill directory for output truncation.
+///
+/// Uses `$XDG_RUNTIME_DIR/kaish/spill` (RAM-backed tmpfs on systemd systems).
+/// Cleared on reboot, user-scoped, survives across MCP calls.
+pub fn spill_dir() -> PathBuf {
+    runtime_dir().join("spill")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -237,6 +245,13 @@ mod tests {
         assert_eq!(config_dir(), xdg_config_home().join("kaish"));
         assert_eq!(cache_dir(), xdg_cache_home().join("kaish"));
         assert_eq!(runtime_dir(), xdg_runtime_dir().join("kaish"));
+    }
+
+    #[test]
+    fn spill_dir_is_under_runtime() {
+        let spill = spill_dir();
+        assert!(spill.starts_with(&runtime_dir()));
+        assert!(spill.ends_with("spill"));
     }
 
     #[test]

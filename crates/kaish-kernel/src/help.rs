@@ -20,6 +20,8 @@ pub enum HelpTopic {
     Scatter,
     /// Ignore file configuration.
     Ignore,
+    /// Output size limit configuration.
+    OutputLimit,
     /// Known limitations.
     Limits,
     /// Help for a specific tool.
@@ -39,6 +41,7 @@ impl HelpTopic {
             "vfs" | "filesystem" | "fs" | "paths" => Self::Vfs,
             "scatter" | "gather" | "parallel" | "散" | "集" => Self::Scatter,
             "ignore" | "gitignore" | "kaish-ignore" => Self::Ignore,
+            "output-limit" | "spill" | "truncate" | "kaish-output-limit" => Self::OutputLimit,
             "limits" | "limitations" | "missing" => Self::Limits,
             other => Self::Tool(other.to_string()),
         }
@@ -53,6 +56,7 @@ impl HelpTopic {
             Self::Vfs => "Virtual filesystem mounts and paths",
             Self::Scatter => "Parallel processing (散/集)",
             Self::Ignore => "Ignore file configuration",
+            Self::OutputLimit => "Output size limit configuration",
             Self::Limits => "Known limitations",
             Self::Tool(_) => "Help for a specific tool",
         }
@@ -66,6 +70,7 @@ const SYNTAX: &str = include_str!("../docs/help/syntax.md");
 const VFS: &str = include_str!("../docs/help/vfs.md");
 const SCATTER: &str = include_str!("../docs/help/scatter.md");
 const IGNORE: &str = include_str!("../docs/help/ignore.md");
+const OUTPUT_LIMIT: &str = include_str!("../docs/help/output-limit.md");
 const LIMITS: &str = include_str!("../docs/help/limits.md");
 
 /// Get help content for a topic.
@@ -81,6 +86,7 @@ pub fn get_help(topic: &HelpTopic, tool_schemas: &[ToolSchema]) -> String {
         HelpTopic::Vfs => VFS.to_string(),
         HelpTopic::Scatter => SCATTER.to_string(),
         HelpTopic::Ignore => IGNORE.to_string(),
+        HelpTopic::OutputLimit => OUTPUT_LIMIT.to_string(),
         HelpTopic::Limits => LIMITS.to_string(),
         HelpTopic::Tool(name) => format_tool_help(name, tool_schemas),
     }
@@ -203,6 +209,7 @@ pub fn list_topics() -> Vec<(&'static str, &'static str)> {
         ("vfs", "Virtual filesystem mounts and paths"),
         ("scatter", "Parallel processing (散/集)"),
         ("ignore", "Ignore file configuration"),
+        ("output-limit", "Output size limit configuration"),
         ("limits", "Known limitations"),
     ]
 }
@@ -221,6 +228,9 @@ mod tests {
         assert_eq!(HelpTopic::parse_topic("vfs"), HelpTopic::Vfs);
         assert_eq!(HelpTopic::parse_topic("scatter"), HelpTopic::Scatter);
         assert_eq!(HelpTopic::parse_topic("集"), HelpTopic::Scatter);
+        assert_eq!(HelpTopic::parse_topic("output-limit"), HelpTopic::OutputLimit);
+        assert_eq!(HelpTopic::parse_topic("spill"), HelpTopic::OutputLimit);
+        assert_eq!(HelpTopic::parse_topic("kaish-output-limit"), HelpTopic::OutputLimit);
         assert_eq!(HelpTopic::parse_topic("limits"), HelpTopic::Limits);
         assert_eq!(
             HelpTopic::parse_topic("grep"),
@@ -236,6 +246,7 @@ mod tests {
         assert!(VFS.contains("Mount Points"));
         assert!(SCATTER.contains("scatter"));
         assert!(IGNORE.contains("kaish-ignore"));
+        assert!(OUTPUT_LIMIT.contains("kaish-output-limit"));
         assert!(LIMITS.contains("Limitations"));
     }
 

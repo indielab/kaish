@@ -9,6 +9,7 @@ use crate::backend::{KernelBackend, LocalBackend};
 use crate::dispatch::PipelinePosition;
 use crate::ignore_config::IgnoreConfig;
 use crate::interpreter::Scope;
+use crate::output_limit::OutputLimitConfig;
 use crate::scheduler::{JobManager, PipeReader, PipeWriter, StderrStream};
 use crate::tools::ToolRegistry;
 use crate::vfs::VfsRouter;
@@ -80,6 +81,8 @@ pub struct ExecContext {
     pub aliases: HashMap<String, String>,
     /// Ignore file configuration for file-walking tools.
     pub ignore_config: IgnoreConfig,
+    /// Output size limit configuration for agent safety.
+    pub output_limit: OutputLimitConfig,
     /// Terminal state for job control (interactive mode, Unix only).
     #[cfg(unix)]
     pub terminal_state: Option<std::sync::Arc<crate::terminal::TerminalState>>,
@@ -108,6 +111,7 @@ impl ExecContext {
             interactive: false,
             aliases: HashMap::new(),
             ignore_config: IgnoreConfig::none(),
+            output_limit: OutputLimitConfig::none(),
             #[cfg(unix)]
             terminal_state: None,
         }
@@ -135,6 +139,7 @@ impl ExecContext {
             interactive: false,
             aliases: HashMap::new(),
             ignore_config: IgnoreConfig::none(),
+            output_limit: OutputLimitConfig::none(),
             #[cfg(unix)]
             terminal_state: None,
         }
@@ -159,6 +164,7 @@ impl ExecContext {
             interactive: false,
             aliases: HashMap::new(),
             ignore_config: IgnoreConfig::none(),
+            output_limit: OutputLimitConfig::none(),
             #[cfg(unix)]
             terminal_state: None,
         }
@@ -183,6 +189,7 @@ impl ExecContext {
             interactive: false,
             aliases: HashMap::new(),
             ignore_config: IgnoreConfig::none(),
+            output_limit: OutputLimitConfig::none(),
             #[cfg(unix)]
             terminal_state: None,
         }
@@ -210,6 +217,7 @@ impl ExecContext {
             interactive: false,
             aliases: HashMap::new(),
             ignore_config: IgnoreConfig::none(),
+            output_limit: OutputLimitConfig::none(),
             #[cfg(unix)]
             terminal_state: None,
         }
@@ -234,6 +242,7 @@ impl ExecContext {
             interactive: false,
             aliases: HashMap::new(),
             ignore_config: IgnoreConfig::none(),
+            output_limit: OutputLimitConfig::none(),
             #[cfg(unix)]
             terminal_state: None,
         }
@@ -341,6 +350,7 @@ impl ExecContext {
             interactive: self.interactive,
             aliases: self.aliases.clone(),
             ignore_config: self.ignore_config.clone(),
+            output_limit: self.output_limit.clone(),
             #[cfg(unix)]
             terminal_state: self.terminal_state.clone(),
         }

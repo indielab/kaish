@@ -259,18 +259,29 @@ impl BackendDispatcher {
             // Output was streamed to pipe, so result.out is empty
             Some(ExecResult::from_output(code, String::new(), stderr))
         } else {
-            // No pipe_stdout — buffer output as before (last stage or non-pipeline)
-            let result = match child.wait_with_output().await {
-                Ok(output) => {
-                    let code = output.status.code().unwrap_or(1) as i64;
-                    let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
-                    let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
-                    Some(ExecResult::from_output(code, stdout, stderr))
-                }
-                Err(e) => Some(ExecResult::failure(1, format!("{}: {}", name, e))),
+            // No pipe_stdout — last stage or non-pipeline.
+            // Use spill-aware collection if output limits are configured.
+            let Some(child_stdout) = child.stdout.take() else {
+                return Some(ExecResult::failure(1, "internal: stdout not available"));
             };
+            let Some(child_stderr) = child.stderr.take() else {
+                return Some(ExecResult::failure(1, "internal: stderr not available"));
+            };
+
+            // Always use spill_aware_collect — it handles both limited and
+            // unlimited modes, and correctly streams stderr to ctx.stderr.
+            // (wait_with_output would bypass stderr streaming.)
+            let (stdout, stderr) = crate::output_limit::spill_aware_collect(
+                child_stdout,
+                child_stderr,
+                ctx.stderr.clone(),
+                &ctx.output_limit,
+            ).await;
+
+            let status = child.wait().await;
             if let Some(task) = stdin_task { task.abort(); }
-            result
+            let code = status.map(|s| s.code().unwrap_or(1) as i64).unwrap_or(1);
+            Some(ExecResult::from_output(code, stdout, stderr))
         }
     }
 }

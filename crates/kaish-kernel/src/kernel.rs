@@ -122,6 +122,9 @@ pub struct KernelConfig {
 
     /// Ignore file configuration for file-walking tools.
     pub ignore_config: crate::ignore_config::IgnoreConfig,
+
+    /// Output size limit configuration for agent safety.
+    pub output_limit: crate::output_limit::OutputLimitConfig,
 }
 
 /// Get the default sandbox root ($HOME).
@@ -141,6 +144,7 @@ impl Default for KernelConfig {
             skip_validation: false,
             interactive: false,
             ignore_config: crate::ignore_config::IgnoreConfig::none(),
+            output_limit: crate::output_limit::OutputLimitConfig::none(),
         }
     }
 }
@@ -156,6 +160,7 @@ impl KernelConfig {
             skip_validation: false,
             interactive: false,
             ignore_config: crate::ignore_config::IgnoreConfig::none(),
+            output_limit: crate::output_limit::OutputLimitConfig::none(),
         }
     }
 
@@ -169,6 +174,7 @@ impl KernelConfig {
             skip_validation: false,
             interactive: false,
             ignore_config: crate::ignore_config::IgnoreConfig::none(),
+            output_limit: crate::output_limit::OutputLimitConfig::none(),
         }
     }
 
@@ -185,6 +191,7 @@ impl KernelConfig {
             skip_validation: false,
             interactive: false,
             ignore_config: crate::ignore_config::IgnoreConfig::none(),
+            output_limit: crate::output_limit::OutputLimitConfig::none(),
         }
     }
 
@@ -201,6 +208,7 @@ impl KernelConfig {
             skip_validation: false,
             interactive: false,
             ignore_config: crate::ignore_config::IgnoreConfig::mcp(),
+            output_limit: crate::output_limit::OutputLimitConfig::mcp(),
         }
     }
 
@@ -215,6 +223,7 @@ impl KernelConfig {
             skip_validation: false,
             interactive: false,
             ignore_config: crate::ignore_config::IgnoreConfig::mcp(),
+            output_limit: crate::output_limit::OutputLimitConfig::mcp(),
         }
     }
 
@@ -229,6 +238,7 @@ impl KernelConfig {
             skip_validation: false,
             interactive: false,
             ignore_config: crate::ignore_config::IgnoreConfig::none(),
+            output_limit: crate::output_limit::OutputLimitConfig::none(),
         }
     }
 
@@ -259,6 +269,12 @@ impl KernelConfig {
     /// Set the ignore file configuration.
     pub fn with_ignore_config(mut self, config: crate::ignore_config::IgnoreConfig) -> Self {
         self.ignore_config = config;
+        self
+    }
+
+    /// Set the output limit configuration.
+    pub fn with_output_limit(mut self, config: crate::output_limit::OutputLimitConfig) -> Self {
+        self.output_limit = config;
         self
     }
 }
@@ -330,6 +346,13 @@ impl Kernel {
 
                 // Real /tmp for interop with other processes
                 vfs.mount("/tmp", LocalFs::new(PathBuf::from("/tmp")));
+
+                // Mount XDG runtime dir for spill files and socket access
+                let runtime = crate::paths::xdg_runtime_dir();
+                if runtime.exists() {
+                    let runtime_str = runtime.to_string_lossy().to_string();
+                    vfs.mount(&runtime_str, LocalFs::new(runtime));
+                }
 
                 // Resolve the sandbox root (defaults to $HOME)
                 let local_root = root.clone().unwrap_or_else(|| {
@@ -422,7 +445,7 @@ impl Kernel {
         jobs: Arc<JobManager>,
         make_ctx: impl FnOnce(&Arc<VfsRouter>, &Arc<ToolRegistry>) -> ExecContext,
     ) -> Result<Self> {
-        let KernelConfig { name, cwd, skip_validation, interactive, ignore_config, .. } = config;
+        let KernelConfig { name, cwd, skip_validation, interactive, ignore_config, output_limit, .. } = config;
 
         let mut tools = ToolRegistry::new();
         register_builtins(&mut tools);
@@ -444,6 +467,7 @@ impl Kernel {
         exec_ctx.set_tools(tools.clone());
         exec_ctx.stderr = Some(stderr_writer);
         exec_ctx.ignore_config = ignore_config;
+        exec_ctx.output_limit = output_limit;
 
         Ok(Self {
             name,
@@ -1026,12 +1050,18 @@ impl Kernel {
                 interactive: self.interactive,
                 aliases: ec.aliases.clone(),
                 ignore_config: ec.ignore_config.clone(),
+                output_limit: ec.output_limit.clone(),
                 #[cfg(unix)]
                 terminal_state: ec.terminal_state.clone(),
             }
         }; // locks released
 
-        let result = self.runner.run(&pipeline.commands, &mut ctx, self).await;
+        let mut result = self.runner.run(&pipeline.commands, &mut ctx, self).await;
+
+        // Post-hoc spill check (catches builtins and fast external commands)
+        if ctx.output_limit.is_enabled() {
+            let _ = crate::output_limit::spill_if_needed(&mut result, &ctx.output_limit).await;
+        }
 
         // Sync changes back from context
         {
@@ -1040,6 +1070,7 @@ impl Kernel {
             ec.prev_cwd = ctx.prev_cwd.clone();
             ec.aliases = ctx.aliases.clone();
             ec.ignore_config = ctx.ignore_config.clone();
+            ec.output_limit = ctx.output_limit.clone();
         }
         {
             let mut scope = self.scope.write().await;
@@ -2576,6 +2607,7 @@ impl Kernel {
             ec.stdin_data = ctx.stdin_data.take();
             ec.aliases = ctx.aliases.clone();
             ec.ignore_config = ctx.ignore_config.clone();
+            ec.output_limit = ctx.output_limit.clone();
             ec.pipeline_position = ctx.pipeline_position;
         }
 
@@ -2593,6 +2625,7 @@ impl Kernel {
             ctx.prev_cwd = ec.prev_cwd.clone();
             ctx.aliases = ec.aliases.clone();
             ctx.ignore_config = ec.ignore_config.clone();
+            ctx.output_limit = ec.output_limit.clone();
         }
 
         Ok(result)

@@ -19,6 +19,7 @@ pub mod dispatch;
 pub mod help;
 pub mod ignore_config;
 pub mod interpreter;
+pub mod output_limit;
 pub mod kernel;
 pub mod lexer;
 pub mod parser;
@@ -55,6 +56,7 @@ pub use backend::{
 pub use dispatch::{BackendDispatcher, CommandDispatcher, PipelinePosition};
 pub use ignore_config::{IgnoreConfig, IgnoreScope};
 pub use kernel::{Kernel, KernelConfig, VfsMountMode};
+pub use output_limit::OutputLimitConfig;
 pub use rpc::KernelRpcServer;
 
 // ═══════════════════════════════════════════════════════════════════════════

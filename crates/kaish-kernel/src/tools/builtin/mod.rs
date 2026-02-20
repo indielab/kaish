@@ -45,6 +45,7 @@ mod ls;
 mod mkdir;
 mod mktemp;
 mod mv;
+mod output_limit;
 mod printf;
 #[cfg(target_os = "linux")]
 mod ps;
@@ -125,6 +126,7 @@ pub fn register_builtins(registry: &mut ToolRegistry) {
     registry.register(mkdir::Mkdir);
     registry.register(mktemp::Mktemp);
     registry.register(mv::Mv);
+    registry.register(output_limit::KaishOutputLimit);
     registry.register(patch::Patch);
     registry.register(printf::Printf);
     #[cfg(target_os = "linux")]

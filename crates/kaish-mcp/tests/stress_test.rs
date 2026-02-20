@@ -90,7 +90,9 @@ async fn test_very_long_string() {
     let script = format!(r#"echo "{}""#, long_string);
     let result = execute(&client, &script).await.unwrap();
     assert!(result.ok);
-    assert_eq!(result.stdout.trim().len(), 100_000);
+    // MCP mode truncates output at 64KB with a spill pointer
+    assert!(result.stdout.contains("[output truncated:"));
+    assert!(result.stdout.contains("full output at"));
     cleanup(&client).await;
 }
 
