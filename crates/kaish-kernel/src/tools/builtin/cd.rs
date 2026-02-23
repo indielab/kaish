@@ -52,7 +52,7 @@ impl Tool for Cd {
         // Verify the path exists and is a directory
         match ctx.backend.stat(Path::new(&resolved)).await {
             Ok(info) => {
-                if info.kind == crate::vfs::DirEntryKind::Directory {
+                if info.is_dir() {
                     let new_cwd = resolved.clone();
                     ctx.set_cwd(new_cwd);
                     // For `cd -`, output the new directory (like bash)

@@ -233,14 +233,14 @@ async fn evaluate_unary(op: &str, arg: &str, ctx: &ExecContext) -> Result<bool, 
         "-f" => {
             let path = ctx.resolve_path(arg);
             match ctx.backend.stat(Path::new(&path)).await {
-                Ok(info) => Ok(info.kind == crate::vfs::DirEntryKind::File),
+                Ok(info) => Ok(info.is_file()),
                 Err(_) => Ok(false),
             }
         }
         "-d" => {
             let path = ctx.resolve_path(arg);
             match ctx.backend.stat(Path::new(&path)).await {
-                Ok(info) => Ok(info.kind == crate::vfs::DirEntryKind::Directory),
+                Ok(info) => Ok(info.is_dir()),
                 Err(_) => Ok(false),
             }
         }
@@ -268,8 +268,11 @@ async fn evaluate_unary(op: &str, arg: &str, ctx: &ExecContext) -> Result<bool, 
             }
         }
         "-L" | "-h" => {
-            // Is a symbolic link (for now, always false in VFS)
-            Ok(false)
+            let path = ctx.resolve_path(arg);
+            match ctx.backend.lstat(Path::new(&path)).await {
+                Ok(info) => Ok(info.is_symlink()),
+                Err(_) => Ok(false),
+            }
         }
 
         _ => Err(format!("unknown unary operator: {}", op)),

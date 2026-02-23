@@ -340,6 +340,12 @@ pub trait KernelBackend: Send + Sync {
     // Symlink Operations
     // ═══════════════════════════════════════════════════════════════════════════
 
+    /// Get metadata for a path without following symlinks.
+    ///
+    /// Unlike `stat`, this returns metadata about the symlink itself,
+    /// not the target it points to.
+    async fn lstat(&self, path: &Path) -> BackendResult<DirEntry>;
+
     /// Read the target of a symbolic link.
     ///
     /// Returns the path the symlink points to without following it.
@@ -414,14 +420,12 @@ mod tests {
 
     #[test]
     fn test_dir_entry_constructors() {
-        use crate::vfs::DirEntryKind;
-
         let dir = DirEntry::directory("mydir");
-        assert_eq!(dir.kind, DirEntryKind::Directory);
+        assert!(dir.is_dir());
         assert_eq!(dir.name, "mydir");
 
         let file = DirEntry::file("myfile.txt", 1024);
-        assert_eq!(file.kind, DirEntryKind::File);
+        assert!(file.is_file());
         assert_eq!(file.size, 1024);
     }
 

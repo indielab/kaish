@@ -68,6 +68,21 @@ impl DirEntry {
             symlink_target: Some(target.into()),
         }
     }
+
+    /// Returns true if this entry is a directory.
+    pub fn is_dir(&self) -> bool {
+        self.kind == DirEntryKind::Directory
+    }
+
+    /// Returns true if this entry is a regular file.
+    pub fn is_file(&self) -> bool {
+        self.kind == DirEntryKind::File
+    }
+
+    /// Returns true if this entry is a symbolic link.
+    pub fn is_symlink(&self) -> bool {
+        self.kind == DirEntryKind::Symlink
+    }
 }
 
 /// Abstract filesystem interface.
@@ -119,7 +134,7 @@ pub trait Filesystem: Send + Sync {
     async fn rename(&self, from: &Path, to: &Path) -> io::Result<()> {
         // Default implementation: copy then delete (not atomic)
         let entry = self.stat(from).await?;
-        if entry.kind == DirEntryKind::Directory {
+        if entry.is_dir() {
             // For directories, we'd need recursive copy - just error for now
             return Err(io::Error::new(
                 io::ErrorKind::Unsupported,

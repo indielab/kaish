@@ -65,7 +65,7 @@ async fn move_path(
 
     // Determine final destination path
     let final_dst = match backend.stat(dst).await {
-        Ok(dst_info) if dst_info.kind == crate::vfs::DirEntryKind::Directory => {
+        Ok(dst_info) if dst_info.is_dir() => {
             // Move into directory with same filename
             let filename = src.file_name().ok_or_else(|| {
                 BackendError::InvalidOperation("invalid source path".to_string())
@@ -90,7 +90,7 @@ async fn move_path(
     }
 
     // Fall back to copy + remove (for cross-mount moves)
-    if info.kind == crate::vfs::DirEntryKind::Directory {
+    if info.is_dir() {
         // Copy directory recursively, then remove source
         move_dir_recursive(backend, src, &final_dst).await?;
         remove_dir_recursive(backend, src).await?;
@@ -120,7 +120,7 @@ fn move_dir_recursive<'a>(
             let src_child: PathBuf = src.join(&entry.name);
             let dst_child: PathBuf = dst.join(&entry.name);
 
-            if entry.kind == crate::vfs::DirEntryKind::Directory {
+            if entry.is_dir() {
                 move_dir_recursive(backend, &src_child, &dst_child).await?;
             } else {
                 let data = backend.read(&src_child, None).await?;
@@ -142,7 +142,7 @@ fn remove_dir_recursive<'a>(
 
         for entry in entries {
             let child_path: PathBuf = dir.join(&entry.name);
-            if entry.kind == crate::vfs::DirEntryKind::Directory {
+            if entry.is_dir() {
                 remove_dir_recursive(backend, &child_path).await?;
                 backend.remove(&child_path, false).await?;
             } else {

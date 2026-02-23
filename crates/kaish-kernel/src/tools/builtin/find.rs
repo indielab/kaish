@@ -209,7 +209,7 @@ impl Tool for Find {
 
             // Determine entry type for rendering hints
             let entry_type = info
-                .map(|i| if i.kind == crate::vfs::DirEntryKind::Directory { EntryType::Directory } else { EntryType::File })
+                .map(|i| if i.is_dir() { EntryType::Directory } else { EntryType::File })
                 .unwrap_or(EntryType::File);
 
             let path_str = path.to_string_lossy().to_string();

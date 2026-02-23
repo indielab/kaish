@@ -114,6 +114,10 @@ impl KernelBackend for MockBackend {
         None
     }
 
+    async fn lstat(&self, _path: &Path) -> BackendResult<DirEntry> {
+        Ok(DirEntry::file("mock", 0))
+    }
+
     async fn read_link(&self, _path: &Path) -> BackendResult<std::path::PathBuf> {
         Err(BackendError::InvalidOperation("mock backend does not support symlinks".to_string()))
     }

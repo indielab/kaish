@@ -12,7 +12,7 @@ use super::{
     ToolInfo, ToolResult, WriteMode,
 };
 use crate::tools::{ExecContext, ToolArgs, ToolRegistry};
-use crate::vfs::{DirEntry, DirEntryKind, Filesystem, MountInfo, VfsRouter};
+use crate::vfs::{DirEntry, Filesystem, MountInfo, VfsRouter};
 
 /// Local backend implementation using VfsRouter and ToolRegistry.
 ///
@@ -324,7 +324,7 @@ impl KernelBackend for LocalBackend {
             // For recursive removal, we need to check if it's a directory
             // and remove contents first
             if let Ok(entry) = self.vfs.stat(path).await
-                && entry.kind == DirEntryKind::Directory
+                && entry.is_dir()
             {
                 // List and remove children
                 if let Ok(entries) = self.vfs.list(path).await {
@@ -352,6 +352,10 @@ impl KernelBackend for LocalBackend {
     // ═══════════════════════════════════════════════════════════════════════════
     // Symlink Operations
     // ═══════════════════════════════════════════════════════════════════════════
+
+    async fn lstat(&self, path: &Path) -> BackendResult<DirEntry> {
+        Ok(self.vfs.lstat(path).await?)
+    }
 
     async fn read_link(&self, path: &Path) -> BackendResult<std::path::PathBuf> {
         Ok(self.vfs.read_link(path).await?)
@@ -691,11 +695,11 @@ mod tests {
     async fn test_stat() {
         let backend = make_backend().await;
         let info = backend.stat(Path::new("/test.txt")).await.unwrap();
-        assert_eq!(info.kind, DirEntryKind::File);
+        assert!(info.is_file());
         assert_eq!(info.size, 11); // "hello world".len()
 
         let info = backend.stat(Path::new("/dir")).await.unwrap();
-        assert_eq!(info.kind, DirEntryKind::Directory);
+        assert!(info.is_dir());
     }
 
     #[tokio::test]
@@ -704,7 +708,7 @@ mod tests {
         backend.mkdir(Path::new("/newdir")).await.unwrap();
         assert!(backend.exists(Path::new("/newdir")).await);
         let info = backend.stat(Path::new("/newdir")).await.unwrap();
-        assert_eq!(info.kind, DirEntryKind::Directory);
+        assert!(info.is_dir());
     }
 
     #[tokio::test]
@@ -754,7 +758,7 @@ mod tests {
         let entries = backend.list(Path::new("/")).await.unwrap();
 
         let link_entry = entries.iter().find(|e| e.name == "link.txt").unwrap();
-        assert_eq!(link_entry.kind, DirEntryKind::Symlink, "link.txt should be a symlink");
+        assert!(link_entry.is_symlink(), "link.txt should be a symlink");
         assert_eq!(link_entry.symlink_target, Some(PathBuf::from("target.txt")));
     }
 }

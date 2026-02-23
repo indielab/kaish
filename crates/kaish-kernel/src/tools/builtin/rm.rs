@@ -56,7 +56,7 @@ async fn remove_path(backend: &dyn KernelBackend, path: &Path, recursive: bool, 
     // Check if path exists
     match backend.stat(path).await {
         Ok(info) => {
-            if info.kind == crate::vfs::DirEntryKind::Directory && recursive {
+            if info.is_dir() && recursive {
                 // Remove contents first
                 remove_dir_recursive(backend, path).await?;
             }
@@ -80,7 +80,7 @@ fn remove_dir_recursive<'a>(
 
         for entry in entries {
             let child_path: PathBuf = dir.join(&entry.name);
-            if entry.kind == crate::vfs::DirEntryKind::Directory {
+            if entry.is_dir() {
                 // Recurse into subdirectory
                 remove_dir_recursive(backend, &child_path).await?;
                 backend.remove(&child_path, false).await?;

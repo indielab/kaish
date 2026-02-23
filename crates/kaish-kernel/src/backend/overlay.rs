@@ -27,7 +27,7 @@ use super::{
     ToolInfo, ToolResult, WriteMode,
 };
 use crate::tools::{ExecContext, ToolArgs};
-use crate::vfs::{DirEntry, DirEntryKind, Filesystem, MountInfo, VfsRouter};
+use crate::vfs::{DirEntry, Filesystem, MountInfo, VfsRouter};
 
 /// Backend that overlays virtual paths (`/v/*`) on top of a custom backend.
 ///
@@ -202,7 +202,7 @@ impl KernelBackend for VirtualOverlayBackend {
         if Self::is_virtual_path(path) {
             if recursive
                 && let Ok(entry) = self.vfs.stat(path).await
-                && entry.kind == DirEntryKind::Directory
+                && entry.is_dir()
                 && let Ok(entries) = self.vfs.list(path).await
             {
                 for entry in entries {
@@ -246,6 +246,14 @@ impl KernelBackend for VirtualOverlayBackend {
     // ═══════════════════════════════════════════════════════════════════════════
     // Symlink Operations
     // ═══════════════════════════════════════════════════════════════════════════
+
+    async fn lstat(&self, path: &Path) -> BackendResult<DirEntry> {
+        if Self::is_virtual_path(path) {
+            Ok(self.vfs.lstat(path).await?)
+        } else {
+            self.inner.lstat(path).await
+        }
+    }
 
     async fn read_link(&self, path: &Path) -> BackendResult<PathBuf> {
         if Self::is_virtual_path(path) {
@@ -388,7 +396,7 @@ mod tests {
     async fn test_stat_virtual_path() {
         let overlay = make_overlay().await;
         let info = overlay.stat(Path::new("/v/blobs/test.bin")).await.unwrap();
-        assert_eq!(info.kind, DirEntryKind::File);
+        assert!(info.is_file());
         assert_eq!(info.size, 9); // "blob data".len()
     }
 

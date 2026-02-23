@@ -199,6 +199,7 @@ impl Filesystem for LocalFs {
             } else if file_type.is_dir() {
                 (DirEntryKind::Directory, None)
             } else {
+                // Special files (sockets, pipes, devices) → File. See stat() comment.
                 (DirEntryKind::File, None)
             };
 
@@ -224,6 +225,9 @@ impl Filesystem for LocalFs {
         let kind = if meta.is_dir() {
             DirEntryKind::Directory
         } else {
+            // Unix special files (sockets, pipes, block/char devices) are classified
+            // as File. kaish doesn't operate on special files, and adding a variant
+            // would force match-arm changes everywhere for no practical benefit.
             DirEntryKind::File
         };
 
@@ -255,6 +259,7 @@ impl Filesystem for LocalFs {
         } else if meta.is_dir() {
             DirEntryKind::Directory
         } else {
+            // Special files (sockets, pipes, devices) → File. See stat() comment.
             DirEntryKind::File
         };
 
@@ -436,11 +441,11 @@ mod tests {
         fs.mkdir(Path::new("dir")).await.unwrap();
 
         let file_entry = fs.stat(Path::new("file.txt")).await.unwrap();
-        assert_eq!(file_entry.kind, DirEntryKind::File);
+        assert!(file_entry.is_file());
         assert_eq!(file_entry.size, 7);
 
         let dir_entry = fs.stat(Path::new("dir")).await.unwrap();
-        assert_eq!(dir_entry.kind, DirEntryKind::Directory);
+        assert!(dir_entry.is_dir());
 
         cleanup(&dir).await;
     }
@@ -505,7 +510,7 @@ mod tests {
             .unwrap();
 
         let entry = fs.lstat(Path::new("link.txt")).await.unwrap();
-        assert_eq!(entry.kind, DirEntryKind::Symlink, "lstat should report symlink kind");
+        assert!(entry.is_symlink(), "lstat should report symlink kind");
 
         cleanup(&dir).await;
     }

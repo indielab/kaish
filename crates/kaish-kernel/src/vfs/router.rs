@@ -316,7 +316,7 @@ impl VfsRouter {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::vfs::{DirEntryKind, MemoryFs};
+    use crate::vfs::MemoryFs;
 
     #[tokio::test]
     async fn test_basic_mount() {
@@ -459,14 +459,14 @@ mod tests {
         router.mount("/scratch", MemoryFs::new());
 
         let entry = router.stat(Path::new("/scratch")).await.unwrap();
-        assert_eq!(entry.kind, DirEntryKind::Directory);
+        assert!(entry.is_dir());
     }
 
     #[tokio::test]
     async fn test_stat_root() {
         let router = VfsRouter::new();
         let entry = router.stat(Path::new("/")).await.unwrap();
-        assert_eq!(entry.kind, DirEntryKind::Directory);
+        assert!(entry.is_dir());
     }
 
     #[tokio::test]

@@ -8,7 +8,7 @@ use crate::ast::Value;
 use crate::glob::contains_glob;
 use crate::interpreter::{EntryType, ExecResult, OutputData, OutputNode};
 use crate::tools::{ExecContext, ParamSchema, Tool, ToolArgs, ToolSchema};
-use crate::vfs::{DirEntry, DirEntryKind};
+use crate::vfs::DirEntry;
 
 /// Ls tool: list directory contents.
 pub struct Ls;
@@ -112,7 +112,7 @@ impl Tool for Ls {
         // Check if path is a file (not a directory)
         // Real ls behavior: `ls file.txt` just outputs the filename
         if let Ok(info) = ctx.backend.stat(Path::new(&resolved)).await
-            && info.kind != DirEntryKind::Directory {
+            && !info.is_dir() {
                 // It's a file - just display it
                 return self.list_file(ctx, &path, &info, long_format, human_readable);
             }
@@ -163,7 +163,7 @@ impl Ls {
     ) -> ExecResult {
         let entry_type = dir_entry_to_type(info);
         let node = if long_format {
-            let type_char = if info.kind == DirEntryKind::Symlink { "l" } else { "-" };
+            let type_char = if info.is_symlink() { "l" } else { "-" };
             let size_str = if human_readable {
                 format_human_size(info.size)
             } else {
@@ -252,9 +252,9 @@ impl Ls {
             .map(|e| {
                 let entry_type = dir_entry_to_type(e);
                 if long_format {
-                    let type_char = if e.kind == DirEntryKind::Symlink {
+                    let type_char = if e.is_symlink() {
                         "l"
-                    } else if e.kind == DirEntryKind::Directory {
+                    } else if e.is_dir() {
                         "d"
                     } else {
                         "-"
@@ -309,7 +309,7 @@ impl Ls {
                     .iter()
                     .map(|e| {
                         let entry_type = dir_entry_to_type(e);
-                        let name_display = if e.kind == DirEntryKind::Symlink {
+                        let name_display = if e.is_symlink() {
                             if long_format {
                                 if let Some(target) = &e.symlink_target {
                                     format!("{} -> {}", e.name, target.display())
@@ -324,9 +324,9 @@ impl Ls {
                         };
 
                         if long_format {
-                            let type_char = if e.kind == DirEntryKind::Symlink {
+                            let type_char = if e.is_symlink() {
                                 "l"
-                            } else if e.kind == DirEntryKind::Directory {
+                            } else if e.is_dir() {
                                 "d"
                             } else {
                                 "-"
@@ -398,7 +398,7 @@ impl Ls {
             // Filter out ignored directories
             if let Some(ref filter) = ignore_filter {
                 filtered.retain(|e| {
-                    if e.kind == DirEntryKind::Directory && !show_all {
+                    if e.is_dir() && !show_all {
                         !filter.is_name_ignored(&e.name, true)
                     } else {
                         true
@@ -409,7 +409,7 @@ impl Ls {
             // Collect subdirs for recursion (before formatting)
             let subdirs: Vec<_> = filtered
                 .iter()
-                .filter(|e| e.kind == DirEntryKind::Directory)
+                .filter(|e| e.is_dir())
                 .map(|e| {
                     let child_path = format!("{}/{}", dir_path.trim_end_matches('/'), e.name);
                     let child_display = if display_path == "." {
@@ -426,7 +426,7 @@ impl Ls {
                 let entry_type = dir_entry_to_type(e);
                 let name = e.name.clone();
                 if long_format {
-                    let type_char = if e.kind == DirEntryKind::Symlink { "l" } else if e.kind == DirEntryKind::Directory { "d" } else { "-" };
+                    let type_char = if e.is_symlink() { "l" } else if e.is_dir() { "d" } else { "-" };
                     let size_str = if human_readable {
                         format_human_size(e.size)
                     } else {
@@ -494,12 +494,11 @@ fn filter_and_sort(entries: Vec<DirEntry>, show_all: bool, sort_opts: &SortOptio
 
 /// Convert DirEntry to EntryType for coloring.
 fn dir_entry_to_type(entry: &DirEntry) -> EntryType {
-    if entry.kind == DirEntryKind::Symlink {
+    if entry.is_symlink() {
         EntryType::Symlink
-    } else if entry.kind == DirEntryKind::Directory {
+    } else if entry.is_dir() {
         EntryType::Directory
     } else if entry.permissions.map(|p| p & 0o111 != 0).unwrap_or(false) {
-        // Has execute permission
         EntryType::Executable
     } else {
         EntryType::File
@@ -512,9 +511,9 @@ fn format_entries(entries: &[DirEntry], long_format: bool, human_readable: bool)
         entries
             .iter()
             .map(|e| {
-                let type_char = if e.kind == DirEntryKind::Symlink {
+                let type_char = if e.is_symlink() {
                     'l'
-                } else if e.kind == DirEntryKind::Directory {
+                } else if e.is_dir() {
                     'd'
                 } else {
                     '-'
@@ -525,7 +524,7 @@ fn format_entries(entries: &[DirEntry], long_format: bool, human_readable: bool)
                     format!("{:>8}", e.size)
                 };
                 // For symlinks, show the target
-                let name_display = if e.kind == DirEntryKind::Symlink {
+                let name_display = if e.is_symlink() {
                     if let Some(target) = &e.symlink_target {
                         format!("{} -> {}", e.name, target.display())
                     } else {
@@ -540,7 +539,7 @@ fn format_entries(entries: &[DirEntry], long_format: bool, human_readable: bool)
     } else {
         // In non-long format, add @ suffix for symlinks (like ls -F)
         entries.iter().map(|e| {
-            if e.kind == DirEntryKind::Symlink {
+            if e.is_symlink() {
                 format!("{}@", e.name)
             } else {
                 e.name.clone()
@@ -769,9 +768,7 @@ mod tests {
 
     #[test]
     fn test_dir_entry_to_type_symlink() {
-        let mut entry = DirEntry::file("link.txt", 0);
-        entry.kind = DirEntryKind::Symlink;
-        entry.symlink_target = Some(std::path::PathBuf::from("target.txt"));
+        let entry = DirEntry::symlink("link.txt", "target.txt");
         assert_eq!(dir_entry_to_type(&entry), EntryType::Symlink);
     }
 
