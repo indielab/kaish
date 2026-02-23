@@ -9,6 +9,7 @@ use std::time::Duration;
 use anyhow::{Context, Result};
 use kaish_kernel::interpreter::OutputData;
 use kaish_kernel::{Kernel, KernelConfig};
+use rmcp::schemars::{self, JsonSchema};
 use serde::{Deserialize, Serialize};
 
 use super::config::ExternalServerConfig;
@@ -40,7 +41,7 @@ pub struct ExecuteParams {
 ///   `apply_output_format`).
 /// - `data`: auto-parsed JSON from stdout. Present when stdout is valid JSON.
 /// - When `--json` is used, `output` is None and the JSON is in `stdout`/`data`.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct ExecuteResult {
     /// Exit code (0 = success).
     pub code: i64,

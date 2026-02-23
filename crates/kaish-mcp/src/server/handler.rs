@@ -20,7 +20,7 @@ use rmcp::model::{
     PaginatedRequestParams, ProgressNotificationParam, ProtocolVersion, RawResource,
     RawResourceTemplate, ReadResourceRequestParams, ReadResourceResult, ResourceContents,
     ServerCapabilities, ServerInfo, SetLevelRequestParams, SubscribeRequestParams,
-    UnsubscribeRequestParams,
+    ToolAnnotations, UnsubscribeRequestParams,
 };
 use rmcp::schemars::{self, JsonSchema};
 use rmcp::service::{NotificationContext, Peer, RequestContext, RoleServer};
@@ -35,7 +35,7 @@ use kaish_kernel::help::{get_help, HelpTopic};
 use kaish_kernel::vfs::{LocalFs, MemoryFs, VfsRouter};
 
 use super::config::McpServerConfig;
-use super::execute::{self, ExecuteParams};
+use super::execute::{self, ExecuteParams, ExecuteResult};
 use super::resources::{self, parse_resource_uri, ResourceContent};
 use super::subscriptions::ResourceWatcher;
 
@@ -212,11 +212,14 @@ impl KaishServerHandler {
                 .await
                 .map_err(|e| McpError::internal_error(e.to_string(), None))?;
 
-        // Content blocks: plain text for human/LLM consumption
+        // Content blocks: plain text for human/LLM consumption.
+        // Priority hints tell clients what to surface:
+        //   stdout: lower priority when structured_content carries the same data
+        //   stderr: always relevant — errors, warnings, diagnostics
         let mut content = Vec::new();
-        content.push(Content::text(&result.stdout));
+        content.push(Content::text(&result.stdout).with_priority(0.3));
         if !result.stderr.is_empty() {
-            content.push(Content::text(format!("[stderr] {}", result.stderr)));
+            content.push(Content::text(format!("[stderr] {}", result.stderr)).with_priority(1.0));
         }
 
         let structured_content = {
@@ -411,8 +414,27 @@ impl rmcp::ServerHandler for KaishServerHandler {
         _request: Option<PaginatedRequestParams>,
         _context: RequestContext<RoleServer>,
     ) -> Result<ListToolsResult, McpError> {
+        let mut tools = self.tool_router.list_all();
+
+        for tool in &mut tools {
+            if tool.name == "execute" {
+                // Output schema: lets clients validate/type-check the response
+                match rmcp::handler::server::tool::schema_for_output::<ExecuteResult>() {
+                    Ok(schema) => tool.output_schema = Some(schema),
+                    Err(e) => tracing::warn!("Failed to generate ExecuteResult schema: {e}"),
+                }
+                // Tool annotations: execute runs arbitrary commands
+                tool.annotations = Some(
+                    ToolAnnotations::new()
+                        .destructive(true)
+                        .idempotent(false)
+                        .open_world(true),
+                );
+            }
+        }
+
         Ok(ListToolsResult {
-            tools: self.tool_router.list_all(),
+            tools,
             meta: None,
             next_cursor: None,
         })
@@ -830,4 +852,101 @@ mod tests {
             .log_to_client(LoggingLevel::Info, "test", Value::String("hello".into()))
             .await;
     }
+
+    #[tokio::test]
+    async fn test_execute_tool_annotations_and_schema() {
+        let config = McpServerConfig::default();
+        let handler = KaishServerHandler::new(config).expect("handler creation failed");
+
+        // Simulate what list_tools() does: get tools from router, then annotate
+        let mut tools = handler.tool_router.list_all();
+        for tool in &mut tools {
+            if tool.name == "execute" {
+                match rmcp::handler::server::tool::schema_for_output::<ExecuteResult>() {
+                    Ok(schema) => tool.output_schema = Some(schema),
+                    Err(e) => panic!("schema generation failed: {e}"),
+                }
+                tool.annotations = Some(
+                    ToolAnnotations::new()
+                        .destructive(true)
+                        .idempotent(false)
+                        .open_world(true),
+                );
+            }
+        }
+
+        let execute_tool = tools.iter().find(|t| t.name == "execute")
+            .expect("execute tool should be listed");
+
+        // Tool annotations: execute is destructive, non-idempotent, open-world
+        let annotations = execute_tool.annotations.as_ref()
+            .expect("execute should have annotations");
+        assert_eq!(annotations.destructive_hint, Some(true));
+        assert_eq!(annotations.idempotent_hint, Some(false));
+        assert_eq!(annotations.open_world_hint, Some(true));
+
+        // Output schema should be present and valid
+        let schema = execute_tool.output_schema.as_ref()
+            .expect("execute should have an output schema");
+        // Schema must contain the expected fields from ExecuteResult
+        let schema_str = serde_json::to_string(schema.as_ref())
+            .expect("schema should serialize");
+        assert!(schema_str.contains("stdout"), "schema should include stdout field");
+        assert!(schema_str.contains("stderr"), "schema should include stderr field");
+        assert!(schema_str.contains("code"), "schema should include code field");
+        assert!(schema_str.contains("ok"), "schema should include ok field");
+    }
+
+    #[tokio::test]
+    async fn test_execute_stdout_priority() {
+        let config = McpServerConfig::default();
+        let handler = KaishServerHandler::new(config).expect("handler creation failed");
+
+        let input = Parameters(ExecuteInput {
+            script: "echo hello".to_string(),
+            cwd: None,
+            env: None,
+            timeout_ms: None,
+        });
+        let result = handler.execute(input).await.expect("execute failed");
+
+        // stdout content should have low priority (structured_content is primary)
+        assert_eq!(
+            result.content[0].annotations.as_ref()
+                .and_then(|a| a.priority),
+            Some(0.3),
+            "stdout should have priority 0.3"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_execute_stderr_priority() {
+        let config = McpServerConfig::default();
+        let handler = KaishServerHandler::new(config).expect("handler creation failed");
+
+        let input = Parameters(ExecuteInput {
+            script: "nonexistent_command_xyz".to_string(),
+            cwd: None,
+            env: None,
+            timeout_ms: None,
+        });
+        let result = handler.execute(input).await.expect("execute failed");
+
+        // stderr content should have high priority
+        let stderr_block = result.content.iter().find(|c| {
+            if let RawContent::Text(t) = &c.raw {
+                t.text.starts_with("[stderr]")
+            } else {
+                false
+            }
+        }).expect("should have stderr block");
+
+        assert_eq!(
+            stderr_block.annotations.as_ref()
+                .and_then(|a| a.priority),
+            Some(1.0),
+            "stderr should have priority 1.0"
+        );
+    }
+
 }
