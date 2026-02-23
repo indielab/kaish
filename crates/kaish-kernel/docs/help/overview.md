@@ -11,6 +11,7 @@ help builtins   List of all builtins
 help vfs        Virtual filesystem mounts
 help scatter    Parallel processing (散/集)
 help ignore     Ignore file configuration
+help output-limit  Output size limit configuration
 help limits     Known limitations
 help <tool>     Detailed tool help (e.g., help grep)
 ```

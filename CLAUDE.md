@@ -131,6 +131,7 @@ Kernel (核)
 
 ```
 crates/
+├── kaish-types/     # Pure-data leaf crate: OutputData, ExecResult, Value, DirEntry, etc.
 ├── kaish-schema/    # Cap'n Proto codegen from schema/kaish.capnp
 ├── kaish-glob/      # Glob matching and async file walking with gitignore support
 ├── kaish-kernel/    # Core: lexer, parser, interpreter, tools, VFS, validator
