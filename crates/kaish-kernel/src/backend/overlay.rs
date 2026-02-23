@@ -21,14 +21,13 @@
 use async_trait::async_trait;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::UNIX_EPOCH;
 
 use super::{
-    BackendError, BackendResult, EntryInfo, KernelBackend, LocalBackend, PatchOp, ReadRange,
+    BackendError, BackendResult, KernelBackend, LocalBackend, PatchOp, ReadRange,
     ToolInfo, ToolResult, WriteMode,
 };
 use crate::tools::{ExecContext, ToolArgs};
-use crate::vfs::{EntryType, Filesystem, MountInfo, VfsRouter};
+use crate::vfs::{DirEntry, DirEntryKind, Filesystem, MountInfo, VfsRouter};
 
 /// Backend that overlays virtual paths (`/v/*`) on top of a custom backend.
 ///
@@ -166,35 +165,15 @@ impl KernelBackend for VirtualOverlayBackend {
     // Directory Operations
     // ═══════════════════════════════════════════════════════════════════════════
 
-    async fn list(&self, path: &Path) -> BackendResult<Vec<EntryInfo>> {
+    async fn list(&self, path: &Path) -> BackendResult<Vec<DirEntry>> {
         if Self::is_virtual_path(path) {
-            let entries = self.vfs.list(path).await?;
-            Ok(entries
-                .into_iter()
-                .map(|e| {
-                    let (is_dir, is_file, is_symlink) = match e.entry_type {
-                        EntryType::Directory => (true, false, false),
-                        EntryType::File => (false, true, false),
-                        EntryType::Symlink => (false, false, true),
-                    };
-                    EntryInfo {
-                        name: e.name,
-                        is_dir,
-                        is_file,
-                        is_symlink,
-                        size: e.size,
-                        modified: None,
-                        permissions: None,
-                        symlink_target: e.symlink_target,
-                    }
-                })
-                .collect())
+            Ok(self.vfs.list(path).await?)
         } else if path.to_string_lossy() == "/" || path.to_string_lossy().is_empty() {
             // Root listing: combine inner backend's root with /v
             let mut entries = self.inner.list(path).await?;
             // Add /v if not already present
             if !entries.iter().any(|e| e.name == "v") {
-                entries.push(EntryInfo::directory("v"));
+                entries.push(DirEntry::directory("v"));
             }
             Ok(entries)
         } else {
@@ -202,25 +181,9 @@ impl KernelBackend for VirtualOverlayBackend {
         }
     }
 
-    async fn stat(&self, path: &Path) -> BackendResult<EntryInfo> {
+    async fn stat(&self, path: &Path) -> BackendResult<DirEntry> {
         if Self::is_virtual_path(path) {
-            let meta = self.vfs.stat(path).await?;
-            let modified = meta.modified.and_then(|t| {
-                t.duration_since(UNIX_EPOCH).ok().map(|d| d.as_secs())
-            });
-            Ok(EntryInfo {
-                name: path
-                    .file_name()
-                    .map(|s| s.to_string_lossy().to_string())
-                    .unwrap_or_else(|| "v".to_string()),
-                is_dir: meta.is_dir,
-                is_file: meta.is_file,
-                is_symlink: meta.is_symlink,
-                size: meta.size,
-                modified,
-                permissions: None,
-                symlink_target: None,
-            })
+            Ok(self.vfs.stat(path).await?)
         } else {
             self.inner.stat(path).await
         }
@@ -238,8 +201,8 @@ impl KernelBackend for VirtualOverlayBackend {
     async fn remove(&self, path: &Path, recursive: bool) -> BackendResult<()> {
         if Self::is_virtual_path(path) {
             if recursive
-                && let Ok(meta) = self.vfs.stat(path).await
-                && meta.is_dir
+                && let Ok(entry) = self.vfs.stat(path).await
+                && entry.kind == DirEntryKind::Directory
                 && let Ok(entries) = self.vfs.list(path).await
             {
                 for entry in entries {
@@ -425,7 +388,7 @@ mod tests {
     async fn test_stat_virtual_path() {
         let overlay = make_overlay().await;
         let info = overlay.stat(Path::new("/v/blobs/test.bin")).await.unwrap();
-        assert!(info.is_file);
+        assert_eq!(info.kind, DirEntryKind::File);
         assert_eq!(info.size, 9); // "blob data".len()
     }
 

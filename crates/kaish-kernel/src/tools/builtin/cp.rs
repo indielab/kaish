@@ -77,7 +77,7 @@ async fn copy_path(
 ) -> Result<(), BackendError> {
     let info = backend.stat(src).await?;
 
-    if info.is_dir {
+    if info.kind == crate::vfs::DirEntryKind::Directory {
         if !recursive {
             return Err(BackendError::InvalidOperation(format!(
                 "{}: is a directory (use -r to copy)",
@@ -88,7 +88,7 @@ async fn copy_path(
     } else {
         // Check if destination is a directory
         let final_dst = match backend.stat(dst).await {
-            Ok(dst_info) if dst_info.is_dir => {
+            Ok(dst_info) if dst_info.kind == crate::vfs::DirEntryKind::Directory => {
                 // Copy into directory with same filename
                 let filename = src.file_name().ok_or_else(|| {
                     BackendError::InvalidOperation("invalid source path".to_string())
@@ -125,7 +125,7 @@ fn copy_dir_recursive<'a>(
             let src_child: PathBuf = src.join(&entry.name);
             let dst_child: PathBuf = dst.join(&entry.name);
 
-            if entry.is_dir {
+            if entry.kind == crate::vfs::DirEntryKind::Directory {
                 copy_dir_recursive(backend, &src_child, &dst_child, no_clobber).await?;
             } else {
                 // Check for no-clobber mode

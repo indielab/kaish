@@ -59,7 +59,7 @@ mod tests {
 
         // Verify it exists via backend
         let info = ctx.backend.stat(Path::new("/newdir")).await.unwrap();
-        assert!(info.is_dir);
+        assert!(info.kind == crate::vfs::DirEntryKind::Directory);
     }
 
     #[tokio::test]
@@ -72,9 +72,9 @@ mod tests {
         assert!(result.ok());
 
         // Verify nested dirs exist
-        assert!(ctx.backend.stat(Path::new("/a")).await.unwrap().is_dir);
-        assert!(ctx.backend.stat(Path::new("/a/b")).await.unwrap().is_dir);
-        assert!(ctx.backend.stat(Path::new("/a/b/c")).await.unwrap().is_dir);
+        assert!(ctx.backend.stat(Path::new("/a")).await.unwrap().kind == crate::vfs::DirEntryKind::Directory);
+        assert!(ctx.backend.stat(Path::new("/a/b")).await.unwrap().kind == crate::vfs::DirEntryKind::Directory);
+        assert!(ctx.backend.stat(Path::new("/a/b/c")).await.unwrap().kind == crate::vfs::DirEntryKind::Directory);
     }
 
     #[tokio::test]

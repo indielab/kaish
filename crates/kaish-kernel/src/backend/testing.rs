@@ -7,10 +7,10 @@ use std::sync::Arc;
 use async_trait::async_trait;
 
 use super::{
-    BackendError, BackendResult, EntryInfo, KernelBackend, PatchOp, ReadRange, ToolInfo, ToolResult, WriteMode,
+    BackendError, BackendResult, KernelBackend, PatchOp, ReadRange, ToolInfo, ToolResult, WriteMode,
 };
 use crate::tools::{ExecContext, ToolArgs};
-use crate::vfs::MountInfo;
+use crate::vfs::{DirEntry, MountInfo};
 
 /// Mock backend that counts call_tool invocations.
 /// Used to verify tool dispatch routes through the backend.
@@ -56,12 +56,12 @@ impl KernelBackend for MockBackend {
         Ok(())
     }
 
-    async fn list(&self, _path: &Path) -> BackendResult<Vec<EntryInfo>> {
+    async fn list(&self, _path: &Path) -> BackendResult<Vec<DirEntry>> {
         Ok(Vec::new())
     }
 
-    async fn stat(&self, _path: &Path) -> BackendResult<EntryInfo> {
-        Ok(EntryInfo::file("mock", 0))
+    async fn stat(&self, _path: &Path) -> BackendResult<DirEntry> {
+        Ok(DirEntry::file("mock", 0))
     }
 
     async fn mkdir(&self, _path: &Path) -> BackendResult<()> {

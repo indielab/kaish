@@ -5,40 +5,69 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
-/// Metadata about a file or directory.
-#[derive(Debug, Clone)]
-pub struct Metadata {
-    /// True if this is a directory.
-    pub is_dir: bool,
-    /// True if this is a file.
-    pub is_file: bool,
-    /// True if this is a symbolic link.
-    pub is_symlink: bool,
-    /// Size in bytes (0 for directories).
-    pub size: u64,
-    /// Last modification time, if available.
-    pub modified: Option<SystemTime>,
-}
-
-/// Type of directory entry.
+/// Kind of directory entry.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum EntryType {
+pub enum DirEntryKind {
     File,
     Directory,
     Symlink,
 }
 
-/// A directory entry returned by `list`.
+/// A directory entry — the unified file metadata type.
+///
+/// Used everywhere: VFS `list()`, `stat()`, `lstat()`, and `KernelBackend` methods.
 #[derive(Debug, Clone)]
 pub struct DirEntry {
     /// Name of the entry (not full path).
     pub name: String,
-    /// Type of entry.
-    pub entry_type: EntryType,
+    /// Kind of entry.
+    pub kind: DirEntryKind,
     /// Size in bytes (0 for directories).
     pub size: u64,
+    /// Last modification time, if available.
+    pub modified: Option<SystemTime>,
+    /// Unix permissions (e.g., 0o644), if available.
+    pub permissions: Option<u32>,
     /// For symlinks, the target path.
     pub symlink_target: Option<PathBuf>,
+}
+
+impl DirEntry {
+    /// Create a new directory entry.
+    pub fn directory(name: impl Into<String>) -> Self {
+        Self {
+            name: name.into(),
+            kind: DirEntryKind::Directory,
+            size: 0,
+            modified: None,
+            permissions: None,
+            symlink_target: None,
+        }
+    }
+
+    /// Create a new file entry.
+    pub fn file(name: impl Into<String>, size: u64) -> Self {
+        Self {
+            name: name.into(),
+            kind: DirEntryKind::File,
+            size,
+            modified: None,
+            permissions: None,
+            symlink_target: None,
+        }
+    }
+
+    /// Create a new symlink entry.
+    pub fn symlink(name: impl Into<String>, target: impl Into<PathBuf>) -> Self {
+        Self {
+            name: name.into(),
+            kind: DirEntryKind::Symlink,
+            size: 0,
+            modified: None,
+            permissions: None,
+            symlink_target: Some(target.into()),
+        }
+    }
 }
 
 /// Abstract filesystem interface.
@@ -60,7 +89,7 @@ pub trait Filesystem: Send + Sync {
     async fn list(&self, path: &Path) -> io::Result<Vec<DirEntry>>;
 
     /// Get metadata for a file or directory.
-    async fn stat(&self, path: &Path) -> io::Result<Metadata>;
+    async fn stat(&self, path: &Path) -> io::Result<DirEntry>;
 
     /// Create a directory (and parent directories if needed).
     ///
@@ -89,8 +118,8 @@ pub trait Filesystem: Send + Sync {
     /// Returns `Err` if the filesystem is read-only.
     async fn rename(&self, from: &Path, to: &Path) -> io::Result<()> {
         // Default implementation: copy then delete (not atomic)
-        let meta = self.stat(from).await?;
-        if meta.is_dir {
+        let entry = self.stat(from).await?;
+        if entry.kind == DirEntryKind::Directory {
             // For directories, we'd need recursive copy - just error for now
             return Err(io::Error::new(
                 io::ErrorKind::Unsupported,
@@ -141,7 +170,7 @@ pub trait Filesystem: Send + Sync {
     ///
     /// Unlike `stat`, this returns metadata about the symlink itself,
     /// not the target it points to.
-    async fn lstat(&self, path: &Path) -> io::Result<Metadata> {
+    async fn lstat(&self, path: &Path) -> io::Result<DirEntry> {
         // Default: same as stat (for backends that don't support symlinks)
         self.stat(path).await
     }

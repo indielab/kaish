@@ -50,7 +50,7 @@ pub mod walker {
 }
 
 pub use backend::{
-    BackendError, BackendResult, EntryInfo, KernelBackend, LocalBackend, PatchOp, ReadRange,
+    BackendError, BackendResult, KernelBackend, LocalBackend, PatchOp, ReadRange,
     ToolInfo, ToolResult, VirtualOverlayBackend, WriteMode,
 };
 pub use dispatch::{BackendDispatcher, CommandDispatcher, PipelinePosition};

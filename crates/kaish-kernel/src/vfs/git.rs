@@ -23,7 +23,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
 use super::local::LocalFs;
-use super::traits::{DirEntry, Filesystem, Metadata};
+use super::traits::{DirEntry, Filesystem};
 
 /// Git-aware filesystem backend.
 ///
@@ -663,7 +663,7 @@ impl Filesystem for GitVfs {
         Ok(entries)
     }
 
-    async fn stat(&self, path: &Path) -> io::Result<Metadata> {
+    async fn stat(&self, path: &Path) -> io::Result<DirEntry> {
         self.local.stat(path).await
     }
 

@@ -169,7 +169,7 @@ impl Tool for Find {
 
         // Apply post-filters (mtime, size) and collect results
         let mut nodes: Vec<OutputNode> = Vec::new();
-        let now_secs = SystemTime::now()
+        let _now_secs = SystemTime::now()
             .duration_since(SystemTime::UNIX_EPOCH)
             .map(|d| d.as_secs())
             .unwrap_or(0);
@@ -182,7 +182,7 @@ impl Tool for Find {
             if let Some((sign, days)) = mtime_filter
                 && let Some(ref info) = info
                     && let Some(modified) = info.modified {
-                        let age_secs = now_secs.saturating_sub(modified);
+                        let age_secs = modified.elapsed().map(|d| d.as_secs()).unwrap_or(0);
                         let age_days = age_secs / 86400;
                         let matches = match sign {
                             '+' => age_days > days,  // older than N days
@@ -209,7 +209,7 @@ impl Tool for Find {
 
             // Determine entry type for rendering hints
             let entry_type = info
-                .map(|i| if i.is_dir { EntryType::Directory } else { EntryType::File })
+                .map(|i| if i.kind == crate::vfs::DirEntryKind::Directory { EntryType::Directory } else { EntryType::File })
                 .unwrap_or(EntryType::File);
 
             let path_str = path.to_string_lossy().to_string();

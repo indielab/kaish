@@ -7,7 +7,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 
 use crate::tools::ToolRegistry;
-use super::traits::{DirEntry, EntryType, Filesystem, Metadata};
+use super::traits::{DirEntry, Filesystem};
 
 /// A read-only filesystem that exposes registered builtins as entries.
 pub struct BuiltinFs {
@@ -40,35 +40,20 @@ impl Filesystem for BuiltinFs {
         if !p.is_empty() && p != "." {
             return Err(io::Error::new(io::ErrorKind::NotFound, "not a directory"));
         }
-        let mut entries: Vec<DirEntry> = self.tools.names().iter().map(|name| DirEntry {
-            name: name.to_string(),
-            entry_type: EntryType::File,
-            size: 0,
-            symlink_target: None,
+        let mut entries: Vec<DirEntry> = self.tools.names().iter().map(|name| {
+            DirEntry::file(name.to_string(), 0)
         }).collect();
         entries.sort_by(|a, b| a.name.cmp(&b.name));
         Ok(entries)
     }
 
-    async fn stat(&self, path: &Path) -> io::Result<Metadata> {
+    async fn stat(&self, path: &Path) -> io::Result<DirEntry> {
         let name = path.to_str().unwrap_or("");
         if name.is_empty() || name == "." {
-            return Ok(Metadata {
-                is_dir: true,
-                is_file: false,
-                is_symlink: false,
-                size: 0,
-                modified: None,
-            });
+            return Ok(DirEntry::directory("."));
         }
         if self.tools.get(name).is_some() {
-            Ok(Metadata {
-                is_dir: false,
-                is_file: true,
-                is_symlink: false,
-                size: 0,
-                modified: None,
-            })
+            Ok(DirEntry::file(name, 0))
         } else {
             Err(io::Error::new(io::ErrorKind::NotFound, "builtin not found"))
         }

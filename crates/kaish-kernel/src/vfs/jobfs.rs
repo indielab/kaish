@@ -19,7 +19,7 @@ use std::io;
 use std::path::Path;
 use std::sync::Arc;
 
-use super::traits::{DirEntry, EntryType, Filesystem, Metadata};
+use super::traits::{DirEntry, DirEntryKind, Filesystem};
 use crate::scheduler::{JobId, JobManager};
 
 /// Virtual filesystem providing job observability.
@@ -162,7 +162,9 @@ impl Filesystem for JobFs {
                     .into_iter()
                     .map(|id| DirEntry {
                         name: id.0.to_string(),
-                        entry_type: EntryType::Directory,
+                        kind: DirEntryKind::Directory,
+                        modified: None,
+                        permissions: None,
                         size: 0,
                         symlink_target: None,
                     })
@@ -181,25 +183,33 @@ impl Filesystem for JobFs {
                 Ok(vec![
                     DirEntry {
                         name: "stdout".to_string(),
-                        entry_type: EntryType::File,
+                        kind: DirEntryKind::File,
+                        modified: None,
+                        permissions: None,
                         size: 0, // Dynamic content
                         symlink_target: None,
                     },
                     DirEntry {
                         name: "stderr".to_string(),
-                        entry_type: EntryType::File,
+                        kind: DirEntryKind::File,
+                        modified: None,
+                        permissions: None,
                         size: 0,
                         symlink_target: None,
                     },
                     DirEntry {
                         name: "status".to_string(),
-                        entry_type: EntryType::File,
+                        kind: DirEntryKind::File,
+                        modified: None,
+                        permissions: None,
                         size: 0,
                         symlink_target: None,
                     },
                     DirEntry {
                         name: "command".to_string(),
-                        entry_type: EntryType::File,
+                        kind: DirEntryKind::File,
+                        modified: None,
+                        permissions: None,
                         size: 0,
                         symlink_target: None,
                     },
@@ -208,21 +218,20 @@ impl Filesystem for JobFs {
         }
     }
 
-    async fn stat(&self, path: &Path) -> io::Result<Metadata> {
+    async fn stat(&self, path: &Path) -> io::Result<DirEntry> {
         let (job_id, file) = Self::parse_path(path).ok_or_else(|| {
             io::Error::new(io::ErrorKind::InvalidInput, "invalid job path")
         })?;
 
+        let name = path
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "/".to_string());
+
         match (job_id, file) {
             (None, None) => {
                 // Root directory
-                Ok(Metadata {
-                    is_dir: true,
-                    is_file: false,
-                    is_symlink: false,
-                    size: 0,
-                    modified: None,
-                })
+                Ok(DirEntry::directory(name))
             }
             (Some(id), None) => {
                 // Job directory
@@ -232,13 +241,7 @@ impl Filesystem for JobFs {
                         format!("job {} not found", id),
                     ));
                 }
-                Ok(Metadata {
-                    is_dir: true,
-                    is_file: false,
-                    is_symlink: false,
-                    size: 0,
-                    modified: None,
-                })
+                Ok(DirEntry::directory(name))
             }
             (Some(id), Some(file)) => {
                 // File inside job directory
@@ -257,13 +260,7 @@ impl Filesystem for JobFs {
                     ));
                 }
 
-                Ok(Metadata {
-                    is_dir: false,
-                    is_file: true,
-                    is_symlink: false,
-                    size: 0, // Dynamic content
-                    modified: None,
-                })
+                Ok(DirEntry::file(name, 0))
             }
             (None, Some(_)) => {
                 // Invalid: file at root level
@@ -343,7 +340,7 @@ mod tests {
         let entries = fs.list(Path::new("")).await.unwrap();
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].name, id.0.to_string());
-        assert_eq!(entries[0].entry_type, EntryType::Directory);
+        assert_eq!(entries[0].kind, DirEntryKind::Directory);
     }
 
     #[tokio::test]
@@ -429,8 +426,8 @@ mod tests {
         let manager = Arc::new(JobManager::new());
         let fs = JobFs::new(manager);
 
-        let meta = fs.stat(Path::new("")).await.unwrap();
-        assert!(meta.is_dir);
+        let entry = fs.stat(Path::new("")).await.unwrap();
+        assert_eq!(entry.kind, DirEntryKind::Directory);
     }
 
     #[tokio::test]
@@ -439,8 +436,8 @@ mod tests {
         let fs = JobFs::new(manager);
 
         let path = format!("{}", id);
-        let meta = fs.stat(Path::new(&path)).await.unwrap();
-        assert!(meta.is_dir);
+        let entry = fs.stat(Path::new(&path)).await.unwrap();
+        assert_eq!(entry.kind, DirEntryKind::Directory);
     }
 
     #[tokio::test]
@@ -449,8 +446,8 @@ mod tests {
         let fs = JobFs::new(manager);
 
         let path = format!("{}/stdout", id);
-        let meta = fs.stat(Path::new(&path)).await.unwrap();
-        assert!(meta.is_file);
+        let entry = fs.stat(Path::new(&path)).await.unwrap();
+        assert_eq!(entry.kind, DirEntryKind::File);
     }
 
     #[tokio::test]

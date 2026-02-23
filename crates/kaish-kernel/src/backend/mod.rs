@@ -39,7 +39,7 @@ use thiserror::Error;
 
 use crate::interpreter::{value_to_json, ExecResult, OutputData};
 use crate::tools::{ExecContext, ToolArgs, ToolSchema};
-use crate::vfs::MountInfo;
+use crate::vfs::{DirEntry, MountInfo};
 
 /// Result type for backend operations.
 pub type BackendResult<T> = Result<T, BackendError>;
@@ -198,71 +198,6 @@ pub enum WriteMode {
     Truncate,
 }
 
-/// Information about a file or directory entry.
-#[derive(Debug, Clone)]
-pub struct EntryInfo {
-    /// Entry name (file or directory name).
-    pub name: String,
-    /// True if this is a directory.
-    pub is_dir: bool,
-    /// True if this is a file.
-    pub is_file: bool,
-    /// True if this is a symbolic link.
-    pub is_symlink: bool,
-    /// Size in bytes.
-    pub size: u64,
-    /// Last modification time (Unix timestamp in seconds).
-    pub modified: Option<u64>,
-    /// Unix permissions (e.g., 0o644).
-    pub permissions: Option<u32>,
-    /// For symlinks, the target path.
-    pub symlink_target: Option<std::path::PathBuf>,
-}
-
-impl EntryInfo {
-    /// Create a new directory entry.
-    pub fn directory(name: impl Into<String>) -> Self {
-        Self {
-            name: name.into(),
-            is_dir: true,
-            is_file: false,
-            is_symlink: false,
-            size: 0,
-            modified: None,
-            permissions: None,
-            symlink_target: None,
-        }
-    }
-
-    /// Create a new file entry.
-    pub fn file(name: impl Into<String>, size: u64) -> Self {
-        Self {
-            name: name.into(),
-            is_dir: false,
-            is_file: true,
-            is_symlink: false,
-            size,
-            modified: None,
-            permissions: None,
-            symlink_target: None,
-        }
-    }
-
-    /// Create a new symlink entry.
-    pub fn symlink(name: impl Into<String>, target: impl Into<std::path::PathBuf>) -> Self {
-        Self {
-            name: name.into(),
-            is_dir: false,
-            is_file: false,
-            is_symlink: true,
-            size: 0,
-            modified: None,
-            permissions: None,
-            symlink_target: Some(target.into()),
-        }
-    }
-}
-
 /// Result from tool execution via backend.
 #[derive(Debug, Clone)]
 pub struct ToolResult {
@@ -379,10 +314,10 @@ pub trait KernelBackend: Send + Sync {
     // ═══════════════════════════════════════════════════════════════════════════
 
     /// List directory contents.
-    async fn list(&self, path: &Path) -> BackendResult<Vec<EntryInfo>>;
+    async fn list(&self, path: &Path) -> BackendResult<Vec<DirEntry>>;
 
     /// Get file or directory metadata.
-    async fn stat(&self, path: &Path) -> BackendResult<EntryInfo>;
+    async fn stat(&self, path: &Path) -> BackendResult<DirEntry>;
 
     /// Create a directory (and parent directories if needed).
     async fn mkdir(&self, path: &Path) -> BackendResult<()>;
@@ -478,15 +413,15 @@ mod tests {
     }
 
     #[test]
-    fn test_entry_info_constructors() {
-        let dir = EntryInfo::directory("mydir");
-        assert!(dir.is_dir);
-        assert!(!dir.is_file);
+    fn test_dir_entry_constructors() {
+        use crate::vfs::DirEntryKind;
+
+        let dir = DirEntry::directory("mydir");
+        assert_eq!(dir.kind, DirEntryKind::Directory);
         assert_eq!(dir.name, "mydir");
 
-        let file = EntryInfo::file("myfile.txt", 1024);
-        assert!(!file.is_dir);
-        assert!(file.is_file);
+        let file = DirEntry::file("myfile.txt", 1024);
+        assert_eq!(file.kind, DirEntryKind::File);
         assert_eq!(file.size, 1024);
     }
 

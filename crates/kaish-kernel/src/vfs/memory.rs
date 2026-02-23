@@ -2,7 +2,7 @@
 //!
 //! Used for `/v` and testing. All data is ephemeral.
 
-use super::traits::{DirEntry, EntryType, Filesystem, Metadata};
+use super::traits::{DirEntry, DirEntryKind, Filesystem};
 use async_trait::async_trait;
 use std::collections::HashMap;
 use std::io;
@@ -102,7 +102,8 @@ impl MemoryFs {
     }
 
     /// Stat a file, following symlinks with depth limit.
-    fn stat_inner(&self, path: &Path, depth: usize) -> std::pin::Pin<Box<dyn std::future::Future<Output = io::Result<Metadata>> + Send + '_>> {
+    /// Returns a DirEntry with a placeholder name (caller should override).
+    fn stat_inner(&self, path: &Path, depth: usize) -> std::pin::Pin<Box<dyn std::future::Future<Output = io::Result<DirEntry>> + Send + '_>> {
         let path = path.to_path_buf();
         Box::pin(async move {
             if depth > Self::MAX_SYMLINK_DEPTH {
@@ -113,45 +114,49 @@ impl MemoryFs {
             let normalized = Self::normalize(&path);
 
             if normalized.as_os_str().is_empty() {
-                return Ok(Metadata {
-                    is_dir: true,
-                    is_file: false,
-                    is_symlink: false,
+                return Ok(DirEntry {
+                    name: String::new(),
+                    kind: DirEntryKind::Directory,
                     size: 0,
                     modified: Some(SystemTime::now()),
+                    permissions: None,
+                    symlink_target: None,
                 });
             }
 
-            let entry_info: Option<(Metadata, Option<PathBuf>)> = {
+            let entry_info: Option<(DirEntry, Option<PathBuf>)> = {
                 let entries = self.entries.read().await;
                 match entries.get(&normalized) {
                     Some(Entry::File { data, modified }) => Some((
-                        Metadata {
-                            is_dir: false,
-                            is_file: true,
-                            is_symlink: false,
+                        DirEntry {
+                            name: String::new(),
+                            kind: DirEntryKind::File,
                             size: data.len() as u64,
                             modified: Some(*modified),
+                            permissions: None,
+                            symlink_target: None,
                         },
                         None,
                     )),
                     Some(Entry::Directory { modified }) => Some((
-                        Metadata {
-                            is_dir: true,
-                            is_file: false,
-                            is_symlink: false,
+                        DirEntry {
+                            name: String::new(),
+                            kind: DirEntryKind::Directory,
                             size: 0,
                             modified: Some(*modified),
+                            permissions: None,
+                            symlink_target: None,
                         },
                         None,
                     )),
                     Some(Entry::Symlink { target, .. }) => Some((
-                        Metadata {
-                            is_dir: false,
-                            is_file: false,
-                            is_symlink: false,
+                        DirEntry {
+                            name: String::new(),
+                            kind: DirEntryKind::File, // placeholder, will be overridden
                             size: 0,
                             modified: None,
+                            permissions: None,
+                            symlink_target: None,
                         },
                         Some(target.clone()),
                     )),
@@ -160,7 +165,7 @@ impl MemoryFs {
             };
 
             match entry_info {
-                Some((meta, None)) => Ok(meta),
+                Some((entry, None)) => Ok(entry),
                 Some((_, Some(target))) => self.stat_inner(&target, depth + 1).await,
                 None => Err(io::Error::new(
                     io::ErrorKind::NotFound,
@@ -261,15 +266,17 @@ impl Filesystem for MemoryFs {
             if let Some(parent) = entry_path.parent()
                 && parent == prefix && entry_path != &normalized
                     && let Some(name) = entry_path.file_name() {
-                        let (entry_type, size, symlink_target) = match entry {
-                            Entry::File { data, .. } => (EntryType::File, data.len() as u64, None),
-                            Entry::Directory { .. } => (EntryType::Directory, 0, None),
-                            Entry::Symlink { target, .. } => (EntryType::Symlink, 0, Some(target.clone())),
+                        let (kind, size, modified, symlink_target) = match entry {
+                            Entry::File { data, modified } => (DirEntryKind::File, data.len() as u64, Some(*modified), None),
+                            Entry::Directory { modified } => (DirEntryKind::Directory, 0, Some(*modified), None),
+                            Entry::Symlink { target, modified } => (DirEntryKind::Symlink, 0, Some(*modified), Some(target.clone())),
                         };
                         result.push(DirEntry {
                             name: name.to_string_lossy().into_owned(),
-                            entry_type,
+                            kind,
                             size,
+                            modified,
+                            permissions: None,
                             symlink_target,
                         });
                     }
@@ -280,46 +287,63 @@ impl Filesystem for MemoryFs {
         Ok(result)
     }
 
-    async fn stat(&self, path: &Path) -> io::Result<Metadata> {
-        self.stat_inner(path, 0).await
+    async fn stat(&self, path: &Path) -> io::Result<DirEntry> {
+        let mut entry = self.stat_inner(path, 0).await?;
+        // Set name from the requested path
+        let normalized = Self::normalize(path);
+        entry.name = normalized
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "/".to_string());
+        Ok(entry)
     }
 
-    async fn lstat(&self, path: &Path) -> io::Result<Metadata> {
+    async fn lstat(&self, path: &Path) -> io::Result<DirEntry> {
         let normalized = Self::normalize(path);
+
+        let name = normalized
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "/".to_string());
+
         let entries = self.entries.read().await;
 
         // Handle root directory
         if normalized.as_os_str().is_empty() {
-            return Ok(Metadata {
-                is_dir: true,
-                is_file: false,
-                is_symlink: false,
+            return Ok(DirEntry {
+                name,
+                kind: DirEntryKind::Directory,
                 size: 0,
                 modified: Some(SystemTime::now()),
+                permissions: None,
+                symlink_target: None,
             });
         }
 
         match entries.get(&normalized) {
-            Some(Entry::File { data, modified }) => Ok(Metadata {
-                is_dir: false,
-                is_file: true,
-                is_symlink: false,
+            Some(Entry::File { data, modified }) => Ok(DirEntry {
+                name,
+                kind: DirEntryKind::File,
                 size: data.len() as u64,
                 modified: Some(*modified),
+                permissions: None,
+                symlink_target: None,
             }),
-            Some(Entry::Directory { modified }) => Ok(Metadata {
-                is_dir: true,
-                is_file: false,
-                is_symlink: false,
+            Some(Entry::Directory { modified }) => Ok(DirEntry {
+                name,
+                kind: DirEntryKind::Directory,
                 size: 0,
                 modified: Some(*modified),
+                permissions: None,
+                symlink_target: None,
             }),
-            Some(Entry::Symlink { modified, .. }) => Ok(Metadata {
-                is_dir: false,
-                is_file: false,
-                is_symlink: true,
+            Some(Entry::Symlink { target, modified }) => Ok(DirEntry {
+                name,
+                kind: DirEntryKind::Symlink,
                 size: 0,
                 modified: Some(*modified),
+                permissions: None,
+                symlink_target: Some(target.clone()),
             }),
             None => Err(io::Error::new(
                 io::ErrorKind::NotFound,
@@ -536,14 +560,14 @@ mod tests {
         fs.write(Path::new("a/b/c/file.txt"), b"nested").await.unwrap();
 
         // Should have created parent directories
-        let meta = fs.stat(Path::new("a")).await.unwrap();
-        assert!(meta.is_dir);
+        let entry = fs.stat(Path::new("a")).await.unwrap();
+        assert_eq!(entry.kind, DirEntryKind::Directory);
 
-        let meta = fs.stat(Path::new("a/b")).await.unwrap();
-        assert!(meta.is_dir);
+        let entry = fs.stat(Path::new("a/b")).await.unwrap();
+        assert_eq!(entry.kind, DirEntryKind::Directory);
 
-        let meta = fs.stat(Path::new("a/b/c")).await.unwrap();
-        assert!(meta.is_dir);
+        let entry = fs.stat(Path::new("a/b/c")).await.unwrap();
+        assert_eq!(entry.kind, DirEntryKind::Directory);
 
         let data = fs.read(Path::new("a/b/c/file.txt")).await.unwrap();
         assert_eq!(data, b"nested");
@@ -570,9 +594,8 @@ mod tests {
         let fs = MemoryFs::new();
         fs.mkdir(Path::new("mydir")).await.unwrap();
 
-        let meta = fs.stat(Path::new("mydir")).await.unwrap();
-        assert!(meta.is_dir);
-        assert!(!meta.is_file);
+        let entry = fs.stat(Path::new("mydir")).await.unwrap();
+        assert_eq!(entry.kind, DirEntryKind::Directory);
     }
 
     #[tokio::test]
@@ -720,10 +743,9 @@ mod tests {
         fs.symlink(Path::new("target.txt"), Path::new("link.txt")).await.unwrap();
 
         // stat follows symlinks - should report file metadata
-        let meta = fs.stat(Path::new("link.txt")).await.unwrap();
-        assert!(meta.is_file);
-        assert!(!meta.is_symlink);
-        assert_eq!(meta.size, 5);
+        let entry = fs.stat(Path::new("link.txt")).await.unwrap();
+        assert_eq!(entry.kind, DirEntryKind::File);
+        assert_eq!(entry.size, 5);
     }
 
     #[tokio::test]
@@ -733,10 +755,8 @@ mod tests {
         fs.symlink(Path::new("target.txt"), Path::new("link.txt")).await.unwrap();
 
         // lstat does not follow symlinks
-        let meta = fs.lstat(Path::new("link.txt")).await.unwrap();
-        assert!(meta.is_symlink);
-        assert!(!meta.is_file);
-        assert!(!meta.is_dir);
+        let entry = fs.lstat(Path::new("link.txt")).await.unwrap();
+        assert_eq!(entry.kind, DirEntryKind::Symlink);
     }
 
     #[tokio::test]
@@ -751,7 +771,7 @@ mod tests {
 
         // Find the symlink entry
         let link_entry = entries.iter().find(|e| e.name == "link.txt").unwrap();
-        assert_eq!(link_entry.entry_type, EntryType::Symlink);
+        assert_eq!(link_entry.kind, DirEntryKind::Symlink);
         assert_eq!(link_entry.symlink_target, Some(PathBuf::from("file.txt")));
     }
 
@@ -766,8 +786,8 @@ mod tests {
         assert_eq!(target, Path::new("nonexistent.txt"));
 
         // lstat works (the symlink exists)
-        let meta = fs.lstat(Path::new("broken.txt")).await.unwrap();
-        assert!(meta.is_symlink);
+        let entry = fs.lstat(Path::new("broken.txt")).await.unwrap();
+        assert_eq!(entry.kind, DirEntryKind::Symlink);
 
         // stat fails (target doesn't exist)
         let result = fs.stat(Path::new("broken.txt")).await;
@@ -816,8 +836,8 @@ mod tests {
         assert_eq!(data, b"end of chain");
 
         // stat through chain should report file
-        let meta = fs.stat(Path::new("a")).await.unwrap();
-        assert!(meta.is_file);
+        let entry = fs.stat(Path::new("a")).await.unwrap();
+        assert_eq!(entry.kind, DirEntryKind::File);
     }
 
     #[tokio::test]
@@ -828,8 +848,8 @@ mod tests {
         fs.symlink(Path::new("realdir"), Path::new("linkdir")).await.unwrap();
 
         // stat follows symlink - should see directory
-        let meta = fs.stat(Path::new("linkdir")).await.unwrap();
-        assert!(meta.is_dir);
+        let entry = fs.stat(Path::new("linkdir")).await.unwrap();
+        assert_eq!(entry.kind, DirEntryKind::Directory);
 
         // Note: listing through symlink requires following in list(),
         // which we don't currently support (symlink to dir returns NotADirectory)
@@ -914,12 +934,12 @@ mod tests {
         fs.symlink(Path::new("target"), Path::new("a/b/c/link")).await.unwrap();
 
         // Parents created
-        let meta = fs.stat(Path::new("a/b")).await.unwrap();
-        assert!(meta.is_dir);
+        let entry = fs.stat(Path::new("a/b")).await.unwrap();
+        assert_eq!(entry.kind, DirEntryKind::Directory);
 
         // Symlink exists (lstat)
-        let meta = fs.lstat(Path::new("a/b/c/link")).await.unwrap();
-        assert!(meta.is_symlink);
+        let entry = fs.lstat(Path::new("a/b/c/link")).await.unwrap();
+        assert_eq!(entry.kind, DirEntryKind::Symlink);
     }
 
     #[tokio::test]

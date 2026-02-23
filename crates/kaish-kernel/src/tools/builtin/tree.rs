@@ -225,7 +225,7 @@ impl Tool for Tree {
 
                 // Check ignore filter
                 if let Some(ref filter) = ignore_filter
-                    && filter.is_name_ignored(&entry.name, entry.is_dir) {
+                    && filter.is_name_ignored(&entry.name, entry.kind == crate::vfs::DirEntryKind::Directory) {
                         continue;
                     }
 
@@ -238,7 +238,7 @@ impl Tool for Tree {
                     .unwrap_or(&full_path)
                     .trim_start_matches('/');
 
-                if entry.is_dir {
+                if entry.kind == crate::vfs::DirEntryKind::Directory {
                     stack.push((full_path.clone(), depth + 1));
 
                     // Add directory to tree unless files_only

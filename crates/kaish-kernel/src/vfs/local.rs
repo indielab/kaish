@@ -2,7 +2,7 @@
 //!
 //! Provides access to real filesystem paths, with optional read-only mode.
 
-use super::traits::{DirEntry, EntryType, Filesystem, Metadata};
+use super::traits::{DirEntry, DirEntryKind, Filesystem};
 use async_trait::async_trait;
 use std::io;
 use std::path::{Path, PathBuf};
@@ -149,6 +149,18 @@ impl LocalFs {
             Ok(())
         }
     }
+
+    /// Extract permissions from std::fs::Metadata (unix only).
+    #[cfg(unix)]
+    fn extract_permissions(meta: &std::fs::Metadata) -> Option<u32> {
+        use std::os::unix::fs::PermissionsExt;
+        Some(meta.permissions().mode())
+    }
+
+    #[cfg(not(unix))]
+    fn extract_permissions(_meta: &std::fs::Metadata) -> Option<u32> {
+        None
+    }
 }
 
 #[async_trait]
@@ -180,20 +192,22 @@ impl Filesystem for LocalFs {
             let metadata = fs::symlink_metadata(entry.path()).await?;
             let file_type = metadata.file_type();
 
-            let (entry_type, symlink_target) = if file_type.is_symlink() {
+            let (kind, symlink_target) = if file_type.is_symlink() {
                 // Read the symlink target
                 let target = fs::read_link(entry.path()).await.ok();
-                (EntryType::Symlink, target)
+                (DirEntryKind::Symlink, target)
             } else if file_type.is_dir() {
-                (EntryType::Directory, None)
+                (DirEntryKind::Directory, None)
             } else {
-                (EntryType::File, None)
+                (DirEntryKind::File, None)
             };
 
             entries.push(DirEntry {
                 name: entry.file_name().to_string_lossy().into_owned(),
-                entry_type,
+                kind,
                 size: metadata.len(),
+                modified: metadata.modified().ok(),
+                permissions: Self::extract_permissions(&metadata),
                 symlink_target,
             });
         }
@@ -202,33 +216,66 @@ impl Filesystem for LocalFs {
         Ok(entries)
     }
 
-    async fn stat(&self, path: &Path) -> io::Result<Metadata> {
+    async fn stat(&self, path: &Path) -> io::Result<DirEntry> {
         let full_path = self.resolve(path)?;
         // stat follows symlinks
         let meta = fs::metadata(&full_path).await?;
 
-        Ok(Metadata {
-            is_dir: meta.is_dir(),
-            is_file: meta.is_file(),
-            is_symlink: false, // stat follows symlinks, so the target is never a symlink
+        let kind = if meta.is_dir() {
+            DirEntryKind::Directory
+        } else {
+            DirEntryKind::File
+        };
+
+        let name = path
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "/".to_string());
+
+        Ok(DirEntry {
+            name,
+            kind,
             size: meta.len(),
             modified: meta.modified().ok(),
+            permissions: Self::extract_permissions(&meta),
+            symlink_target: None, // stat follows symlinks
         })
     }
 
-    async fn lstat(&self, path: &Path) -> io::Result<Metadata> {
+    async fn lstat(&self, path: &Path) -> io::Result<DirEntry> {
         // lstat doesn't follow symlinks - validate containment without canonicalization
         let full_path = self.resolve_no_follow(path)?;
 
         // Use symlink_metadata which doesn't follow symlinks
         let meta = fs::symlink_metadata(&full_path).await?;
 
-        Ok(Metadata {
-            is_dir: meta.is_dir(),
-            is_file: meta.is_file(),
-            is_symlink: meta.file_type().is_symlink(),
+        let file_type = meta.file_type();
+        let kind = if file_type.is_symlink() {
+            DirEntryKind::Symlink
+        } else if meta.is_dir() {
+            DirEntryKind::Directory
+        } else {
+            DirEntryKind::File
+        };
+
+        let symlink_target = if file_type.is_symlink() {
+            fs::read_link(&full_path).await.ok()
+        } else {
+            None
+        };
+
+        let name = path
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "/".to_string());
+
+        Ok(DirEntry {
+            name,
+            kind,
             size: meta.len(),
             modified: meta.modified().ok(),
+            permissions: Self::extract_permissions(&meta),
+            symlink_target,
         })
     }
 
@@ -388,14 +435,12 @@ mod tests {
         fs.write(Path::new("file.txt"), b"content").await.unwrap();
         fs.mkdir(Path::new("dir")).await.unwrap();
 
-        let file_meta = fs.stat(Path::new("file.txt")).await.unwrap();
-        assert!(file_meta.is_file);
-        assert!(!file_meta.is_dir);
-        assert_eq!(file_meta.size, 7);
+        let file_entry = fs.stat(Path::new("file.txt")).await.unwrap();
+        assert_eq!(file_entry.kind, DirEntryKind::File);
+        assert_eq!(file_entry.size, 7);
 
-        let dir_meta = fs.stat(Path::new("dir")).await.unwrap();
-        assert!(dir_meta.is_dir);
-        assert!(!dir_meta.is_file);
+        let dir_entry = fs.stat(Path::new("dir")).await.unwrap();
+        assert_eq!(dir_entry.kind, DirEntryKind::Directory);
 
         cleanup(&dir).await;
     }
@@ -459,8 +504,8 @@ mod tests {
             .await
             .unwrap();
 
-        let meta = fs.lstat(Path::new("link.txt")).await.unwrap();
-        assert!(meta.is_symlink, "lstat should report symlink type");
+        let entry = fs.lstat(Path::new("link.txt")).await.unwrap();
+        assert_eq!(entry.kind, DirEntryKind::Symlink, "lstat should report symlink kind");
 
         cleanup(&dir).await;
     }

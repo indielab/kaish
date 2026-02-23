@@ -220,7 +220,7 @@ mod tests {
         // Verify file was created
         let stat = ctx.backend.stat(Path::new(&result.out)).await;
         assert!(stat.is_ok());
-        assert!(stat.unwrap().is_file);
+        assert_eq!(stat.unwrap().kind, crate::vfs::DirEntryKind::File);
     }
 
     #[tokio::test]
@@ -236,7 +236,7 @@ mod tests {
         // Verify directory was created
         let stat = ctx.backend.stat(Path::new(&result.out)).await;
         assert!(stat.is_ok());
-        assert!(stat.unwrap().is_dir);
+        assert_eq!(stat.unwrap().kind, crate::vfs::DirEntryKind::Directory);
     }
 
     #[tokio::test]

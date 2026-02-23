@@ -233,14 +233,14 @@ async fn evaluate_unary(op: &str, arg: &str, ctx: &ExecContext) -> Result<bool, 
         "-f" => {
             let path = ctx.resolve_path(arg);
             match ctx.backend.stat(Path::new(&path)).await {
-                Ok(info) => Ok(info.is_file),
+                Ok(info) => Ok(info.kind == crate::vfs::DirEntryKind::File),
                 Err(_) => Ok(false),
             }
         }
         "-d" => {
             let path = ctx.resolve_path(arg);
             match ctx.backend.stat(Path::new(&path)).await {
-                Ok(info) => Ok(info.is_dir),
+                Ok(info) => Ok(info.kind == crate::vfs::DirEntryKind::Directory),
                 Err(_) => Ok(false),
             }
         }

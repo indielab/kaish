@@ -33,4 +33,4 @@ pub use jobfs::JobFs;
 pub use local::LocalFs;
 pub use memory::MemoryFs;
 pub use router::{MountInfo, VfsRouter};
-pub use traits::{DirEntry, EntryType, Filesystem, Metadata};
+pub use traits::{DirEntry, DirEntryKind, Filesystem};

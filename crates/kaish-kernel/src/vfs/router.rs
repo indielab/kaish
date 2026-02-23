@@ -2,7 +2,7 @@
 //!
 //! Routes filesystem operations to the appropriate backend based on path.
 
-use super::traits::{DirEntry, EntryType, Filesystem, Metadata};
+use super::traits::{DirEntry, Filesystem};
 use async_trait::async_trait;
 use std::collections::BTreeMap;
 use std::io;
@@ -193,29 +193,21 @@ impl Filesystem for VfsRouter {
     }
 
     #[tracing::instrument(level = "trace", skip(self), fields(path = %path.display()))]
-    async fn stat(&self, path: &Path) -> io::Result<Metadata> {
+    async fn stat(&self, path: &Path) -> io::Result<DirEntry> {
         // Special case: root always exists
         let path_str = path.to_string_lossy();
         if path_str.is_empty() || path_str == "/" {
-            return Ok(Metadata {
-                is_dir: true,
-                is_file: false,
-                is_symlink: false,
-                size: 0,
-                modified: None,
-            });
+            return Ok(DirEntry::directory("/"));
         }
 
         // Check if path is a mount point itself
         let normalized = Self::normalize_mount_path(path.to_path_buf());
         if self.mounts.contains_key(&normalized) {
-            return Ok(Metadata {
-                is_dir: true,
-                is_file: false,
-                is_symlink: false,
-                size: 0,
-                modified: None,
-            });
+            let name = path
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_else(|| "/".to_string());
+            return Ok(DirEntry::directory(name));
         }
 
         let (fs, relative) = self.find_mount(path)?;
@@ -232,29 +224,21 @@ impl Filesystem for VfsRouter {
         fs.symlink(target, &relative).await
     }
 
-    async fn lstat(&self, path: &Path) -> io::Result<Metadata> {
+    async fn lstat(&self, path: &Path) -> io::Result<DirEntry> {
         // Special case: root always exists
         let path_str = path.to_string_lossy();
         if path_str.is_empty() || path_str == "/" {
-            return Ok(Metadata {
-                is_dir: true,
-                is_file: false,
-                is_symlink: false,
-                size: 0,
-                modified: None,
-            });
+            return Ok(DirEntry::directory("/"));
         }
 
         // Check if path is a mount point itself
         let normalized = Self::normalize_mount_path(path.to_path_buf());
         if self.mounts.contains_key(&normalized) {
-            return Ok(Metadata {
-                is_dir: true,
-                is_file: false,
-                is_symlink: false,
-                size: 0,
-                modified: None,
-            });
+            let name = path
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_else(|| "/".to_string());
+            return Ok(DirEntry::directory(name));
         }
 
         let (fs, relative) = self.find_mount(path)?;
@@ -319,12 +303,7 @@ impl VfsRouter {
                     .unwrap_or("");
 
                 if !first_component.is_empty() && seen_names.insert(first_component.to_string()) {
-                    entries.push(DirEntry {
-                        name: first_component.to_string(),
-                        entry_type: EntryType::Directory,
-                        size: 0,
-                        symlink_target: None,
-                    });
+                    entries.push(DirEntry::directory(first_component));
                 }
             }
         }
@@ -337,7 +316,7 @@ impl VfsRouter {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::vfs::MemoryFs;
+    use crate::vfs::{DirEntryKind, MemoryFs};
 
     #[tokio::test]
     async fn test_basic_mount() {
@@ -479,15 +458,15 @@ mod tests {
         let mut router = VfsRouter::new();
         router.mount("/scratch", MemoryFs::new());
 
-        let meta = router.stat(Path::new("/scratch")).await.unwrap();
-        assert!(meta.is_dir);
+        let entry = router.stat(Path::new("/scratch")).await.unwrap();
+        assert_eq!(entry.kind, DirEntryKind::Directory);
     }
 
     #[tokio::test]
     async fn test_stat_root() {
         let router = VfsRouter::new();
-        let meta = router.stat(Path::new("/")).await.unwrap();
-        assert!(meta.is_dir);
+        let entry = router.stat(Path::new("/")).await.unwrap();
+        assert_eq!(entry.kind, DirEntryKind::Directory);
     }
 
     #[tokio::test]

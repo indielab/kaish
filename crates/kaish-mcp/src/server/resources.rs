@@ -64,15 +64,15 @@ pub async fn list_resources(
         let entry_path = path.join(&entry.name);
         let uri = build_resource_uri(&entry_path);
 
-        let (description, mime_type) = match entry.entry_type {
-            kaish_kernel::vfs::EntryType::Directory => {
+        let (description, mime_type) = match entry.kind {
+            kaish_kernel::vfs::DirEntryKind::Directory => {
                 (Some("Directory".to_string()), Some("inode/directory".to_string()))
             }
-            kaish_kernel::vfs::EntryType::File => {
+            kaish_kernel::vfs::DirEntryKind::File => {
                 let mime = guess_mime_type(&entry.name);
                 (None, Some(mime))
             }
-            kaish_kernel::vfs::EntryType::Symlink => {
+            kaish_kernel::vfs::DirEntryKind::Symlink => {
                 let target = entry.symlink_target
                     .as_ref()
                     .map(|t| format!(" -> {}", t.display()))
@@ -101,12 +101,12 @@ pub async fn read_resource(
 ) -> Result<ResourceContent> {
     let metadata = vfs.stat(path).await.context("Failed to stat VFS path")?;
 
-    if metadata.is_dir {
+    if metadata.kind == kaish_kernel::vfs::DirEntryKind::Directory {
         // For directories, return a listing
         let entries = vfs.list(path).await.context("Failed to list directory")?;
         let listing: Vec<String> = entries.iter().map(|e| {
-            match e.entry_type {
-                kaish_kernel::vfs::EntryType::Directory => format!("{}/", e.name),
+            match e.kind {
+                kaish_kernel::vfs::DirEntryKind::Directory => format!("{}/", e.name),
                 _ => e.name.clone(),
             }
         }).collect();

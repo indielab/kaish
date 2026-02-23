@@ -6,35 +6,36 @@
 use async_trait::async_trait;
 use std::path::Path;
 
-use crate::backend::{EntryInfo, KernelBackend};
+use crate::backend::KernelBackend;
+use crate::vfs::{DirEntry, DirEntryKind};
 use kaish_glob::{WalkerDirEntry, WalkerError, WalkerFs};
 
 /// Wraps a `&dyn KernelBackend` to implement `WalkerFs`.
 pub struct BackendWalkerFs<'a>(pub &'a dyn KernelBackend);
 
-impl WalkerDirEntry for EntryInfo {
+impl WalkerDirEntry for DirEntry {
     fn name(&self) -> &str {
         &self.name
     }
 
     fn is_dir(&self) -> bool {
-        self.is_dir
+        matches!(self.kind, DirEntryKind::Directory)
     }
 
     fn is_file(&self) -> bool {
-        self.is_file
+        matches!(self.kind, DirEntryKind::File)
     }
 
     fn is_symlink(&self) -> bool {
-        self.is_symlink
+        matches!(self.kind, DirEntryKind::Symlink)
     }
 }
 
 #[async_trait]
 impl WalkerFs for BackendWalkerFs<'_> {
-    type DirEntry = EntryInfo;
+    type DirEntry = DirEntry;
 
-    async fn list_dir(&self, path: &Path) -> Result<Vec<EntryInfo>, WalkerError> {
+    async fn list_dir(&self, path: &Path) -> Result<Vec<DirEntry>, WalkerError> {
         self.0.list(path).await.map_err(|e| WalkerError::Io(e.to_string()))
     }
 
@@ -43,7 +44,7 @@ impl WalkerFs for BackendWalkerFs<'_> {
     }
 
     async fn is_dir(&self, path: &Path) -> bool {
-        self.0.stat(path).await.is_ok_and(|info| info.is_dir)
+        self.0.stat(path).await.is_ok_and(|info| info.kind == DirEntryKind::Directory)
     }
 
     async fn exists(&self, path: &Path) -> bool {

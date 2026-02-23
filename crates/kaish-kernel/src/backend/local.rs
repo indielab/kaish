@@ -6,14 +6,13 @@
 use async_trait::async_trait;
 use std::path::Path;
 use std::sync::Arc;
-use std::time::UNIX_EPOCH;
 
 use super::{
-    BackendError, BackendResult, ConflictError, EntryInfo, KernelBackend, PatchOp, ReadRange,
+    BackendError, BackendResult, ConflictError, KernelBackend, PatchOp, ReadRange,
     ToolInfo, ToolResult, WriteMode,
 };
 use crate::tools::{ExecContext, ToolArgs, ToolRegistry};
-use crate::vfs::{EntryType, Filesystem, MountInfo, VfsRouter};
+use crate::vfs::{DirEntry, DirEntryKind, Filesystem, MountInfo, VfsRouter};
 
 /// Local backend implementation using VfsRouter and ToolRegistry.
 ///
@@ -307,50 +306,12 @@ impl KernelBackend for LocalBackend {
     // Directory Operations
     // ═══════════════════════════════════════════════════════════════════════════
 
-    async fn list(&self, path: &Path) -> BackendResult<Vec<EntryInfo>> {
-        let entries = self.vfs.list(path).await?;
-        Ok(entries
-            .into_iter()
-            .map(|e| {
-                let (is_dir, is_file, is_symlink) = match e.entry_type {
-                    EntryType::Directory => (true, false, false),
-                    EntryType::File => (false, true, false),
-                    EntryType::Symlink => (false, false, true),
-                };
-                EntryInfo {
-                    name: e.name,
-                    is_dir,
-                    is_file,
-                    is_symlink,
-                    size: e.size,
-                    modified: None, // VFS DirEntry doesn't include modified time
-                    permissions: None,
-                    symlink_target: e.symlink_target,
-                }
-            })
-            .collect())
+    async fn list(&self, path: &Path) -> BackendResult<Vec<DirEntry>> {
+        Ok(self.vfs.list(path).await?)
     }
 
-    async fn stat(&self, path: &Path) -> BackendResult<EntryInfo> {
-        let meta = self.vfs.stat(path).await?;
-        let modified = meta.modified.and_then(|t| {
-            t.duration_since(UNIX_EPOCH)
-                .ok()
-                .map(|d| d.as_secs())
-        });
-        Ok(EntryInfo {
-            name: path
-                .file_name()
-                .map(|s| s.to_string_lossy().to_string())
-                .unwrap_or_else(|| "/".to_string()),
-            is_dir: meta.is_dir,
-            is_file: meta.is_file,
-            is_symlink: meta.is_symlink,
-            size: meta.size,
-            modified,
-            permissions: None,
-            symlink_target: None, // stat follows symlinks
-        })
+    async fn stat(&self, path: &Path) -> BackendResult<DirEntry> {
+        Ok(self.vfs.stat(path).await?)
     }
 
     async fn mkdir(&self, path: &Path) -> BackendResult<()> {
@@ -362,8 +323,8 @@ impl KernelBackend for LocalBackend {
         if recursive {
             // For recursive removal, we need to check if it's a directory
             // and remove contents first
-            if let Ok(meta) = self.vfs.stat(path).await
-                && meta.is_dir
+            if let Ok(entry) = self.vfs.stat(path).await
+                && entry.kind == DirEntryKind::Directory
             {
                 // List and remove children
                 if let Ok(entries) = self.vfs.list(path).await {
@@ -730,13 +691,11 @@ mod tests {
     async fn test_stat() {
         let backend = make_backend().await;
         let info = backend.stat(Path::new("/test.txt")).await.unwrap();
-        assert!(info.is_file);
-        assert!(!info.is_dir);
+        assert_eq!(info.kind, DirEntryKind::File);
         assert_eq!(info.size, 11); // "hello world".len()
 
         let info = backend.stat(Path::new("/dir")).await.unwrap();
-        assert!(info.is_dir);
-        assert!(!info.is_file);
+        assert_eq!(info.kind, DirEntryKind::Directory);
     }
 
     #[tokio::test]
@@ -745,7 +704,7 @@ mod tests {
         backend.mkdir(Path::new("/newdir")).await.unwrap();
         assert!(backend.exists(Path::new("/newdir")).await);
         let info = backend.stat(Path::new("/newdir")).await.unwrap();
-        assert!(info.is_dir);
+        assert_eq!(info.kind, DirEntryKind::Directory);
     }
 
     #[tokio::test]
@@ -793,10 +752,9 @@ mod tests {
         let backend = LocalBackend::new(Arc::new(vfs));
 
         let entries = backend.list(Path::new("/")).await.unwrap();
-        println!("Entries: {:?}", entries);
 
         let link_entry = entries.iter().find(|e| e.name == "link.txt").unwrap();
-        assert!(link_entry.is_symlink, "link.txt should be a symlink");
+        assert_eq!(link_entry.kind, DirEntryKind::Symlink, "link.txt should be a symlink");
         assert_eq!(link_entry.symlink_target, Some(PathBuf::from("target.txt")));
     }
 }

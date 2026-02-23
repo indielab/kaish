@@ -46,12 +46,13 @@ impl Tool for Stat {
                     ExecResult::success(output)
                 } else {
                     // Default output: use structured OutputData
-                    let file_type = if info.is_dir {
+                    let is_dir = info.kind == crate::vfs::DirEntryKind::Directory;
+                    let file_type = if is_dir {
                         "directory"
                     } else {
                         "regular file"
                     };
-                    let entry_type = if info.is_dir {
+                    let entry_type = if is_dir {
                         EntryType::Directory
                     } else {
                         EntryType::File
@@ -79,7 +80,7 @@ impl Tool for Stat {
 }
 
 /// Format stat output according to a format string.
-fn format_stat(fmt: &str, name: &str, info: &crate::backend::EntryInfo) -> String {
+fn format_stat(fmt: &str, name: &str, info: &crate::vfs::DirEntry) -> String {
     let mut result = fmt.to_string();
 
     // %n - file name
@@ -89,7 +90,7 @@ fn format_stat(fmt: &str, name: &str, info: &crate::backend::EntryInfo) -> Strin
     result = result.replace("%s", &info.size.to_string());
 
     // %F - file type
-    let file_type = if info.is_dir { "directory" } else { "regular file" };
+    let file_type = if info.kind == crate::vfs::DirEntryKind::Directory { "directory" } else { "regular file" };
     result = result.replace("%F", file_type);
 
     // Add newline if not present
