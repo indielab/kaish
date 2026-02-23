@@ -894,6 +894,8 @@ fn set_output_node(builder: &mut output_node::Builder<'_>, node: &OutputNode) {
         EntryType::Directory => SchemaEntryType::Directory,
         EntryType::Executable => SchemaEntryType::Executable,
         EntryType::Symlink => SchemaEntryType::Symlink,
+        // EntryType is #[non_exhaustive] — unknown variants serialize as Text
+        _ => SchemaEntryType::Text,
     };
     builder.set_entry_type(entry_type);
 

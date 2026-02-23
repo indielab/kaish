@@ -127,15 +127,14 @@ pub async fn read_resource(
     let data = vfs.read(path).await.context("Failed to read VFS path")?;
     let mime_type = guess_mime_type(&path.to_string_lossy());
 
-    // Check if it's text or binary
-    if is_likely_text(&data) {
-        let text = String::from_utf8_lossy(&data).into_owned();
-        Ok(ResourceContent::Text { text, mime_type })
-    } else {
-        Ok(ResourceContent::Blob {
-            data,
+    // Use exact UTF-8 validation — from_utf8_lossy would silently corrupt binary files
+    // that start with valid UTF-8 bytes.
+    match String::from_utf8(data) {
+        Ok(text) => Ok(ResourceContent::Text { text, mime_type }),
+        Err(e) => Ok(ResourceContent::Blob {
+            data: e.into_bytes(),
             mime_type,
-        })
+        }),
     }
 }
 
@@ -202,24 +201,6 @@ fn guess_mime_type(name: &str) -> String {
     .to_string()
 }
 
-/// Check if data is likely text (contains no null bytes and is valid UTF-8ish).
-fn is_likely_text(data: &[u8]) -> bool {
-    // Empty files are text
-    if data.is_empty() {
-        return true;
-    }
-
-    // Check first 8KB for null bytes (common binary indicator)
-    let sample = &data[..data.len().min(8192)];
-
-    // If it has null bytes, it's probably binary
-    if sample.contains(&0) {
-        return false;
-    }
-
-    // Try to parse as UTF-8
-    std::str::from_utf8(sample).is_ok()
-}
 
 #[cfg(test)]
 mod tests {
@@ -262,11 +243,4 @@ mod tests {
         assert_eq!(guess_mime_type("noext"), "application/octet-stream");
     }
 
-    #[test]
-    fn test_is_likely_text() {
-        assert!(is_likely_text(b"Hello, world!"));
-        assert!(is_likely_text(b""));
-        assert!(is_likely_text("UTF-8: é".as_bytes()));
-        assert!(!is_likely_text(b"Binary\x00data"));
-    }
 }

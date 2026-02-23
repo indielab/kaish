@@ -3,7 +3,7 @@
 //! Configuration is loaded from `~/.config/kaish/mcp-server.toml`.
 
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 use directories::ProjectDirs;
@@ -16,8 +16,8 @@ pub struct McpServerConfig {
     #[serde(default = "default_name")]
     pub name: String,
 
-    /// Server version.
-    #[serde(default = "default_version")]
+    /// Server version. Not settable via config — always the binary's version.
+    #[serde(skip, default = "default_version")]
     pub version: String,
 
     /// External MCP servers to connect to for tool chaining.
@@ -73,7 +73,7 @@ impl McpServerConfig {
     }
 
     /// Load configuration from a specific path.
-    pub fn load_from(path: &PathBuf) -> Result<Self> {
+    pub fn load_from(path: &Path) -> Result<Self> {
         let content = std::fs::read_to_string(path)
             .with_context(|| format!("Failed to read config from {}", path.display()))?;
 
@@ -106,6 +106,19 @@ pub struct ExternalServerConfig {
     /// Environment variables to set.
     #[serde(default)]
     pub env: HashMap<String, String>,
+}
+
+impl From<ExternalServerConfig> for crate::config::McpConfig {
+    fn from(cfg: ExternalServerConfig) -> Self {
+        crate::config::McpConfig {
+            name: cfg.name,
+            transport: crate::config::McpTransport::Stdio {
+                command: cfg.command,
+                args: cfg.args,
+                env: cfg.env.into_iter().collect(),
+            },
+        }
+    }
 }
 
 /// Configuration for a resource mount.
@@ -158,7 +171,8 @@ vfs_path = "/"
 
         let config: McpServerConfig = toml::from_str(toml).expect("parse failed");
         assert_eq!(config.name, "my-kaish");
-        assert_eq!(config.version, "1.0.0");
+        // version is #[serde(skip)] — always the binary version, not config-file value
+        assert!(!config.version.is_empty());
         assert_eq!(config.default_timeout_ms, 60_000);
         assert_eq!(config.mcp_servers.len(), 2);
         assert_eq!(config.mcp_servers[0].name, "git");

@@ -7,7 +7,7 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
-use kaish_kernel::interpreter::OutputData;
+use kaish_kernel::interpreter::{value_to_json, OutputData};
 use kaish_kernel::{Kernel, KernelConfig};
 use rmcp::schemars::{self, JsonSchema};
 use serde::{Deserialize, Serialize};
@@ -94,30 +94,7 @@ impl ExecuteResult {
 
     /// Create from kernel execution result.
     pub fn from_exec_result(result: &kaish_kernel::interpreter::ExecResult) -> Self {
-        let data = result.data.as_ref().and_then(|v| {
-            match v {
-                kaish_kernel::ast::Value::Null => Some(serde_json::Value::Null),
-                kaish_kernel::ast::Value::Bool(b) => Some(serde_json::Value::Bool(*b)),
-                kaish_kernel::ast::Value::Int(i) => Some(serde_json::Value::Number((*i).into())),
-                kaish_kernel::ast::Value::Float(f) => {
-                    serde_json::Number::from_f64(*f).map(serde_json::Value::Number)
-                }
-                kaish_kernel::ast::Value::String(s) => {
-                    // Try to parse as JSON first (for backwards compatibility)
-                    serde_json::from_str(s).ok()
-                        .or_else(|| Some(serde_json::Value::String(s.clone())))
-                }
-                kaish_kernel::ast::Value::Json(json) => Some(json.clone()),
-                kaish_kernel::ast::Value::Blob(blob) => {
-                    let mut map = serde_json::Map::new();
-                    map.insert("_type".to_string(), serde_json::Value::String("blob".to_string()));
-                    map.insert("id".to_string(), serde_json::Value::String(blob.id.clone()));
-                    map.insert("size".to_string(), serde_json::Value::Number(blob.size.into()));
-                    map.insert("contentType".to_string(), serde_json::Value::String(blob.content_type.clone()));
-                    Some(serde_json::Value::Object(map))
-                }
-            }
-        });
+        let data = result.data.as_ref().map(value_to_json);
 
         Self {
             code: result.code,
@@ -336,6 +313,23 @@ mod tests {
         assert!(!result.ok);
         assert_eq!(result.code, 42);
         assert_eq!(result.stderr, "error message");
+    }
+
+    #[test]
+    fn test_from_exec_result_string_stays_string() {
+        // Value::String containing JSON must NOT be silently re-parsed into an object.
+        // It becomes a JSON string, not a JSON object.
+        use kaish_kernel::ast::Value;
+        use kaish_kernel::interpreter::ExecResult;
+
+        let mut exec_result = ExecResult::success("test");
+        exec_result.data = Some(Value::String(r#"{"x": 1}"#.to_string()));
+
+        let result = ExecuteResult::from_exec_result(&exec_result);
+        let data = result.data.expect("data should be present");
+        // Must be a JSON string, not an object
+        assert!(data.is_string(), "Value::String should become a JSON string, not an object");
+        assert_eq!(data.as_str(), Some(r#"{"x": 1}"#));
     }
 
     #[tokio::test]

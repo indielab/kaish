@@ -17,6 +17,7 @@ use crate::result::ExecResult;
 ///
 /// This unified enum is used by both the new OutputNode system
 /// and the legacy DisplayHint::Table for backward compatibility.
+#[non_exhaustive]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "lowercase")]
@@ -330,6 +331,7 @@ impl OutputData {
 // ============================================================
 
 /// Output serialization format, requested via global flags.
+#[non_exhaustive]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OutputFormat {
     /// JSON serialization via OutputData::to_json()

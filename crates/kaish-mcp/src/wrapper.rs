@@ -8,7 +8,7 @@ use rmcp::model::{RawContent, ResourceContents, Tool as McpTool};
 use tracing_opentelemetry::OpenTelemetrySpanExt;
 
 use kaish_kernel::ast::Value;
-use kaish_kernel::interpreter::ExecResult;
+use kaish_kernel::interpreter::{value_to_json, ExecResult};
 use kaish_kernel::tools::{ExecContext, ParamSchema, Tool, ToolArgs, ToolSchema};
 
 use crate::client::McpClient;
@@ -47,27 +47,27 @@ impl McpToolWrapper {
         self.client.name()
     }
 
+    /// Get the required parameter names from the MCP input schema.
+    fn required_param_names(&self) -> Vec<String> {
+        self.mcp_tool
+            .input_schema
+            .get("required")
+            .and_then(|r| r.as_array())
+            .map(|arr| arr.iter().filter_map(|v| v.as_str().map(String::from)).collect())
+            .unwrap_or_default()
+    }
+
     /// Get the parameter names in a consistent order.
     ///
     /// The MCP schema properties are in a Map which doesn't guarantee order.
     /// We try to use the "required" array first (which is ordered), then
     /// append any remaining optional parameters.
     fn param_names(&self) -> Vec<String> {
-        let input_schema = &self.mcp_tool.input_schema;
-
-        // Get required params first (they have a defined order in the array)
-        let required_params: Vec<String> = input_schema
-            .get("required")
-            .and_then(|r| r.as_array())
-            .map(|arr| {
-                arr.iter()
-                    .filter_map(|v| v.as_str().map(String::from))
-                    .collect()
-            })
-            .unwrap_or_default();
+        let required_params = self.required_param_names();
 
         // Get all properties
-        let all_props: Vec<String> = input_schema
+        let all_props: Vec<String> = self.mcp_tool
+            .input_schema
             .get("properties")
             .and_then(|p| p.as_object())
             .map(|obj| obj.keys().cloned().collect())
@@ -98,26 +98,16 @@ impl Tool for McpToolWrapper {
                 .description
                 .as_deref()
                 .unwrap_or("MCP tool"),
-        );
+        )
+        .with_positional_mapping();
 
-        // Convert MCP input schema to kaish ParamSchema
+        // Convert MCP input schema to kaish ParamSchema.
         // input_schema is Arc<JsonObject> = Arc<Map<String, Value>>
         let input_schema = &self.mcp_tool.input_schema;
-
-        // Get parameter names in a consistent order for positional arg mapping
         let param_names = self.param_names();
+        let required_params = self.required_param_names();
 
         if let Some(properties) = input_schema.get("properties").and_then(|p| p.as_object()) {
-            let required_params: Vec<String> = input_schema
-                .get("required")
-                .and_then(|r| r.as_array())
-                .map(|arr| {
-                    arr.iter()
-                        .filter_map(|v| v.as_str().map(String::from))
-                        .collect()
-                })
-                .unwrap_or_default();
-
             // Use param_names order to ensure consistent ordering
             for param_name in &param_names {
                 if let Some(param_schema) = properties.get(param_name) {
@@ -133,9 +123,7 @@ impl Tool for McpToolWrapper {
                         .unwrap_or("")
                         .to_string();
 
-                    let is_required = required_params.contains(param_name);
-
-                    let param = if is_required {
+                    let param = if required_params.contains(param_name) {
                         ParamSchema::required(param_name, param_type, description)
                     } else {
                         ParamSchema::optional(param_name, param_type, Value::Null, description)
@@ -265,28 +253,3 @@ fn args_to_json(
     }
 }
 
-/// Convert a kaish Value to a JSON value.
-fn value_to_json(value: &Value) -> serde_json::Value {
-    match value {
-        Value::Null => serde_json::Value::Null,
-        Value::Bool(b) => serde_json::Value::Bool(*b),
-        Value::Int(i) => serde_json::Value::Number((*i).into()),
-        Value::Float(f) => serde_json::Number::from_f64(*f)
-            .map(serde_json::Value::Number)
-            .unwrap_or(serde_json::Value::Null),
-        Value::String(s) => serde_json::Value::String(s.clone()),
-        Value::Json(json) => json.clone(),
-        Value::Blob(blob) => {
-            let mut map = serde_json::Map::new();
-            map.insert("_type".to_string(), serde_json::Value::String("blob".to_string()));
-            map.insert("id".to_string(), serde_json::Value::String(blob.id.clone()));
-            map.insert("size".to_string(), serde_json::Value::Number(blob.size.into()));
-            map.insert("contentType".to_string(), serde_json::Value::String(blob.content_type.clone()));
-            if let Some(hash) = &blob.hash {
-                let hash_hex: String = hash.iter().map(|b| format!("{:02x}", b)).collect();
-                map.insert("hash".to_string(), serde_json::Value::String(hash_hex));
-            }
-            serde_json::Value::Object(map)
-        }
-    }
-}

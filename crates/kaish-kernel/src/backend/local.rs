@@ -270,6 +270,10 @@ impl KernelBackend for LocalBackend {
                 }
                 self.vfs.write(path, content).await?;
             }
+            // WriteMode is #[non_exhaustive] — treat unknown modes as Overwrite
+            _ => {
+                self.vfs.write(path, content).await?;
+            }
         }
         Ok(())
     }

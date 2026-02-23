@@ -275,7 +275,8 @@ fn colorize_entry(name: &str, entry_type: Option<EntryType>) -> String {
         Some(EntryType::Directory) => name.blue().bold().to_string(),
         Some(EntryType::Executable) => name.green().bold().to_string(),
         Some(EntryType::Symlink) => name.cyan().to_string(),
-        Some(EntryType::File) | Some(EntryType::Text) | None => name.to_string(),
+        // EntryType is #[non_exhaustive] — unknown variants render unstyled
+        Some(EntryType::File) | Some(EntryType::Text) | Some(_) | None => name.to_string(),
     }
 }
 

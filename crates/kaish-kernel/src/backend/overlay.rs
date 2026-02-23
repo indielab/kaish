@@ -119,6 +119,10 @@ impl KernelBackend for VirtualOverlayBackend {
                     }
                     self.vfs.write(path, content).await?;
                 }
+                // WriteMode is #[non_exhaustive] — treat unknown modes as Overwrite
+                _ => {
+                    self.vfs.write(path, content).await?;
+                }
             }
             Ok(())
         } else {

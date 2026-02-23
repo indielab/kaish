@@ -144,11 +144,8 @@ impl ResourceWatcher {
                 map.get(&path).cloned()
             };
 
+            // If the path was in path_to_uri, it's subscribed — no second check needed.
             let Some(uri) = uri else { continue };
-
-            if !watcher.is_subscribed(&uri).await {
-                continue;
-            }
 
             let Some(p) = peer.get() else { continue };
 

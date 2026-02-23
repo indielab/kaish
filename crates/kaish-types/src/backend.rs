@@ -154,6 +154,7 @@ impl ReadRange {
 }
 
 /// Write mode for file operations.
+#[non_exhaustive]
 #[derive(Debug, Clone, Copy, Default)]
 pub enum WriteMode {
     /// Fail if file already exists.

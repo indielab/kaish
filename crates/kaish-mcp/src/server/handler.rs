@@ -32,6 +32,7 @@ use serde_json::Value;
 use tokio::sync::RwLock;
 
 use kaish_kernel::help::{get_help, HelpTopic};
+use kaish_kernel::tools::ToolSchema;
 use kaish_kernel::vfs::{LocalFs, MemoryFs, VfsRouter};
 
 use super::config::McpServerConfig;
@@ -56,6 +57,8 @@ pub struct KaishServerHandler {
     peer: Arc<OnceLock<Peer<RoleServer>>>,
     /// Minimum logging level requested by client. None = logging not requested.
     log_level: Arc<RwLock<Option<LoggingLevel>>>,
+    /// Cached tool schemas (static — avoids creating a kernel per prompt_builtins call).
+    tool_schemas: Vec<ToolSchema>,
 }
 
 /// Map LoggingLevel to a numeric severity for comparison.
@@ -104,6 +107,13 @@ impl KaishServerHandler {
 
         let peer = Arc::new(OnceLock::new());
 
+        // Pre-compute tool schemas once — they're static and used by prompt_builtins.
+        let schema_kernel = kaish_kernel::Kernel::new(
+            kaish_kernel::KernelConfig::isolated().with_skip_validation(true),
+        )
+        .context("Failed to create schema kernel")?;
+        let tool_schemas = schema_kernel.tool_schemas();
+
         Ok(Self {
             config,
             vfs: Arc::new(RwLock::new(vfs)),
@@ -112,6 +122,7 @@ impl KaishServerHandler {
             watcher: ResourceWatcher::new(peer.clone()),
             peer,
             log_level: Arc::new(RwLock::new(None)),
+            tool_schemas,
         })
     }
 
@@ -283,12 +294,7 @@ impl KaishServerHandler {
             )
         };
 
-        // Create a temporary kernel to get tool schemas
-        let config = kaish_kernel::KernelConfig::isolated().with_skip_validation(true);
-        let kernel = kaish_kernel::Kernel::new(config)
-            .map_err(|e| McpError::internal_error(e.to_string(), None))?;
-        let schemas = kernel.tool_schemas();
-        let content = get_help(&topic, &schemas);
+        let content = get_help(&topic, &self.tool_schemas);
 
         Ok(GetPromptResult {
             description: Some(description),
@@ -504,12 +510,17 @@ impl rmcp::ServerHandler for KaishServerHandler {
             let _ = peer.notify_resource_list_changed().await;
         }
 
-        // Log progress completion
-        if let Some(token) = progress_token {
-            tracing::debug!(
-                progress_token = ?token,
-                "Tool call complete (progress token tracked)"
-            );
+        // Send completion progress notification
+        if let (Some(token), Some(peer)) = (&progress_token, self.peer.get()) {
+            // Explicitly ignored: progress notifications are best-effort
+            let _ = peer
+                .notify_progress(ProgressNotificationParam {
+                    progress_token: token.clone(),
+                    progress: 1.0,
+                    total: Some(1.0),
+                    message: Some("Complete".to_string()),
+                })
+                .await;
         }
 
         result
