@@ -37,9 +37,10 @@ fn decide_rm_action(
     if trash_enabled {
         if let Some(rp) = real_path {
             // Skip trash for excluded paths (/tmp, /v/*)
-            let path_str = rp.to_string_lossy();
-            let excluded = path_str.starts_with("/tmp")
-                || path_str.starts_with("/v/");
+            // Use Path::starts_with (component-aware) not str starts_with,
+            // otherwise "/tmp_file.txt" would incorrectly match "/tmp".
+            let excluded = rp.starts_with("/tmp")
+                || rp.starts_with("/v");
 
             if !excluded {
                 // Directories always go to trash — stat size is unreliable

@@ -104,10 +104,10 @@ everywhere, a `jq` that always uses the same filter syntax, an `awk` that never 
 | Category | Tools |
 |----------|-------|
 | **Text** | awk, cut, diff, grep, head, sed, sort, split, tail, tr, uniq, wc |
-| **Files** | basename, cat, cd, cp, dirname, find, glob, ln, ls, mkdir, mktemp, mv, patch, pwd, read, readlink, realpath, rm, stat, tee, touch, tree, write |
+| **Files** | basename, cat, cd, cp, dirname, find, glob, ln, ls, mkdir, mktemp, mv, patch, pwd, readlink, realpath, rm, stat, tee, touch, tree, write |
 | **JSON** | jq |
 | **Git** | git (init, clone, status, add, commit, log, diff, branch, checkout, worktree) |
-| **System** | alias, bg, date, echo, env, exec, export, fg, help, hostname, jobs, kill, printf, ps, seq, set, sleep, spawn, test/\[\[, tokens, uname, unalias, unset, wait, which |
+| **System** | alias, bg, date, echo, env, exec, export, fg, help, hostname, jobs, kill, printf, ps, read, seq, set, sleep, spawn, test/\[\[, tokens, uname, unalias, unset, wait, which |
 | **Parallel** | scatter, gather |
 | **Meta** | assert, false, true |
 | **kaish-*** | kaish-ast, kaish-clear, kaish-ignore, kaish-mounts, kaish-output-limit, kaish-status, kaish-tools, kaish-trash, kaish-validate, kaish-vars, kaish-version |
