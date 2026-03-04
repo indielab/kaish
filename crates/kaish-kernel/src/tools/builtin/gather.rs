@@ -58,7 +58,7 @@ impl Tool for Gather {
         let input = ctx.read_stdin_to_string().await.unwrap_or_default();
 
         if input.is_empty() {
-            return ExecResult::with_output(OutputData::text(""));
+            return ExecResult::success("");
         }
 
         // In standalone mode (not in a scatter/gather pipeline),

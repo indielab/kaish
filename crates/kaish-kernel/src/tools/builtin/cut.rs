@@ -112,7 +112,7 @@ impl Tool for Cut {
         }
 
         if output.is_empty() {
-            ExecResult::with_output(OutputData::text(""))
+            ExecResult::success("")
         } else {
             ExecResult::with_output(OutputData::text(format!("{}\n", output.join("\n"))))
         }

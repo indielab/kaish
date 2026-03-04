@@ -121,7 +121,7 @@ impl Tool for Set {
             }
         }
 
-        ExecResult::with_output(OutputData::text(""))
+        ExecResult::success("")
     }
 }
 

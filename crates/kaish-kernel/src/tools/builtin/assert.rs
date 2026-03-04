@@ -3,7 +3,7 @@
 use async_trait::async_trait;
 
 use crate::ast::Value;
-use crate::interpreter::{ExecResult, OutputData};
+use crate::interpreter::ExecResult;
 use crate::tools::{ExecContext, ParamSchema, Tool, ToolArgs, ToolSchema};
 
 /// Assert tool: verify conditions in tests.
@@ -43,7 +43,7 @@ impl Tool for Assert {
             .unwrap_or_else(|| "assertion failed".to_string());
 
         if is_truthy(condition) {
-            ExecResult::with_output(OutputData::text(""))
+            ExecResult::success("")
         } else {
             ExecResult::failure(1, format!("assert: {}", message))
         }

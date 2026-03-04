@@ -103,7 +103,7 @@ impl Tool for Export {
             }
         }
 
-        ExecResult::with_output(OutputData::text(""))
+        ExecResult::success("")
     }
 }
 

@@ -313,9 +313,9 @@ impl Tool for Grep {
         if files_only {
             return if match_count > 0 {
                 if let Some(name) = filename {
-                    ExecResult::success(format!("{}\n", name))
+                    ExecResult::with_output(OutputData::text(format!("{}\n", name)))
                 } else {
-                    ExecResult::success("(stdin)\n".to_string())
+                    ExecResult::with_output(OutputData::text("-\n".to_string()))
                 }
             } else {
                 ExecResult::from_output(1, "", "")
@@ -323,7 +323,7 @@ impl Tool for Grep {
         }
 
         if count_only {
-            ExecResult::success(format!("{}\n", match_count))
+            ExecResult::with_output(OutputData::text(format!("{}\n", match_count)))
         } else if match_count == 0 {
             ExecResult::from_output(1, text_output, "")
         } else {
@@ -460,12 +460,12 @@ impl Grep {
             return if files_with_matches.is_empty() {
                 ExecResult::from_output(1, "", "")
             } else {
-                ExecResult::success(files_with_matches.join("\n") + "\n")
+                ExecResult::with_output(OutputData::text(files_with_matches.join("\n") + "\n"))
             };
         }
 
         if count_only {
-            ExecResult::success(format!("{}\n", total_matches))
+            ExecResult::with_output(OutputData::text(format!("{}\n", total_matches)))
         } else if total_matches == 0 {
             ExecResult::from_output(1, total_output, "")
         } else {

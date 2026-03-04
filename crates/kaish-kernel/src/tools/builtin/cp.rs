@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 
 use crate::ast::Value;
 use crate::backend::{BackendError, KernelBackend, WriteMode};
-use crate::interpreter::{ExecResult, OutputData};
+use crate::interpreter::ExecResult;
 use crate::tools::{ExecContext, ParamSchema, Tool, ToolArgs, ToolSchema};
 
 /// Cp tool: copy files and directories.
@@ -63,7 +63,7 @@ impl Tool for Cp {
         let dst_path = ctx.resolve_path(&dest);
 
         match copy_path(&*ctx.backend, &src_path, &dst_path, recursive, no_clobber).await {
-            Ok(()) => ExecResult::with_output(OutputData::text("")),
+            Ok(()) => ExecResult::success(""),
             Err(e) => ExecResult::failure(1, format!("cp: {}", e)),
         }
     }

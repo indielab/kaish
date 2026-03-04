@@ -45,7 +45,7 @@ impl Tool for Stat {
                 if let Some(fmt) = format {
                     // Custom format mode: return plain text
                     let output = format_stat(&fmt, &path_str, &info);
-                    ExecResult::success(output)
+                    ExecResult::with_output(OutputData::text(output))
                 } else {
                     // Default output: use structured OutputData
                     let is_dir = info.is_dir();

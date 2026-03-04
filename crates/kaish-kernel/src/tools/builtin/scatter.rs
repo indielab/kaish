@@ -62,7 +62,7 @@ impl Tool for Scatter {
         };
 
         if items.is_empty() {
-            return ExecResult::with_output(OutputData::text(""));
+            return ExecResult::success("");
         }
 
         // In standalone mode (not in a scatter/gather pipeline),

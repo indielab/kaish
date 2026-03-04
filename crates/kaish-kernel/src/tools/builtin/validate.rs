@@ -113,7 +113,7 @@ impl Tool for Validate {
 
         if quiet {
             if errors.is_empty() {
-                return ExecResult::with_output(OutputData::text(""));
+                return ExecResult::success("");
             } else {
                 return ExecResult::failure(1, "");
             }

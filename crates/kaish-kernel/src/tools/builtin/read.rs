@@ -11,7 +11,7 @@
 use async_trait::async_trait;
 
 use crate::ast::Value;
-use crate::interpreter::{ExecResult, OutputData};
+use crate::interpreter::ExecResult;
 use crate::tools::{ExecContext, ParamSchema, Tool, ToolArgs, ToolSchema};
 
 /// Read tool: reads a line from stdin into variable(s).
@@ -122,7 +122,7 @@ impl Tool for Read {
         }
 
         // Include prompt in stderr output (for visibility to caller)
-        let mut result = ExecResult::with_output(OutputData::text(""));
+        let mut result = ExecResult::success("");
         if !prompt_output.is_empty() {
             result.err = prompt_output.to_string();
         }

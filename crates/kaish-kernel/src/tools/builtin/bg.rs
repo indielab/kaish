@@ -3,7 +3,7 @@
 use async_trait::async_trait;
 
 use crate::ast::Value;
-use crate::interpreter::ExecResult;
+use crate::interpreter::{ExecResult, OutputData};
 use crate::scheduler::JobId;
 use crate::tools::{ExecContext, ParamSchema, Tool, ToolArgs, ToolSchema};
 
@@ -96,7 +96,7 @@ impl Tool for Bg {
                 jobs.remove(job_id).await;
             });
 
-            ExecResult::success(format!("[{}] {} &\n", job_id, cmd))
+            ExecResult::with_output(OutputData::text(format!("[{}] {} &\n", job_id, cmd)))
         }
     }
 }

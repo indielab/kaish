@@ -181,7 +181,7 @@ async fn git_status(args: &ToolArgs, ctx: &ExecContext) -> ExecResult {
         Ok(statuses) => {
             if statuses.is_empty() {
                 if porcelain {
-                    return ExecResult::with_output(OutputData::text(""));
+                    return ExecResult::success("");
                 }
                 return ExecResult::with_output(OutputData::text("nothing to commit, working tree clean"));
             }
@@ -266,7 +266,7 @@ async fn git_add(args: &[String], ctx: &ExecContext) -> ExecResult {
     let pathspecs: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
 
     match git.add(&pathspecs) {
-        Ok(()) => ExecResult::with_output(OutputData::text("")),
+        Ok(()) => ExecResult::success(""),
         Err(e) => ExecResult::failure(1, format!("git add: {}", e)),
     }
 }

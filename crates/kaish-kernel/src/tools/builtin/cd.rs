@@ -62,7 +62,7 @@ impl Tool for Cd {
                     if path_arg == "-" {
                         ExecResult::with_output(OutputData::text(resolved.to_string_lossy().to_string()))
                     } else {
-                        ExecResult::with_output(OutputData::text(""))
+                        ExecResult::success("")
                     }
                 } else {
                     ExecResult::failure(1, format!("cd: {}: Not a directory", path_arg))

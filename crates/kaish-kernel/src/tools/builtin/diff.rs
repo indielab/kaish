@@ -105,7 +105,7 @@ impl Tool for Diff {
 
         // Quick check if files are identical
         if content1 == content2 {
-            return ExecResult::with_output(OutputData::text(""));
+            return ExecResult::success("");
         }
 
         // Quiet mode: just report difference

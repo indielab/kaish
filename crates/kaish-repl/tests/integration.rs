@@ -1283,3 +1283,77 @@ fn builtin_h_flag_does_not_show_help_when_claimed() {
     assert!(!joined.contains("List directory contents"),
         "ls -h should not show help: {}", joined);
 }
+
+// ============================================================================
+// Silent-success Tests
+// ============================================================================
+
+/// Run a single command and return its ProcessResult directly.
+fn run_one(cmd: &str) -> ProcessResult {
+    let mut repl = Repl::new().expect("Failed to create REPL");
+    repl.process_line(cmd)
+}
+
+#[test]
+fn silent_cd() {
+    assert!(matches!(run_one("cd /tmp"), ProcessResult::Empty), "cd should produce no output");
+}
+
+#[test]
+fn silent_mkdir_and_rmdir() {
+    let dir = format!("/tmp/kaish-test-{}", std::process::id());
+    assert!(matches!(run_one(&format!("mkdir {}", dir)), ProcessResult::Empty), "mkdir should produce no output");
+    // cleanup
+    let _ = std::fs::remove_dir(&dir);
+}
+
+#[test]
+fn silent_touch() {
+    let path = format!("/tmp/kaish-touch-{}", std::process::id());
+    assert!(matches!(run_one(&format!("touch {}", path)), ProcessResult::Empty), "touch should produce no output");
+    let _ = std::fs::remove_file(&path);
+}
+
+#[test]
+fn silent_sleep() {
+    assert!(matches!(run_one("sleep 0"), ProcessResult::Empty), "sleep should produce no output");
+}
+
+#[test]
+fn silent_true() {
+    assert!(matches!(run_one("true"), ProcessResult::Empty), "true should produce no output");
+}
+
+#[test]
+fn silent_export() {
+    assert!(matches!(run_one("export FOO=bar"), ProcessResult::Empty), "export should produce no output");
+}
+
+#[test]
+fn silent_mv_cp() {
+    let src = format!("/tmp/kaish-mv-src-{}", std::process::id());
+    let dst = format!("/tmp/kaish-mv-dst-{}", std::process::id());
+    std::fs::write(&src, "x").unwrap();
+    assert!(matches!(run_one(&format!("cp {} {}", src, dst)), ProcessResult::Empty), "cp should produce no output");
+    assert!(matches!(run_one(&format!("mv {} {}", dst, src)), ProcessResult::Empty), "mv should produce no output");
+    let _ = std::fs::remove_file(&src);
+}
+
+#[test]
+fn echo_still_produces_output() {
+    // Sanity check: commands with real output still produce Output, not Empty
+    assert!(matches!(run_one("echo hello"), ProcessResult::Output(_)), "echo should produce output");
+}
+
+#[test]
+fn cd_dash_produces_output() {
+    // cd - prints the new directory, like bash
+    let mut repl = Repl::new().expect("Failed to create REPL");
+    repl.process_line("cd /tmp");
+    let result = repl.process_line("cd -");
+    match result {
+        ProcessResult::Output(s) => assert!(s.contains("tmp") || !s.is_empty(), "cd - should print new dir: {:?}", s),
+        ProcessResult::Empty => panic!("cd - should print the new directory"),
+        ProcessResult::Exit => panic!("unexpected exit"),
+    }
+}

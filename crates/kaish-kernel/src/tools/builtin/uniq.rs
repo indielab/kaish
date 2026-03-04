@@ -80,7 +80,7 @@ impl Tool for Uniq {
 
         let lines: Vec<&str> = input.lines().collect();
         if lines.is_empty() {
-            return ExecResult::with_output(OutputData::text(""));
+            return ExecResult::success("");
         }
 
         // Group consecutive identical lines
@@ -130,7 +130,7 @@ impl Tool for Uniq {
         };
 
         if output.is_empty() {
-            ExecResult::with_output(OutputData::text(""))
+            ExecResult::success("")
         } else {
             ExecResult::with_output(OutputData::text(format!("{}\n", output.join("\n"))))
         }

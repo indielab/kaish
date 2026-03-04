@@ -115,7 +115,7 @@ impl Tool for Sort {
         }
 
         if lines.is_empty() {
-            ExecResult::with_output(OutputData::text(""))
+            ExecResult::success("")
         } else {
             ExecResult::with_output(OutputData::text(format!("{}\n", lines.join("\n"))))
         }

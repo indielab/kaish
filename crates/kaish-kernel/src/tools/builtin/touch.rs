@@ -4,7 +4,7 @@ use async_trait::async_trait;
 use std::path::Path;
 
 use crate::backend::WriteMode;
-use crate::interpreter::{ExecResult, OutputData};
+use crate::interpreter::ExecResult;
 use crate::tools::{ExecContext, ParamSchema, Tool, ToolArgs, ToolSchema};
 
 /// Touch tool: change file timestamps or create files.
@@ -43,11 +43,11 @@ impl Tool for Touch {
                 }
             }
             // For virtual filesystems (MemoryFs), this is a no-op
-            ExecResult::with_output(OutputData::text(""))
+            ExecResult::success("")
         } else {
             // Create empty file
             match ctx.backend.write(path, &[], WriteMode::CreateNew).await {
-                Ok(()) => ExecResult::with_output(OutputData::text("")),
+                Ok(()) => ExecResult::success(""),
                 Err(e) => ExecResult::failure(1, format!("touch: {}: {}", path_str, e)),
             }
         }

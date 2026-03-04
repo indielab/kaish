@@ -468,7 +468,13 @@ impl Repl {
         });
 
         match result {
-            Ok(exec_result) => ProcessResult::Output(format_result(&exec_result)),
+            Ok(exec_result) => {
+                if exec_result.ok() && exec_result.output.is_none() && exec_result.out.is_empty() {
+                    ProcessResult::Empty
+                } else {
+                    ProcessResult::Output(format_result(&exec_result))
+                }
+            }
             Err(e) => ProcessResult::Output(format!("Error: {}", e)),
         }
     }
@@ -614,8 +620,6 @@ pub fn run() -> Result<()> {
     rl.set_helper(Some(helper));
 
     let history_path = load_history(&mut rl);
-
-    println!();
 
     loop {
         // Dynamic prompt: call kaish_prompt() if defined, else default

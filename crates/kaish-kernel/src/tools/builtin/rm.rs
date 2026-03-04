@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 
 use crate::ast::Value;
 use crate::backend::{BackendError, KernelBackend};
-use crate::interpreter::{ExecResult, OutputData};
+use crate::interpreter::ExecResult;
 use crate::tools::{ExecContext, Tool, ToolArgs, ToolSchema, ParamSchema};
 
 /// Rm tool: remove files and directories.
@@ -118,7 +118,7 @@ impl Tool for Rm {
         // Check existence first
         let stat = match ctx.backend.stat(Path::new(&resolved)).await {
             Ok(info) => Some(info),
-            Err(BackendError::NotFound(_)) if force => return ExecResult::with_output(OutputData::text("")),
+            Err(BackendError::NotFound(_)) if force => return ExecResult::success(""),
             Err(BackendError::NotFound(_)) => return ExecResult::failure(1, format!("rm: {}: No such file or directory", path)),
             Err(e) => return ExecResult::failure(1, format!("rm: {}: {}", path, e)),
         };
@@ -146,7 +146,7 @@ impl Tool for Rm {
                 let real_display = real.display().to_string();
                 let trash_result = tokio::task::spawn_blocking(move || trash::delete(real)).await;
                 match trash_result {
-                    Ok(Ok(())) => ExecResult::with_output(OutputData::text("")),
+                    Ok(Ok(())) => ExecResult::success(""),
                     Ok(Err(e)) => {
                         ExecResult::failure(1, format!(
                             "rm: {}: trash failed: {} (use `set +o trash` to delete permanently)",
@@ -168,7 +168,7 @@ impl Tool for Rm {
                         Ok(()) => {
                             // Nonce valid — proceed with delete
                             match remove_path(&*ctx.backend, Path::new(&resolved), recursive, force).await {
-                                Ok(()) => ExecResult::with_output(OutputData::text("")),
+                                Ok(()) => ExecResult::success(""),
                                 Err(e) => ExecResult::failure(1, format!("rm: {}: {}", path, e)),
                             }
                         }
@@ -187,7 +187,7 @@ impl Tool for Rm {
             }
             RmAction::Delete => {
                 match remove_path(&*ctx.backend, Path::new(&resolved), recursive, force).await {
-                    Ok(()) => ExecResult::with_output(OutputData::text("")),
+                    Ok(()) => ExecResult::success(""),
                     Err(e) => ExecResult::failure(1, format!("rm: {}: {}", path, e)),
                 }
             }
