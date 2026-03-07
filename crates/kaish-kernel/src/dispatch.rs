@@ -277,7 +277,7 @@ impl BackendDispatcher {
             // Always use spill_aware_collect — it handles both limited and
             // unlimited modes, and correctly streams stderr to ctx.stderr.
             // (wait_with_output would bypass stderr streaming.)
-            let (stdout, stderr) = crate::output_limit::spill_aware_collect(
+            let (stdout, stderr, did_spill) = crate::output_limit::spill_aware_collect(
                 child_stdout,
                 child_stderr,
                 ctx.stderr.clone(),
@@ -287,7 +287,9 @@ impl BackendDispatcher {
             let status = child.wait().await;
             if let Some(task) = stdin_task { task.abort(); }
             let code = status.map(|s| s.code().unwrap_or(1) as i64).unwrap_or(1);
-            Some(ExecResult::from_output(code, stdout, stderr))
+            let mut result = ExecResult::from_output(code, stdout, stderr);
+            result.did_spill = did_spill;
+            Some(result)
         }
     }
 }

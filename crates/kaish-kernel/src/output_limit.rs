@@ -125,6 +125,7 @@ pub async fn spill_if_needed(
     match write_spill_file(result.out.as_bytes()).await {
         Ok((path, written)) => {
             result.out = build_truncated_output(&result.out, config, &path, total);
+            result.did_spill = true;
             Some(SpillResult {
                 path,
                 total_bytes: written,
@@ -148,13 +149,13 @@ pub async fn spill_if_needed(
 /// 1. Detection window (up to 1s): accumulate in memory
 /// 2. If still running after 1s and over limit: stream to spill file
 ///
-/// Returns `(stdout_string, stderr_string)`.
+/// Returns `(stdout_string, stderr_string, did_spill)`.
 pub async fn spill_aware_collect(
     mut stdout: tokio::process::ChildStdout,
     mut stderr_reader: tokio::process::ChildStderr,
     stderr_stream: Option<crate::scheduler::StderrStream>,
     config: &OutputLimitConfig,
-) -> (String, String) {
+) -> (String, String, bool) {
     let max = config.max_bytes.unwrap_or(usize::MAX);
 
     // Spawn stderr collection
@@ -162,10 +163,10 @@ pub async fn spill_aware_collect(
         collect_stderr(&mut stderr_reader, stderr_stream.as_ref()).await
     });
 
-    let stdout_result = collect_stdout_with_spill(&mut stdout, max, config).await;
+    let (stdout_result, did_spill) = collect_stdout_with_spill(&mut stdout, max, config).await;
 
     let stderr = stderr_task.await.unwrap_or_default();
-    (stdout_result, stderr)
+    (stdout_result, stderr, did_spill)
 }
 
 /// Collect stderr (same pattern as existing dispatch code).
@@ -198,11 +199,13 @@ async fn collect_stderr(
 }
 
 /// Collect stdout with two-phase spill detection.
+///
+/// Returns `(stdout_string, did_spill)`.
 async fn collect_stdout_with_spill(
     stdout: &mut tokio::process::ChildStdout,
     max_bytes: usize,
     config: &OutputLimitConfig,
-) -> String {
+) -> (String, bool) {
     use tokio::io::AsyncReadExt;
     use tokio::time::{sleep, Duration};
 
@@ -220,7 +223,7 @@ async fn collect_stdout_with_spill(
                     Ok(0) => {
                         // EOF — command finished within detection window.
                         // Post-hoc spill check happens in the caller.
-                        return String::from_utf8_lossy(&buffer).into_owned();
+                        return (String::from_utf8_lossy(&buffer).into_owned(), false);
                     }
                     Ok(n) => {
                         buffer.extend_from_slice(&chunk[..n]);
@@ -230,7 +233,7 @@ async fn collect_stdout_with_spill(
                         }
                     }
                     Err(_) => {
-                        return String::from_utf8_lossy(&buffer).into_owned();
+                        return (String::from_utf8_lossy(&buffer).into_owned(), false);
                     }
                 }
             }
@@ -245,17 +248,17 @@ async fn collect_stdout_with_spill(
     if buffer.len() > max_bytes {
         // Already over limit — spill what we have and stream the rest to disk
         match stream_to_spill(&buffer, stdout, config).await {
-            Ok(result) => return result,
+            Ok(result) => return (result, true),
             Err(e) => {
                 // Spill failed — return error. Don't continue accumulating.
                 // Dropping stdout closes the pipe, which sends SIGPIPE to the child.
                 tracing::error!("streaming spill failed: {}", e);
                 let size = buffer.len();
                 drop(buffer);
-                return format!(
+                return (format!(
                     "ERROR: output exceeded {} byte limit ({} bytes buffered) and spill to disk failed: {}",
                     max_bytes, size, e
-                );
+                ), false);
             }
         }
     }
@@ -270,15 +273,15 @@ async fn collect_stdout_with_spill(
                 // Check if we've exceeded limit mid-stream
                 if buffer.len() > max_bytes {
                     match stream_to_spill(&buffer, stdout, config).await {
-                        Ok(result) => return result,
+                        Ok(result) => return (result, true),
                         Err(e) => {
                             tracing::error!("streaming spill failed: {}", e);
                             let size = buffer.len();
                             drop(buffer);
-                            return format!(
+                            return (format!(
                                 "ERROR: output exceeded {} byte limit ({} bytes buffered) and spill to disk failed: {}",
                                 max_bytes, size, e
-                            );
+                            ), false);
                         }
                     }
                 }
@@ -287,7 +290,7 @@ async fn collect_stdout_with_spill(
         }
     }
 
-    String::from_utf8_lossy(&buffer).into_owned()
+    (String::from_utf8_lossy(&buffer).into_owned(), false)
 }
 
 /// Write buffered data + remaining stdout to a spill file, return truncated result.
@@ -545,6 +548,7 @@ mod tests {
         let spill = spill_if_needed(&mut result, &config).await;
         assert!(spill.is_none());
         assert_eq!(result.out, "short output");
+        assert!(!result.did_spill);
     }
 
     #[tokio::test]
@@ -558,6 +562,7 @@ mod tests {
         let mut result = ExecResult::success(big_output);
         let spill = spill_if_needed(&mut result, &config).await;
         assert!(spill.is_some());
+        assert!(result.did_spill);
 
         let spill = spill.unwrap();
         assert_eq!(spill.total_bytes, 200);
@@ -587,6 +592,7 @@ mod tests {
         let spill = spill_if_needed(&mut result, &config).await;
         assert!(spill.is_none());
         assert_eq!(result.out, big_output);
+        assert!(!result.did_spill);
     }
 
     #[test]
@@ -624,6 +630,98 @@ mod tests {
         assert!(result.out.contains("full output at"));
         // Head should contain the first numbers
         assert!(result.out.starts_with("1\n"));
+    }
+
+    #[tokio::test]
+    async fn test_spill_without_latch_exits_3() {
+        use crate::kernel::{Kernel, KernelConfig};
+
+        let config = KernelConfig::mcp()
+            .with_output_limit(OutputLimitConfig {
+                max_bytes: Some(100),
+                head_bytes: 30,
+                tail_bytes: 20,
+            });
+        let kernel = Kernel::new(config).expect("kernel creation");
+
+        let big = "x".repeat(200);
+        let result = kernel.execute(&format!("echo '{}'", big)).await.expect("execute");
+        assert_eq!(result.code, 3, "spill without latch should exit 3");
+        assert!(result.out.contains("[output truncated:"));
+    }
+
+    #[tokio::test]
+    async fn test_spill_with_latch_exits_2_with_nonce() {
+        use crate::kernel::{Kernel, KernelConfig};
+        use crate::nonce::NonceStore;
+
+        let store = NonceStore::new();
+        let config = KernelConfig::mcp()
+            .with_output_limit(OutputLimitConfig {
+                max_bytes: Some(100),
+                head_bytes: 30,
+                tail_bytes: 20,
+            })
+            .with_latch(true)
+            .with_nonce_store(store);
+        let kernel = Kernel::new(config).expect("kernel creation");
+
+        let big = "x".repeat(200);
+        let result = kernel.execute(&format!("echo '{}'", big)).await.expect("execute");
+        assert_eq!(result.code, 2, "spill with latch should exit 2");
+        assert!(result.out.contains("[output truncated:"));
+        assert!(result.err.contains("--confirm="), "latch should include confirm hint");
+    }
+
+    #[tokio::test]
+    async fn test_spill_confirm_nonce_returns_truncated_output() {
+        use crate::kernel::{Kernel, KernelConfig};
+        use crate::nonce::NonceStore;
+
+        let store = NonceStore::new();
+        let config = KernelConfig::mcp()
+            .with_output_limit(OutputLimitConfig {
+                max_bytes: Some(100),
+                head_bytes: 30,
+                tail_bytes: 20,
+            })
+            .with_latch(true)
+            .with_nonce_store(store);
+        let kernel = Kernel::new(config).expect("kernel creation");
+
+        let big = "x".repeat(200);
+        let result = kernel.execute(&format!("echo '{}'", big)).await.expect("execute");
+        assert_eq!(result.code, 2);
+
+        // Extract nonce from err message
+        let nonce = result.err
+            .lines()
+            .find(|l| l.contains("--confirm="))
+            .and_then(|l| l.split("--confirm=").nth(1))
+            .and_then(|s| s.split(']').next())
+            .expect("nonce in err message");
+
+        let confirmed = kernel.execute(&format!("--confirm={}", nonce)).await.expect("confirm");
+        assert_eq!(confirmed.code, 0, "--confirm= should return exit 0");
+        assert!(confirmed.out.contains("[output truncated:"));
+    }
+
+    #[tokio::test]
+    async fn test_spill_confirm_bogus_nonce_exits_1() {
+        use crate::kernel::{Kernel, KernelConfig};
+
+        let config = KernelConfig::mcp()
+            .with_output_limit(OutputLimitConfig {
+                max_bytes: Some(100),
+                head_bytes: 30,
+                tail_bytes: 20,
+            })
+            .with_latch(true);
+        let kernel = Kernel::new(config).expect("kernel creation");
+
+        let result = kernel.execute("--confirm=bogus123").await.expect("execute");
+        assert_eq!(result.code, 1, "bogus nonce should exit 1");
+        assert!(result.err.contains("not found or expired"));
     }
 
     #[tokio::test]

@@ -131,6 +131,7 @@ impl Tool for Tokens {
             err: String::new(),
             data: None,
             output: Some(table),
+            did_spill: false,
         }
     }
 }

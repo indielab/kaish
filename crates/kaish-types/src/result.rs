@@ -27,6 +27,10 @@ pub struct ExecResult {
     pub data: Option<Value>,
     /// Structured output data for rendering.
     pub output: Option<OutputData>,
+    /// True if output was truncated and written to a spill file.
+    /// Invisible in serialized output — internal signal for the kernel.
+    #[serde(skip)]
+    pub did_spill: bool,
 }
 
 impl ExecResult {
@@ -40,6 +44,7 @@ impl ExecResult {
             err: String::new(),
             data,
             output: None,
+            did_spill: false,
         }
     }
 
@@ -62,6 +67,7 @@ impl ExecResult {
             err: String::new(),
             data,
             output: Some(output),
+            did_spill: false,
         }
     }
 
@@ -74,6 +80,7 @@ impl ExecResult {
             err: String::new(),
             data: Some(data),
             output: None,
+            did_spill: false,
         }
     }
 
@@ -92,6 +99,7 @@ impl ExecResult {
             err: String::new(),
             data: Some(data),
             output: None,
+            did_spill: false,
         }
     }
 
@@ -103,6 +111,7 @@ impl ExecResult {
             err: err.into(),
             data: None,
             output: None,
+            did_spill: false,
         }
     }
 
@@ -127,6 +136,7 @@ impl ExecResult {
             err: stderr.into(),
             data,
             output: None,
+            did_spill: false,
         }
     }
 
@@ -143,6 +153,7 @@ impl ExecResult {
             err: String::new(),
             data,
             output: Some(output),
+            did_spill: false,
         }
     }
 
@@ -326,5 +337,20 @@ mod tests {
         let result = ExecResult::success_data(value.clone());
         assert!(result.ok());
         assert_eq!(result.data, Some(value));
+    }
+
+    #[test]
+    fn did_spill_defaults_to_false() {
+        assert!(!ExecResult::success("hi").did_spill);
+        assert!(!ExecResult::failure(1, "err").did_spill);
+        assert!(!ExecResult::from_output(0, "out", "err").did_spill);
+    }
+
+    #[test]
+    fn did_spill_not_serialized() {
+        let mut result = ExecResult::success("hi");
+        result.did_spill = true;
+        let json = serde_json::to_string(&result).unwrap();
+        assert!(!json.contains("did_spill"));
     }
 }
