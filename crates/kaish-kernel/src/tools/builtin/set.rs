@@ -49,6 +49,9 @@ impl Tool for Set {
             if ctx.scope.trash_enabled() {
                 output.push_str("set -o trash\n");
             }
+            if let Some(bytes) = ctx.output_limit.max_bytes() {
+                output.push_str(&format!("set -o output-limit={}\n", format_size_for_set(bytes)));
+            }
             return ExecResult::with_output(OutputData::text(output.trim_end()));
         }
 
@@ -84,7 +87,17 @@ impl Tool for Set {
                         match name {
                             "latch" => ctx.scope.set_latch_enabled(true),
                             "trash" => ctx.scope.set_trash_enabled(true),
-                            _ => {} // silently ignore (pipefail, etc.)
+                            _ => {
+                                if name == "output-limit" || name.starts_with("output-limit=") {
+                                    if let Some(size_str) = name.strip_prefix("output-limit=") {
+                                        if let Ok(bytes) = crate::output_limit::parse_size(size_str) {
+                                            ctx.output_limit.set_limit(Some(bytes));
+                                        }
+                                    } else if ctx.output_limit.max_bytes().is_none() {
+                                        ctx.output_limit.set_limit(Some(crate::output_limit::OutputLimitConfig::default_limit()));
+                                    }
+                                }
+                            }
                         }
                         i += 1; // skip the option name
                     }
@@ -94,6 +107,7 @@ impl Tool for Set {
                         match name {
                             "latch" => ctx.scope.set_latch_enabled(false),
                             "trash" => ctx.scope.set_trash_enabled(false),
+                            "output-limit" => ctx.output_limit.set_limit(None),
                             _ => {}
                         }
                         i += 1;
@@ -116,12 +130,33 @@ impl Tool for Set {
                 match name {
                     "latch" => { ctx.scope.set_latch_enabled(true); break; }
                     "trash" => { ctx.scope.set_trash_enabled(true); break; }
-                    _ => {}
+                    _ => {
+                        if name == "output-limit" || name.starts_with("output-limit=") {
+                            if let Some(size_str) = name.strip_prefix("output-limit=") {
+                                if let Ok(bytes) = crate::output_limit::parse_size(size_str) {
+                                    ctx.output_limit.set_limit(Some(bytes));
+                                }
+                            } else if ctx.output_limit.max_bytes().is_none() {
+                                ctx.output_limit.set_limit(Some(crate::output_limit::OutputLimitConfig::default_limit()));
+                            }
+                            break;
+                        }
+                    }
                 }
             }
         }
 
         ExecResult::success("")
+    }
+}
+
+fn format_size_for_set(bytes: usize) -> String {
+    if bytes % (1024 * 1024) == 0 {
+        format!("{}M", bytes / (1024 * 1024))
+    } else if bytes % 1024 == 0 {
+        format!("{}K", bytes / 1024)
+    } else {
+        bytes.to_string()
     }
 }
 
@@ -284,5 +319,78 @@ mod tests {
 
         let result = Set.execute(args, &mut ctx).await;
         assert!(result.ok());
+    }
+
+    #[tokio::test]
+    async fn test_set_o_output_limit_enables_default() {
+        let mut ctx = make_ctx();
+        assert!(!ctx.output_limit.is_enabled());
+
+        let mut args = ToolArgs::new();
+        args.positional.push(Value::String("-o".into()));
+        args.positional.push(Value::String("output-limit".into()));
+
+        let result = Set.execute(args, &mut ctx).await;
+        assert!(result.ok());
+        assert!(ctx.output_limit.is_enabled());
+        assert_eq!(ctx.output_limit.max_bytes(), Some(crate::output_limit::OutputLimitConfig::default_limit()));
+    }
+
+    #[tokio::test]
+    async fn test_set_o_output_limit_with_size() {
+        let mut ctx = make_ctx();
+
+        let mut args = ToolArgs::new();
+        args.positional.push(Value::String("-o".into()));
+        args.positional.push(Value::String("output-limit=16K".into()));
+
+        let result = Set.execute(args, &mut ctx).await;
+        assert!(result.ok());
+        assert_eq!(ctx.output_limit.max_bytes(), Some(16 * 1024));
+    }
+
+    #[tokio::test]
+    async fn test_set_plus_o_output_limit_disables() {
+        let mut ctx = make_ctx();
+        ctx.output_limit.set_limit(Some(8 * 1024));
+        assert!(ctx.output_limit.is_enabled());
+
+        let mut args = ToolArgs::new();
+        args.positional.push(Value::String("+o".into()));
+        args.positional.push(Value::String("output-limit".into()));
+
+        let result = Set.execute(args, &mut ctx).await;
+        assert!(result.ok());
+        assert!(!ctx.output_limit.is_enabled());
+    }
+
+    #[tokio::test]
+    async fn test_set_no_args_shows_output_limit() {
+        let mut ctx = make_ctx();
+        ctx.output_limit.set_limit(Some(4 * 1024));
+
+        let args = ToolArgs::new();
+        let result = Set.execute(args, &mut ctx).await;
+        assert!(result.ok());
+        assert!(result.out.contains("set -o output-limit=4K"));
+    }
+
+    #[tokio::test]
+    async fn test_set_no_args_hides_output_limit_when_disabled() {
+        let mut ctx = make_ctx();
+        // output_limit disabled by default in test ctx
+
+        let args = ToolArgs::new();
+        let result = Set.execute(args, &mut ctx).await;
+        assert!(result.ok());
+        assert!(!result.out.contains("output-limit"));
+    }
+
+    #[test]
+    fn test_format_size_for_set() {
+        assert_eq!(format_size_for_set(1024), "1K");
+        assert_eq!(format_size_for_set(8 * 1024), "8K");
+        assert_eq!(format_size_for_set(1024 * 1024), "1M");
+        assert_eq!(format_size_for_set(512), "512");
     }
 }

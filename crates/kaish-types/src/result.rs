@@ -52,7 +52,7 @@ impl ExecResult {
     /// `echo '{"key":1}'` populates `data` for command substitution.
     pub fn with_output(output: OutputData) -> Self {
         let data = if output.is_simple_text() {
-            output.as_text().and_then(|t| Self::try_parse_json(t))
+            output.as_text().and_then(Self::try_parse_json)
         } else {
             None
         };

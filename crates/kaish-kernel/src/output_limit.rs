@@ -4,7 +4,7 @@
 //! spill file on the real filesystem and `ExecResult.out` is truncated
 //! with a pointer message. The agent can then selectively read the file.
 //!
-//! Per-mode defaults: MCP kernels get a 64KB limit, REPL/test kernels
+//! Per-mode defaults: MCP kernels get an 8KB limit, REPL/test kernels
 //! are unlimited. Runtime-switchable via the `kaish-output-limit` builtin.
 
 use std::path::PathBuf;
@@ -12,8 +12,8 @@ use std::path::PathBuf;
 use crate::interpreter::ExecResult;
 use crate::paths;
 
-/// Default output limit for MCP mode (64KB).
-const DEFAULT_MCP_LIMIT: usize = 64 * 1024;
+/// Default output limit for MCP mode (8KB).
+const DEFAULT_MCP_LIMIT: usize = 8 * 1024;
 
 /// Default head preview size (bytes of output start to keep).
 const DEFAULT_HEAD_BYTES: usize = 1024;
@@ -42,7 +42,12 @@ impl OutputLimitConfig {
         }
     }
 
-    /// MCP-safe defaults: 64KB limit, 1KB head, 512B tail.
+    /// Default limit used by `on` subcommand and `set -o output-limit`.
+    pub fn default_limit() -> usize {
+        DEFAULT_MCP_LIMIT
+    }
+
+    /// MCP-safe defaults: 8KB limit, 1KB head, 512B tail.
     pub fn mcp() -> Self {
         Self {
             max_bytes: Some(DEFAULT_MCP_LIMIT),
@@ -469,7 +474,7 @@ mod tests {
     fn test_mcp_is_enabled() {
         let config = OutputLimitConfig::mcp();
         assert!(config.is_enabled());
-        assert_eq!(config.max_bytes(), Some(64 * 1024));
+        assert_eq!(config.max_bytes(), Some(8 * 1024));
         assert_eq!(config.head_bytes(), 1024);
         assert_eq!(config.tail_bytes(), 512);
     }
@@ -604,7 +609,7 @@ mod tests {
     async fn test_kernel_mcp_truncates_large_output() {
         use crate::kernel::{Kernel, KernelConfig};
 
-        // MCP config has 64K limit by default — use a smaller limit for testing
+        // MCP config has 8K limit by default — use a smaller limit for testing
         let config = KernelConfig::mcp()
             .with_output_limit(OutputLimitConfig {
                 max_bytes: Some(200),

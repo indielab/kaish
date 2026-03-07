@@ -3,7 +3,7 @@
 use async_trait::async_trait;
 
 use crate::interpreter::{ExecResult, OutputData, OutputNode};
-use crate::output_limit::parse_size;
+use crate::output_limit::{parse_size, OutputLimitConfig};
 use crate::tools::{ExecContext, Tool, ToolArgs, ToolSchema};
 
 /// Output limit tool: inspect and modify output size limit configuration.
@@ -19,7 +19,7 @@ impl Tool for KaishOutputLimit {
         ToolSchema::new("kaish-output-limit", "Inspect or modify output size limit configuration")
             .example("Show current config", "kaish-output-limit")
             .example("Set limit to 64KB", "kaish-output-limit set 64K")
-            .example("Enable with default 64KB", "kaish-output-limit on")
+            .example("Enable with default 8KB", "kaish-output-limit on")
             .example("Disable (unlimited)", "kaish-output-limit off")
             .example("Set head preview size", "kaish-output-limit head 2048")
             .example("Set tail preview size", "kaish-output-limit tail 1024")
@@ -45,7 +45,7 @@ impl Tool for KaishOutputLimit {
             }
             Some("on") => {
                 if ctx.output_limit.max_bytes().is_none() {
-                    ctx.output_limit.set_limit(Some(64 * 1024));
+                    ctx.output_limit.set_limit(Some(OutputLimitConfig::default_limit()));
                 }
                 show_config(ctx)
             }
