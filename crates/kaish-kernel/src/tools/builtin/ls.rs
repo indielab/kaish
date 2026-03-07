@@ -459,7 +459,14 @@ impl Ls {
             }
         }
 
-        let output = OutputData::nodes(dir_nodes);
+        let output = if long_format {
+            OutputData::table(
+                vec!["Name".to_string(), "Type".to_string(), "Size".to_string()],
+                dir_nodes,
+            )
+        } else {
+            OutputData::nodes(dir_nodes)
+        };
         let mut result = ExecResult::with_output(output);
         // Override canonical output with traditional ls -R text format
         result.out = text_output.trim_end().to_string();
