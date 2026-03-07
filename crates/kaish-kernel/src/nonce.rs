@@ -121,8 +121,8 @@ impl NonceStore {
 
     /// Issue a nonce that carries a cached `ExecResult` for spill latch recovery.
     ///
-    /// When the agent runs `--confirm=<nonce>`, `get_cached_result` returns this
-    /// result so the agent receives the truncated output with exit 0.
+    /// When the agent runs `kaish-confirm <nonce>`, `get_cached_result` returns
+    /// this result so the agent receives the truncated output with exit 0.
     pub fn issue_with_result(&self, result: ExecResult) -> String {
         let nonce = generate_nonce();
         let now = Instant::now();
@@ -144,7 +144,8 @@ impl NonceStore {
 
     /// Retrieve the cached result for a spill latch nonce.
     ///
-    /// Returns `None` if the nonce is unknown, expired, or has no cached result.
+    /// Called by the `kaish-confirm` builtin. Returns `None` if the nonce is
+    /// unknown, expired, or has no cached result.
     pub fn get_cached_result(&self, nonce: &str) -> Option<ExecResult> {
         let now = Instant::now();
         let ttl = self.ttl;

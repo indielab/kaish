@@ -16,6 +16,21 @@ Controls maximum command output size. When exceeded, full output is written to a
 3. Result is replaced with: head preview + `...` + tail preview + pointer to spill file
 4. Agent can read the spill file selectively with `cat` or `head`/`tail`
 
+## Exit Codes on Spill
+
+| `set -o latch` | exit code | recovery |
+|---|---|---|
+| off | 3 | read spill file directly |
+| on  | 2 | run `kaish-confirm <nonce>` to retrieve cached result |
+
+Without latch (exit 3): read the spill file path shown in the output.
+
+With latch (exit 2): the error message includes the nonce:
+```
+[output truncated — to retrieve, run: kaish-confirm ab12cd34]
+```
+Running `kaish-confirm ab12cd34` returns exit 0 with the same truncated output.
+
 ## Spill Files
 
 Location: `$XDG_RUNTIME_DIR/kaish/spill/` (typically `/run/user/$UID/kaish/spill/`)

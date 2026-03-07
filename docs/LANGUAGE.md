@@ -290,7 +290,7 @@ echo $((A > B))                 # 1
 
 ```bash
 set -e                          # exit on first error
-set -o latch                    # require nonce confirmation for destructive rm
+set -o latch                    # require nonce confirmation for rm and output spill
 set -o trash                    # move rm'd files to freedesktop.org Trash
 set +o latch                    # disable latch
 set +o trash                    # disable trash
@@ -310,6 +310,14 @@ Nonce expires in 60 seconds.
 ```
 
 The `kaish-trash` builtin manages trashed files: `list`, `restore`, `empty`, `config`.
+
+Latch also applies to output spill. When `set -o output-limit` truncates output, it exits **3** (no latch) or **2** (latch). With latch, the error message includes a nonce:
+
+```
+[output truncated — to retrieve, run: kaish-confirm ab12cd34]
+```
+
+Running `kaish-confirm <nonce>` returns exit 0 with the cached truncated output. The result also includes `did_spill: true` and `original_code` (the command's original exit code before it was overwritten).
 
 Nonces are scoped to (command, paths) — a nonce for `rm fileA` cannot confirm
 `rm fileB`. They expire after 60 seconds and are not consumed on use (idempotent
