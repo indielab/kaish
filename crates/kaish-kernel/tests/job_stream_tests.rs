@@ -307,9 +307,10 @@ async fn test_jobs_builtin_shows_vfs_path() {
     let result = jobs_tool.execute(ToolArgs::new(), &mut ctx).await;
 
     assert!(result.ok());
-    assert!(result.out.contains(&format!("/v/jobs/{}/", id)));
-    assert!(result.out.contains("Running"));
-    assert!(result.out.contains("test job"));
+    let text = result.text_out();
+    assert!(text.contains(&format!("/v/jobs/{}/", id)));
+    assert!(text.contains("Running"));
+    assert!(text.contains("test job"));
 }
 
 #[tokio::test]
@@ -336,7 +337,7 @@ async fn test_ls_v_jobs_directory() {
     let result = ls_tool.execute(args, &mut ctx).await;
 
     assert!(result.ok());
-    assert!(result.out.contains(&id.0.to_string()));
+    assert!(result.text_out().contains(&id.0.to_string()));
 }
 
 #[tokio::test]
@@ -365,7 +366,7 @@ async fn test_cat_v_jobs_status() {
     let result = cat_tool.execute(args, &mut ctx).await;
 
     assert!(result.ok());
-    assert!(result.out.contains("running"));
+    assert!(result.text_out().contains("running"));
 }
 
 #[tokio::test]
@@ -397,6 +398,7 @@ async fn test_cat_v_jobs_stdout() {
     let result = cat_tool.execute(args, &mut ctx).await;
 
     assert!(result.ok());
-    assert!(result.out.contains("build progress: 50%"));
-    assert!(result.out.contains("build progress: 100%"));
+    let text = result.text_out();
+    assert!(text.contains("build progress: 50%"));
+    assert!(text.contains("build progress: 100%"));
 }

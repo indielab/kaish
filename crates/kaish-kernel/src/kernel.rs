@@ -1338,8 +1338,9 @@ impl Kernel {
             let result = runner.run(&commands, &mut bg_ctx, &dispatcher).await;
 
             // Write output to streams
-            if !result.out.is_empty() {
-                stdout.write(result.out.as_bytes()).await;
+            let text = result.text_out();
+            if !text.is_empty() {
+                stdout.write(text.as_bytes()).await;
             }
             if !result.err.is_empty() {
                 stderr.write(result.err.as_bytes()).await;
@@ -1832,11 +1833,11 @@ impl Kernel {
                             .collect();
                         Ok(Value::Json(serde_json::Value::Array(items)))
                     } else {
-                        Ok(Value::String(result.out.trim_end().to_string()))
+                        Ok(Value::String(result.text_out().trim_end().to_string()))
                     }
                 } else {
                     // Otherwise return stdout as single string (NO implicit splitting)
-                    Ok(Value::String(result.out.trim_end().to_string()))
+                    Ok(Value::String(result.text_out().trim_end().to_string()))
                 }
             }
             Expr::Test(test_expr) => {
@@ -2001,7 +2002,7 @@ impl Kernel {
                 // Now propagate the error
                 let result = run_result?;
 
-                Ok(result.out.trim_end_matches('\n').to_string())
+                Ok(result.text_out().trim_end_matches('\n').to_string())
             }
             StringPart::LastExitCode => {
                 let scope = self.scope.read().await;
@@ -2872,10 +2873,11 @@ impl CommandDispatcher for Kernel {
 /// the exit code to match the new result. Used to preserve output from
 /// multiple statements, loop iterations, and command chains.
 fn accumulate_result(accumulated: &mut ExecResult, new: &ExecResult) {
-    if !accumulated.out.is_empty() && !new.out.is_empty() && !accumulated.out.ends_with('\n') {
+    let new_text = new.text_out();
+    if !accumulated.out.is_empty() && !new_text.is_empty() && !accumulated.out.ends_with('\n') {
         accumulated.out.push('\n');
     }
-    accumulated.out.push_str(&new.out);
+    accumulated.out.push_str(&new_text);
     if !accumulated.err.is_empty() && !new.err.is_empty() && !accumulated.err.ends_with('\n') {
         accumulated.err.push('\n');
     }

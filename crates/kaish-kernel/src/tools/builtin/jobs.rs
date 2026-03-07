@@ -65,8 +65,6 @@ impl Tool for Jobs {
         ];
 
         let output = OutputData::table(headers, nodes);
-        let mut result = ExecResult::with_output(output);
-        // Override canonical output with traditional jobs format
         let mut text = String::new();
         for job in jobs {
             text.push_str(&format!(
@@ -74,8 +72,7 @@ impl Tool for Jobs {
                 job.id, job.status, job.command, job.id
             ));
         }
-        result.out = text;
-        result
+        ExecResult::with_output_and_text(output, text)
     }
 }
 

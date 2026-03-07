@@ -467,10 +467,7 @@ impl Ls {
         } else {
             OutputData::nodes(dir_nodes)
         };
-        let mut result = ExecResult::with_output(output);
-        // Override canonical output with traditional ls -R text format
-        result.out = text_output.trim_end().to_string();
-        result
+        ExecResult::with_output_and_text(output, text_output.trim_end().to_string())
     }
 }
 

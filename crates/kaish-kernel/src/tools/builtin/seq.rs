@@ -196,10 +196,7 @@ impl Tool for Seq {
 
         // Create OutputData and preserve the custom separator in text output
         let output_data = OutputData::nodes(nodes);
-        let mut result = ExecResult::with_output(output_data);
-
-        // Override canonical output with custom separator format
-        result.out = formatted.join(&separator) + "\n";
+        let mut result = ExecResult::with_output_and_text(output_data, formatted.join(&separator) + "\n");
         result.data = Some(Value::Json(serde_json::Value::Array(json_array)));
         result
     }

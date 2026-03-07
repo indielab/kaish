@@ -215,8 +215,8 @@ mod grep_realworld {
 
         let result = grep.execute(args, &mut ctx).await;
         assert!(result.ok(), "grep -A failed: {}", result.err);
-        assert!(result.out.contains("pub fn new"));
-        assert!(result.out.contains("name.to_string()")); // Context line
+        assert!(result.text_out().contains("pub fn new"));
+        assert!(result.text_out().contains("name.to_string()")); // Context line
     }
 
     // Pattern: grep -E "pattern\|pattern2" file
@@ -234,7 +234,7 @@ mod grep_realworld {
 
         let result = grep.execute(args, &mut ctx).await;
         assert!(result.ok(), "grep -E alternation failed: {}", result.err);
-        assert!(result.out.contains("TODO"));
+        assert!(result.text_out().contains("TODO"));
     }
 
     // Pattern: grep -r "pattern" directory/
@@ -253,7 +253,7 @@ mod grep_realworld {
         let result = grep.execute(args, &mut ctx).await;
         assert!(result.ok(), "grep -r failed: {}", result.err);
         // Should find TODO in multiple files
-        assert!(result.out.contains("main.rs") || result.out.contains("lib.rs") || result.out.contains("api.rs"));
+        assert!(result.text_out().contains("main.rs") || result.text_out().contains("lib.rs") || result.text_out().contains("api.rs"));
     }
 
     // Pattern: grep -l "pattern" *.rs
@@ -273,7 +273,7 @@ mod grep_realworld {
         let result = grep.execute(args, &mut ctx).await;
         assert!(result.ok(), "grep -rl failed: {}", result.err);
         // Output should be filenames only
-        for line in result.out.lines() {
+        for line in result.text_out().lines() {
             assert!(line.ends_with(".rs"), "Expected filename, got: {}", line);
         }
     }
@@ -294,9 +294,9 @@ mod grep_realworld {
         let result = grep.execute(args, &mut ctx).await;
         assert!(result.ok(), "grep -n failed: {}", result.err);
         // Should have line number prefix
-        assert!(result.out.contains(":"));
+        assert!(result.text_out().contains(":"));
         // Line should contain the pattern
-        assert!(result.out.contains("impl"));
+        assert!(result.text_out().contains("impl"));
     }
 
     // Pattern: grep -i "error" logfile
@@ -314,7 +314,7 @@ mod grep_realworld {
 
         let result = grep.execute(args, &mut ctx).await;
         assert!(result.ok(), "grep -i failed: {}", result.err);
-        assert!(result.out.contains("ERROR")); // Finds ERROR even with lowercase pattern
+        assert!(result.text_out().contains("ERROR")); // Finds ERROR even with lowercase pattern
     }
 
     // Pattern: grep -c "pattern" file
@@ -332,8 +332,8 @@ mod grep_realworld {
 
         let result = grep.execute(args, &mut ctx).await;
         assert!(result.ok(), "grep -c failed: {}", result.err);
-        let count: i32 = result.out.trim().parse().unwrap_or(-1);
-        assert!(count > 0, "Expected positive count, got: {}", result.out);
+        let count: i32 = result.text_out().trim().parse().unwrap_or(-1);
+        assert!(count > 0, "Expected positive count, got: {}", result.text_out());
     }
 
     // Pattern: grep -v "pattern" file
@@ -352,9 +352,9 @@ mod grep_realworld {
         let result = grep.execute(args, &mut ctx).await;
         assert!(result.ok(), "grep -v failed: {}", result.err);
         // Should NOT contain DEBUG lines
-        assert!(!result.out.contains("DEBUG"));
+        assert!(!result.text_out().contains("DEBUG"));
         // But should contain other lines
-        assert!(result.out.contains("INFO") || result.out.contains("ERROR"));
+        assert!(result.text_out().contains("INFO") || result.text_out().contains("ERROR"));
     }
 
     // Pattern: grep "pattern" file | head -10
@@ -371,7 +371,7 @@ mod grep_realworld {
 
         let result = grep.execute(args, &mut ctx).await;
         assert!(result.ok(), "grep stdin failed: {}", result.err);
-        assert_eq!(result.out.lines().count(), 3); // three lines contain "line"
+        assert_eq!(result.text_out().lines().count(), 3); // three lines contain "line"
     }
 }
 
@@ -395,8 +395,8 @@ mod cat_realworld {
 
         let result = cat.execute(args, &mut ctx).await;
         assert!(result.ok(), "cat json failed: {}", result.err);
-        assert!(result.out.contains("mcpServers"));
-        assert!(result.out.contains("holler"));
+        assert!(result.text_out().contains("mcpServers"));
+        assert!(result.text_out().contains("holler"));
     }
 
     // Pattern: cat ~/.config/file.toml
@@ -412,8 +412,8 @@ mod cat_realworld {
 
         let result = cat.execute(args, &mut ctx).await;
         assert!(result.ok(), "cat toml failed: {}", result.err);
-        assert!(result.out.contains("[package]"));
-        assert!(result.out.contains("[dependencies]"));
+        assert!(result.text_out().contains("[package]"));
+        assert!(result.text_out().contains("[dependencies]"));
     }
 
     // Pattern: cat file1 file2 file3
@@ -430,8 +430,8 @@ mod cat_realworld {
 
         let result = cat.execute(args, &mut ctx).await;
         assert!(result.ok(), "cat multiple failed: {}", result.err);
-        assert!(result.out.contains("fn main")); // from main.rs
-        assert!(result.out.contains("pub mod utils")); // from lib.rs
+        assert!(result.text_out().contains("fn main")); // from main.rs
+        assert!(result.text_out().contains("pub mod utils")); // from lib.rs
     }
 
     // Pattern: cat -n file.rs
@@ -449,7 +449,7 @@ mod cat_realworld {
         let result = cat.execute(args, &mut ctx).await;
         assert!(result.ok(), "cat -n failed: {}", result.err);
         // Should have line number prefix
-        assert!(result.out.contains("1") || result.out.contains("2"));
+        assert!(result.text_out().contains("1") || result.text_out().contains("2"));
     }
 
     // Pattern: cat nonexistent 2>/dev/null || echo "Not found"
@@ -489,8 +489,8 @@ mod head_realworld {
 
         let result = head.execute(args, &mut ctx).await;
         assert!(result.ok(), "head failed: {}", result.err);
-        assert_eq!(result.out.lines().count(), 5);
-        assert!(result.out.contains("Starting application")); // First line
+        assert_eq!(result.text_out().lines().count(), 5);
+        assert!(result.text_out().contains("Starting application")); // First line
     }
 
     // Pattern: head -20 src/file.rs
@@ -507,8 +507,8 @@ mod head_realworld {
 
         let result = head.execute(args, &mut ctx).await;
         assert!(result.ok(), "head src failed: {}", result.err);
-        assert_eq!(result.out.lines().count(), 3);
-        assert!(result.out.contains("use std::sync::Arc"));
+        assert_eq!(result.text_out().lines().count(), 3);
+        assert!(result.text_out().contains("use std::sync::Arc"));
     }
 
     // Pattern: head -n 10 file (using -n flag)
@@ -526,7 +526,7 @@ mod head_realworld {
 
         let result = head.execute(args, &mut ctx).await;
         assert!(result.ok(), "head -n failed: {}", result.err);
-        assert!(result.out.lines().count() <= 3);
+        assert!(result.text_out().lines().count() <= 3);
     }
 
     // Default: head file (should show 10 lines)
@@ -542,7 +542,7 @@ mod head_realworld {
         let result = head.execute(args, &mut ctx).await;
         assert!(result.ok(), "head default failed: {}", result.err);
         // Log has 10 lines, default should show all or 10
-        assert!(result.out.lines().count() <= 10);
+        assert!(result.text_out().lines().count() <= 10);
     }
 }
 
@@ -567,8 +567,8 @@ mod tail_realworld {
 
         let result = tail.execute(args, &mut ctx).await;
         assert!(result.ok(), "tail failed: {}", result.err);
-        assert_eq!(result.out.lines().count(), 5);
-        assert!(result.out.contains("Shutting down")); // Last line
+        assert_eq!(result.text_out().lines().count(), 5);
+        assert!(result.text_out().contains("Shutting down")); // Last line
     }
 
     // Pattern: tail -15 typescript
@@ -585,7 +585,7 @@ mod tail_realworld {
 
         let result = tail.execute(args, &mut ctx).await;
         assert!(result.ok(), "tail src failed: {}", result.err);
-        assert_eq!(result.out.lines().count(), 3);
+        assert_eq!(result.text_out().lines().count(), 3);
     }
 
     // Default: tail file (should show 10 lines)
@@ -600,7 +600,7 @@ mod tail_realworld {
 
         let result = tail.execute(args, &mut ctx).await;
         assert!(result.ok(), "tail default failed: {}", result.err);
-        assert!(result.out.lines().count() <= 10);
+        assert!(result.text_out().lines().count() <= 10);
     }
 }
 
@@ -626,14 +626,14 @@ mod wc_realworld {
         let result = wc.execute(args, &mut ctx).await;
         assert!(result.ok(), "wc -l failed: {}", result.err);
         // Output is TSV format: filename\tcount - get count from last column
-        let count: i32 = result.out
+        let count: i32 = result.text_out()
             .split('\t')
             .last()
             .unwrap_or("0")
             .trim()
             .parse()
             .unwrap_or(-1);
-        assert!(count > 0, "Expected positive line count, got: {}", result.out);
+        assert!(count > 0, "Expected positive line count, got: {}", result.text_out());
     }
 
     // Pattern: wc -l file1 file2 file3
@@ -652,7 +652,8 @@ mod wc_realworld {
         let result = wc.execute(args, &mut ctx).await;
         assert!(result.ok(), "wc -l multiple failed: {}", result.err);
         // Should have output for each file
-        let lines: Vec<&str> = result.out.lines().collect();
+        let text = result.text_out();
+        let lines: Vec<&str> = text.lines().collect();
         assert!(lines.len() >= 2, "Expected output for multiple files");
     }
 
@@ -686,7 +687,8 @@ mod wc_realworld {
         let result = wc.execute(args, &mut ctx).await;
         assert!(result.ok(), "wc default failed: {}", result.err);
         // Default output should have multiple numbers
-        let parts: Vec<&str> = result.out.split_whitespace().collect();
+        let text = result.text_out();
+        let parts: Vec<&str> = text.split_whitespace().collect();
         assert!(parts.len() >= 3, "Expected lines, words, bytes");
     }
 }
@@ -711,8 +713,8 @@ mod ls_realworld {
 
         let result = ls.execute(args, &mut ctx).await;
         assert!(result.ok(), "ls failed: {}", result.err);
-        assert!(result.out.contains("main.rs"));
-        assert!(result.out.contains("lib.rs"));
+        assert!(result.text_out().contains("main.rs"));
+        assert!(result.text_out().contains("lib.rs"));
     }
 
     // Pattern: ls -la directory/
@@ -731,7 +733,7 @@ mod ls_realworld {
         let result = ls.execute(args, &mut ctx).await;
         assert!(result.ok(), "ls -la failed: {}", result.err);
         // Long format should have more detail
-        assert!(result.out.contains("main.rs"));
+        assert!(result.text_out().contains("main.rs"));
     }
 
     // Pattern: ls *.rs (would need glob expansion)
@@ -747,7 +749,7 @@ mod ls_realworld {
 
         let result = ls.execute(args, &mut ctx).await;
         assert!(result.ok(), "ls file failed: {}", result.err);
-        assert!(result.out.contains("README.md"));
+        assert!(result.text_out().contains("README.md"));
     }
 
     // Pattern: ls (current directory)
@@ -761,7 +763,7 @@ mod ls_realworld {
 
         let result = ls.execute(args, &mut ctx).await;
         assert!(result.ok(), "ls cwd failed: {}", result.err);
-        assert!(result.out.contains("main.rs") || result.out.contains("lib.rs"));
+        assert!(result.text_out().contains("main.rs") || result.text_out().contains("lib.rs"));
     }
 }
 
@@ -784,7 +786,7 @@ mod echo_realworld {
 
         let result = echo.execute(args, &mut ctx).await;
         assert!(result.ok(), "echo failed: {}", result.err);
-        assert_eq!(result.out.trim(), "Hello, world!");
+        assert_eq!(result.text_out().trim(), "Hello, world!");
     }
 
     // Pattern: echo "---"
@@ -800,7 +802,7 @@ mod echo_realworld {
 
         let result = echo.execute(args, &mut ctx).await;
         assert!(result.ok(), "echo separator failed: {}", result.err);
-        assert_eq!(result.out.trim(), "---");
+        assert_eq!(result.text_out().trim(), "---");
     }
 
     // Pattern: echo "" (empty string)
@@ -830,8 +832,8 @@ mod echo_realworld {
 
         let result = echo.execute(args, &mut ctx).await;
         assert!(result.ok(), "echo multiple failed: {}", result.err);
-        assert!(result.out.contains("Hello"));
-        assert!(result.out.contains("World"));
+        assert!(result.text_out().contains("Hello"));
+        assert!(result.text_out().contains("World"));
     }
 
     // Pattern: echo -n "no newline"
@@ -847,7 +849,7 @@ mod echo_realworld {
 
         let result = echo.execute(args, &mut ctx).await;
         assert!(result.ok(), "echo -n failed: {}", result.err);
-        assert!(!result.out.ends_with('\n'));
+        assert!(!result.text_out().ends_with('\n'));
     }
 }
 
@@ -871,7 +873,7 @@ mod jq_realworld {
 
         let result = jq.execute(args, &mut ctx).await;
         assert!(result.ok(), "jq positional failed: {}", result.err);
-        assert!(result.out.contains("Alice"));
+        assert!(result.text_out().contains("Alice"));
     }
 
     // Pattern: jq '.[] | select(.id == 2)' file.json
@@ -887,7 +889,7 @@ mod jq_realworld {
 
         let result = jq.execute(args, &mut ctx).await;
         assert!(result.ok(), "jq select failed: {}", result.err);
-        assert!(result.out.contains("two"));
+        assert!(result.text_out().contains("two"));
     }
 
     // Pattern: jq -r '.field' file.json
@@ -904,7 +906,7 @@ mod jq_realworld {
 
         let result = jq.execute(args, &mut ctx).await;
         assert!(result.ok(), "jq -r failed: {}", result.err);
-        assert_eq!(result.out.trim(), "Alice"); // No quotes with -r
+        assert_eq!(result.text_out().trim(), "Alice"); // No quotes with -r
     }
 
     // Pattern: jq 'length' file.json
@@ -920,7 +922,7 @@ mod jq_realworld {
 
         let result = jq.execute(args, &mut ctx).await;
         assert!(result.ok(), "jq length failed: {}", result.err);
-        assert_eq!(result.out.trim(), "3");
+        assert_eq!(result.text_out().trim(), "3");
     }
 
     // Pattern: jq '.mcpServers | keys' settings.json
@@ -936,8 +938,8 @@ mod jq_realworld {
 
         let result = jq.execute(args, &mut ctx).await;
         assert!(result.ok(), "jq keys failed: {}", result.err);
-        assert!(result.out.contains("holler"));
-        assert!(result.out.contains("sshwarma"));
+        assert!(result.text_out().contains("holler"));
+        assert!(result.text_out().contains("sshwarma"));
     }
 
     // Pattern: cat file.json | jq '.field' (stdin)
@@ -953,7 +955,7 @@ mod jq_realworld {
 
         let result = jq.execute(args, &mut ctx).await;
         assert!(result.ok(), "jq stdin failed: {}", result.err);
-        assert_eq!(result.out.trim(), "42");
+        assert_eq!(result.text_out().trim(), "42");
     }
 }
 
@@ -981,14 +983,14 @@ mod pipeline_patterns {
         assert!(grep_result.ok());
 
         // Second: pipe output to wc -l
-        ctx.set_stdin(grep_result.out);
+        ctx.set_stdin(grep_result.text_out().into_owned());
         let mut wc_args = ToolArgs::new();
         wc_args.flags.insert("l".to_string());
 
         let wc_result = wc.execute(wc_args, &mut ctx).await;
         assert!(wc_result.ok(), "wc failed: {}", wc_result.err);
 
-        let count: i32 = wc_result.out.trim().parse().unwrap_or(0);
+        let count: i32 = wc_result.text_out().trim().parse().unwrap_or(0);
         assert!(count > 0, "Expected INFO lines");
     }
 
@@ -1008,13 +1010,13 @@ mod pipeline_patterns {
         assert!(cat_result.ok());
 
         // Second: grep for ERROR
-        ctx.set_stdin(cat_result.out);
+        ctx.set_stdin(cat_result.text_out().into_owned());
         let mut grep_args = ToolArgs::new();
         grep_args.positional.push(Value::String("ERROR".into()));
 
         let grep_result = grep.execute(grep_args, &mut ctx).await;
         assert!(grep_result.ok(), "grep failed: {}", grep_result.err);
-        assert!(grep_result.out.contains("Connection failed"));
+        assert!(grep_result.text_out().contains("Connection failed"));
     }
 
     // Pattern: head -50 file | grep "pattern"
@@ -1034,12 +1036,12 @@ mod pipeline_patterns {
         assert!(head_result.ok());
 
         // Second: grep for DEBUG
-        ctx.set_stdin(head_result.out);
+        ctx.set_stdin(head_result.text_out().into_owned());
         let mut grep_args = ToolArgs::new();
         grep_args.positional.push(Value::String("DEBUG".into()));
 
         let grep_result = grep.execute(grep_args, &mut ctx).await;
         assert!(grep_result.ok(), "grep failed: {}", grep_result.err);
-        assert!(grep_result.out.contains("Loading config"));
+        assert!(grep_result.text_out().contains("Loading config"));
     }
 }

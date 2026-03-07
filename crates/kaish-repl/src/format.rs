@@ -25,7 +25,7 @@ pub fn format_output(result: &ExecResult, context: OutputContext) -> String {
     }
 
     // No structured output - use raw output
-    result.out.clone()
+    result.text_out().into_owned()
 }
 
 /// Format OutputData for display based on context.

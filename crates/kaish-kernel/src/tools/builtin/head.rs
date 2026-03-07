@@ -189,10 +189,7 @@ impl Tool for Head {
                 vec!["Line".to_string(), "Num".to_string()],
                 nodes,
             );
-            let mut result = ExecResult::with_output(output_data);
-            // Override canonical output with traditional format
-            result.out = format!("{}\n", output_lines.join("\n"));
-            result
+            ExecResult::with_output_and_text(output_data, format!("{}\n", output_lines.join("\n")))
         }
     }
 }
@@ -224,9 +221,8 @@ impl Head {
             }
         }
 
-        let mut result = ExecResult::with_output(OutputData::text(output.trim_end().to_string()));
-        result.out = output.trim_end().to_string();
-        result
+        let trimmed = output.trim_end().to_string();
+        ExecResult::with_output_and_text(OutputData::text(trimmed.clone()), trimmed)
     }
 
     /// Parse line count from args (shared by execute and head_glob).
@@ -302,9 +298,7 @@ impl Head {
                 vec!["Line".to_string(), "Num".to_string()],
                 nodes,
             );
-            let mut result = ExecResult::with_output(output_data);
-            result.out = format!("{}\n", output_lines.join("\n"));
-            result
+            ExecResult::with_output_and_text(output_data, format!("{}\n", output_lines.join("\n")))
         }
     }
 }

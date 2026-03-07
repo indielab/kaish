@@ -2,6 +2,8 @@
 //!
 //! After every command in kaish, the special variable `$?` contains an ExecResult.
 
+use std::borrow::Cow;
+
 use crate::output::OutputData;
 use crate::value::Value;
 
@@ -43,14 +45,20 @@ impl ExecResult {
 
     /// Create a successful result with structured output data.
     ///
-    /// This is the preferred constructor for new code. The `OutputData`
-    /// provides a unified model for all output types.
+    /// The `OutputData` is the source of truth. Text is materialized lazily
+    /// via `text_out()` when needed (pipes, redirects, command substitution).
+    ///
+    /// For text-type output, JSON auto-detection still runs so that
+    /// `echo '{"key":1}'` populates `data` for command substitution.
     pub fn with_output(output: OutputData) -> Self {
-        let out = output.to_canonical_string();
-        let data = Self::try_parse_json(&out);
+        let data = if output.is_simple_text() {
+            output.as_text().and_then(|t| Self::try_parse_json(t))
+        } else {
+            None
+        };
         Self {
             code: 0,
-            out,
+            out: String::new(),
             err: String::new(),
             data,
             output: Some(output),
@@ -122,6 +130,37 @@ impl ExecResult {
         }
     }
 
+    /// Create a successful result with structured output and explicit pipe text.
+    ///
+    /// Use this when a builtin needs custom text formatting that differs from
+    /// the canonical `OutputData::to_canonical_string()` representation.
+    pub fn with_output_and_text(output: OutputData, text: impl Into<String>) -> Self {
+        let out = text.into();
+        let data = Self::try_parse_json(&out);
+        Self {
+            code: 0,
+            out,
+            err: String::new(),
+            data,
+            output: Some(output),
+        }
+    }
+
+    /// Get text output, materializing from OutputData on demand.
+    ///
+    /// Returns `self.out` if non-empty, otherwise falls back to
+    /// `OutputData::to_canonical_string()`. This is the canonical way to
+    /// get text for pipes, command substitution, and file redirects.
+    pub fn text_out(&self) -> Cow<'_, str> {
+        if !self.out.is_empty() {
+            Cow::Borrowed(&self.out)
+        } else if let Some(ref output) = self.output {
+            Cow::Owned(output.to_canonical_string())
+        } else {
+            Cow::Borrowed("")
+        }
+    }
+
     /// True if the command succeeded (exit code 0).
     pub fn ok(&self) -> bool {
         self.code == 0
@@ -132,7 +171,7 @@ impl ExecResult {
         match name {
             "code" => Some(Value::Int(self.code)),
             "ok" => Some(Value::Bool(self.ok())),
-            "out" => Some(Value::String(self.out.clone())),
+            "out" => Some(Value::String(self.text_out().into_owned())),
             "err" => Some(Value::String(self.err.clone())),
             "data" => self.data.clone(),
             _ => None,

@@ -31,6 +31,12 @@ async fn apply_redirects(
     redirects: &[Redirect],
     ctx: &ExecContext,
 ) -> ExecResult {
+    // Materialize lazy output into result.out so redirects can mutate it
+    if result.out.is_empty() {
+        if let Some(ref output) = result.output {
+            result.out = output.to_canonical_string();
+        }
+    }
     for redir in redirects {
         match redir.kind {
             RedirectKind::MergeStderr => {
@@ -388,9 +394,10 @@ impl PipelineRunner {
 
                 // Write output to pipe for next stage (if not last)
                 if let Some(mut pipe_out) = stage_ctx.pipe_stdout.take() {
-                    if !result.out.is_empty() {
+                    let text = result.text_out();
+                    if !text.is_empty() {
                         // Write result to pipe; ignore broken pipe (reader dropped early)
-                        let _ = pipe_out.write_all(result.out.as_bytes()).await;
+                        let _ = pipe_out.write_all(text.as_bytes()).await;
                         let _ = pipe_out.shutdown().await;
                     }
                     // Drop pipe_out signals EOF to next stage's reader

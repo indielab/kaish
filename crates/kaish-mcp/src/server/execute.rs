@@ -99,7 +99,7 @@ impl ExecuteResult {
 
         Self {
             code: result.code,
-            stdout: result.out.clone(),
+            stdout: result.text_out().into_owned(),
             stderr: result.err.clone(),
             data,
             ok: result.ok(),

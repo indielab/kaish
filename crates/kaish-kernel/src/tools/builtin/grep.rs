@@ -334,10 +334,7 @@ impl Tool for Grep {
                 vec!["Match".to_string()]
             };
             let output = OutputData::table(headers, nodes);
-            let mut result = ExecResult::with_output(output);
-            // Override the canonical output with traditional grep format
-            result.out = text_output;
-            result
+            ExecResult::with_output_and_text(output, text_output)
         }
     }
 }
@@ -476,9 +473,7 @@ impl Grep {
                 vec!["Match".to_string(), "File".to_string()]
             };
             let output = OutputData::table(headers, total_nodes);
-            let mut result = ExecResult::with_output(output);
-            result.out = total_output;
-            result
+            ExecResult::with_output_and_text(output, total_output)
         }
     }
 }

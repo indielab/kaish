@@ -118,8 +118,9 @@ fn run_script(path: &str) -> Result<ExitCode> {
     // Set $0 to the script path
     rt.block_on(client.kernel().set_positional(path, vec![]));
     let result = rt.block_on(client.execute_streaming(&source, &mut |r| {
-        if !r.out.is_empty() {
-            print!("{}", r.out);
+        let text = r.text_out();
+        if !text.is_empty() {
+            print!("{}", text);
         }
         if !r.err.is_empty() {
             eprint!("{}", r.err);
@@ -148,8 +149,9 @@ fn run_command(cmd: &str) -> Result<ExitCode> {
 
     let rt = tokio::runtime::Runtime::new()?;
     let result = rt.block_on(client.execute_streaming(cmd, &mut |r| {
-        if !r.out.is_empty() {
-            print!("{}", r.out);
+        let text = r.text_out();
+        if !text.is_empty() {
+            print!("{}", text);
         }
         if !r.err.is_empty() {
             eprint!("{}", r.err);

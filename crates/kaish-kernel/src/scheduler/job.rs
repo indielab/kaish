@@ -212,7 +212,8 @@ impl Job {
     /// Write job output to a temp file.
     fn write_output_file(&self, result: &ExecResult) -> Option<PathBuf> {
         // Only write if there's output to capture
-        if result.out.is_empty() && result.err.is_empty() {
+        let text = result.text_out();
+        if text.is_empty() && result.err.is_empty() {
             return None;
         }
 
@@ -229,10 +230,10 @@ impl Job {
         content.push_str(&format!("# Job {}: {}\n", self.id, self.command));
         content.push_str(&format!("# Status: {}\n\n", if result.ok() { "Done" } else { "Failed" }));
 
-        if !result.out.is_empty() {
+        if !text.is_empty() {
             content.push_str("## STDOUT\n");
-            content.push_str(&result.out);
-            if !result.out.ends_with('\n') {
+            content.push_str(&text);
+            if !text.ends_with('\n') {
                 content.push('\n');
             }
         }

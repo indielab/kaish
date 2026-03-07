@@ -106,6 +106,12 @@ pub async fn spill_if_needed(
     config: &OutputLimitConfig,
 ) -> Option<SpillResult> {
     let max = config.max_bytes?;
+    // Materialize lazy output before checking size
+    if result.out.is_empty() {
+        if let Some(ref output) = result.output {
+            result.out = output.to_canonical_string();
+        }
+    }
     let total = result.out.len();
     if total <= max {
         return None;

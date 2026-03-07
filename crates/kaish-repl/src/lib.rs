@@ -469,7 +469,7 @@ impl Repl {
 
         match result {
             Ok(exec_result) => {
-                if exec_result.ok() && exec_result.output.is_none() && exec_result.out.is_empty() {
+                if exec_result.ok() && exec_result.output.is_none() && exec_result.text_out().is_empty() {
                     ProcessResult::Empty
                 } else {
                     ProcessResult::Output(format_result(&exec_result))
@@ -509,11 +509,12 @@ fn format_result(result: &ExecResult) -> String {
     // Success: show output directly (no status prefix).
     // Failure: show stderr or exit code so the user notices.
     if result.ok() {
-        result.out.clone()
+        result.text_out().into_owned()
     } else {
         let mut output = String::new();
-        if !result.out.is_empty() {
-            output.push_str(&result.out);
+        let text = result.text_out();
+        if !text.is_empty() {
+            output.push_str(&text);
             if !output.ends_with('\n') {
                 output.push('\n');
             }
@@ -590,7 +591,7 @@ fn resolve_prompt(repl: &Repl) -> String {
     if has_fn {
         if let Ok(result) = repl.runtime.block_on(repl.kernel.execute("kaish_prompt")) {
             if result.ok() {
-                let text = result.out.trim_end().to_string();
+                let text = result.text_out().trim_end().to_string();
                 if !text.is_empty() {
                     return text;
                 }

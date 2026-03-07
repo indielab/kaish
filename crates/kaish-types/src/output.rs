@@ -351,7 +351,7 @@ pub enum OutputFormat {
 /// and `grep` (exit 1 = no matches) use non-zero exits for semantic meaning,
 /// not errors. The `--json` contract must hold for all exit codes.
 pub fn apply_output_format(mut result: ExecResult, format: OutputFormat) -> ExecResult {
-    if result.output.is_none() && result.out.is_empty() {
+    if result.output.is_none() && result.text_out().is_empty() {
         return result;
     }
     match format {
@@ -361,7 +361,7 @@ pub fn apply_output_format(mut result: ExecResult, format: OutputFormat) -> Exec
                     .unwrap_or_else(|_| "null".to_string())
             } else {
                 // Text-only: wrap as JSON string
-                serde_json::to_string(&result.out)
+                serde_json::to_string(&*result.text_out())
                     .unwrap_or_else(|_| "null".to_string())
             };
             result.out = json_str;
