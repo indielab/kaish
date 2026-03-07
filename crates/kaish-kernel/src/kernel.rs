@@ -681,20 +681,6 @@ impl Kernel {
         input: &str,
         on_output: &mut dyn FnMut(&ExecResult),
     ) -> Result<ExecResult> {
-        let input = input.trim();
-
-        // Spill latch recovery: `--confirm=<nonce>` retrieves a cached truncated result.
-        if let Some(nonce) = input.strip_prefix("--confirm=") {
-            let ec = self.exec_ctx.read().await;
-            return match ec.nonce_store.get_cached_result(nonce.trim()) {
-                Some(result) => Ok(result),
-                None => Ok(ExecResult::failure(
-                    1,
-                    "spill nonce not found or expired — re-run the original command",
-                )),
-            };
-        }
-
         let program = parse(input).map_err(|errors| {
             let msg = errors
                 .iter()
@@ -1278,7 +1264,7 @@ impl Kernel {
                 let nonce = ctx.nonce_store.issue_with_result(result.clone());
                 let ttl = ctx.nonce_store.ttl().as_secs();
                 result.err.push_str(&format!(
-                    "\n[output truncated — to retrieve, run: --confirm={}]\n[Nonce expires in {} seconds.]",
+                    "\n[output truncated — to retrieve, run: kaish-confirm {}]\n[Nonce expires in {} seconds.]",
                     nonce, ttl
                 ));
                 result.original_code = Some(original);

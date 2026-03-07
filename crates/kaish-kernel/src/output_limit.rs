@@ -672,7 +672,7 @@ mod tests {
         assert_eq!(result.code, 2, "spill with latch should exit 2");
         assert_eq!(result.original_code, Some(0), "original command exit code preserved");
         assert!(result.out.contains("[output truncated:"));
-        assert!(result.err.contains("--confirm="), "latch should include confirm hint");
+        assert!(result.err.contains("kaish-confirm"), "latch should include confirm hint");
     }
 
     #[tokio::test]
@@ -698,13 +698,13 @@ mod tests {
         // Extract nonce from err message
         let nonce = result.err
             .lines()
-            .find(|l| l.contains("--confirm="))
-            .and_then(|l| l.split("--confirm=").nth(1))
+            .find(|l| l.contains("kaish-confirm"))
+            .and_then(|l| l.split("kaish-confirm ").nth(1))
             .and_then(|s| s.split(']').next())
             .expect("nonce in err message");
 
-        let confirmed = kernel.execute(&format!("--confirm={}", nonce)).await.expect("confirm");
-        assert_eq!(confirmed.code, 0, "--confirm= should return exit 0");
+        let confirmed = kernel.execute(&format!("kaish-confirm {}", nonce)).await.expect("confirm");
+        assert_eq!(confirmed.code, 0, "kaish-confirm should return exit 0");
         assert!(confirmed.out.contains("[output truncated:"));
     }
 
@@ -721,7 +721,7 @@ mod tests {
             .with_latch(true);
         let kernel = Kernel::new(config).expect("kernel creation");
 
-        let result = kernel.execute("--confirm=bogus123").await.expect("execute");
+        let result = kernel.execute("kaish-confirm bogus123").await.expect("execute");
         assert_eq!(result.code, 1, "bogus nonce should exit 1");
         assert!(result.err.contains("not found or expired"));
     }
