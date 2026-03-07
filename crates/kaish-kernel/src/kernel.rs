@@ -1256,23 +1256,11 @@ impl Kernel {
             let _ = crate::output_limit::spill_if_needed(&mut result, &ctx.output_limit).await;
         }
 
-        // Apply spill exit code and optionally issue latch nonce for recovery
+        // Signal spill with exit 3; agent reads the spill file directly
+        // (use `set +o output-limit` before cat/head/tail to bypass the limit)
         if result.did_spill {
-            let original = result.code;
-            let latch = ctx.scope.latch_enabled();
-            if latch {
-                let nonce = ctx.nonce_store.issue_with_result(result.clone());
-                let ttl = ctx.nonce_store.ttl().as_secs();
-                result.err.push_str(&format!(
-                    "\n[output truncated — to retrieve, run: kaish-confirm {}]\n[Nonce expires in {} seconds.]",
-                    nonce, ttl
-                ));
-                result.original_code = Some(original);
-                result.code = 2;
-            } else {
-                result.original_code = Some(original);
-                result.code = 3;
-            }
+            result.original_code = Some(result.code);
+            result.code = 3;
         }
 
         // Sync changes back from context

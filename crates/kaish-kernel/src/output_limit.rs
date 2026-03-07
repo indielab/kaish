@@ -633,7 +633,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_spill_without_latch_exits_3() {
+    async fn test_spill_exits_3() {
         use crate::kernel::{Kernel, KernelConfig};
 
         let config = KernelConfig::mcp()
@@ -646,84 +646,9 @@ mod tests {
 
         let big = "x".repeat(200);
         let result = kernel.execute(&format!("echo '{}'", big)).await.expect("execute");
-        assert_eq!(result.code, 3, "spill without latch should exit 3");
+        assert_eq!(result.code, 3, "spill should always exit 3");
         assert_eq!(result.original_code, Some(0), "original command exit code preserved");
         assert!(result.out.contains("[output truncated:"));
-    }
-
-    #[tokio::test]
-    async fn test_spill_with_latch_exits_2_with_nonce() {
-        use crate::kernel::{Kernel, KernelConfig};
-        use crate::nonce::NonceStore;
-
-        let store = NonceStore::new();
-        let config = KernelConfig::mcp()
-            .with_output_limit(OutputLimitConfig {
-                max_bytes: Some(100),
-                head_bytes: 30,
-                tail_bytes: 20,
-            })
-            .with_latch(true)
-            .with_nonce_store(store);
-        let kernel = Kernel::new(config).expect("kernel creation");
-
-        let big = "x".repeat(200);
-        let result = kernel.execute(&format!("echo '{}'", big)).await.expect("execute");
-        assert_eq!(result.code, 2, "spill with latch should exit 2");
-        assert_eq!(result.original_code, Some(0), "original command exit code preserved");
-        assert!(result.out.contains("[output truncated:"));
-        assert!(result.err.contains("kaish-confirm"), "latch should include confirm hint");
-    }
-
-    #[tokio::test]
-    async fn test_spill_confirm_nonce_returns_truncated_output() {
-        use crate::kernel::{Kernel, KernelConfig};
-        use crate::nonce::NonceStore;
-
-        let store = NonceStore::new();
-        let config = KernelConfig::mcp()
-            .with_output_limit(OutputLimitConfig {
-                max_bytes: Some(100),
-                head_bytes: 30,
-                tail_bytes: 20,
-            })
-            .with_latch(true)
-            .with_nonce_store(store);
-        let kernel = Kernel::new(config).expect("kernel creation");
-
-        let big = "x".repeat(200);
-        let result = kernel.execute(&format!("echo '{}'", big)).await.expect("execute");
-        assert_eq!(result.code, 2);
-
-        // Extract nonce from err message
-        let nonce = result.err
-            .lines()
-            .find(|l| l.contains("kaish-confirm"))
-            .and_then(|l| l.split("kaish-confirm ").nth(1))
-            .and_then(|s| s.split(']').next())
-            .expect("nonce in err message");
-
-        let confirmed = kernel.execute(&format!("kaish-confirm {}", nonce)).await.expect("confirm");
-        assert_eq!(confirmed.code, 0, "kaish-confirm should return exit 0");
-        assert!(confirmed.out.contains("[output truncated:"));
-    }
-
-    #[tokio::test]
-    async fn test_spill_confirm_bogus_nonce_exits_1() {
-        use crate::kernel::{Kernel, KernelConfig};
-
-        let config = KernelConfig::mcp()
-            .with_output_limit(OutputLimitConfig {
-                max_bytes: Some(100),
-                head_bytes: 30,
-                tail_bytes: 20,
-            })
-            .with_latch(true);
-        let kernel = Kernel::new(config).expect("kernel creation");
-
-        let result = kernel.execute("kaish-confirm bogus123").await.expect("execute");
-        assert_eq!(result.code, 1, "bogus nonce should exit 1");
-        assert!(result.err.contains("not found or expired"));
     }
 
     #[tokio::test]

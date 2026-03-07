@@ -16,20 +16,15 @@ Controls maximum command output size. When exceeded, full output is written to a
 3. Result is replaced with: head preview + `...` + tail preview + pointer to spill file
 4. Agent can read the spill file selectively with `cat` or `head`/`tail`
 
-## Exit Codes on Spill
+## Exit Code on Spill
 
-| `set -o latch` | exit code | recovery |
-|---|---|---|
-| off | 3 | read spill file directly |
-| on  | 2 | run `kaish-confirm <nonce>` to retrieve cached result |
+Spill always exits **3**. The spill file path is shown in the output. To read it without hitting the limit again:
 
-Without latch (exit 3): read the spill file path shown in the output.
-
-With latch (exit 2): the error message includes the nonce:
+```bash
+set +o output-limit
+cat /run/user/1000/kaish/spill/spill-1234567890.123-4567.txt
+set -o output-limit=8K
 ```
-[output truncated — to retrieve, run: kaish-confirm ab12cd34]
-```
-Running `kaish-confirm ab12cd34` returns exit 0 with the same truncated output.
 
 ## Spill Files
 

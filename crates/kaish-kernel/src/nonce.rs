@@ -13,8 +13,6 @@ use std::hash::{BuildHasher, Hasher};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime};
 
-use crate::interpreter::ExecResult;
-
 /// What a nonce authorizes: a command and a set of paths.
 #[derive(Debug, Clone)]
 pub struct NonceScope {
@@ -22,8 +20,6 @@ pub struct NonceScope {
     command: String,
     /// Authorized paths. Empty means no path constraint (command-only ops).
     paths: BTreeSet<String>,
-    /// Cached result for spill latch recovery (`--confirm=` path).
-    cached_result: Option<ExecResult>,
 }
 
 impl NonceScope {
@@ -106,7 +102,6 @@ impl NonceStore {
         let scope = NonceScope {
             command: command.to_string(),
             paths: paths.iter().map(|p| p.to_string()).collect(),
-            cached_result: None,
         };
 
         #[allow(clippy::expect_used)]
@@ -117,48 +112,6 @@ impl NonceStore {
 
         inner.nonces.insert(nonce.clone(), (now, scope));
         nonce
-    }
-
-    /// Issue a nonce that carries a cached `ExecResult` for spill latch recovery.
-    ///
-    /// When the agent runs `kaish-confirm <nonce>`, `get_cached_result` returns
-    /// this result so the agent receives the truncated output with exit 0.
-    pub fn issue_with_result(&self, result: ExecResult) -> String {
-        let nonce = generate_nonce();
-        let now = Instant::now();
-        let ttl = self.ttl;
-
-        let scope = NonceScope {
-            command: String::new(),
-            paths: BTreeSet::new(),
-            cached_result: Some(result),
-        };
-
-        #[allow(clippy::expect_used)]
-        let mut inner = self.inner.lock().expect("nonce store poisoned");
-
-        inner.nonces.retain(|_, (created, _)| now.duration_since(*created) < ttl);
-        inner.nonces.insert(nonce.clone(), (now, scope));
-        nonce
-    }
-
-    /// Retrieve the cached result for a spill latch nonce.
-    ///
-    /// Called by the `kaish-confirm` builtin. Returns `None` if the nonce is
-    /// unknown, expired, or has no cached result.
-    pub fn get_cached_result(&self, nonce: &str) -> Option<ExecResult> {
-        let now = Instant::now();
-        let ttl = self.ttl;
-
-        #[allow(clippy::expect_used)]
-        let inner = self.inner.lock().expect("nonce store poisoned");
-
-        match inner.nonces.get(nonce) {
-            Some((created, scope)) if now.duration_since(*created) < ttl => {
-                scope.cached_result.clone()
-            }
-            _ => None,
-        }
     }
 
     /// Validate a nonce against a command and paths.
@@ -379,40 +332,4 @@ mod tests {
         assert!(result.is_err());
     }
 
-    // ── Spill latch cached result tests ──
-
-    #[test]
-    fn issue_with_result_and_retrieve() {
-        let store = NonceStore::new();
-        let result = crate::interpreter::ExecResult::success("truncated output");
-        let nonce = store.issue_with_result(result.clone());
-
-        assert_eq!(nonce.len(), 8);
-        let retrieved = store.get_cached_result(&nonce);
-        assert!(retrieved.is_some());
-        assert_eq!(retrieved.unwrap().out, "truncated output");
-    }
-
-    #[test]
-    fn get_cached_result_unknown_nonce() {
-        let store = NonceStore::new();
-        assert!(store.get_cached_result("bogus123").is_none());
-    }
-
-    #[test]
-    fn cached_result_expired() {
-        let store = NonceStore::with_ttl(Duration::from_millis(0));
-        let result = crate::interpreter::ExecResult::success("data");
-        let nonce = store.issue_with_result(result);
-
-        std::thread::sleep(Duration::from_millis(1));
-        assert!(store.get_cached_result(&nonce).is_none());
-    }
-
-    #[test]
-    fn issue_nonce_has_no_cached_result() {
-        let store = NonceStore::new();
-        let nonce = store.issue("rm", &["/tmp/file"]);
-        assert!(store.get_cached_result(&nonce).is_none());
-    }
 }

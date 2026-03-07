@@ -37,7 +37,6 @@ mod jobs;
 mod jq_native;
 mod kaish_ast;
 mod kaish_clear;
-mod kaish_confirm;
 mod kaish_trash;
 mod kaish_status;
 mod kaish_version;
@@ -120,7 +119,6 @@ pub fn register_builtins(registry: &mut ToolRegistry) {
     registry.register(jq_native::JqNative);
     registry.register(kaish_ast::KaishAst);
     registry.register(kaish_clear::KaishClear);
-    registry.register(kaish_confirm::KaishConfirm);
     registry.register(kaish_trash::KaishTrash);
     registry.register(kaish_status::KaishStatus);
     registry.register(kaish_version::KaishVersion);

@@ -125,7 +125,7 @@ greet "Amy"
 
 ```bash
 set -e                    # exit on first error
-set -o latch              # require nonce confirmation for rm and spill (exit code 2)
+set -o latch              # require nonce confirmation for rm (exit code 2)
 set -o trash              # move rm'd files to Trash
 set +o latch              # disable latch
 set +o trash              # disable trash
