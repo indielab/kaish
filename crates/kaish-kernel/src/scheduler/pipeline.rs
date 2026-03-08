@@ -31,16 +31,20 @@ async fn apply_redirects(
     redirects: &[Redirect],
     ctx: &ExecContext,
 ) -> ExecResult {
-    // Materialize lazy output into result.out so redirects can mutate it
-    if result.out.is_empty() {
-        if let Some(ref output) = result.output {
-            result.out = output.to_canonical_string();
-        }
-    }
+    // Defer materialization of OutputData → result.out to individual redirect
+    // handlers. File redirects (Overwrite/Append) can stream OutputData directly
+    // to disk via write_canonical(), avoiding OOM on large structured output.
+    // Merge redirects and the fallthrough path materialize on demand.
     for redir in redirects {
         match redir.kind {
             RedirectKind::MergeStderr => {
                 // 2>&1 - append stderr to stdout
+                // Ensure output is materialized for merge
+                if result.out.is_empty() {
+                    if let Some(ref output) = result.output {
+                        result.out = output.to_canonical_string();
+                    }
+                }
                 if !result.err.is_empty() {
                     result.out.push_str(&result.err);
                     result.err.clear();
@@ -48,6 +52,11 @@ async fn apply_redirects(
             }
             RedirectKind::MergeStdout => {
                 // 1>&2 or >&2 - append stdout to stderr
+                if result.out.is_empty() {
+                    if let Some(ref output) = result.output {
+                        result.out = output.to_canonical_string();
+                    }
+                }
                 if !result.out.is_empty() {
                     result.err.push_str(&result.out);
                     result.out.clear();
@@ -55,28 +64,58 @@ async fn apply_redirects(
             }
             RedirectKind::StdoutOverwrite => {
                 if let Some(path) = eval_redirect_target(&redir.target, ctx) {
-                    if let Err(e) = tokio::fs::write(&path, &result.out).await {
-                        return ExecResult::failure(1, format!("redirect: {e}"));
+                    // Stream OutputData directly to file if available
+                    if result.out.is_empty() && result.output.is_some() {
+                        match std::fs::File::create(&path) {
+                            Ok(mut file) => {
+                                if let Some(ref output) = result.output {
+                                    if let Err(e) = output.write_canonical(&mut file, None) {
+                                        return ExecResult::failure(1, format!("redirect: {e}"));
+                                    }
+                                }
+                            }
+                            Err(e) => return ExecResult::failure(1, format!("redirect: {e}")),
+                        }
+                    } else {
+                        if let Err(e) = tokio::fs::write(&path, &result.out).await {
+                            return ExecResult::failure(1, format!("redirect: {e}"));
+                        }
                     }
                     result.out.clear();
+                    result.output = None;
                 }
             }
             RedirectKind::StdoutAppend => {
                 if let Some(path) = eval_redirect_target(&redir.target, ctx) {
-                    let file = tokio::fs::OpenOptions::new()
-                        .append(true)
-                        .create(true)
-                        .open(&path)
-                        .await;
-                    match file {
-                        Ok(mut f) => {
-                            if let Err(e) = f.write_all(result.out.as_bytes()).await {
-                                return ExecResult::failure(1, format!("redirect: {e}"));
+                    // Stream OutputData directly if available
+                    if result.out.is_empty() && result.output.is_some() {
+                        match std::fs::OpenOptions::new().append(true).create(true).open(&path) {
+                            Ok(mut file) => {
+                                if let Some(ref output) = result.output {
+                                    if let Err(e) = output.write_canonical(&mut file, None) {
+                                        return ExecResult::failure(1, format!("redirect: {e}"));
+                                    }
+                                }
                             }
+                            Err(e) => return ExecResult::failure(1, format!("redirect: {e}")),
                         }
-                        Err(e) => return ExecResult::failure(1, format!("redirect: {e}")),
+                    } else {
+                        let file = tokio::fs::OpenOptions::new()
+                            .append(true)
+                            .create(true)
+                            .open(&path)
+                            .await;
+                        match file {
+                            Ok(mut f) => {
+                                if let Err(e) = f.write_all(result.out.as_bytes()).await {
+                                    return ExecResult::failure(1, format!("redirect: {e}"));
+                                }
+                            }
+                            Err(e) => return ExecResult::failure(1, format!("redirect: {e}")),
+                        }
                     }
                     result.out.clear();
+                    result.output = None;
                 }
             }
             RedirectKind::Stderr => {
@@ -99,6 +138,15 @@ async fn apply_redirects(
             }
             // Pre-execution redirects - already handled before command execution
             RedirectKind::Stdin | RedirectKind::HereDoc => {}
+        }
+    }
+    // Materialize any remaining OutputData into result.out.
+    // Callers (accumulate_result, pipeline piping) expect .out to be populated
+    // after apply_redirects returns. File redirects above consume .output directly
+    // via streaming; this only fires when no redirect consumed it.
+    if result.out.is_empty() {
+        if let Some(ref output) = result.output {
+            result.out = output.to_canonical_string();
         }
     }
     result

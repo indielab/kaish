@@ -141,17 +141,12 @@ impl NonceStore {
                 }
 
                 // Every confirmed path must be in the authorized set.
-                // Linear scan avoids BTreeSet allocation — slices are typically 0-1 elements.
-                let unauthorized: Vec<_> = paths
-                    .iter()
-                    .filter(|p| !scope.paths.contains(**p))
-                    .collect();
-
-                if !unauthorized.is_empty() {
+                // Short-circuit on first unauthorized path — slices are typically 0-1 elements.
+                if let Some(unauthorized) = paths.iter().find(|p| !scope.paths.contains(**p)) {
                     return Err(format!(
-                        "nonce scope mismatch: authorized {:?}, got unauthorized {:?}",
-                        scope.paths.iter().collect::<Vec<_>>(),
-                        unauthorized
+                        "nonce scope mismatch: unauthorized path '{}' (authorized: {:?})",
+                        unauthorized,
+                        scope.paths.iter().collect::<Vec<_>>()
                     ));
                 }
 

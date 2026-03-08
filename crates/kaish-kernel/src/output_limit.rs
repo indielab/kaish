@@ -111,17 +111,43 @@ pub async fn spill_if_needed(
     config: &OutputLimitConfig,
 ) -> Option<SpillResult> {
     let max = config.max_bytes?;
-    // Materialize lazy output before checking size
-    if result.out.is_empty() {
-        if let Some(ref output) = result.output {
-            result.out = output.to_canonical_string();
+
+    // If result.out is already populated (external commands), check it directly
+    if !result.out.is_empty() {
+        let total = result.out.len();
+        if total <= max {
+            return None;
         }
-    }
-    let total = result.out.len();
-    if total <= max {
-        return None;
+        return spill_string(result, config, max).await;
     }
 
+    // If we have structured OutputData, estimate size before materializing
+    if let Some(ref output) = result.output {
+        let estimate = output.estimated_byte_size();
+        if estimate <= max {
+            // Small enough — materialize normally
+            result.out = output.to_canonical_string();
+            // Re-check actual size (estimate is a lower bound)
+            if result.out.len() <= max {
+                return None;
+            }
+            return spill_string(result, config, max).await;
+        }
+
+        // Large — stream directly to spill file, never holding full String
+        return spill_output_data(result, config, max).await;
+    }
+
+    None
+}
+
+/// Spill an already-materialized string in result.out.
+async fn spill_string(
+    result: &mut ExecResult,
+    config: &OutputLimitConfig,
+    max: usize,
+) -> Option<SpillResult> {
+    let total = result.out.len();
     match write_spill_file(result.out.as_bytes()).await {
         Ok((path, written)) => {
             result.out = build_truncated_output(&result.out, config, &path, total);
@@ -132,7 +158,6 @@ pub async fn spill_if_needed(
             })
         }
         Err(e) => {
-            // Spill failed — replace with error rather than sending truncated/corrupt data
             tracing::error!("output spill failed: {}", e);
             *result = ExecResult::failure(1, format!(
                 "output exceeded {} byte limit ({} bytes) and spill to disk failed: {}",
@@ -141,6 +166,66 @@ pub async fn spill_if_needed(
             None
         }
     }
+}
+
+/// Stream OutputData directly to a spill file without materializing the full String.
+async fn spill_output_data(
+    result: &mut ExecResult,
+    config: &OutputLimitConfig,
+    max: usize,
+) -> Option<SpillResult> {
+    let output = result.output.as_ref()?;
+
+    let dir = paths::spill_dir();
+    if let Err(e) = tokio::fs::create_dir_all(&dir).await {
+        tracing::error!("output spill dir creation failed: {}", e);
+        *result = ExecResult::failure(1, format!(
+            "output exceeded {} byte limit and spill dir creation failed: {}", max, e
+        ));
+        return None;
+    }
+
+    let filename = generate_spill_filename();
+    let path = dir.join(&filename);
+
+    // Write OutputData directly to file via write_canonical
+    let total = match std::fs::File::create(&path) {
+        Ok(mut file) => {
+            match output.write_canonical(&mut file, None) {
+                Ok(n) => n,
+                Err(e) => {
+                    tracing::error!("output spill write failed: {}", e);
+                    *result = ExecResult::failure(1, format!(
+                        "output exceeded {} byte limit and spill to disk failed: {}", max, e
+                    ));
+                    return None;
+                }
+            }
+        }
+        Err(e) => {
+            tracing::error!("output spill file creation failed: {}", e);
+            *result = ExecResult::failure(1, format!(
+                "output exceeded {} byte limit and spill to disk failed: {}", max, e
+            ));
+            return None;
+        }
+    };
+
+    // Read head and tail from the spill file for the truncated preview
+    let head = read_head_from_file(&path, config.head_bytes).await.unwrap_or_default();
+    let tail = read_tail_from_file(&path, config.tail_bytes).await.unwrap_or_default();
+    let path_str = path.to_string_lossy();
+
+    result.out = format!(
+        "{}\n...\n{}\n[output truncated: {} bytes total — full output at {}]",
+        head, tail, total, path_str
+    );
+    result.did_spill = true;
+
+    Some(SpillResult {
+        path,
+        total_bytes: total,
+    })
 }
 
 /// Collect stdout from a child process with spill-aware size limiting.
@@ -200,9 +285,12 @@ async fn collect_stderr(
 
 /// Collect stdout with two-phase spill detection.
 ///
+/// Generic over `AsyncRead + Unpin` — works with `ChildStdout` in production
+/// and `DuplexStream` in tests.
+///
 /// Returns `(stdout_string, did_spill)`.
-async fn collect_stdout_with_spill(
-    stdout: &mut tokio::process::ChildStdout,
+async fn collect_stdout_with_spill<R: tokio::io::AsyncRead + Unpin>(
+    stdout: &mut R,
     max_bytes: usize,
     config: &OutputLimitConfig,
 ) -> (String, bool) {
@@ -294,9 +382,11 @@ async fn collect_stdout_with_spill(
 }
 
 /// Write buffered data + remaining stdout to a spill file, return truncated result.
-async fn stream_to_spill(
+///
+/// Generic over `AsyncRead + Unpin` for testability.
+async fn stream_to_spill<R: tokio::io::AsyncRead + Unpin>(
     buffer: &[u8],
-    stdout: &mut tokio::process::ChildStdout,
+    stdout: &mut R,
     config: &OutputLimitConfig,
 ) -> Result<String, std::io::Error> {
     use tokio::io::AsyncReadExt;
@@ -397,6 +487,21 @@ fn tail_from_str(s: &str, max_bytes: usize) -> &str {
         adjusted += 1;
     }
     &s[adjusted..]
+}
+
+/// Read the first N bytes from a file for head preview.
+async fn read_head_from_file(path: &std::path::Path, max_bytes: usize) -> Result<String, std::io::Error> {
+    use tokio::io::AsyncReadExt;
+
+    let mut file = tokio::fs::File::open(path).await?;
+    let mut buf = vec![0u8; max_bytes];
+    let n = file.read(&mut buf).await?;
+    buf.truncate(n);
+
+    let s = String::from_utf8_lossy(&buf);
+    // Truncate to char boundary
+    let result = truncate_to_char_boundary(&s, max_bytes);
+    Ok(result.to_string())
 }
 
 /// Read the last N bytes from a file for tail preview.
@@ -681,5 +786,206 @@ mod tests {
         let big = "x".repeat(200);
         let result = kernel.execute(&format!("echo '{}'", big)).await.expect("execute");
         assert!(result.out.contains("[output truncated:"));
+    }
+
+    // ── OutputData estimation and streaming tests ──
+
+    #[test]
+    fn test_estimated_byte_size_text() {
+        use crate::interpreter::OutputData;
+        let data = OutputData::text("hello world");
+        assert_eq!(data.estimated_byte_size(), 11);
+    }
+
+    #[test]
+    fn test_estimated_byte_size_table() {
+        use crate::interpreter::{OutputData, OutputNode};
+        let data = OutputData::table(
+            vec!["NAME".into(), "SIZE".into()],
+            vec![
+                OutputNode::new("foo").with_cells(vec!["123".into()]),
+                OutputNode::new("bar").with_cells(vec!["456".into()]),
+            ],
+        );
+        // "foo\t123\nbar\t456" = 3+1+3 + 1 + 3+1+3 = 15
+        assert_eq!(data.estimated_byte_size(), 15);
+    }
+
+    #[test]
+    fn test_estimated_byte_size_tree() {
+        use crate::interpreter::{OutputData, OutputNode};
+        let data = OutputData::nodes(vec![
+            OutputNode::new("src").with_children(vec![
+                OutputNode::new("main.rs"),
+                OutputNode::new("lib.rs"),
+            ]),
+        ]);
+        // "src/{main.rs,lib.rs}" = 3 + 2 + 7 + 1 + 6 + 1 = 20
+        assert_eq!(data.estimated_byte_size(), 20);
+    }
+
+    #[test]
+    fn test_write_canonical_matches_to_canonical_string() {
+        use crate::interpreter::{OutputData, OutputNode};
+
+        let cases: Vec<OutputData> = vec![
+            OutputData::text("hello world"),
+            OutputData::nodes(vec![
+                OutputNode::new("file1"),
+                OutputNode::new("file2"),
+            ]),
+            OutputData::table(
+                vec!["NAME".into(), "SIZE".into()],
+                vec![
+                    OutputNode::new("foo").with_cells(vec!["123".into()]),
+                    OutputNode::new("bar").with_cells(vec!["456".into()]),
+                ],
+            ),
+            OutputData::nodes(vec![
+                OutputNode::new("src").with_children(vec![
+                    OutputNode::new("main.rs"),
+                    OutputNode::new("lib.rs"),
+                ]),
+            ]),
+        ];
+
+        for data in cases {
+            let expected = data.to_canonical_string();
+            let mut buf = Vec::new();
+            let written = data.write_canonical(&mut buf, None).unwrap();
+            let got = String::from_utf8(buf).unwrap();
+            assert_eq!(got, expected, "write_canonical mismatch for {:?}", data);
+            assert_eq!(written, expected.len(), "byte count mismatch");
+        }
+    }
+
+    #[test]
+    fn test_write_canonical_budget_stops_early() {
+        use crate::interpreter::{OutputData, OutputNode};
+
+        let data = OutputData::nodes(
+            (0..1000).map(|i| OutputNode::new(format!("file_{:04}", i))).collect()
+        );
+        let mut buf = Vec::new();
+        let written = data.write_canonical(&mut buf, Some(100)).unwrap();
+        // Should have stopped shortly after 100 bytes
+        assert!(written > 100, "should exceed budget slightly");
+        assert!(written < 500, "should stop soon after budget: got {}", written);
+    }
+
+    #[tokio::test]
+    async fn test_spill_if_needed_large_output_data_no_oom() {
+        use crate::interpreter::{OutputData, OutputNode};
+
+        let config = OutputLimitConfig {
+            max_bytes: Some(1024),
+            head_bytes: 100,
+            tail_bytes: 50,
+        };
+
+        // 100K nodes — large enough to detect OOM if materialized carelessly,
+        // but small enough to not slow down the test
+        let nodes: Vec<OutputNode> = (0..100_000)
+            .map(|i| OutputNode::new(format!("node_{:06}", i)))
+            .collect();
+        let data = OutputData::nodes(nodes);
+        let mut result = ExecResult::with_output(data);
+
+        let spill = spill_if_needed(&mut result, &config).await;
+        assert!(spill.is_some(), "should have spilled");
+        assert!(result.did_spill);
+        assert!(result.out.contains("[output truncated:"));
+
+        // Clean up
+        if let Some(s) = spill {
+            let _ = tokio::fs::remove_file(&s.path).await;
+        }
+    }
+
+    // ── Streaming collector tests (using tokio::io::duplex) ──
+
+    #[tokio::test]
+    async fn test_collect_small_output_no_spill() {
+        let (mut writer, reader) = tokio::io::duplex(1024);
+        let config = OutputLimitConfig {
+            max_bytes: Some(1024),
+            head_bytes: 100,
+            tail_bytes: 50,
+        };
+
+        // Write small data and close
+        use tokio::io::AsyncWriteExt;
+        writer.write_all(b"hello world").await.unwrap();
+        drop(writer); // EOF
+
+        let mut reader = reader;
+        let (result, did_spill) = collect_stdout_with_spill(&mut reader, 1024, &config).await;
+        assert_eq!(result, "hello world");
+        assert!(!did_spill);
+    }
+
+    #[tokio::test]
+    async fn test_collect_large_output_spills() {
+        let (mut writer, reader) = tokio::io::duplex(64 * 1024);
+        let config = OutputLimitConfig {
+            max_bytes: Some(100),
+            head_bytes: 20,
+            tail_bytes: 10,
+        };
+
+        // Write data exceeding limit and close
+        use tokio::io::AsyncWriteExt;
+        let data = "x".repeat(500);
+        writer.write_all(data.as_bytes()).await.unwrap();
+        drop(writer); // EOF
+
+        let mut reader = reader;
+        let (result, did_spill) = collect_stdout_with_spill(&mut reader, 100, &config).await;
+        assert!(did_spill, "should have spilled");
+        assert!(result.contains("[output truncated:"));
+        assert!(result.contains("full output at"));
+    }
+
+    #[tokio::test]
+    async fn test_collect_exact_boundary_no_spill() {
+        let (mut writer, reader) = tokio::io::duplex(1024);
+        let config = OutputLimitConfig {
+            max_bytes: Some(100),
+            head_bytes: 20,
+            tail_bytes: 10,
+        };
+
+        // Write exactly max_bytes
+        use tokio::io::AsyncWriteExt;
+        let data = "x".repeat(100);
+        writer.write_all(data.as_bytes()).await.unwrap();
+        drop(writer); // EOF
+
+        let mut reader = reader;
+        let (result, did_spill) = collect_stdout_with_spill(&mut reader, 100, &config).await;
+        // Exactly at limit — should not spill (<=)
+        assert!(!did_spill, "exact boundary should not spill");
+        assert_eq!(result.len(), 100);
+    }
+
+    #[tokio::test]
+    async fn test_collect_broken_pipe() {
+        let (writer, reader) = tokio::io::duplex(1024);
+        let config = OutputLimitConfig {
+            max_bytes: Some(1024),
+            head_bytes: 100,
+            tail_bytes: 50,
+        };
+
+        // Write some data, then drop writer mid-stream
+        use tokio::io::AsyncWriteExt;
+        let mut writer = writer;
+        writer.write_all(b"partial data").await.unwrap();
+        drop(writer); // Simulate broken pipe
+
+        let mut reader = reader;
+        let (result, did_spill) = collect_stdout_with_spill(&mut reader, 1024, &config).await;
+        assert_eq!(result, "partial data");
+        assert!(!did_spill);
     }
 }

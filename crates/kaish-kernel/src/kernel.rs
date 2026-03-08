@@ -2886,6 +2886,15 @@ impl CommandDispatcher for Kernel {
 /// the exit code to match the new result. Used to preserve output from
 /// multiple statements, loop iterations, and command chains.
 fn accumulate_result(accumulated: &mut ExecResult, new: &ExecResult) {
+    // Materialize lazy OutputData into .out before accumulating.
+    // Without this, the first command's output stays in .output while
+    // the second's text gets appended to .out, losing the first.
+    if accumulated.out.is_empty() {
+        if let Some(ref output) = accumulated.output {
+            accumulated.out = output.to_canonical_string();
+            accumulated.output = None;
+        }
+    }
     let new_text = new.text_out();
     if !accumulated.out.is_empty() && !new_text.is_empty() && !accumulated.out.ends_with('\n') {
         accumulated.out.push('\n');

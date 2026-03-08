@@ -119,6 +119,46 @@ impl OutputNode {
         !self.children.is_empty()
     }
 
+    /// Estimate brace-notation byte size without materializing.
+    pub fn estimated_byte_size(&self) -> usize {
+        if self.children.is_empty() {
+            self.name.len()
+        } else {
+            // "name/{child1,child2,...}"
+            let mut size = self.name.len() + 2; // name + "/{" + "}"
+            for (i, child) in self.children.iter().enumerate() {
+                if i > 0 {
+                    size += 1; // comma separator
+                }
+                size += child.estimated_byte_size();
+            }
+            size + 1 // closing brace
+        }
+    }
+
+    /// Write brace-notation to a writer. Returns bytes written.
+    pub fn write_canonical(&self, w: &mut dyn std::io::Write, _budget: usize) -> std::io::Result<usize> {
+        if self.children.is_empty() {
+            w.write_all(self.name.as_bytes())?;
+            return Ok(self.name.len());
+        }
+        let mut written = 0;
+        w.write_all(self.name.as_bytes())?;
+        written += self.name.len();
+        w.write_all(b"/{")?;
+        written += 2;
+        for (i, child) in self.children.iter().enumerate() {
+            if i > 0 {
+                w.write_all(b",")?;
+                written += 1;
+            }
+            written += child.write_canonical(w, _budget.saturating_sub(written))?;
+        }
+        w.write_all(b"}")?;
+        written += 1;
+        Ok(written)
+    }
+
     /// Get the display name, potentially with text content.
     pub fn display_name(&self) -> &str {
         if self.name.is_empty() {
@@ -216,6 +256,92 @@ impl OutputData {
         } else {
             None
         }
+    }
+
+    /// Estimate canonical string byte size without materializing.
+    ///
+    /// Lower bound — actual may be slightly larger due to formatting.
+    /// Mirrors `to_canonical_string()` structure but only accumulates sizes.
+    pub fn estimated_byte_size(&self) -> usize {
+        if self.root.len() == 1 && self.root[0].is_text_only() {
+            return self.root[0].text.as_ref().map_or(0, |t| t.len());
+        }
+
+        if self.is_flat() {
+            let mut size = 0;
+            for (i, n) in self.root.iter().enumerate() {
+                if i > 0 {
+                    size += 1; // newline separator
+                }
+                size += n.display_name().len();
+                for cell in &n.cells {
+                    size += 1 + cell.len(); // tab + cell
+                }
+            }
+            return size;
+        }
+
+        // Tree: estimate brace notation
+        let mut size = 0;
+        for (i, n) in self.root.iter().enumerate() {
+            if i > 0 {
+                size += 1; // newline separator
+            }
+            size += n.estimated_byte_size();
+        }
+        size
+    }
+
+    /// Write canonical representation to a writer with optional byte budget.
+    ///
+    /// Returns total bytes written. Stops after budget exceeded (imprecise:
+    /// one write past the limit is fine — caller uses this for spill detection,
+    /// not for exact truncation).
+    pub fn write_canonical(&self, w: &mut dyn std::io::Write, budget: Option<usize>) -> std::io::Result<usize> {
+        let mut written = 0usize;
+        let budget = budget.unwrap_or(usize::MAX);
+
+        if self.root.len() == 1 && self.root[0].is_text_only() {
+            if let Some(ref text) = self.root[0].text {
+                w.write_all(text.as_bytes())?;
+                return Ok(text.len());
+            }
+            return Ok(0);
+        }
+
+        if self.is_flat() {
+            for (i, n) in self.root.iter().enumerate() {
+                if i > 0 {
+                    w.write_all(b"\n")?;
+                    written += 1;
+                }
+                let name = n.display_name();
+                w.write_all(name.as_bytes())?;
+                written += name.len();
+                for cell in &n.cells {
+                    w.write_all(b"\t")?;
+                    w.write_all(cell.as_bytes())?;
+                    written += 1 + cell.len();
+                }
+                if written > budget {
+                    return Ok(written);
+                }
+            }
+            return Ok(written);
+        }
+
+        // Tree: brace notation
+        for (i, n) in self.root.iter().enumerate() {
+            if i > 0 {
+                w.write_all(b"\n")?;
+                written += 1;
+            }
+            written += n.write_canonical(w, budget.saturating_sub(written))?;
+            if written > budget {
+                return Ok(written);
+            }
+        }
+        Ok(written)
     }
 
     /// Convert to canonical string output (for pipes).

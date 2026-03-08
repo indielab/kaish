@@ -112,6 +112,50 @@ async fn cmd_list(args: &ToolArgs, _ctx: &mut ExecContext) -> ExecResult {
     ))
 }
 
+/// Find restore matches: exact (1) wins, else substring.
+///
+/// Single pass over items. Returns matched items or error message.
+fn find_restore_match<T>(items: Vec<(String, T)>, target: &str) -> Result<Vec<T>, String> {
+    let mut exact = Vec::new();
+    let mut substring = Vec::new();
+    let mut substring_names = Vec::new();
+
+    for (name, item) in items {
+        if name == target {
+            exact.push(item);
+        } else if name.contains(target) {
+            substring_names.push(name);
+            substring.push(item);
+        }
+    }
+
+    if exact.len() == 1 {
+        return Ok(exact);
+    }
+
+    // Combine exact + substring if no single exact match
+    let mut all_names: Vec<String> = Vec::new();
+    if !exact.is_empty() {
+        all_names.extend(std::iter::repeat_n(target.to_string(), exact.len()));
+    }
+    all_names.extend(substring_names);
+
+    let mut all: Vec<T> = exact;
+    all.extend(substring);
+
+    if all.is_empty() {
+        return Err(format!("'{}' not found in trash", target));
+    }
+    if all.len() > 1 {
+        return Err(format!(
+            "multiple matches for '{}': {}. Be more specific.",
+            target,
+            all_names.join(", ")
+        ));
+    }
+    Ok(all)
+}
+
 async fn cmd_restore(args: &ToolArgs, _ctx: &mut ExecContext) -> ExecResult {
     let name = match args.get_string("arg", 1) {
         Some(n) => n,
@@ -123,33 +167,15 @@ async fn cmd_restore(args: &ToolArgs, _ctx: &mut ExecContext) -> ExecResult {
         Err(e) => return ExecResult::failure(1, format!("kaish-trash restore: {}", e)),
     };
 
-    // Exact match first, then fall back to substring
-    let exact_count = items.iter()
-        .filter(|item| item.name.to_string_lossy() == name)
-        .count();
+    let named_items: Vec<(String, trash::TrashItem)> = items
+        .into_iter()
+        .map(|item| (item.name.to_string_lossy().to_string(), item))
+        .collect();
 
-    let matches: Vec<_> = if exact_count == 1 {
-        items.into_iter()
-            .filter(|item| item.name.to_string_lossy() == name)
-            .collect()
-    } else {
-        items.into_iter()
-            .filter(|item| item.name.to_string_lossy().contains(name.as_str()))
-            .collect()
+    let matches = match find_restore_match(named_items, &name) {
+        Ok(m) => m,
+        Err(msg) => return ExecResult::failure(1, format!("kaish-trash restore: {}", msg)),
     };
-
-    if matches.is_empty() {
-        return ExecResult::failure(1, format!("kaish-trash restore: '{}' not found in trash", name));
-    }
-
-    if matches.len() > 1 {
-        let names: Vec<String> = matches.iter().map(|m| m.name.to_string_lossy().to_string()).collect();
-        return ExecResult::failure(1, format!(
-            "kaish-trash restore: multiple matches for '{}': {}. Be more specific.",
-            name,
-            names.join(", ")
-        ));
-    }
 
     match trash_op(move || trash::os_limited::restore_all(matches)).await {
         Ok(()) => ExecResult::with_output(OutputData::text(format!("restored: {}", name))),
@@ -317,6 +343,7 @@ mod tests {
         assert!(result.err.contains("--confirm="));
     }
 
+    #[ignore] // calls trash::os_limited::list on real OS trash — flaky in CI
     #[tokio::test]
     async fn test_empty_with_valid_nonce_on_empty_trash() {
         let mut ctx = make_ctx();
@@ -356,6 +383,7 @@ mod tests {
         assert!(result.err.contains("unknown subcommand"));
     }
 
+    #[ignore] // calls trash::os_limited::list on real OS trash — flaky in CI
     #[tokio::test]
     async fn test_list_empty_trash() {
         let mut ctx = make_ctx();
@@ -367,5 +395,65 @@ mod tests {
         assert!(result.ok());
         // May show "trash is empty" or actual items depending on system state.
         // In CI/test, trash should typically be empty.
+    }
+
+    // ── find_restore_match tests (pure logic, no OS trash dependency) ──
+
+    #[test]
+    fn test_find_restore_match_single_exact() {
+        let items = vec![
+            ("foo.txt".to_string(), 1),
+            ("bar.txt".to_string(), 2),
+        ];
+        let result = find_restore_match(items, "foo.txt");
+        assert_eq!(result.unwrap(), vec![1]);
+    }
+
+    #[test]
+    fn test_find_restore_match_multiple_exact_uses_all() {
+        let items = vec![
+            ("foo.txt".to_string(), 1),
+            ("foo.txt".to_string(), 2),
+            ("bar.txt".to_string(), 3),
+        ];
+        let result = find_restore_match(items, "foo.txt");
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(err.contains("multiple matches"));
+    }
+
+    #[test]
+    fn test_find_restore_match_substring_fallback() {
+        let items = vec![
+            ("my_foo.txt".to_string(), 1),
+            ("bar.txt".to_string(), 2),
+        ];
+        let result = find_restore_match(items, "foo");
+        assert_eq!(result.unwrap(), vec![1]);
+    }
+
+    #[test]
+    fn test_find_restore_match_no_match() {
+        let items: Vec<(String, i32)> = vec![
+            ("foo.txt".to_string(), 1),
+            ("bar.txt".to_string(), 2),
+        ];
+        let result = find_restore_match(items, "baz");
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("not found"));
+    }
+
+    #[test]
+    fn test_find_restore_match_multiple_ambiguous() {
+        let items = vec![
+            ("foo_a.txt".to_string(), 1),
+            ("foo_b.txt".to_string(), 2),
+        ];
+        let result = find_restore_match(items, "foo");
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(err.contains("multiple matches"));
+        assert!(err.contains("foo_a.txt"));
+        assert!(err.contains("foo_b.txt"));
     }
 }
