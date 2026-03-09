@@ -212,7 +212,7 @@ async fn cmd_empty(args: &ToolArgs, ctx: &mut ExecContext) -> ExecResult {
         }
     } else {
         ctx.latch_result("kaish-trash empty", &[], "emptying trash is destructive", |nonce| {
-            format!("kaish-trash empty --confirm={}", nonce)
+            format!("kaish-trash empty --confirm=\"{}\"", nonce)
         })
     }
 }

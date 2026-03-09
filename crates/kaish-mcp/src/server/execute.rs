@@ -178,9 +178,20 @@ pub async fn execute(
                     config = config.with_nonce_store(store);
                 }
 
+                // Apply kernel-level settings from per-request env before creating the kernel.
+                // These must influence KernelConfig, not just shell variables.
+                if let Some(ref env) = params.env {
+                    if env.get("KAISH_LATCH").is_some_and(|v| v == "1") {
+                        config = config.with_latch(true);
+                    }
+                    if env.get("KAISH_TRASH").is_some_and(|v| v == "1") {
+                        config = config.with_trash(true);
+                    }
+                }
+
                 let kernel = Kernel::new(config).context("Failed to create kernel")?;
 
-                // Set environment variables if provided
+                // Set environment variables as shell variables
                 if let Some(env) = params.env {
                     for (key, value) in env {
                         kernel

@@ -207,7 +207,7 @@ impl KaishServerHandler {
     ///
     /// Each call runs in a fresh, isolated environment. Supports restricted/modified
     /// Bourne syntax plus kaish extensions (scatter/gather, typed params, MCP tool calls).
-    #[tool(description = "Execute kaish shell scripts. Each call runs in a fresh kernel (variables, functions, and cwd reset). Confirmation nonces (set -o latch) persist across calls within the MCP session.\n\nSupports: pipes, redirects, here-docs, if/for/while, functions, builtins (grep, jq, git, find, sed, awk, cat, ls, etc.), ${VAR:-default}, $((arithmetic)), scatter/gather parallelism.\n\nNOT supported: process substitution <(), backticks, eval, implicit word splitting.\n\nPaths: Native paths work within $HOME (e.g., /home/user/src/project). /v/ = ephemeral memory. Use 'help' tool for details.")]
+    #[tool(description = "Run shell commands with pre-validation — syntax errors are caught before anything executes.\n\nEach call runs in a fresh kernel (variables reset, cwd reset). Confirmation nonces persist across calls.\n\nKey advantages over bash:\n• No word splitting — $VAR with spaces just works, no quoting bugs\n• No implicit glob expansion — *.txt is literal unless you use glob builtin\n• All builtins support --json for structured output (ls --json, ps --json, etc.)\n• Destructive commands (rm) can be gated behind confirmation nonces (set -o latch)\n\nBuiltins: grep, jq, git, find, sed, awk, cat, ls, tree, stat, diff, and 50+ more.\nAlso supports: pipes, redirects, here-docs, if/for/while, functions, ${VAR:-default}, $((arithmetic)).\n\nNot supported: process substitution <(), backticks, eval.\n\nPaths: Native paths work within $HOME. /v/ = ephemeral memory.\n\nFirst time? Run: help builtins")]
     async fn execute(&self, input: Parameters<ExecuteInput>) -> Result<CallToolResult, McpError> {
         tracing::info!(
             script_len = input.0.script.len(),
@@ -236,10 +236,22 @@ impl KaishServerHandler {
         // Priority hints tell clients what to surface:
         //   stdout: lower priority when structured_content carries the same data
         //   stderr: always relevant — errors, warnings, diagnostics
+        //
+        // On error, stderr comes first (it's the most useful content).
+        // Empty stdout is omitted to avoid "no output" display in clients.
         let mut content = Vec::new();
-        content.push(Content::text(&result.stdout).with_priority(0.3));
-        if !result.stderr.is_empty() {
-            content.push(Content::text(format!("[stderr] {}", result.stderr)).with_priority(1.0));
+        if !result.ok && !result.stderr.is_empty() {
+            content.push(Content::text(&result.stderr).with_priority(1.0));
+        }
+        if !result.stdout.is_empty() {
+            content.push(Content::text(&result.stdout).with_priority(0.3));
+        }
+        if result.ok && !result.stderr.is_empty() {
+            content.push(Content::text(format!("[stderr] {}", result.stderr)).with_priority(0.8));
+        }
+        // Ensure at least one content block (MCP spec requires non-empty content)
+        if content.is_empty() {
+            content.push(Content::text("(no output)").with_priority(0.1));
         }
 
         let structured_content = {
@@ -363,16 +375,16 @@ impl rmcp::ServerHandler for KaishServerHandler {
                 .build(),
             server_info: Implementation::from_build_env(),
             instructions: Some(
-                "kaish (会sh) — Predictable shell for MCP tool orchestration.\n\n\
-                 Bourne-like syntax without the gotchas (no word splitting, no glob expansion, \
-                 no backticks). Strict validation catches errors before execution. \
-                 Builtins run in-process; external commands work via PATH fallback \
-                 (just type `cargo build`, `git status`, etc.).\n\n\
+                "kaish (会sh) — Shell with pre-validation and structured output for MCP tool orchestration.\n\n\
+                 Why use kaish instead of a raw shell:\n\
+                 • Syntax errors are caught before execution — no half-run commands\n\
+                 • No word splitting, no glob expansion surprises — $VAR with spaces just works\n\
+                 • All builtins support --json for structured output (no parsing ls/ps text)\n\
+                 • Destructive operations can require confirmation nonces (set -o latch)\n\
+                 • External commands work via PATH (cargo build, git status, etc.)\n\n\
                  Tools:\n\
-                 • execute — Run shell scripts (pipes, redirects, builtins, loops, functions)\n\
-                 • help — Discover syntax, builtins, VFS mounts, capabilities\n\n\
-                 Resources available via `kaish://vfs/{path}` URIs.\n\n\
-                 Use 'help' tool for details."
+                 • execute — Run commands. First time? Run `help builtins` to see what's available.\n\n\
+                 Resources available via `kaish://vfs/{path}` URIs."
                     .to_string(),
             ),
         }
@@ -817,18 +829,16 @@ mod tests {
         });
         let result = handler.execute(input).await.expect("execute failed");
 
-        // Should have a stderr content block with [stderr] prefix
-        let stderr_block = result.content.iter().find(|c| {
-            if let RawContent::Text(t) = &c.raw {
-                t.text.starts_with("[stderr]")
-            } else {
-                false
-            }
-        });
-        assert!(
-            stderr_block.is_some(),
-            "should have a [stderr] content block"
-        );
+        // On error, stderr is the first content block (no [stderr] prefix)
+        if let RawContent::Text(text) = &result.content[0].raw {
+            assert!(
+                text.text.contains("not found") || text.text.contains("nonexistent"),
+                "first content block on error should be stderr: got {:?}",
+                text.text
+            );
+        } else {
+            panic!("Expected text content");
+        }
     }
 
     #[test]
@@ -952,17 +962,9 @@ mod tests {
         });
         let result = handler.execute(input).await.expect("execute failed");
 
-        // stderr content should have high priority
-        let stderr_block = result.content.iter().find(|c| {
-            if let RawContent::Text(t) = &c.raw {
-                t.text.starts_with("[stderr]")
-            } else {
-                false
-            }
-        }).expect("should have stderr block");
-
+        // On error, stderr is the first content block with high priority
         assert_eq!(
-            stderr_block.annotations.as_ref()
+            result.content[0].annotations.as_ref()
                 .and_then(|a| a.priority),
             Some(1.0),
             "stderr should have priority 1.0"

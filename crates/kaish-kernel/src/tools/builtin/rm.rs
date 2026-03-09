@@ -176,7 +176,7 @@ impl Tool for Rm {
                     }
                 } else {
                     ctx.latch_result("rm", &[&path], "latch enabled", |nonce| {
-                        format!("rm --confirm={} {}", nonce, path)
+                        format!("rm --confirm=\"{}\" {}", nonce, path)
                     })
                 }
             }
@@ -526,8 +526,8 @@ mod tests {
         assert!(err.contains("/file.txt"));
         assert!(err.contains("60 seconds"));
 
-        // Extract nonce: find "--confirm=" then take next 8 chars
-        let confirm_prefix = "rm --confirm=";
+        // Extract nonce: find '--confirm="' then take next 8 chars
+        let confirm_prefix = "rm --confirm=\"";
         let idx = err.find(confirm_prefix).expect("should contain confirm prefix");
         let nonce_start = idx + confirm_prefix.len();
         let nonce: String = err[nonce_start..].chars().take(8).collect();
