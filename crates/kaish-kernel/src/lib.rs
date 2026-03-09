@@ -70,7 +70,7 @@ pub use output_limit::OutputLimitConfig;
 // ```ignore
 // let kernel = Kernel::with_backend(my_backend, config, |vfs| {
 //     vfs.mount_arc("/v/docs", docs_fs);
-// })?;
+// }, |_| {})?;
 // ```
 
 // Git types (for embedders that want direct GitVfs access)
@@ -85,3 +85,6 @@ pub use paths::{home_dir, xdg_cache_home, xdg_config_home, xdg_data_home, xdg_ru
 
 // Tilde expansion utility
 pub use interpreter::expand_tilde;
+
+// Tool registration (for embedders registering custom tools)
+pub use tools::{Tool, ToolRegistry, ExecContext};

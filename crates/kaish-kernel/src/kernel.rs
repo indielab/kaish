@@ -427,7 +427,7 @@ impl Kernel {
         // Mount JobFs for job observability at /v/jobs
         vfs.mount("/v/jobs", JobFs::new(jobs.clone()));
 
-        Self::assemble(config, vfs, jobs, |vfs_ref, tools| {
+        Self::assemble(config, vfs, jobs, |_| {}, |vfs_ref, tools| {
             ExecContext::with_vfs_and_tools(vfs_ref.clone(), tools.clone())
         })
     }
@@ -507,18 +507,24 @@ impl Kernel {
     ///
     /// ```ignore
     /// // Simple: default /v/* mounts only
-    /// let kernel = Kernel::with_backend(backend, config, |_| {})?;
+    /// let kernel = Kernel::with_backend(backend, config, |_| {}, |_| {})?;
     ///
     /// // With custom mounts
     /// let kernel = Kernel::with_backend(backend, config, |vfs| {
     ///     vfs.mount_arc("/v/docs", docs_fs);
     ///     vfs.mount_arc("/v/g", git_fs);
+    /// }, |_| {})?;
+    ///
+    /// // With custom tools
+    /// let kernel = Kernel::with_backend(backend, config, |_| {}, |tools| {
+    ///     tools.register(MyCustomTool::new());
     /// })?;
     /// ```
     pub fn with_backend(
         backend: Arc<dyn KernelBackend>,
         config: KernelConfig,
         configure_vfs: impl FnOnce(&mut VfsRouter),
+        configure_tools: impl FnOnce(&mut ToolRegistry),
     ) -> Result<Self> {
         use crate::backend::VirtualOverlayBackend;
 
@@ -531,7 +537,7 @@ impl Kernel {
         // Let caller add custom mounts (e.g., /v/docs, /v/g)
         configure_vfs(&mut vfs);
 
-        Self::assemble(config, vfs, jobs, |vfs_arc: &Arc<VfsRouter>, _: &Arc<ToolRegistry>| {
+        Self::assemble(config, vfs, jobs, configure_tools, |vfs_arc: &Arc<VfsRouter>, _: &Arc<ToolRegistry>| {
             let overlay: Arc<dyn KernelBackend> =
                 Arc::new(VirtualOverlayBackend::new(backend, vfs_arc.clone()));
             ExecContext::with_backend(overlay)
@@ -547,12 +553,14 @@ impl Kernel {
         config: KernelConfig,
         mut vfs: VfsRouter,
         jobs: Arc<JobManager>,
+        configure_tools: impl FnOnce(&mut ToolRegistry),
         make_ctx: impl FnOnce(&Arc<VfsRouter>, &Arc<ToolRegistry>) -> ExecContext,
     ) -> Result<Self> {
         let KernelConfig { name, cwd, skip_validation, interactive, ignore_config, output_limit, allow_external_commands, latch_enabled, trash_enabled, nonce_store, .. } = config;
 
         let mut tools = ToolRegistry::new();
         register_builtins(&mut tools);
+        configure_tools(&mut tools);
         let tools = Arc::new(tools);
 
         // Mount BuiltinFs so `ls /v/bin` lists builtins

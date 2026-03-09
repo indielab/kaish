@@ -164,7 +164,7 @@ impl Tool for Rm {
             RmAction::Latch => {
                 // Check if a valid confirmation nonce was provided
                 if let Some(nonce) = &confirm {
-                    match ctx.nonce_store.validate(nonce, "rm", &[&path]) {
+                    match ctx.verify_nonce(nonce, "rm", &[&path]) {
                         Ok(()) => {
                             // Nonce valid — proceed with delete
                             match remove_path(&*ctx.backend, Path::new(&resolved), recursive, force).await {
@@ -175,14 +175,9 @@ impl Tool for Rm {
                         Err(e) => ExecResult::failure(1, format!("rm: {}: {}", path, e)),
                     }
                 } else {
-                    // Issue a nonce and return exit code 2
-                    let nonce = ctx.nonce_store.issue("rm", &[&path]);
-                    let ttl = ctx.nonce_store.ttl().as_secs();
-                    let msg = format!(
-                        "rm: {}: confirmation required (latch enabled)\nAuthorized: {}\nTo confirm, run: rm --confirm={} {}\nNonce expires in {} seconds.",
-                        path, path, nonce, path, ttl
-                    );
-                    ExecResult::failure(2, msg)
+                    ctx.latch_result("rm", &[&path], "latch enabled", |nonce| {
+                        format!("rm --confirm={} {}", nonce, path)
+                    })
                 }
             }
             RmAction::Delete => {

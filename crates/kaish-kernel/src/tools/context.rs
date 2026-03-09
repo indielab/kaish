@@ -8,7 +8,7 @@ use crate::ast::Value;
 use crate::backend::{KernelBackend, LocalBackend};
 use crate::dispatch::PipelinePosition;
 use crate::ignore_config::IgnoreConfig;
-use crate::interpreter::Scope;
+use crate::interpreter::{ExecResult, Scope};
 use crate::nonce::NonceStore;
 use crate::output_limit::OutputLimitConfig;
 use crate::scheduler::{JobManager, PipeReader, PipeWriter, StderrStream};
@@ -388,6 +388,38 @@ impl ExecContext {
         use crate::backend_walker_fs::BackendWalkerFs;
         let fs = BackendWalkerFs(self.backend.as_ref());
         self.ignore_config.build_filter(root, &fs).await
+    }
+
+    /// Validate a confirmation nonce against a command and paths.
+    ///
+    /// Thin wrapper on `NonceStore::validate` for ergonomic use from builtins.
+    pub fn verify_nonce(&self, nonce: &str, command: &str, paths: &[&str]) -> Result<(), String> {
+        self.nonce_store.validate(nonce, command, paths)
+    }
+
+    /// Issue a nonce and build the standard exit-2 latch result.
+    ///
+    /// `reason` explains why confirmation is needed (e.g., `"latch enabled"`,
+    /// `"emptying trash is destructive"`). The `confirm_hint` closure receives
+    /// the nonce string so each tool can format its own re-run command.
+    pub fn latch_result(
+        &self,
+        command: &str,
+        paths: &[&str],
+        reason: &str,
+        confirm_hint: impl FnOnce(&str) -> String,
+    ) -> ExecResult {
+        let nonce = self.nonce_store.issue(command, paths);
+        let ttl = self.nonce_store.ttl().as_secs();
+        let authorized = if paths.is_empty() {
+            String::new()
+        } else {
+            format!("\nAuthorized: {}", paths.join(", "))
+        };
+        let hint = confirm_hint(&nonce);
+        ExecResult::failure(2, format!(
+            "{command}: confirmation required ({reason}){authorized}\nTo confirm, run: {hint}\nNonce expires in {ttl} seconds."
+        ))
     }
 
     /// Expand a glob pattern to matching file paths.

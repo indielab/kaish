@@ -98,7 +98,7 @@ async fn main() -> anyhow::Result<()> {
     let backend = Arc::new(KaijutsuBackend::new());
     let config = KernelConfig::default();
 
-    let kernel = Kernel::with_backend(backend, config, |_| {})?;
+    let kernel = Kernel::with_backend(backend, config, |_| {}, |_| {})?;
 
     // Git operations now work on worktrees!
     kernel.execute("cd /mnt/repos/kaish && git status").await?;
@@ -116,6 +116,43 @@ When you run `git status` in kaish:
 3. Your backend returns the real path (e.g., `~/.local/share/kaijutsu/worktrees/kaish`)
 4. kaish opens a `GitVfs` at that real path
 5. Git operations work directly on the worktree
+
+## Custom Tools
+
+Register custom builtins using the `configure_tools` callback on `with_backend()`:
+
+```rust
+use std::sync::Arc;
+use async_trait::async_trait;
+use kaish_kernel::{
+    Kernel, KernelConfig, KernelBackend, Tool, ToolRegistry, ExecContext,
+};
+use kaish_types::{ExecResult, ToolSchema, ToolArgs};
+
+struct MyTool {
+    state: Arc<MyState>,
+}
+
+#[async_trait]
+impl Tool for MyTool {
+    fn name(&self) -> &str { "my-tool" }
+
+    fn schema(&self) -> ToolSchema {
+        ToolSchema::new("my-tool", "Does something useful")
+    }
+
+    async fn execute(&self, args: ToolArgs, ctx: &mut ExecContext) -> ExecResult {
+        ExecResult::success("hello from my-tool")
+    }
+}
+
+let kernel = Kernel::with_backend(backend, config, |_| {}, |tools| {
+    tools.register(MyTool { state: my_state.clone() });
+})?;
+```
+
+Custom tools registered this way are available as shell builtins — they
+appear in `tools --json`, have help text, and participate in tab completion.
 
 ## Direct GitVfs Access
 
@@ -239,6 +276,9 @@ The `kaish_kernel` crate exports these types at the crate root for convenience:
 - `KernelConfig` — Configuration options
 - `KernelBackend` — Trait for custom backends
 - `LocalBackend` — Default filesystem backend
+- `Tool` — Trait for implementing custom builtins
+- `ToolRegistry` — Registry for tool registration
+- `ExecContext` — Execution context passed to tools
 
 ### Git Types
 - `GitVfs` — Git-aware filesystem

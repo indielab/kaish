@@ -10,7 +10,7 @@
 //! ```ignore
 //! let kernel = Kernel::with_backend(my_backend, config, |vfs| {
 //!     vfs.mount_arc("/v/docs", docs_fs);
-//! })?;
+//! }, |_| {})?;
 //! ```
 //!
 //! # Path Routing
