@@ -28,7 +28,7 @@ mod tests {
 
     fn make_handler() -> KaishServerHandler {
         let config = McpServerConfig::default();
-        KaishServerHandler::new(config).expect("handler creation failed")
+        KaishServerHandler::new(config, vec![]).expect("handler creation failed")
     }
 
     #[tokio::test]

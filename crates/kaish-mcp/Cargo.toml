@@ -34,6 +34,7 @@ opentelemetry = { workspace = true }
 opentelemetry_sdk = { workspace = true }
 opentelemetry-otlp = { workspace = true }
 tracing-opentelemetry = { workspace = true }
+clap = { version = "4", features = ["derive"] }
 notify = "8"
 toml = "0.9"
 base64 = "0.22"
@@ -42,6 +43,7 @@ directories = { workspace = true }
 [dev-dependencies]
 rstest = { workspace = true }
 insta = { workspace = true }
+tempfile = { workspace = true }
 
 [lints]
 workspace = true

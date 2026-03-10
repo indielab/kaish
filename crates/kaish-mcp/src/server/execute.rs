@@ -114,11 +114,19 @@ impl ExecuteResult {
 /// kernel's execute method returns a non-Send future (due to internal use of
 /// Pin<Box<dyn Future>>). The rmcp server handler requires Send futures, so we
 /// bridge the gap by running the kernel in a dedicated tokio LocalSet.
+///
+/// If `init_paths` is non-empty, those .kai scripts are read from disk and
+/// prepended to the user script before execution. Files are re-read on each
+/// call so edits take effect without restarting the server.
+///
+/// Future optimization: if init scripts get heavy, snapshot interpreter state
+/// after running init and clone for each execute instead of re-parsing.
 pub async fn execute(
     params: ExecuteParams,
     external_servers: &[ExternalServerConfig],
     default_timeout_ms: u64,
     nonce_store: Option<NonceStore>,
+    init_paths: &[PathBuf],
 ) -> Result<ExecuteResult> {
     let timeout_ms = params.timeout_ms.unwrap_or(default_timeout_ms);
 
@@ -131,6 +139,17 @@ pub async fn execute(
             external_servers.iter().map(|s| &s.name).collect::<Vec<_>>()
         );
     }
+
+    // Read init scripts up front (before spawning the thread) so errors
+    // propagate cleanly to the caller.
+    let mut full_script = String::new();
+    for path in init_paths {
+        let content = std::fs::read_to_string(path)
+            .with_context(|| format!("Failed to read init script: {}", path.display()))?;
+        full_script.push_str(&content);
+        full_script.push('\n');
+    }
+    full_script.push_str(&params.script);
 
     // Run the kernel execution in a dedicated thread with a large stack.
     // The default tokio worker stack (2MB) isn't enough for deep recursion
@@ -200,8 +219,8 @@ pub async fn execute(
                     }
                 }
 
-                // Execute with timeout
-                let result = tokio::time::timeout(timeout, kernel.execute(&params.script)).await;
+                // Execute with timeout (full_script = init scripts + user script)
+                let result = tokio::time::timeout(timeout, kernel.execute(&full_script)).await;
 
                 let exec_result = match result {
                     Ok(Ok(exec_result)) => ExecuteResult::from_exec_result(&exec_result),
@@ -238,7 +257,7 @@ mod tests {
             timeout_ms: None,
         };
 
-        let result = execute(params, &[], 30_000, None).await.expect("execute failed");
+        let result = execute(params, &[], 30_000, None, &[]).await.expect("execute failed");
         assert!(result.ok);
         assert_eq!(result.code, 0);
         // Simple text passes through unchanged (no TOON encoding)
@@ -257,7 +276,7 @@ mod tests {
             timeout_ms: None,
         };
 
-        let result = execute(params, &[], 30_000, None).await.expect("execute failed");
+        let result = execute(params, &[], 30_000, None, &[]).await.expect("execute failed");
         assert!(result.ok);
         // Simple text passes through unchanged (no TOON encoding)
         assert_eq!(result.stdout.trim(), "hello world");
@@ -272,7 +291,7 @@ mod tests {
             timeout_ms: None,
         };
 
-        let result = execute(params, &[], 30_000, None).await.expect("execute failed");
+        let result = execute(params, &[], 30_000, None, &[]).await.expect("execute failed");
         assert!(!result.ok);
         assert_eq!(result.code, 127);
     }
@@ -286,7 +305,7 @@ mod tests {
             timeout_ms: None,
         };
 
-        let result = execute(params, &[], 30_000, None).await.expect("execute failed");
+        let result = execute(params, &[], 30_000, None, &[]).await.expect("execute failed");
         assert!(result.ok);
         assert!(result.data.is_some());
 
@@ -309,7 +328,7 @@ mod tests {
             timeout_ms: Some(10), // Very short timeout
         };
 
-        let result = execute(params, &[], 30_000, None).await.expect("execute failed");
+        let result = execute(params, &[], 30_000, None, &[]).await.expect("execute failed");
         assert!(!result.ok);
         assert_eq!(result.code, 124);
         assert!(result.stderr.contains("timed out"));
@@ -358,7 +377,7 @@ mod tests {
             timeout_ms: None,
         };
 
-        let result = execute(params, &[], 30_000, None).await.expect("execute failed");
+        let result = execute(params, &[], 30_000, None, &[]).await.expect("execute failed");
         assert!(result.ok);
         // Should be valid JSON, not TOON-wrapped JSON
         let parsed: serde_json::Value = serde_json::from_str(&result.stdout).expect("valid JSON");
@@ -375,7 +394,7 @@ mod tests {
             timeout_ms: None,
         };
 
-        let result = execute(params, &[], 30_000, None).await.expect("execute failed");
+        let result = execute(params, &[], 30_000, None, &[]).await.expect("execute failed");
         assert!(result.ok);
         // Canonical text: tab-separated values, one per line
         assert!(result.stdout.contains("/"), "should contain mount paths");
@@ -392,9 +411,122 @@ mod tests {
             timeout_ms: None,
         };
 
-        let result = execute(params, &[], 30_000, None).await.expect("execute failed");
+        let result = execute(params, &[], 30_000, None, &[]).await.expect("execute failed");
         assert!(result.ok);
         // Plain text, not TOON-quoted
         assert_eq!(result.stdout.trim(), "hello world");
+    }
+
+    #[tokio::test]
+    async fn test_execute_with_init_script() {
+        let dir = tempfile::tempdir().unwrap();
+        let init_path = dir.path().join("init.kai");
+        std::fs::write(&init_path, "GREETING=hello\n").unwrap();
+
+        let params = ExecuteParams {
+            script: "echo $GREETING".to_string(),
+            cwd: None,
+            env: None,
+            timeout_ms: None,
+        };
+        let result = execute(params, &[], 30_000, None, &[init_path])
+            .await
+            .expect("execute failed");
+        assert!(result.ok);
+        assert_eq!(result.stdout.trim(), "hello");
+    }
+
+    #[tokio::test]
+    async fn test_execute_multiple_init_scripts() {
+        let dir = tempfile::tempdir().unwrap();
+        let init1 = dir.path().join("a.kai");
+        let init2 = dir.path().join("b.kai");
+        std::fs::write(&init1, "VAR1=foo\n").unwrap();
+        std::fs::write(&init2, "VAR2=bar\n").unwrap();
+
+        let params = ExecuteParams {
+            script: "echo ${VAR1} ${VAR2}".to_string(),
+            cwd: None,
+            env: None,
+            timeout_ms: None,
+        };
+        let result = execute(params, &[], 30_000, None, &[init1, init2])
+            .await
+            .expect("execute failed");
+        assert!(result.ok);
+        assert_eq!(result.stdout.trim(), "foo bar");
+    }
+
+    #[tokio::test]
+    async fn test_execute_missing_init_script_fails() {
+        let params = ExecuteParams {
+            script: "echo hi".to_string(),
+            cwd: None,
+            env: None,
+            timeout_ms: None,
+        };
+        let result = execute(
+            params,
+            &[],
+            30_000,
+            None,
+            &[PathBuf::from("/nonexistent/init.kai")],
+        )
+        .await;
+        assert!(result.is_err());
+        let err_msg = result.unwrap_err().to_string();
+        assert!(
+            err_msg.contains("Failed to read init script"),
+            "error should mention init script: {}",
+            err_msg
+        );
+    }
+
+    #[tokio::test]
+    async fn test_execute_init_script_hot_reload() {
+        let dir = tempfile::tempdir().unwrap();
+        let init_path = dir.path().join("init.kai");
+
+        // First run
+        std::fs::write(&init_path, "GREETING=hello\n").unwrap();
+        let params = ExecuteParams {
+            script: "echo $GREETING".to_string(),
+            cwd: None,
+            env: None,
+            timeout_ms: None,
+        };
+        let result1 = execute(params.clone(), &[], 30_000, None, &[init_path.clone()])
+            .await
+            .expect("execute failed");
+        assert!(result1.ok);
+        assert_eq!(result1.stdout.trim(), "hello");
+
+        // Modify file and run again — should pick up the change
+        std::fs::write(&init_path, "GREETING=howdy\n").unwrap();
+        let result2 = execute(params, &[], 30_000, None, &[init_path])
+            .await
+            .expect("execute failed");
+        assert!(result2.ok);
+        assert_eq!(result2.stdout.trim(), "howdy");
+    }
+
+    #[tokio::test]
+    async fn test_execute_init_script_syntax_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let init_path = dir.path().join("init.kai");
+        // Missing 'fi' — unclosed if statement
+        std::fs::write(&init_path, "if [[ true ]]; then echo hi\n").unwrap();
+
+        let params = ExecuteParams {
+            script: "echo main".to_string(),
+            cwd: None,
+            env: None,
+            timeout_ms: None,
+        };
+        let result = execute(params, &[], 30_000, None, &[init_path])
+            .await
+            .expect("execute should return Ok with structured failure");
+        assert!(!result.ok);
+        assert!(!result.stderr.is_empty());
     }
 }

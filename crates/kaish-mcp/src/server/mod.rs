@@ -19,7 +19,7 @@
 //! #[tokio::main]
 //! async fn main() -> anyhow::Result<()> {
 //!     let config = McpServerConfig::load()?;
-//!     let handler = KaishServerHandler::new(config)?;
+//!     let handler = KaishServerHandler::new(config, vec![])?;
 //!
 //!     let transport = stdio();
 //!     handler.serve(transport).await?;

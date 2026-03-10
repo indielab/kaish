@@ -18,9 +18,13 @@
 //!
 //! ```bash
 //! kaish-mcp
+//! kaish-mcp --init ~/.config/kaish/safety.kai
 //! ```
 
+use std::path::PathBuf;
+
 use anyhow::{Context, Result};
+use clap::Parser;
 use opentelemetry::trace::TracerProvider;
 use opentelemetry::KeyValue;
 use opentelemetry_sdk::Resource;
@@ -30,8 +34,19 @@ use tracing_subscriber::{fmt, prelude::*, EnvFilter};
 
 use kaish_mcp::server::{KaishServerHandler, McpServerConfig};
 
+#[derive(Parser)]
+#[command(name = "kaish-mcp", version, about = "kaish MCP server (stdio)")]
+struct Args {
+    /// Init script(s) to load before each execute() call.
+    /// Can be specified multiple times; files are loaded in order.
+    #[arg(long, value_name = "PATH")]
+    init: Vec<String>,
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
+    let args = Args::parse();
+
     // If OTEL_EXPORTER_OTLP_ENDPOINT is set, export spans via OTLP.
     // Otherwise, just use the fmt layer (no-op OTel).
     let provider = if std::env::var("OTEL_EXPORTER_OTLP_ENDPOINT").is_ok() {
@@ -67,6 +82,31 @@ async fn main() -> Result<()> {
 
     tracing::info!("Starting kaish MCP server");
 
+    // Resolve init paths: expand ~ to $HOME, validate existence
+    let home = std::env::var("HOME").unwrap_or_default();
+    let init_paths: Vec<PathBuf> = args
+        .init
+        .iter()
+        .map(|p| {
+            if let Some(rest) = p.strip_prefix("~/") {
+                PathBuf::from(format!("{}/{}", home, rest))
+            } else {
+                PathBuf::from(p)
+            }
+        })
+        .collect();
+
+    for path in &init_paths {
+        anyhow::ensure!(path.exists(), "Init script not found: {}", path.display());
+    }
+
+    if !init_paths.is_empty() {
+        tracing::info!(
+            init_scripts = ?init_paths.iter().map(|p| p.display().to_string()).collect::<Vec<_>>(),
+            "Loading init scripts before each execute"
+        );
+    }
+
     // Load configuration
     let config = McpServerConfig::load().context("Failed to load configuration")?;
 
@@ -77,7 +117,8 @@ async fn main() -> Result<()> {
         config.mcp_servers.len()
     );
 
-    let handler = KaishServerHandler::new(config).context("Failed to create server handler")?;
+    let handler = KaishServerHandler::new(config, init_paths)
+        .context("Failed to create server handler")?;
 
     tracing::info!("Serving on stdio");
 

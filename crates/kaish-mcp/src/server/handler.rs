@@ -62,6 +62,9 @@ pub struct KaishServerHandler {
     tool_schemas: Vec<ToolSchema>,
     /// Shared nonce store so confirmation latch nonces survive across execute() calls.
     nonce_store: NonceStore,
+    /// Paths to init scripts loaded before each execute() call.
+    /// Re-read from disk on each call so edits take effect without restart.
+    init_paths: Vec<PathBuf>,
 }
 
 /// Map LoggingLevel to a numeric severity for comparison.
@@ -81,7 +84,10 @@ fn severity(level: LoggingLevel) -> u8 {
 
 impl KaishServerHandler {
     /// Create a new handler with the given configuration.
-    pub fn new(config: McpServerConfig) -> anyhow::Result<Self> {
+    ///
+    /// `init_paths` are .kai scripts loaded before each `execute()` call (like ~/.bashrc).
+    /// Paths are validated at startup; files are re-read on each call.
+    pub fn new(config: McpServerConfig, init_paths: Vec<PathBuf>) -> anyhow::Result<Self> {
         // Create a VFS for resource access in sandboxed mode.
         // Paths appear native (e.g., /home/user/...) but access is restricted.
         let mut vfs = VfsRouter::new();
@@ -127,6 +133,7 @@ impl KaishServerHandler {
             log_level: Arc::new(RwLock::new(None)),
             tool_schemas,
             nonce_store: NonceStore::new(),
+            init_paths,
         })
     }
 
@@ -228,6 +235,7 @@ impl KaishServerHandler {
                 &self.config.mcp_servers,
                 self.config.default_timeout_ms,
                 Some(self.nonce_store.clone()),
+                &self.init_paths,
             )
                 .await
                 .map_err(|e| McpError::internal_error(e.to_string(), None))?;
@@ -383,7 +391,8 @@ impl rmcp::ServerHandler for KaishServerHandler {
                  • Destructive operations can require confirmation nonces (set -o latch)\n\
                  • External commands work via PATH (cargo build, git status, etc.)\n\n\
                  Tools:\n\
-                 • execute — Run commands. First time? Run `help builtins` to see what's available.\n\n\
+                 • execute — Run commands. First time? Run `help builtins` to see what's available.\n\
+                 • --init <path> — load a .kai script before each command (set defaults, aliases, etc.). Repeatable.\n\n\
                  Resources available via `kaish://vfs/{path}` URIs."
                     .to_string(),
             ),
@@ -718,7 +727,7 @@ mod tests {
     #[tokio::test]
     async fn test_handler_creation() {
         let config = McpServerConfig::default();
-        let handler = KaishServerHandler::new(config).expect("handler creation failed");
+        let handler = KaishServerHandler::new(config, vec![]).expect("handler creation failed");
         assert_eq!(handler.config.name, "kaish");
     }
 
@@ -727,7 +736,7 @@ mod tests {
         use rmcp::ServerHandler;
 
         let config = McpServerConfig::default();
-        let handler = KaishServerHandler::new(config).expect("handler creation failed");
+        let handler = KaishServerHandler::new(config, vec![]).expect("handler creation failed");
         let info = handler.get_info();
         assert!(info.instructions.is_some());
         let instructions = info.instructions.unwrap();
@@ -739,7 +748,7 @@ mod tests {
         use rmcp::ServerHandler;
 
         let config = McpServerConfig::default();
-        let handler = KaishServerHandler::new(config).expect("handler creation failed");
+        let handler = KaishServerHandler::new(config, vec![]).expect("handler creation failed");
         let info = handler.get_info();
 
         // Verify all expected capabilities are enabled
@@ -756,7 +765,7 @@ mod tests {
     #[tokio::test]
     async fn test_execute_output_format() {
         let config = McpServerConfig::default();
-        let handler = KaishServerHandler::new(config).expect("handler creation failed");
+        let handler = KaishServerHandler::new(config, vec![]).expect("handler creation failed");
 
         let input = Parameters(ExecuteInput {
             script: "echo hello".to_string(),
@@ -794,7 +803,7 @@ mod tests {
     #[tokio::test]
     async fn test_execute_error_format() {
         let config = McpServerConfig::default();
-        let handler = KaishServerHandler::new(config).expect("handler creation failed");
+        let handler = KaishServerHandler::new(config, vec![]).expect("handler creation failed");
 
         let input = Parameters(ExecuteInput {
             script: "nonexistent_command_xyz".to_string(),
@@ -818,7 +827,7 @@ mod tests {
     #[tokio::test]
     async fn test_execute_stderr_content() {
         let config = McpServerConfig::default();
-        let handler = KaishServerHandler::new(config).expect("handler creation failed");
+        let handler = KaishServerHandler::new(config, vec![]).expect("handler creation failed");
 
         // A command that fails produces stderr
         let input = Parameters(ExecuteInput {
@@ -855,7 +864,7 @@ mod tests {
     #[tokio::test]
     async fn test_set_level_stores_level() {
         let config = McpServerConfig::default();
-        let handler = KaishServerHandler::new(config).expect("handler creation failed");
+        let handler = KaishServerHandler::new(config, vec![]).expect("handler creation failed");
 
         // Initially no level set
         assert!(handler.log_level.read().await.is_none());
@@ -872,7 +881,7 @@ mod tests {
     #[tokio::test]
     async fn test_log_to_client_without_peer() {
         let config = McpServerConfig::default();
-        let handler = KaishServerHandler::new(config).expect("handler creation failed");
+        let handler = KaishServerHandler::new(config, vec![]).expect("handler creation failed");
 
         // Enable logging at Debug level
         *handler.log_level.write().await = Some(LoggingLevel::Debug);
@@ -886,7 +895,7 @@ mod tests {
     #[tokio::test]
     async fn test_execute_tool_annotations_and_schema() {
         let config = McpServerConfig::default();
-        let handler = KaishServerHandler::new(config).expect("handler creation failed");
+        let handler = KaishServerHandler::new(config, vec![]).expect("handler creation failed");
 
         // Simulate what list_tools() does: get tools from router, then annotate
         let mut tools = handler.tool_router.list_all();
@@ -930,7 +939,7 @@ mod tests {
     #[tokio::test]
     async fn test_execute_stdout_priority() {
         let config = McpServerConfig::default();
-        let handler = KaishServerHandler::new(config).expect("handler creation failed");
+        let handler = KaishServerHandler::new(config, vec![]).expect("handler creation failed");
 
         let input = Parameters(ExecuteInput {
             script: "echo hello".to_string(),
@@ -952,7 +961,7 @@ mod tests {
     #[tokio::test]
     async fn test_execute_stderr_priority() {
         let config = McpServerConfig::default();
-        let handler = KaishServerHandler::new(config).expect("handler creation failed");
+        let handler = KaishServerHandler::new(config, vec![]).expect("handler creation failed");
 
         let input = Parameters(ExecuteInput {
             script: "nonexistent_command_xyz".to_string(),

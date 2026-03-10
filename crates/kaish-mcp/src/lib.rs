@@ -43,7 +43,7 @@
 //! use rmcp::service::ServiceExt;
 //!
 //! let config = McpServerConfig::load()?;
-//! let handler = KaishServerHandler::new(config)?;
+//! let handler = KaishServerHandler::new(config, vec![])?;
 //! handler.serve(stdio()).await?;
 //! ```
 
