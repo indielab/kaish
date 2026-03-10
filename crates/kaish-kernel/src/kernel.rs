@@ -1035,8 +1035,7 @@ impl Kernel {
             Stmt::Case(case_stmt) => {
                 // Evaluate the expression to match against
                 let match_value = {
-                    let mut scope = self.scope.write().await;
-                    let value = eval_expr(&case_stmt.expr, &mut scope)?;
+                    let value = self.eval_expr_async(&case_stmt.expr).await?;
                     value_to_string(&value)
                 };
 
@@ -1079,8 +1078,7 @@ impl Kernel {
                 // return [N] - N becomes the exit code, NOT stdout
                 // Shell semantics: return sets exit code, doesn't produce output
                 let result = if let Some(e) = expr {
-                    let mut scope = self.scope.write().await;
-                    let val = eval_expr(e, &mut scope)?;
+                    let val = self.eval_expr_async(e).await?;
                     // Convert value to exit code
                     let code = match val {
                         Value::Int(n) => n,
@@ -1103,8 +1101,7 @@ impl Kernel {
             }
             Stmt::Exit(expr) => {
                 let code = if let Some(e) = expr {
-                    let mut scope = self.scope.write().await;
-                    let val = eval_expr(e, &mut scope)?;
+                    let val = self.eval_expr_async(e).await?;
                     match val {
                         Value::Int(n) => n,
                         _ => 0,
@@ -1814,9 +1811,16 @@ impl Kernel {
                         self.eval_expr_async(right).await
                     }
                     _ => {
-                        // For other operators, fall back to sync eval
+                        // Evaluate operands async (handles $(cmd)), then compare sync
+                        let left_val = self.eval_expr_async(left).await?;
+                        let right_val = self.eval_expr_async(right).await?;
+                        let resolved = Expr::BinaryOp {
+                            left: Box::new(Expr::Literal(left_val)),
+                            op: *op,
+                            right: Box::new(Expr::Literal(right_val)),
+                        };
                         let mut scope = self.scope.write().await;
-                        eval_expr(expr, &mut scope).map_err(|e| anyhow::anyhow!("{}", e))
+                        eval_expr(&resolved, &mut scope).map_err(|e| anyhow::anyhow!("{}", e))
                     }
                 }
             }
@@ -1973,9 +1977,16 @@ impl Kernel {
                         crate::ast::StringTestOp::IsNonEmpty => !s.is_empty(),
                     })
                 }
-                TestExpr::Comparison { .. } => {
-                    // Delegate to sync evaluator for comparisons (no async needed)
-                    let expr = Expr::Test(Box::new(test_expr.clone()));
+                TestExpr::Comparison { left, op, right } => {
+                    // Evaluate operands async (handles $(cmd)), then compare sync
+                    let left_val = self.eval_expr_async(left).await?;
+                    let right_val = self.eval_expr_async(right).await?;
+                    let resolved = TestExpr::Comparison {
+                        left: Box::new(Expr::Literal(left_val)),
+                        op: *op,
+                        right: Box::new(Expr::Literal(right_val)),
+                    };
+                    let expr = Expr::Test(Box::new(resolved));
                     let mut scope = self.scope.write().await;
                     let value = eval_expr(&expr, &mut scope)
                         .map_err(|e| anyhow::anyhow!("{}", e))?;

@@ -698,6 +698,63 @@ async fn test_var_in_default_with_cmd_subst() {
 }
 
 // ============================================================================
+// Bug 16: Command substitution in [[ ]] comparisons, case, return, exit
+//
+// $(cmd) inside [[ $(cmd) == val ]], case $(cmd), return $(cmd), exit $(cmd)
+// used sync eval_expr with NoOpExecutor — any $(cmd) failed.
+// Fixed: these paths now use eval_expr_async / eval_test_async.
+// ============================================================================
+
+#[tokio::test]
+async fn test_cmd_subst_in_test_comparison() {
+    let kernel = Kernel::transient().unwrap();
+    let result = kernel.execute(r#"[[ $(echo hello) == "hello" ]] && echo "match" || echo "nope""#).await.unwrap();
+    assert_eq!(result.out.trim(), "match", "$(cmd) in [[ == ]] should work: {}", result.out);
+}
+
+#[tokio::test]
+async fn test_cmd_subst_in_test_not_equal() {
+    let kernel = Kernel::transient().unwrap();
+    let result = kernel.execute(r#"[[ $(echo hello) != "world" ]] && echo "diff" || echo "same""#).await.unwrap();
+    assert_eq!(result.out.trim(), "diff", "$(cmd) in [[ != ]] should work: {}", result.out);
+}
+
+#[tokio::test]
+async fn test_cmd_subst_in_case() {
+    let kernel = Kernel::transient().unwrap();
+    let result = kernel.execute(r#"
+case $(echo hello) in
+    hello) echo "matched" ;;
+    *) echo "nope" ;;
+esac
+"#).await.unwrap();
+    assert!(result.out.contains("matched"), "$(cmd) in case should work: {}", result.out);
+}
+
+#[tokio::test]
+async fn test_cmd_subst_in_return() {
+    let kernel = Kernel::transient().unwrap();
+    let result = kernel.execute(r#"
+f() { return $(echo 42); }
+f
+echo $?
+"#).await.unwrap();
+    assert!(result.out.contains("42"), "return $(cmd) should work: {}", result.out);
+}
+
+#[tokio::test]
+async fn test_cmd_subst_in_exit_code() {
+    let kernel = Kernel::transient().unwrap();
+    // exit terminates the kernel, so check via subshell-like behavior
+    let result = kernel.execute(r#"
+f() { return $(echo 7); }
+f
+echo "code: $?"
+"#).await.unwrap();
+    assert!(result.out.contains("code: 7"), "$(cmd) in return should set exit code: {}", result.out);
+}
+
+// ============================================================================
 // COMPOUND TEST EXPRESSIONS: [[ A && B ]], [[ A || B ]], [[ ! A ]]
 // ============================================================================
 
