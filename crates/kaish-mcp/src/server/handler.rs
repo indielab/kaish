@@ -265,18 +265,28 @@ impl KaishServerHandler {
         let structured_content = {
             let mut structured = serde_json::to_value(&result)
                 .map_err(|e| McpError::internal_error(e.to_string(), None))?;
-            // When `data` is the structured form of exactly what's in `stdout`,
-            // suppress `stdout` to avoid redundant escaped-string noise.
-            // Compare trimmed stdout against compact JSON of data — they match
-            // for --json results and single-value JSON, but NOT for accumulated
-            // output (e.g., for-loop "1\n2\n3\n" ≠ data "3").
-            if let Some(ref data) = result.data {
-                if let Ok(data_json) = serde_json::to_string(data) {
-                    if result.stdout.trim() == data_json {
-                        if let Some(obj) = structured.as_object_mut() {
-                            obj.remove("stdout");
-                        }
-                    }
+            // Suppress `stdout` from structured_content when a structured
+            // representation already carries the same information:
+            //
+            // 1. `output` with headers/multiple nodes → tabular/list data
+            //    (builtins like wc, ls, ps). stdout is just text_out() of it.
+            //    Simple text output (echo) keeps stdout for easy client access.
+            // 2. `data` matches stdout → --json results or auto-detected JSON
+            //    where data is the parsed form of exactly what's in stdout.
+            //
+            // In both cases, stdout in structured_content is redundant noise.
+            // The text is still available in the Content blocks for display.
+            let output_is_structured = result.output.as_ref().is_some_and(|o| {
+                o.headers.is_some() || o.root.len() > 1 || !o.is_simple_text()
+            });
+            let suppress_stdout = output_is_structured
+                || result.data.as_ref().is_some_and(|data| {
+                    serde_json::to_string(data)
+                        .is_ok_and(|data_json| result.stdout.trim() == data_json)
+                });
+            if suppress_stdout {
+                if let Some(obj) = structured.as_object_mut() {
+                    obj.remove("stdout");
                 }
             }
             Some(structured)
