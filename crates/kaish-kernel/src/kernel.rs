@@ -1644,6 +1644,24 @@ impl Kernel {
                                 tool_args.flags.insert(flag_name.to_string());
                             }
                         }
+                    } else if let Some(&(canonical, typ)) = param_lookup.get(name.as_str()) {
+                        // Multi-char short flag matches a schema param (POSIX style: -name value)
+                        if is_bool_type(typ) {
+                            tool_args.flags.insert(canonical.to_string());
+                        } else {
+                            let next_pos = positional_indices.iter()
+                                .find(|idx| **idx > i && !consumed.contains(idx));
+                            if let Some(&pos_idx) = next_pos {
+                                if let Arg::Positional(expr) = &args[pos_idx] {
+                                    let value = self.eval_expr_async(expr).await?;
+                                    let value = apply_tilde_expansion(value);
+                                    tool_args.named.insert(canonical.to_string(), value);
+                                    consumed.insert(pos_idx);
+                                }
+                            } else {
+                                tool_args.flags.insert(name.clone());
+                            }
+                        }
                     } else {
                         // Multi-char combined flags like -la: always boolean
                         for c in name.chars() {

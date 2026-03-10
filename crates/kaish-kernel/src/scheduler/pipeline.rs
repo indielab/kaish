@@ -609,6 +609,25 @@ pub fn build_tool_args(args: &[Arg], ctx: &ExecContext, schema: Option<&ToolSche
                             tool_args.flags.insert(flag_name.to_string());
                         }
                     }
+                } else if let Some(&(canonical, typ)) = param_lookup.get(name.as_str()) {
+                    // Multi-char short flag matches a schema param (POSIX style: -name value)
+                    if is_bool_type(typ) {
+                        tool_args.flags.insert(canonical.to_string());
+                    } else {
+                        let next_positional = positional_indices
+                            .iter()
+                            .find(|(idx, _)| *idx > i && !consumed_positionals.contains(idx));
+                        if let Some((pos_idx, expr)) = next_positional {
+                            if let Some(value) = eval_simple_expr(expr, ctx) {
+                                tool_args.named.insert(canonical.to_string(), value);
+                                consumed_positionals.insert(*pos_idx);
+                            } else {
+                                tool_args.flags.insert(name.clone());
+                            }
+                        } else {
+                            tool_args.flags.insert(name.clone());
+                        }
+                    }
                 } else {
                     // Multi-char combined flags like -la: always boolean
                     for c in name.chars() {

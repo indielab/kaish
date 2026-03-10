@@ -1025,6 +1025,96 @@ async fn test_pipeline_large_output_no_deadlock() {
     assert_eq!(exec.out.trim(), "20000");
 }
 
+// ============================================================================
+// Bug: find -name and -type flags ignored (parsed as flags, not named args)
+//
+// `find /path -name "*.rs" -type f` returns unfiltered results because the
+// parser treats `-name` as a flag token, not as `name="*.rs"`. The find
+// builtin's unit tests pass because they inject ToolArgs directly, bypassing
+// the parser. This test goes through the full kernel.execute() path.
+// ============================================================================
+
+#[tokio::test]
+async fn test_find_name_filter_through_parser() {
+    let kernel = Kernel::transient().unwrap();
+
+    // Set up test files in /v/ (ephemeral memory VFS)
+    kernel
+        .execute("mkdir -p /v/proj/src; mkdir -p /v/proj/docs")
+        .await
+        .unwrap();
+    kernel
+        .execute(
+            "write /v/proj/src/main.rs 'fn main() {}'; \
+             write /v/proj/src/lib.rs 'pub mod lib;'; \
+             write /v/proj/docs/README.md '# Docs'; \
+             write /v/proj/Cargo.toml '[package]'",
+        )
+        .await
+        .unwrap();
+
+    // find with -name should only return .rs files
+    let result = kernel
+        .execute("find /v/proj -name '*.rs'")
+        .await
+        .unwrap();
+    assert!(result.ok(), "find should succeed: {}", result.err);
+
+    let out = result.text_out();
+    assert!(out.contains("main.rs"), "should find main.rs: {out}");
+    assert!(out.contains("lib.rs"), "should find lib.rs: {out}");
+    assert!(
+        !out.contains("README.md"),
+        "-name '*.rs' should exclude README.md: {out}"
+    );
+    assert!(
+        !out.contains("Cargo.toml"),
+        "-name '*.rs' should exclude Cargo.toml: {out}"
+    );
+}
+
+#[tokio::test]
+async fn test_find_type_filter_through_parser() {
+    let kernel = Kernel::transient().unwrap();
+
+    kernel
+        .execute("mkdir -p /v/proj/src; write /v/proj/src/main.rs 'fn main() {}'")
+        .await
+        .unwrap();
+
+    // -type f: files only, no directories
+    let files_result = kernel
+        .execute("find /v/proj -type f")
+        .await
+        .unwrap();
+    assert!(files_result.ok(), "find -type f should succeed: {}", files_result.err);
+    let files_out = files_result.text_out();
+    assert!(
+        files_out.contains("main.rs"),
+        "-type f should include files: {files_out}"
+    );
+    assert!(
+        !files_out.contains("/src\n"),
+        "-type f should exclude directories: {files_out}"
+    );
+
+    // -type d: directories only, no files
+    let dirs_result = kernel
+        .execute("find /v/proj -type d")
+        .await
+        .unwrap();
+    assert!(dirs_result.ok(), "find -type d should succeed: {}", dirs_result.err);
+    let dirs_out = dirs_result.text_out();
+    assert!(
+        dirs_out.contains("src"),
+        "-type d should include directories: {dirs_out}"
+    );
+    assert!(
+        !dirs_out.contains("main.rs"),
+        "-type d should exclude files: {dirs_out}"
+    );
+}
+
 #[tokio::test]
 async fn test_pipeline_three_stage_large_output_no_deadlock() {
     let kernel = Kernel::transient().unwrap();
