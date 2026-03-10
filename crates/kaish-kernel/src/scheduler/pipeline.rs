@@ -412,11 +412,17 @@ impl PipelineRunner {
             let task_dispatcher = stage_dispatcher.clone();
 
             let handle: tokio::task::JoinHandle<(ExecResult, ExecContext)> = tokio::spawn(async move {
-                // Receive structured data from previous stage via oneshot
-                if let Some(rx) = data_receiver {
-                    if let Ok(data) = rx.await {
+                // Receive structured data from previous stage (non-blocking).
+                // Using try_recv avoids a deadlock: streaming builtins (e.g. grep)
+                // write to their pipe_stdout during dispatch. If we blocked here
+                // waiting for the upstream's oneshot (sent after dispatch), the
+                // downstream couldn't start draining the pipe → circular wait.
+                // Builtins that use stdin_data (e.g. jq) fall back to pipe text.
+                if let Some(mut rx) = data_receiver {
+                    if let Ok(data) = rx.try_recv() {
                         stage_ctx.stdin_data = data;
                     }
+                    // Err → not ready yet; builtin will read from pipe text
                 }
 
                 // Execute the command
@@ -440,7 +446,17 @@ impl PipelineRunner {
                     }
                 }
 
-                // Write output to pipe for next stage (if not last)
+                // Send structured data to next stage via oneshot BEFORE pipe write.
+                // The pipe write may block on backpressure (>64KB output), and the
+                // consumer awaits this oneshot before starting execution. Sending
+                // first prevents a circular wait (producer blocked on pipe write,
+                // consumer blocked on oneshot).
+                if let Some(tx) = data_sender {
+                    let _ = tx.send(result.data.clone());
+                }
+
+                // Write output to pipe for next stage (if not last).
+                // Consumer is now unblocked and can drain concurrently.
                 if let Some(mut pipe_out) = stage_ctx.pipe_stdout.take() {
                     let text = result.text_out();
                     if !text.is_empty() {
@@ -449,12 +465,6 @@ impl PipelineRunner {
                         let _ = pipe_out.shutdown().await;
                     }
                     // Drop pipe_out signals EOF to next stage's reader
-                }
-
-                // Send structured data to next stage via oneshot
-                if let Some(tx) = data_sender {
-                    // Ignore error — receiver may have been dropped (early termination)
-                    let _ = tx.send(result.data.clone());
                 }
 
                 (result, stage_ctx)

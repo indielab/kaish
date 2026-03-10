@@ -1000,3 +1000,41 @@ async fn test_colon_in_variable_assignment() {
     assert!(result.ok(), "Should succeed: err={}", result.err);
     assert_eq!(result.out.trim(), "/usr/bin:/usr/local/bin");
 }
+
+// ============================================================================
+// Bug: Pipeline deadlock when output exceeds 64KB pipe buffer
+//
+// Stage N writes to pipe (blocks when full), then sends oneshot.
+// Stage N+1 awaits oneshot before reading pipe. When output > 64KB,
+// neither can progress. Fix: send oneshot before pipe write.
+// ============================================================================
+
+#[tokio::test]
+async fn test_pipeline_large_output_no_deadlock() {
+    let kernel = Kernel::transient().unwrap();
+    // seq 1 20000 produces ~100KB, well above the 64KB pipe buffer.
+    // This deadlocks without the fix.
+    let result = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        kernel.execute("seq 1 20000 | wc -l"),
+    )
+    .await;
+    assert!(result.is_ok(), "pipeline deadlocked on >64KB output");
+    let exec = result.unwrap().unwrap();
+    assert!(exec.ok(), "pipeline should succeed: err={}", exec.err);
+    assert_eq!(exec.out.trim(), "20000");
+}
+
+#[tokio::test]
+async fn test_pipeline_three_stage_large_output_no_deadlock() {
+    let kernel = Kernel::transient().unwrap();
+    // Three-stage pipeline: each pipe boundary is a potential deadlock point.
+    let result = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        kernel.execute("seq 1 20000 | grep '1' | wc -l"),
+    )
+    .await;
+    assert!(result.is_ok(), "3-stage pipeline deadlocked");
+    let exec = result.unwrap().unwrap();
+    assert!(exec.ok(), "pipeline should succeed: err={}", exec.err);
+}
