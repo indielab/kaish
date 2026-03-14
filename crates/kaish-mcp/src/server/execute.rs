@@ -66,6 +66,10 @@ pub struct ExecuteResult {
     /// serialization happens at the MCP wire boundary.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub output: Option<OutputData>,
+
+    /// MIME content type hint. When set, MCP handler uses this for response MIME type.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub content_type: Option<String>,
 }
 
 impl ExecuteResult {
@@ -79,6 +83,7 @@ impl ExecuteResult {
             data,
             ok: true,
             output: None,
+            content_type: None,
         }
     }
 
@@ -91,6 +96,7 @@ impl ExecuteResult {
             data: None,
             ok: false,
             output: None,
+            content_type: None,
         }
     }
 
@@ -105,6 +111,7 @@ impl ExecuteResult {
             data,
             ok: result.ok(),
             output: result.output.clone(),
+            content_type: result.content_type.clone(),
         }
     }
 }

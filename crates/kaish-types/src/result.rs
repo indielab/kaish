@@ -33,6 +33,10 @@ pub struct ExecResult {
     /// Present only when `did_spill` is true and `code` was changed.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub original_code: Option<i64>,
+    /// MIME content type hint (e.g., "text/markdown", "image/svg+xml").
+    /// When set, downstream consumers can use this instead of sniffing content.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub content_type: Option<String>,
 }
 
 impl ExecResult {
@@ -48,6 +52,7 @@ impl ExecResult {
             output: None,
             did_spill: false,
             original_code: None,
+            content_type: None,
         }
     }
 
@@ -72,6 +77,7 @@ impl ExecResult {
             output: Some(output),
             did_spill: false,
             original_code: None,
+            content_type: None,
         }
     }
 
@@ -86,6 +92,7 @@ impl ExecResult {
             output: None,
             did_spill: false,
             original_code: None,
+            content_type: None,
         }
     }
 
@@ -106,6 +113,7 @@ impl ExecResult {
             output: None,
             did_spill: false,
             original_code: None,
+            content_type: None,
         }
     }
 
@@ -119,6 +127,7 @@ impl ExecResult {
             output: None,
             did_spill: false,
             original_code: None,
+            content_type: None,
         }
     }
 
@@ -145,6 +154,7 @@ impl ExecResult {
             output: None,
             did_spill: false,
             original_code: None,
+            content_type: None,
         }
     }
 
@@ -163,6 +173,7 @@ impl ExecResult {
             output: Some(output),
             did_spill: false,
             original_code: None,
+            content_type: None,
         }
     }
 
@@ -196,6 +207,12 @@ impl ExecResult {
             "data" => self.data.clone(),
             _ => None,
         }
+    }
+
+    /// Set content type hint, returning self for chaining.
+    pub fn with_content_type(mut self, ct: impl Into<String>) -> Self {
+        self.content_type = Some(ct.into());
+        self
     }
 
     /// Try to parse a string as JSON, returning a Value if successful.

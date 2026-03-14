@@ -252,7 +252,17 @@ impl KaishServerHandler {
             content.push(Content::text(&result.stderr).with_priority(1.0));
         }
         if !result.stdout.is_empty() {
-            content.push(Content::text(&result.stdout).with_priority(0.3));
+            if let Some(ref ct) = result.content_type {
+                // Use embedded resource with MIME type so clients can render appropriately
+                content.push(Content::resource(ResourceContents::TextResourceContents {
+                    uri: "kaish://output".into(),
+                    mime_type: Some(ct.clone()),
+                    text: result.stdout.clone(),
+                    meta: None,
+                }).with_priority(0.3));
+            } else {
+                content.push(Content::text(&result.stdout).with_priority(0.3));
+            }
         }
         if result.ok && !result.stderr.is_empty() {
             content.push(Content::text(format!("[stderr] {}", result.stderr)).with_priority(0.8));

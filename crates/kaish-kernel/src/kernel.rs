@@ -1123,6 +1123,7 @@ impl Kernel {
                         output: None,
                         did_spill: false,
                         original_code: None,
+                        content_type: None,
                     }
                 } else {
                     ExecResult::success("")
@@ -2333,6 +2334,7 @@ impl Kernel {
                 output: None,
                 did_spill: false,
                 original_code: None,
+                content_type: None,
             });
         }
 
@@ -2344,6 +2346,7 @@ impl Kernel {
             output: None,
             did_spill: false,
             original_code: None,
+            content_type: None,
         })
     }
 
