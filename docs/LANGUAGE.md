@@ -482,38 +482,6 @@ cat big_list.txt \
     | gather progress=true
 ```
 
-## MCP Tool Integration
-
-External MCP servers register tools that appear as shell commands with schema-driven CLI translation:
-
-```bash
-# MCP tools use server:tool naming convention
-exa:web_search --query "kaish shell language"
-filesystem:read_file --path /etc/hosts
-
-# Schema-aware: --flag consumes next arg as value (non-bool params)
-github:create_issue --repo tobert/kaish --title "Bug report" --body "Details"
-
-# Or use named args directly
-exa:web_search query="rust async" limit=5
-
-# Boolean flags work too
-myserver:deploy --verbose --dry-run
-
-# Pipe MCP tool output like any command
-exa:web_search --query "rust" | jq '.results[0].url'
-```
-
-**Argument translation (schema-driven):**
-
-| Shell syntax | MCP parameter | Notes |
-|--------------|---------------|-------|
-| `--query "foo"` | `{"query": "foo"}` | Non-bool schema type → consumes next positional |
-| `--limit 10` | `{"limit": 10}` | Type preserved from schema |
-| `--verbose` | `{"verbose": true}` | Bool schema type → boolean flag |
-| `key="value"` | `{"key": "value"}` | Named arg syntax always works |
-| `count=42` | `{"count": 42}` | Type inference from value |
-
 ## Virtual Filesystem
 
 VFS mounts provide unified resource access:

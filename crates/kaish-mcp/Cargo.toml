@@ -1,6 +1,6 @@
 [package]
 name = "kaish-mcp"
-description = "MCP client and server integration for kaish"
+description = "MCP server for kaish"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

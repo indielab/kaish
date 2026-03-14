@@ -40,8 +40,6 @@ if [[ -n $NAME ]]; then echo "Hello, ${NAME}!"; fi
 # Parallel execution with scatter/gather
 seq 1 100 | scatter as=N limit=4 | process $N | gather
 
-# MCP tool integration
-exa:web_search query="rust async" | jq ".title"
 ```
 
 ## Key Differences from Bash

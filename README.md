@@ -5,8 +5,7 @@
 </p>
 
 A predictable shell for AI agents. A distilled Bourne-like shell with builtin
-core utilities. Kaish is embeddable, has stronger validation ahead of execution,
-and can embed MCPs as commands.
+core utilities. Kaish is embeddable with stronger validation ahead of execution.
 
 ## Install
 
@@ -241,18 +240,6 @@ builtins (`ls`, `kaish-mounts`, `kaish-vars`) return readable tab-separated valu
 ```
 Topics: overview, syntax, builtins, vfs, scatter, limits
 Tool help: help grep, help jq, help git
-```
-
-#### MCP Client Mode
-
-kaish can also consume external MCP tools, appearing as namespaced commands:
-
-```bash
-# External MCP tools look like CLI commands
-exa:web_search --query "rust parser combinators"
-
-# Pipe MCP results through kaish builtins
-github:list_issues --repo="foo/bar" | jq '.[] | .title'
 ```
 
 #### Why an MCP shell?

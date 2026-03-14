@@ -8,7 +8,7 @@ This file provides guidance to models when working with in this repository.
 
 Part of the [Kaijutsu](https://github.com/tobert/kaijutsu) project.
 
-**Status**: Core implementation complete. Lexer, parser, interpreter, builtins, MCP client/server, VFS.
+**Status**: Core implementation complete. Lexer, parser, interpreter, builtins, MCP server, VFS.
 
 ## Philosophy
 
@@ -110,12 +110,12 @@ crates/
 ├── kaish-types/     # Pure-data leaf crate: OutputData, ExecResult, Value, DirEntry, etc.
 ├── kaish-glob/      # Glob matching and async file walking with gitignore support
 ├── kaish-kernel/    # Core: lexer, parser, interpreter, tools, VFS, validator
-├── kaish-mcp/       # MCP server + client (expose kaish tools, consume external MCP tools)
+├── kaish-mcp/       # MCP server (expose kaish as an MCP tool)
 ├── kaish-client/    # Client implementations (embedded)
 └── kaish-repl/      # Interactive REPL with rustyline
 ```
 
-**Note:** The `kaish-mcp` crate provides both MCP server (exposing kaish's execute tool) and MCP client (consuming external MCP tools) functionality. The server binary accepts `--init <path>` (repeatable) to load `.kai` scripts before each `execute()` call — the MCP equivalent of `~/.bashrc`.
+**Note:** The server binary accepts `--init <path>` (repeatable) to load `.kai` scripts before each `execute()` call — the MCP equivalent of `~/.bashrc`.
 
 
 ## Language Key Points
@@ -143,7 +143,6 @@ crates/
 
 - 散/集 (scatter/gather) for parallel execution
 - User-defined tools with typed parameters
-- MCP tool integration (client-side, consuming external tools)
 - VFS mounts with multiple backends (local, memory, git, jobs)
 - Pre-execution validation
 - Full arithmetic expressions `$((expr))`

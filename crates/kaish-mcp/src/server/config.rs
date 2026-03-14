@@ -2,7 +2,6 @@
 //!
 //! Configuration is loaded from `~/.config/kaish/mcp-server.toml`.
 
-use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
@@ -19,10 +18,6 @@ pub struct McpServerConfig {
     /// Server version. Not settable via config — always the binary's version.
     #[serde(skip, default = "default_version")]
     pub version: String,
-
-    /// External MCP servers to connect to for tool chaining.
-    #[serde(default)]
-    pub mcp_servers: Vec<ExternalServerConfig>,
 
     /// Resource mounts to expose via MCP.
     #[serde(default)]
@@ -50,7 +45,6 @@ impl Default for McpServerConfig {
         Self {
             name: default_name(),
             version: default_version(),
-            mcp_servers: Vec::new(),
             resource_mounts: Vec::new(),
             default_timeout_ms: default_timeout(),
         }
@@ -90,37 +84,6 @@ impl McpServerConfig {
     }
 }
 
-/// Configuration for an external MCP server to connect to.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ExternalServerConfig {
-    /// Name prefix for tools from this server (e.g., "git" -> "git:status").
-    pub name: String,
-
-    /// Command to execute to start the server.
-    pub command: String,
-
-    /// Arguments to pass to the command.
-    #[serde(default)]
-    pub args: Vec<String>,
-
-    /// Environment variables to set.
-    #[serde(default)]
-    pub env: HashMap<String, String>,
-}
-
-impl From<ExternalServerConfig> for crate::config::McpConfig {
-    fn from(cfg: ExternalServerConfig) -> Self {
-        crate::config::McpConfig {
-            name: cfg.name,
-            transport: crate::config::McpTransport::Stdio {
-                command: cfg.command,
-                args: cfg.args,
-                env: cfg.env.into_iter().collect(),
-            },
-        }
-    }
-}
-
 /// Configuration for a resource mount.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ResourceMountConfig {
@@ -141,7 +104,6 @@ mod tests {
         let config = McpServerConfig::default();
         assert_eq!(config.name, "kaish");
         assert!(!config.version.is_empty());
-        assert!(config.mcp_servers.is_empty());
         assert!(config.resource_mounts.is_empty());
         assert_eq!(config.default_timeout_ms, 30_000);
     }
@@ -153,17 +115,6 @@ name = "my-kaish"
 version = "1.0.0"
 default_timeout_ms = 60000
 
-[[mcp_servers]]
-name = "git"
-command = "uvx"
-args = ["mcp-server-git"]
-
-[[mcp_servers]]
-name = "fs"
-command = "npx"
-args = ["-y", "@anthropics/mcp-server-filesystem"]
-env = { ALLOWED_DIRS = "/home/user" }
-
 [[resource_mounts]]
 uri_prefix = "kaish://vfs"
 vfs_path = "/"
@@ -174,13 +125,6 @@ vfs_path = "/"
         // version is #[serde(skip)] — always the binary version, not config-file value
         assert!(!config.version.is_empty());
         assert_eq!(config.default_timeout_ms, 60_000);
-        assert_eq!(config.mcp_servers.len(), 2);
-        assert_eq!(config.mcp_servers[0].name, "git");
-        assert_eq!(config.mcp_servers[1].name, "fs");
-        assert_eq!(
-            config.mcp_servers[1].env.get("ALLOWED_DIRS"),
-            Some(&"/home/user".to_string())
-        );
         assert_eq!(config.resource_mounts.len(), 1);
         assert_eq!(config.resource_mounts[0].uri_prefix, "kaish://vfs");
     }

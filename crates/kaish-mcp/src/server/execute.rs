@@ -13,8 +13,6 @@ use kaish_kernel::{Kernel, KernelConfig};
 use rmcp::schemars::{self, JsonSchema};
 use serde::{Deserialize, Serialize};
 
-use super::config::ExternalServerConfig;
-
 /// Parameters for the execute tool.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ExecuteParams {
@@ -131,22 +129,11 @@ impl ExecuteResult {
 /// after running init and clone for each execute instead of re-parsing.
 pub async fn execute(
     params: ExecuteParams,
-    external_servers: &[ExternalServerConfig],
     default_timeout_ms: u64,
     nonce_store: Option<NonceStore>,
     init_paths: &[PathBuf],
 ) -> Result<ExecuteResult> {
     let timeout_ms = params.timeout_ms.unwrap_or(default_timeout_ms);
-
-    // Register external MCP tools if configured
-    // Note: For v1 stateless design, we don't connect to external MCPs per-request
-    // as that would be too slow. This is a placeholder for future session-based design.
-    if !external_servers.is_empty() {
-        tracing::debug!(
-            "External MCP servers configured but not connected in stateless mode: {:?}",
-            external_servers.iter().map(|s| &s.name).collect::<Vec<_>>()
-        );
-    }
 
     // Read init scripts up front (before spawning the thread) so errors
     // propagate cleanly to the caller.
@@ -265,7 +252,7 @@ mod tests {
             timeout_ms: None,
         };
 
-        let result = execute(params, &[], 30_000, None, &[]).await.expect("execute failed");
+        let result = execute(params, 30_000, None, &[]).await.expect("execute failed");
         assert!(result.ok);
         assert_eq!(result.code, 0);
         // Simple text passes through unchanged (no TOON encoding)
@@ -284,7 +271,7 @@ mod tests {
             timeout_ms: None,
         };
 
-        let result = execute(params, &[], 30_000, None, &[]).await.expect("execute failed");
+        let result = execute(params, 30_000, None, &[]).await.expect("execute failed");
         assert!(result.ok);
         // Simple text passes through unchanged (no TOON encoding)
         assert_eq!(result.stdout.trim(), "hello world");
@@ -299,7 +286,7 @@ mod tests {
             timeout_ms: None,
         };
 
-        let result = execute(params, &[], 30_000, None, &[]).await.expect("execute failed");
+        let result = execute(params, 30_000, None, &[]).await.expect("execute failed");
         assert!(!result.ok);
         assert_eq!(result.code, 127);
     }
@@ -313,7 +300,7 @@ mod tests {
             timeout_ms: None,
         };
 
-        let result = execute(params, &[], 30_000, None, &[]).await.expect("execute failed");
+        let result = execute(params, 30_000, None, &[]).await.expect("execute failed");
         assert!(result.ok);
         assert!(result.data.is_some());
 
@@ -336,7 +323,7 @@ mod tests {
             timeout_ms: Some(10), // Very short timeout
         };
 
-        let result = execute(params, &[], 30_000, None, &[]).await.expect("execute failed");
+        let result = execute(params, 30_000, None, &[]).await.expect("execute failed");
         assert!(!result.ok);
         assert_eq!(result.code, 124);
         assert!(result.stderr.contains("timed out"));
@@ -385,7 +372,7 @@ mod tests {
             timeout_ms: None,
         };
 
-        let result = execute(params, &[], 30_000, None, &[]).await.expect("execute failed");
+        let result = execute(params, 30_000, None, &[]).await.expect("execute failed");
         assert!(result.ok);
         // Should be valid JSON, not TOON-wrapped JSON
         let parsed: serde_json::Value = serde_json::from_str(&result.stdout).expect("valid JSON");
@@ -402,7 +389,7 @@ mod tests {
             timeout_ms: None,
         };
 
-        let result = execute(params, &[], 30_000, None, &[]).await.expect("execute failed");
+        let result = execute(params, 30_000, None, &[]).await.expect("execute failed");
         assert!(result.ok);
         // Canonical text: tab-separated values, one per line
         assert!(result.stdout.contains("/"), "should contain mount paths");
@@ -419,7 +406,7 @@ mod tests {
             timeout_ms: None,
         };
 
-        let result = execute(params, &[], 30_000, None, &[]).await.expect("execute failed");
+        let result = execute(params, 30_000, None, &[]).await.expect("execute failed");
         assert!(result.ok);
         // Plain text, not TOON-quoted
         assert_eq!(result.stdout.trim(), "hello world");
@@ -437,7 +424,7 @@ mod tests {
             env: None,
             timeout_ms: None,
         };
-        let result = execute(params, &[], 30_000, None, &[init_path])
+        let result = execute(params, 30_000, None, &[init_path])
             .await
             .expect("execute failed");
         assert!(result.ok);
@@ -458,7 +445,7 @@ mod tests {
             env: None,
             timeout_ms: None,
         };
-        let result = execute(params, &[], 30_000, None, &[init1, init2])
+        let result = execute(params, 30_000, None, &[init1, init2])
             .await
             .expect("execute failed");
         assert!(result.ok);
@@ -475,7 +462,6 @@ mod tests {
         };
         let result = execute(
             params,
-            &[],
             30_000,
             None,
             &[PathBuf::from("/nonexistent/init.kai")],
@@ -503,7 +489,7 @@ mod tests {
             env: None,
             timeout_ms: None,
         };
-        let result1 = execute(params.clone(), &[], 30_000, None, &[init_path.clone()])
+        let result1 = execute(params.clone(), 30_000, None, &[init_path.clone()])
             .await
             .expect("execute failed");
         assert!(result1.ok);
@@ -511,7 +497,7 @@ mod tests {
 
         // Modify file and run again — should pick up the change
         std::fs::write(&init_path, "GREETING=howdy\n").unwrap();
-        let result2 = execute(params, &[], 30_000, None, &[init_path])
+        let result2 = execute(params, 30_000, None, &[init_path])
             .await
             .expect("execute failed");
         assert!(result2.ok);
@@ -531,7 +517,7 @@ mod tests {
             env: None,
             timeout_ms: None,
         };
-        let result = execute(params, &[], 30_000, None, &[init_path])
+        let result = execute(params, 30_000, None, &[init_path])
             .await
             .expect("execute should return Ok with structured failure");
         assert!(!result.ok);

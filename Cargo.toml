@@ -68,8 +68,8 @@ jaq-core = "2.2"
 jaq-std = "2.1"
 jaq-json = "1.1"
 
-# MCP client (L8)
-rmcp = { version = "0.16", default-features = true, features = ["client", "transport-child-process"] }
+# MCP (rmcp)
+rmcp = { version = "0.16", default-features = false }
 
 # Async utilities
 tokio-util = { version = "0.7", features = ["compat"] }

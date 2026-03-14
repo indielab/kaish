@@ -111,10 +111,9 @@ async fn main() -> Result<()> {
     let config = McpServerConfig::load().context("Failed to load configuration")?;
 
     tracing::info!(
-        "Server config: name={}, version={}, external_mcps={}",
+        "Server config: name={}, version={}",
         config.name,
         config.version,
-        config.mcp_servers.len()
     );
 
     let handler = KaishServerHandler::new(config, init_paths)

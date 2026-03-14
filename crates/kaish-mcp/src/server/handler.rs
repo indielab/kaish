@@ -232,7 +232,6 @@ impl KaishServerHandler {
         let result =
             execute::execute(
                 params,
-                &self.config.mcp_servers,
                 self.config.default_timeout_ms,
                 Some(self.nonce_store.clone()),
                 &self.init_paths,
