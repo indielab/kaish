@@ -620,6 +620,10 @@ fn lexer_arithmetic_in_command_substitution(#[case] input: &str, #[case] expecte
 #[case::dot_slash("./foo", &["DOTSLASH(./foo)"])]
 #[case::dot_slash_nested("./src/main.rs", &["DOTSLASH(./src/main.rs)"])]
 #[case::cd_dot_slash("cd ./crates", &["IDENT(cd)", "DOTSLASH(./crates)"])]
+// Bare relative paths (no ./ or ../ prefix) — regression test for cd only
+// traversing the first path component
+#[case::cd_bare_relative("cd src/kaish", &["IDENT(cd)", "RELPATH(src/kaish)"])]
+#[case::cd_bare_relative_nested("cd src/kaish/crates", &["IDENT(cd)", "RELPATH(src/kaish/crates)"])]
 fn lexer_navigation_tokens(#[case] input: &str, #[case] expected: &[&str]) {
     run_lexer_test(input, expected);
 }

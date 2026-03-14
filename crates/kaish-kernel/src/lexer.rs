@@ -332,8 +332,9 @@ pub enum Token {
     #[token("~")]
     Tilde,
 
-    /// Relative path starting with `../`: `../foo/bar`
+    /// Relative path: `../foo/bar` or bare `src/kaish` (ident containing `/`)
     #[regex(r"\.\./[a-zA-Z0-9_./-]+", lex_relative_path, priority = 3)]
+    #[regex(r"[a-zA-Z_][a-zA-Z0-9_.-]*/[a-zA-Z0-9_./-]+", lex_relative_path, priority = 3)]
     RelativePath(String),
 
     /// Dot-slash path: `./foo`, `./script.sh`
