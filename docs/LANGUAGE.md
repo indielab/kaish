@@ -22,7 +22,7 @@ echo ${NAME}
 echo "${NAME} more text"
 ```
 
-**Why floats?** MCP tools return JSON, which has floats. Kaish supports them natively.
+**Why floats?** JSON data often has floats. Kaish supports them natively for easy interop.
 
 **Why strict booleans?** Only `true`/`false` are valid. `TRUE`, `Yes`, `1` are errors — catches AI generation mistakes early.
 
@@ -524,7 +524,7 @@ Features that ShellCheck warns about (word splitting, backticks) don't exist in 
 
 | Feature | POSIX/Bourne | Kaish | Rationale |
 |---------|--------------|-------|-----------|
-| **Floats** | Integer only | Native `3.14` | MCP tools return JSON with floats |
+| **Floats** | Integer only | Native `3.14` | JSON interop |
 | **Booleans** | Exit codes | Native `true`/`false` | JSON interop, clearer conditions |
 | **Typed params** | None | `name:string` | Tool definitions with validation |
 | **Arithmetic** | `$(( ))` | `$((expr))` with comparisons | Integer arithmetic + `>`, `<`, `==` returning 1/0 |
@@ -556,11 +556,6 @@ These are documented limitations of the current implementation:
 
 - **Scatter results in completion order** — The 散 (scatter) construct returns results in the order jobs complete, not input order. This is inherent to parallel execution—first done, first returned.
 - **Command substitution in redirect targets** — Constructs like `cmd > $(...)` are not supported. Evaluate the target path separately first.
-
-### RPC/IPC
-
-- **`spawn_local` requires LocalSet** — IPC clients use tokio's `spawn_local` and must be run within a tokio `LocalSet`. This is a consequence of the Cap'n Proto RPC design.
-- **RPC shutdown is advisory** — Calling `shutdown()` on the RPC interface requests shutdown but doesn't guarantee immediate termination.
 
 ### Performance
 

@@ -1,31 +1,15 @@
 # CLAUDE.md
 
-This file provides guidance to models when working with in this repository.
-
 ## Project Overview
 
-**kaish** (会sh — "the gathering shell") is a predictable shell for MCP tool orchestration.
-
-Part of the [Kaijutsu](https://github.com/tobert/kaijutsu) project.
+**kaish** (会sh — "the gathering shell") is a predictable shell for AI agents, exposed as an MCP server.
+Part of [Kaijutsu](https://github.com/tobert/kaijutsu).
 
 **Status**: Core implementation complete. Lexer, parser, interpreter, builtins, MCP server, VFS.
 
-## Philosophy
+**Philosophy**: 80% of a POSIX/Bourne/bash shell, 100% unambiguous. Bourne-compatible subset passes `shellcheck --enable=all`. Extensions (floats, typed params, scatter/gather) are outside ShellCheck's scope.
 
-**80% of a POSIX/Bourne/bash shell, 100% unambiguous.**
-
-- **Bourne-lite** — familiar syntax, no dark corners
-- **Predictable over powerful** — if bash has a confusing edge case, kaish doesn't have that feature
-- **ShellCheck-clean** — the Bourne subset passes `shellcheck --enable=all`
-- **Agent-friendly** — easy to predict and validate
-- **Fail fast** — ambiguity is an error. does not guess
-
-### ShellCheck-Clean Design
-
-The Bourne-compatible subset of kaish should pass `shellcheck --enable=all`.
-When implementing features, verify they don't introduce constructs ShellCheck
-would warn about. Extensions (floats, typed params, MCP tools, scatter/gather)
-are outside ShellCheck's scope and clearly marked.
+**What's intentionally missing**: process substitution `<(cmd)`, backticks, `eval`
 
 ## Build Commands
 
@@ -37,9 +21,7 @@ cargo test -p kaish-kernel --test lexer_tests   # Lexer tests only
 cargo test -p kaish-kernel --test parser_tests  # Parser tests only
 cargo insta test                         # Run snapshot tests
 cargo insta test --check                 # CI mode (fails on pending snapshots)
-cargo test --features proptest -- --ignored  # Property tests
-cargo tarpaulin --out Html --output-dir coverage/  # Coverage
-cargo +nightly fuzz run parser -- -max_len=4096    # Fuzz (nightly)
+cargo insta review                       # Interactive review of pending snapshots
 ```
 
 ## Development Guidelines
@@ -58,31 +40,13 @@ cargo +nightly fuzz run parser -- -max_len=4096    # Fuzz (nightly)
 - Comments only for non-obvious "why"
 - Avoid `mod.rs` — use `src/module_name.rs`
 - Full words for names, avoid abbreviations
-- Prefer newtypes over primitives: `struct JobId(Uuid)` not `Uuid`
-- Use enums for states and variants
-- Define traits for shared capabilities
-
-### Async Patterns
-
-Everything runs on tokio. For blocking operations in async contexts:
-```rust
-let state = tokio::task::block_in_place(|| self.state.blocking_write());
-```
+- Tokio for all async. Blocking in async: `tokio::task::block_in_place(|| ...)`
 
 ### Version Control
 
-- **always add files by name**
-- Review with `git status` before and after staging
-- Use `git diff --staged` before committing
+- **Always add files by name** — no `git add -A` or `git add .`
 - Run `cargo test` before committing
-
-### Commit Attribution
-
-Models should include attribution for themselves.
-
-```
-Co-Authored-By: Claude <claude@anthropic.com>
-```
+- Models include attribution: `Co-Authored-By: Claude <claude@anthropic.com>`
 
 ## Architecture
 
@@ -98,7 +62,7 @@ Kernel (核)
     ├── Parser (chumsky)
     ├── Validator (pre-execution checks)
     ├── Interpreter (tokio async)
-    ├── Tool Registry (builtins + MCP)
+    ├── Tool Registry (builtins + user tools)
     ├── VFS Router (local, memory, git backends)
     └── Job Scheduler (background jobs, scatter/gather)
 ```
@@ -115,84 +79,18 @@ crates/
 └── kaish-repl/      # Interactive REPL with rustyline
 ```
 
-**Note:** The server binary accepts `--init <path>` (repeatable) to load `.kai` scripts before each `execute()` call — the MCP equivalent of `~/.bashrc`.
+The MCP server binary accepts `--init <path>` (repeatable) to load `.kai` scripts before each `execute()` call.
 
-
-## Language Key Points
-
-**Bourne-compatible syntax:**
-
-- `VAR=value` — assignment (no spaces around `=`)
-- `$VAR` and `${VAR}` — both work for expansion
-- `${VAR:-default}` — default values
-- `${#VAR}` — string length
-- `$0`-`$9`, `$@`, `$#` — positional parameters
-- `'literal'` and `"interpolated"` — both quote styles
-- `[[ ]]` — test expressions
-- `if/elif/else/fi`, `for/do/done`, `while/do/done` — control flow
-- `break`, `continue`, `return`, `exit` — control statements
-- `*.txt`, `src/**/*.rs` — bare glob expansion (disable: `set +o glob`)
-- `set -e` — exit on error mode
-- `set -o latch` / `set -o trash` / `set -o glob` — confirmation latch, trash-on-delete, glob expansion
-- `source file` or `. file` — script sourcing
-- `alias name='cmd'` / `unalias name` — command aliases
-- `-x`, `--flag` — flag arguments
-- `key=value` — named arguments
-
-**Kaish-specific:**
-
-- 散/集 (scatter/gather) for parallel execution
-- User-defined tools with typed parameters
-- VFS mounts with multiple backends (local, memory, git, jobs)
-- Pre-execution validation
-- Full arithmetic expressions `$((expr))`
-
-### What's Intentionally Missing
-
-Process substitution `<(cmd)`, backticks, `eval`
-
-## Testing Strategy
+## Testing
 
 Uses **rstest** for parameterized tests and **insta** for snapshot testing.
+Tests live in `crates/kaish-kernel/tests/`. Snapshots in `snapshots/*.snap`.
 
-Test files in `crates/kaish-kernel/tests/`:
-- `lexer_tests.rs` — rstest parameterized lexer tests (94 tests)
-- `parser_tests.rs` — insta snapshot tests for AST output (101 tests)
-- `validation_tests.rs` — pre-execution validation tests
-- `realworld_builtin_tests.rs` — integration tests from real usage
-- `job_stream_tests.rs` — BoundedStream and JobFs integration tests
-- `snapshots/*.snap` — insta snapshot files for parser tests
+## Documentation
 
-Snapshot workflow:
-```bash
-cargo insta test           # Run tests, create .snap.new for changes
-cargo insta review         # Interactive review of pending snapshots
-cargo insta accept         # Accept all pending snapshots
-```
-
-## Key Documentation
-
-| File | Purpose |
-|------|---------|
-| `README.md` | Project overview, quick tour, MCP integration |
-| `docs/LANGUAGE.md` | Complete language reference with examples |
-| `README.md#builtins` | Builtin philosophy, design principles, reference table |
-| `docs/help/*.md` | MCP help system content (agent-facing) |
-
-### Help System
-
-The `docs/help/` directory contains markdown files that are embedded at compile time
-into the kernel and exposed via the MCP `help` tool. These are concise reference cards
-for LLM agents using kaish.
-
-**Files:**
-- `overview.md` — What kaish is, topic list, quick examples
-- `syntax.md` — Variables, quoting, pipes, control flow
-- `vfs.md` — Virtual filesystem mounts and paths
-- `scatter.md` — Parallel processing (散/集)
-- `limits.md` — Known limitations and workarounds
+- `docs/LANGUAGE.md` — complete language reference
+- `docs/help/*.md` — help system content, embedded at compile time into the kernel
 
 **Keep in sync:** When adding builtins or changing syntax, update the relevant help files.
 The builtin list in `help builtins` is generated dynamically from tool schemas, but
 `syntax.md` and `limits.md` need manual updates.
-

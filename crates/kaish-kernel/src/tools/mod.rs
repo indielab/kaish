@@ -1,7 +1,7 @@
 //! Tool system for kaish.
 //!
 //! Tools are the primary way to perform actions in kaish. Every command
-//! is a tool — builtins, user-defined tools, and MCP tools all implement
+//! is a tool — builtins and user-defined tools all implement
 //! the same `Tool` trait.
 //!
 //! # Architecture
@@ -9,8 +9,7 @@
 //! ```text
 //! ToolRegistry
 //! ├── Builtins (echo, ls, cat, ...)
-//! ├── User Tools (defined via `tool` statements)
-//! └── MCP Tools (from connected MCP servers)
+//! └── User Tools (defined via `tool` statements)
 //! ```
 
 mod builtin;

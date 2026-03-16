@@ -2,7 +2,7 @@
 //!
 //! The Kernel owns and coordinates all core components:
 //! - Interpreter state (scope, $?)
-//! - Tool registry (builtins, user tools, MCP)
+//! - Tool registry (builtins, user tools)
 //! - VFS router (mount points)
 //! - Job manager (background jobs)
 //!
@@ -13,8 +13,8 @@
 //! │                         Kernel (核)                         │
 //! │  ┌──────────────┐  ┌──────────────┐  ┌──────────────────┐  │
 //! │  │   Scope      │  │ ToolRegistry │  │  VfsRouter       │  │
-//! │  │  (variables) │  │   (builtins, │  │  (mount points)  │  │
-//! │  │              │  │    MCP, user)│  │                  │  │
+//! │  │  (variables) │  │  (builtins,  │  │  (mount points)  │  │
+//! │  │              │  │   user tools)│  │                  │  │
 //! │  └──────────────┘  └──────────────┘  └──────────────────┘  │
 //! │  ┌──────────────────────────────┐  ┌──────────────────┐    │
 //! │  │  JobManager (background)     │  │  ExecResult ($?) │    │
@@ -133,7 +133,7 @@ pub struct KernelConfig {
     ///
     /// When `true` (default), commands not found as builtins are resolved via PATH
     /// and executed as child processes. When `false`, only kaish builtins and
-    /// backend-registered tools (MCP) are available.
+    /// backend-registered tools are available.
     ///
     /// **Security:** External commands bypass the VFS sandbox entirely — they see
     /// the real filesystem, network, and environment. Set to `false` when running
@@ -1519,7 +1519,7 @@ impl Kernel {
                     return Ok(result);
                 }
 
-                // Try backend-registered tools (embedder engines, MCP tools, etc.)
+                // Try backend-registered tools (embedder engines, etc.)
                 // Look up tool schema for positional→named mapping.
                 // Clone backend and drop read lock before awaiting (may involve network I/O).
                 // Backend tools expect named JSON params, so enable positional mapping.
@@ -1754,7 +1754,7 @@ impl Kernel {
         // Map remaining positionals to unfilled non-bool schema params (in order).
         // This enables `drift_push "abc" "hello"` → named["target_ctx"] = "abc", named["content"] = "hello"
         // Positionals that appeared after `--` are never mapped (they're raw data).
-        // Only for MCP/external tools (map_positionals=true). Builtins handle their own positionals.
+        // Only for backend/external tools (map_positionals=true). Builtins handle their own positionals.
         if let Some(schema) = schema.filter(|s| s.map_positionals) {
             let pre_dash_count = if past_double_dash {
                 let dash_pos = args.iter().position(|a| matches!(a, Arg::DoubleDash)).unwrap_or(args.len());

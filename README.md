@@ -245,7 +245,7 @@ Tool help: help grep, help jq, help git
 #### Why an MCP shell?
 
 AI agents need to compose operations — filter outputs, transform data, iterate over results.
-Raw MCP tools are individual operations; kaish lets agents combine them:
+Individual MCP tool calls are atomic operations; kaish lets agents combine them:
 
 ```bash
 # Filter and transform in one script

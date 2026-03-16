@@ -8,10 +8,8 @@
 //!
 //! The secure remote-access pattern is:
 //!
-//! 1. `kaish serve` runs a persistent kernel over a Unix socket
-//!    (`$XDG_RUNTIME_DIR/kaish/<name>.sock`, mode 0600, Cap'n Proto RPC).
-//! 2. MCP clients connect to `kaish-mcp` over stdio (the security boundary).
-//! 3. Container runtimes work naturally: `docker exec`, `kubectl exec`, etc.
+//! 1. MCP clients connect to `kaish-mcp` over stdio (the security boundary).
+//! 2. Container runtimes work naturally: `docker exec`, `kubectl exec`, etc.
 //!    all provide a stdio pipe that kaish-mcp plugs into directly.
 //!
 //! # Usage
