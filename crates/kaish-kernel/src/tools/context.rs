@@ -13,6 +13,7 @@ use crate::nonce::NonceStore;
 use crate::output_limit::OutputLimitConfig;
 use crate::scheduler::{JobManager, PipeReader, PipeWriter, StderrStream};
 use crate::tools::ToolRegistry;
+use crate::trash::TrashBackend;
 use crate::vfs::VfsRouter;
 
 use super::traits::ToolSchema;
@@ -94,6 +95,12 @@ pub struct ExecContext {
     /// Arc-shared across pipeline stages so nonces issued in one stage
     /// can be validated in another.
     pub nonce_store: NonceStore,
+    /// Trash backend for safe file deletion.
+    ///
+    /// Always present when the kernel creates the context (even if `set -o trash`
+    /// is off — the backend exists so `kaish-trash list/restore/empty` work
+    /// regardless of the trash flag).
+    pub trash_backend: Option<Arc<dyn TrashBackend>>,
     /// Terminal state for job control (interactive mode, Unix only).
     #[cfg(unix)]
     pub terminal_state: Option<std::sync::Arc<crate::terminal::TerminalState>>,
@@ -125,6 +132,7 @@ impl ExecContext {
             output_limit: OutputLimitConfig::none(),
             allow_external_commands: true,
             nonce_store: NonceStore::new(),
+            trash_backend: None,
             #[cfg(unix)]
             terminal_state: None,
         }
@@ -155,6 +163,7 @@ impl ExecContext {
             output_limit: OutputLimitConfig::none(),
             allow_external_commands: true,
             nonce_store: NonceStore::new(),
+            trash_backend: None,
             #[cfg(unix)]
             terminal_state: None,
         }
@@ -182,6 +191,7 @@ impl ExecContext {
             output_limit: OutputLimitConfig::none(),
             allow_external_commands: true,
             nonce_store: NonceStore::new(),
+            trash_backend: None,
             #[cfg(unix)]
             terminal_state: None,
         }
@@ -209,6 +219,7 @@ impl ExecContext {
             output_limit: OutputLimitConfig::none(),
             allow_external_commands: true,
             nonce_store: NonceStore::new(),
+            trash_backend: None,
             #[cfg(unix)]
             terminal_state: None,
         }
@@ -239,6 +250,7 @@ impl ExecContext {
             output_limit: OutputLimitConfig::none(),
             allow_external_commands: true,
             nonce_store: NonceStore::new(),
+            trash_backend: None,
             #[cfg(unix)]
             terminal_state: None,
         }
@@ -266,6 +278,7 @@ impl ExecContext {
             output_limit: OutputLimitConfig::none(),
             allow_external_commands: true,
             nonce_store: NonceStore::new(),
+            trash_backend: None,
             #[cfg(unix)]
             terminal_state: None,
         }
@@ -284,6 +297,11 @@ impl ExecContext {
     /// Set the job manager for background job tracking.
     pub fn set_job_manager(&mut self, manager: Arc<JobManager>) {
         self.job_manager = Some(manager);
+    }
+
+    /// Set the trash backend.
+    pub fn set_trash_backend(&mut self, backend: Arc<dyn TrashBackend>) {
+        self.trash_backend = Some(backend);
     }
 
     /// Set stdin for this execution.
@@ -376,6 +394,7 @@ impl ExecContext {
             output_limit: self.output_limit.clone(),
             allow_external_commands: self.allow_external_commands,
             nonce_store: self.nonce_store.clone(),
+            trash_backend: self.trash_backend.clone(),
             #[cfg(unix)]
             terminal_state: self.terminal_state.clone(),
         }

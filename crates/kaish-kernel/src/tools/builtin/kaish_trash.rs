@@ -6,23 +6,11 @@ use async_trait::async_trait;
 
 use crate::ast::Value;
 use crate::interpreter::{ExecResult, OutputData, OutputNode};
+use crate::trash::TrashBackend;
 use crate::tools::{ExecContext, ParamSchema, Tool, ToolArgs, ToolSchema};
 
 /// KaishTrash tool: manage the system trash.
 pub struct KaishTrash;
-
-/// Run a blocking trash operation, flattening the JoinError/trash::Error into a single Result.
-async fn trash_op<F, T>(op: F) -> Result<T, String>
-where
-    F: FnOnce() -> Result<T, trash::Error> + Send + 'static,
-    T: Send + 'static,
-{
-    match tokio::task::spawn_blocking(op).await {
-        Ok(Ok(v)) => Ok(v),
-        Ok(Err(e)) => Err(e.to_string()),
-        Err(e) => Err(e.to_string()),
-    }
-}
 
 #[async_trait]
 impl Tool for KaishTrash {
@@ -73,38 +61,39 @@ impl Tool for KaishTrash {
     }
 }
 
-async fn cmd_list(args: &ToolArgs, _ctx: &mut ExecContext) -> ExecResult {
+/// Get the trash backend from context, or return an error result.
+#[allow(clippy::result_large_err)]
+fn get_backend<'a>(ctx: &'a ExecContext, subcmd: &str) -> Result<&'a dyn TrashBackend, ExecResult> {
+    ctx.trash_backend
+        .as_deref()
+        .ok_or_else(|| ExecResult::failure(1, format!("kaish-trash {}: trash backend not available", subcmd)))
+}
+
+async fn cmd_list(args: &ToolArgs, ctx: &mut ExecContext) -> ExecResult {
+    let trash = match get_backend(ctx, "list") {
+        Ok(t) => t,
+        Err(e) => return e,
+    };
     let filter = args.get_string("arg", 1);
 
-    let items = match trash_op(trash::os_limited::list).await {
-        Ok(items) => items,
+    let entries = match trash.list(filter.as_deref()).await {
+        Ok(entries) => entries,
         Err(e) => return ExecResult::failure(1, format!("kaish-trash list: {}", e)),
     };
 
-    if items.is_empty() {
-        return ExecResult::with_output(OutputData::text("trash is empty"));
+    if entries.is_empty() {
+        let msg = if filter.is_some() { "no matching items in trash" } else { "trash is empty" };
+        return ExecResult::with_output(OutputData::text(msg));
     }
 
-    let mut nodes = Vec::new();
-    for item in &items {
-        let name = item.name.to_string_lossy().to_string();
-
-        // Apply filter if provided
-        if let Some(ref f) = filter {
-            if !name.contains(f.as_str()) {
-                continue;
-            }
-        }
-
-        let original = item.original_parent.join(&item.name).to_string_lossy().to_string();
-        let deleted = format!("{}", item.time_deleted);
-
-        nodes.push(OutputNode::new(&name).with_cells(vec![original, deleted]));
-    }
-
-    if nodes.is_empty() {
-        return ExecResult::with_output(OutputData::text("no matching items in trash"));
-    }
+    let nodes: Vec<OutputNode> = entries
+        .iter()
+        .map(|entry| {
+            let original = entry.original_path.to_string_lossy().to_string();
+            let deleted = format!("{}", entry.deleted_at);
+            OutputNode::new(&entry.name).with_cells(vec![original, deleted])
+        })
+        .collect();
 
     ExecResult::with_output(OutputData::table(
         vec!["NAME".to_string(), "ORIGINAL_PATH".to_string(), "DELETED".to_string()],
@@ -112,72 +101,22 @@ async fn cmd_list(args: &ToolArgs, _ctx: &mut ExecContext) -> ExecResult {
     ))
 }
 
-/// Find restore matches: exact (1) wins, else substring.
-///
-/// Single pass over items. Returns matched items or error message.
-fn find_restore_match<T>(items: Vec<(String, T)>, target: &str) -> Result<Vec<T>, String> {
-    let mut exact = Vec::new();
-    let mut substring = Vec::new();
-    let mut substring_names = Vec::new();
-
-    for (name, item) in items {
-        if name == target {
-            exact.push(item);
-        } else if name.contains(target) {
-            substring_names.push(name);
-            substring.push(item);
-        }
-    }
-
-    if exact.len() == 1 {
-        return Ok(exact);
-    }
-
-    // Combine exact + substring if no single exact match
-    let mut all_names: Vec<String> = Vec::new();
-    if !exact.is_empty() {
-        all_names.extend(std::iter::repeat_n(target.to_string(), exact.len()));
-    }
-    all_names.extend(substring_names);
-
-    let mut all: Vec<T> = exact;
-    all.extend(substring);
-
-    if all.is_empty() {
-        return Err(format!("'{}' not found in trash", target));
-    }
-    if all.len() > 1 {
-        return Err(format!(
-            "multiple matches for '{}': {}. Be more specific.",
-            target,
-            all_names.join(", ")
-        ));
-    }
-    Ok(all)
-}
-
-async fn cmd_restore(args: &ToolArgs, _ctx: &mut ExecContext) -> ExecResult {
+async fn cmd_restore(args: &ToolArgs, ctx: &mut ExecContext) -> ExecResult {
     let name = match args.get_string("arg", 1) {
         Some(n) => n,
         None => return ExecResult::failure(1, "kaish-trash restore: specify a path/name to restore"),
     };
+    let trash = match get_backend(ctx, "restore") {
+        Ok(t) => t,
+        Err(e) => return e,
+    };
 
-    let items = match trash_op(trash::os_limited::list).await {
-        Ok(items) => items,
+    let matches = match trash.find_by_name(&name).await {
+        Ok(m) => m,
         Err(e) => return ExecResult::failure(1, format!("kaish-trash restore: {}", e)),
     };
 
-    let named_items: Vec<(String, trash::TrashItem)> = items
-        .into_iter()
-        .map(|item| (item.name.to_string_lossy().to_string(), item))
-        .collect();
-
-    let matches = match find_restore_match(named_items, &name) {
-        Ok(m) => m,
-        Err(msg) => return ExecResult::failure(1, format!("kaish-trash restore: {}", msg)),
-    };
-
-    match trash_op(move || trash::os_limited::restore_all(matches)).await {
+    match trash.restore(matches).await {
         Ok(()) => ExecResult::with_output(OutputData::text(format!("restored: {}", name))),
         Err(e) => ExecResult::failure(1, format!("kaish-trash restore: {}", e)),
     }
@@ -193,18 +132,13 @@ async fn cmd_empty(args: &ToolArgs, ctx: &mut ExecContext) -> ExecResult {
     if let Some(nonce) = &confirm {
         match ctx.verify_nonce(nonce, "kaish-trash empty", &[]) {
             Ok(()) => {
-                // Check if trash is actually empty first
-                let items = match trash_op(trash::os_limited::list).await {
-                    Ok(items) => items,
-                    Err(e) => return ExecResult::failure(1, format!("kaish-trash empty: {}", e)),
+                let trash = match get_backend(ctx, "empty") {
+                    Ok(t) => t,
+                    Err(e) => return e,
                 };
-
-                if items.is_empty() {
-                    return ExecResult::with_output(OutputData::text("trash is already empty"));
-                }
-
-                match trash_op(move || trash::os_limited::purge_all(items)).await {
-                    Ok(()) => ExecResult::with_output(OutputData::text("trash emptied")),
+                match trash.purge_all().await {
+                    Ok(0) => ExecResult::with_output(OutputData::text("trash is already empty")),
+                    Ok(_) => ExecResult::with_output(OutputData::text("trash emptied")),
                     Err(e) => ExecResult::failure(1, format!("kaish-trash empty: {}", e)),
                 }
             }
@@ -275,6 +209,7 @@ fn format_size(bytes: u64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::trash::find_restore_match;
     use crate::vfs::{MemoryFs, VfsRouter};
     use std::sync::Arc;
 
@@ -339,10 +274,11 @@ mod tests {
         assert!(result.err.contains("--confirm="));
     }
 
-    #[ignore] // calls trash::os_limited::list on real OS trash — flaky in CI
+    #[ignore] // calls real OS trash — flaky in CI
     #[tokio::test]
     async fn test_empty_with_valid_nonce_on_empty_trash() {
         let mut ctx = make_ctx();
+        ctx.trash_backend = Some(Arc::new(crate::trash_system::SystemTrash));
 
         let nonce = ctx.nonce_store.issue("kaish-trash empty", &[]);
 
@@ -379,10 +315,11 @@ mod tests {
         assert!(result.err.contains("unknown subcommand"));
     }
 
-    #[ignore] // calls trash::os_limited::list on real OS trash — flaky in CI
+    #[ignore] // calls real OS trash — flaky in CI
     #[tokio::test]
     async fn test_list_empty_trash() {
         let mut ctx = make_ctx();
+        ctx.trash_backend = Some(Arc::new(crate::trash_system::SystemTrash));
 
         let mut args = ToolArgs::new();
         args.positional.push(Value::String("list".into()));

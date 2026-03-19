@@ -143,19 +143,16 @@ impl Tool for Rm {
 
         match action {
             RmAction::Trash(real) => {
+                let trash_backend = match ctx.trash_backend.as_ref() {
+                    Some(tb) => tb,
+                    None => return ExecResult::failure(1, "rm: trash backend not available"),
+                };
                 let real_display = real.display().to_string();
-                let trash_result = tokio::task::spawn_blocking(move || trash::delete(real)).await;
-                match trash_result {
-                    Ok(Ok(())) => ExecResult::success(""),
-                    Ok(Err(e)) => {
-                        ExecResult::failure(1, format!(
-                            "rm: {}: trash failed: {} (use `set +o trash` to delete permanently)",
-                            real_display, e
-                        ))
-                    }
+                match trash_backend.trash(&real).await {
+                    Ok(()) => ExecResult::success(""),
                     Err(e) => {
                         ExecResult::failure(1, format!(
-                            "rm: {}: trash task failed: {} (use `set +o trash` to delete permanently)",
+                            "rm: {}: trash failed: {} (use `set +o trash` to delete permanently)",
                             real_display, e
                         ))
                     }

@@ -27,6 +27,8 @@ pub mod parser;
 pub mod paths;
 pub mod scheduler;
 pub mod tools;
+pub mod trash;
+pub mod trash_system;
 pub mod validator;
 pub mod vfs;
 #[cfg(unix)]

@@ -577,6 +577,7 @@ impl Kernel {
         exec_ctx.set_job_manager(jobs.clone());
         exec_ctx.set_tool_schemas(tools.schemas());
         exec_ctx.set_tools(tools.clone());
+        exec_ctx.set_trash_backend(Arc::new(crate::trash_system::SystemTrash));
         exec_ctx.stderr = Some(stderr_writer);
         exec_ctx.ignore_config = ignore_config;
         exec_ctx.output_limit = output_limit;
@@ -1294,6 +1295,7 @@ impl Kernel {
                 output_limit: ec.output_limit.clone(),
                 allow_external_commands: self.allow_external_commands,
                 nonce_store: ec.nonce_store.clone(),
+                trash_backend: ec.trash_backend.clone(),
                 #[cfg(unix)]
                 terminal_state: ec.terminal_state.clone(),
             }
