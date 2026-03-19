@@ -178,7 +178,7 @@ impl Ls {
 
         let output = if long_format {
             OutputData::table(
-                vec!["Name".to_string(), "Type".to_string(), "Size".to_string()],
+                vec!["NAME".to_string(), "TYPE".to_string(), "SIZE".to_string()],
                 vec![node],
             )
         } else {
@@ -275,7 +275,7 @@ impl Ls {
 
         let output = if long_format {
             OutputData::table(
-                vec!["Name".to_string(), "Type".to_string(), "Size".to_string()],
+                vec!["NAME".to_string(), "TYPE".to_string(), "SIZE".to_string()],
                 nodes,
             )
         } else {
@@ -348,7 +348,7 @@ impl Ls {
 
                 let output = if long_format {
                     OutputData::table(
-                        vec!["Name".to_string(), "Type".to_string(), "Size".to_string()],
+                        vec!["NAME".to_string(), "TYPE".to_string(), "SIZE".to_string()],
                         nodes,
                     )
                 } else {
@@ -461,7 +461,7 @@ impl Ls {
 
         let output = if long_format {
             OutputData::table(
-                vec!["Name".to_string(), "Type".to_string(), "Size".to_string()],
+                vec!["NAME".to_string(), "TYPE".to_string(), "SIZE".to_string()],
                 dir_nodes,
             )
         } else {

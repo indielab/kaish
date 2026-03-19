@@ -170,19 +170,19 @@ fn build_headers(
     bytes_only: bool,
     show_all: bool,
 ) -> Vec<String> {
-    let mut headers = vec!["File".to_string()];
+    let mut headers = vec!["FILE".to_string()];
 
     if show_all || lines_only {
-        headers.push("Lines".to_string());
+        headers.push("LINES".to_string());
     }
     if show_all || words_only {
-        headers.push("Words".to_string());
+        headers.push("WORDS".to_string());
     }
     if show_all || bytes_only {
-        headers.push("Bytes".to_string());
+        headers.push("BYTES".to_string());
     }
     if chars_only {
-        headers.push("Chars".to_string());
+        headers.push("CHARS".to_string());
     }
 
     headers

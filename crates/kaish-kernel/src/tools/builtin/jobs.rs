@@ -59,9 +59,9 @@ impl Tool for Jobs {
 
         let headers = vec![
             "ID".to_string(),
-            "Status".to_string(),
-            "Command".to_string(),
-            "Path".to_string(),
+            "STATUS".to_string(),
+            "COMMAND".to_string(),
+            "PATH".to_string(),
         ];
 
         let output = OutputData::table(headers, nodes);

@@ -68,9 +68,9 @@ impl Tool for Stat {
                         .with_entry_type(entry_type);
 
                     let headers = vec![
-                        "File".to_string(),
-                        "Size".to_string(),
-                        "Type".to_string(),
+                        "FILE".to_string(),
+                        "SIZE".to_string(),
+                        "TYPE".to_string(),
                     ];
 
                     ExecResult::with_output(OutputData::table(headers, vec![node]))

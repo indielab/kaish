@@ -143,7 +143,7 @@ impl Tool for Tail {
                 .collect();
 
             let output_data = OutputData::table(
-                vec!["Line".to_string(), "Num".to_string()],
+                vec!["LINE".to_string(), "NUM".to_string()],
                 nodes,
             );
             ExecResult::with_output_and_text(output_data, format!("{}\n", output_lines.join("\n")))

@@ -329,9 +329,9 @@ impl Tool for Grep {
         } else {
             // Return structured output with nodes
             let headers = if grep_opts.show_line_numbers {
-                vec!["Match".to_string(), "Line".to_string()]
+                vec!["MATCH".to_string(), "LINE".to_string()]
             } else {
-                vec!["Match".to_string()]
+                vec!["MATCH".to_string()]
             };
             let output = OutputData::table(headers, nodes);
             ExecResult::with_output_and_text(output, text_output)
@@ -468,9 +468,9 @@ impl Grep {
         } else {
             // Return structured output
             let headers = if opts.show_line_numbers {
-                vec!["Match".to_string(), "File".to_string(), "Line".to_string()]
+                vec!["MATCH".to_string(), "FILE".to_string(), "LINE".to_string()]
             } else {
-                vec!["Match".to_string(), "File".to_string()]
+                vec!["MATCH".to_string(), "FILE".to_string()]
             };
             let output = OutputData::table(headers, total_nodes);
             ExecResult::with_output_and_text(output, total_output)

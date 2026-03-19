@@ -186,7 +186,7 @@ impl Tool for Head {
                 .collect();
 
             let output_data = OutputData::table(
-                vec!["Line".to_string(), "Num".to_string()],
+                vec!["LINE".to_string(), "NUM".to_string()],
                 nodes,
             );
             ExecResult::with_output_and_text(output_data, format!("{}\n", output_lines.join("\n")))
@@ -295,7 +295,7 @@ impl Head {
                 .map(|(i, line)| OutputNode::new(*line).with_cells(vec![(i + 1).to_string()]))
                 .collect();
             let output_data = OutputData::table(
-                vec!["Line".to_string(), "Num".to_string()],
+                vec!["LINE".to_string(), "NUM".to_string()],
                 nodes,
             );
             ExecResult::with_output_and_text(output_data, format!("{}\n", output_lines.join("\n")))
