@@ -1,0 +1,277 @@
+//! base64 — Encode or decode base64 data.
+
+use async_trait::async_trait;
+use std::path::Path;
+
+use base64::engine::general_purpose::STANDARD;
+use base64::Engine;
+
+use crate::ast::Value;
+use crate::interpreter::{ExecResult, OutputData};
+use crate::tools::{ExecContext, ParamSchema, Tool, ToolArgs, ToolSchema};
+
+/// Base64 tool: encode or decode base64 data.
+pub struct Base64Tool;
+
+#[async_trait]
+impl Tool for Base64Tool {
+    fn name(&self) -> &str {
+        "base64"
+    }
+
+    fn schema(&self) -> ToolSchema {
+        ToolSchema::new("base64", "Encode or decode base64 data")
+            .param(ParamSchema::optional(
+                "path",
+                "string",
+                Value::Null,
+                "File to read (reads stdin if not provided)",
+            ))
+            .param(
+                ParamSchema::optional(
+                    "decode",
+                    "bool",
+                    Value::Bool(false),
+                    "Decode base64 input (-d)",
+                )
+                .with_aliases(["-d"]),
+            )
+            .param(
+                ParamSchema::optional(
+                    "wrap",
+                    "int",
+                    Value::Int(76),
+                    "Wrap encoded output at column N (0 = no wrap) (-w)",
+                )
+                .with_aliases(["-w"]),
+            )
+            .example("Encode stdin", "echo hello | base64")
+            .example("Decode", "echo aGVsbG8K | base64 -d")
+            .example("Encode without wrapping", "base64 -w 0 file.bin")
+    }
+
+    async fn execute(&self, args: ToolArgs, ctx: &mut ExecContext) -> ExecResult {
+        let decode = args.has_flag("decode") || args.has_flag("d");
+        let wrap_col = args
+            .get("wrap", usize::MAX)
+            .and_then(|v| match v {
+                Value::Int(i) => Some(*i as usize),
+                Value::String(s) => s.parse().ok(),
+                _ => None,
+            })
+            .unwrap_or(76);
+
+        // Get input from file(s) or stdin, expanding globs
+        let paths = match ctx.expand_paths(&args.positional).await {
+            Ok(p) => p,
+            Err(e) => return ExecResult::failure(1, format!("base64: {}", e)),
+        };
+
+        let input = match paths.first() {
+            Some(path) => {
+                let resolved = ctx.resolve_path(path);
+                match ctx.backend.read(Path::new(&resolved), None).await {
+                    Ok(data) => match String::from_utf8(data) {
+                        Ok(s) => s,
+                        Err(_) => {
+                            return ExecResult::failure(
+                                1,
+                                format!("base64: {}: invalid UTF-8", path),
+                            )
+                        }
+                    },
+                    Err(e) => return ExecResult::failure(1, format!("base64: {}: {}", path, e)),
+                }
+            }
+            None => ctx.read_stdin_to_string().await.unwrap_or_default(),
+        };
+
+        if decode {
+            // Strip whitespace before decoding (base64 input often has newlines)
+            let cleaned: String = input.chars().filter(|c| !c.is_whitespace()).collect();
+            match STANDARD.decode(&cleaned) {
+                Ok(bytes) => {
+                    let text = String::from_utf8_lossy(&bytes);
+                    ExecResult::with_output(OutputData::text(text.into_owned()))
+                }
+                Err(e) => ExecResult::failure(1, format!("base64: invalid input: {}", e)),
+            }
+        } else {
+            // Encode: input bytes → base64 string
+            let encoded = STANDARD.encode(input.as_bytes());
+
+            let output = if wrap_col > 0 {
+                wrap_lines(&encoded, wrap_col)
+            } else {
+                encoded
+            };
+
+            ExecResult::with_output(OutputData::text(output))
+        }
+    }
+}
+
+/// Wrap a string at the given column width.
+fn wrap_lines(s: &str, width: usize) -> String {
+    let mut result = String::with_capacity(s.len() + s.len() / width);
+    for (i, ch) in s.chars().enumerate() {
+        if i > 0 && i % width == 0 {
+            result.push('\n');
+        }
+        result.push(ch);
+    }
+    result
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::vfs::{Filesystem, MemoryFs, VfsRouter};
+    use std::sync::Arc;
+
+    async fn make_ctx() -> ExecContext {
+        let mut vfs = VfsRouter::new();
+        let mem = MemoryFs::new();
+        mem.write(Path::new("hello.txt"), b"hello")
+            .await
+            .expect("write failed");
+        mem.write(Path::new("encoded.txt"), b"aGVsbG8=")
+            .await
+            .expect("write failed");
+        vfs.mount("/", mem);
+        ExecContext::new(Arc::new(vfs))
+    }
+
+    #[tokio::test]
+    async fn test_encode_stdin() {
+        let mut ctx = make_ctx().await;
+        ctx.set_stdin("hello".to_string());
+
+        let args = ToolArgs::new();
+        let result = Base64Tool.execute(args, &mut ctx).await;
+        assert!(result.ok());
+        assert_eq!(result.text_out().as_ref(), "aGVsbG8=");
+    }
+
+    #[tokio::test]
+    async fn test_decode_stdin() {
+        let mut ctx = make_ctx().await;
+        ctx.set_stdin("aGVsbG8=".to_string());
+
+        let mut args = ToolArgs::new();
+        args.named
+            .insert("decode".to_string(), Value::Bool(true));
+        let result = Base64Tool.execute(args, &mut ctx).await;
+        assert!(result.ok());
+        assert_eq!(result.text_out().as_ref(), "hello");
+    }
+
+    #[tokio::test]
+    async fn test_encode_file() {
+        let mut ctx = make_ctx().await;
+        let mut args = ToolArgs::new();
+        args.positional
+            .push(Value::String("/hello.txt".into()));
+
+        let result = Base64Tool.execute(args, &mut ctx).await;
+        assert!(result.ok());
+        assert_eq!(result.text_out().as_ref(), "aGVsbG8=");
+    }
+
+    #[tokio::test]
+    async fn test_decode_file() {
+        let mut ctx = make_ctx().await;
+        let mut args = ToolArgs::new();
+        args.positional
+            .push(Value::String("/encoded.txt".into()));
+        args.named
+            .insert("decode".to_string(), Value::Bool(true));
+
+        let result = Base64Tool.execute(args, &mut ctx).await;
+        assert!(result.ok());
+        assert_eq!(result.text_out().as_ref(), "hello");
+    }
+
+    #[tokio::test]
+    async fn test_encode_wrap() {
+        let mut ctx = make_ctx().await;
+        // Long input to trigger wrapping
+        ctx.set_stdin("The quick brown fox jumps over the lazy dog".to_string());
+
+        let mut args = ToolArgs::new();
+        args.named.insert("wrap".to_string(), Value::Int(20));
+        let result = Base64Tool.execute(args, &mut ctx).await;
+        assert!(result.ok());
+        // Each line should be at most 20 chars
+        for line in result.text_out().as_ref().lines() {
+            assert!(line.len() <= 20, "line too long: {}", line);
+        }
+    }
+
+    #[tokio::test]
+    async fn test_encode_no_wrap() {
+        let mut ctx = make_ctx().await;
+        ctx.set_stdin("The quick brown fox jumps over the lazy dog".to_string());
+
+        let mut args = ToolArgs::new();
+        args.named.insert("wrap".to_string(), Value::Int(0));
+        let result = Base64Tool.execute(args, &mut ctx).await;
+        assert!(result.ok());
+        assert!(!result.text_out().as_ref().contains('\n'));
+    }
+
+    #[tokio::test]
+    async fn test_decode_invalid() {
+        let mut ctx = make_ctx().await;
+        ctx.set_stdin("not-valid-base64!!!".to_string());
+
+        let mut args = ToolArgs::new();
+        args.named
+            .insert("decode".to_string(), Value::Bool(true));
+        let result = Base64Tool.execute(args, &mut ctx).await;
+        assert!(!result.ok());
+    }
+
+    #[tokio::test]
+    async fn test_roundtrip() {
+        let mut ctx = make_ctx().await;
+        ctx.set_stdin("roundtrip test 日本語".to_string());
+
+        let args = ToolArgs::new();
+        let encoded = Base64Tool.execute(args, &mut ctx).await;
+        assert!(encoded.ok());
+
+        ctx.set_stdin(encoded.text_out().into_owned());
+        let mut args2 = ToolArgs::new();
+        args2
+            .named
+            .insert("decode".to_string(), Value::Bool(true));
+        let decoded = Base64Tool.execute(args2, &mut ctx).await;
+        assert!(decoded.ok());
+        assert_eq!(decoded.text_out().as_ref(), "roundtrip test 日本語");
+    }
+
+    #[tokio::test]
+    async fn test_decode_with_whitespace() {
+        let mut ctx = make_ctx().await;
+        ctx.set_stdin("aGVs\nbG8=\n".to_string());
+
+        let mut args = ToolArgs::new();
+        args.named
+            .insert("decode".to_string(), Value::Bool(true));
+        let result = Base64Tool.execute(args, &mut ctx).await;
+        assert!(result.ok());
+        assert_eq!(result.text_out().as_ref(), "hello");
+    }
+
+    #[tokio::test]
+    async fn test_empty_input() {
+        let mut ctx = make_ctx().await;
+        ctx.set_stdin("".to_string());
+
+        let args = ToolArgs::new();
+        let result = Base64Tool.execute(args, &mut ctx).await;
+        assert!(result.ok());
+        assert_eq!(result.text_out().as_ref(), "");
+    }
+}

@@ -5,10 +5,12 @@
 mod alias;
 mod assert;
 mod awk;
+mod base64_tool;
 mod basename;
 mod bg;
 mod cat;
 mod cd;
+mod checksum;
 mod cp;
 mod cut;
 mod date;
@@ -63,9 +65,11 @@ mod set;
 mod sleep;
 mod sort;
 mod stat;
+mod tac;
 mod tail;
 mod tee;
 mod test_builtin;
+mod timeout;
 mod tokens;
 mod touch;
 mod tr;
@@ -80,6 +84,7 @@ mod wait;
 mod wc;
 mod which;
 mod write;
+mod xxd;
 
 use super::ToolRegistry;
 
@@ -89,10 +94,12 @@ pub fn register_builtins(registry: &mut ToolRegistry) {
     registry.register(alias::Unalias);
     registry.register(assert::Assert);
     registry.register(awk::Awk);
+    registry.register(base64_tool::Base64Tool);
     registry.register(basename::Basename);
     registry.register(bg::Bg);
     registry.register(cat::Cat);
     registry.register(cd::Cd);
+    registry.register(checksum::Checksum);
     registry.register(cp::Cp);
     registry.register(cut::Cut);
     registry.register(date::Date);
@@ -146,10 +153,12 @@ pub fn register_builtins(registry: &mut ToolRegistry) {
     registry.register(sleep::Sleep);
     registry.register(sort::Sort);
     registry.register(stat::Stat);
+    registry.register(tac::Tac);
     registry.register(tail::Tail);
     registry.register(tee::Tee);
     registry.register(test_builtin::Test);
     registry.register(test_builtin::Bracket);
+    registry.register(timeout::Timeout);
     registry.register(tokens::Tokens);
     registry.register(touch::Touch);
     registry.register(tr::Tr);
@@ -165,4 +174,5 @@ pub fn register_builtins(registry: &mut ToolRegistry) {
     registry.register(wc::Wc);
     registry.register(which::Which);
     registry.register(write::Write);
+    registry.register(xxd::Xxd);
 }

@@ -1,0 +1,379 @@
+//! checksum — Compute file hashes (sha256, sha1, md5).
+
+use async_trait::async_trait;
+use std::path::Path;
+
+use digest::Digest;
+
+use crate::ast::Value;
+use crate::interpreter::{ExecResult, OutputData, OutputNode};
+use crate::tools::{ExecContext, ParamSchema, Tool, ToolArgs, ToolSchema};
+
+/// Checksum tool: compute or verify file hashes.
+pub struct Checksum;
+
+#[async_trait]
+impl Tool for Checksum {
+    fn name(&self) -> &str {
+        "checksum"
+    }
+
+    fn schema(&self) -> ToolSchema {
+        ToolSchema::new("checksum", "Compute or verify file hashes")
+            .param(ParamSchema::optional(
+                "path",
+                "string",
+                Value::Null,
+                "File(s) to hash (reads stdin if not provided)",
+            ))
+            .param(
+                ParamSchema::optional(
+                    "algo",
+                    "string",
+                    Value::String("sha256".into()),
+                    "Hash algorithm: sha256, sha1, md5 (-a)",
+                )
+                .with_aliases(["-a"]),
+            )
+            .param(
+                ParamSchema::optional(
+                    "check",
+                    "string",
+                    Value::Null,
+                    "Verify checksums from file (-c)",
+                )
+                .with_aliases(["-c"]),
+            )
+            .example("SHA256 of a file", "checksum README.md")
+            .example("MD5", "checksum -a md5 file.tar.gz")
+            .example("Hash stdin", "echo hello | checksum")
+            .example("Verify", "checksum -c checksums.txt")
+    }
+
+    async fn execute(&self, args: ToolArgs, ctx: &mut ExecContext) -> ExecResult {
+        let algo = args
+            .get_string("algo", usize::MAX)
+            .unwrap_or_else(|| "sha256".to_string());
+
+        // Validate algorithm
+        if !matches!(algo.as_str(), "sha256" | "sha1" | "md5") {
+            return ExecResult::failure(
+                1,
+                format!("checksum: unknown algorithm '{}' (use sha256, sha1, or md5)", algo),
+            );
+        }
+
+        // Check mode: verify checksums from a file
+        if let Some(check_path) = args.get_string("check", usize::MAX) {
+            return self.verify_checksums(ctx, &check_path, &algo).await;
+        }
+
+        // Collect file paths, expanding globs
+        let paths = match ctx.expand_paths(&args.positional).await {
+            Ok(p) => p,
+            Err(e) => return ExecResult::failure(1, format!("checksum: {}", e)),
+        };
+
+        if paths.is_empty() {
+            // Hash stdin
+            let input = ctx.read_stdin_to_string().await.unwrap_or_default();
+            let hash = compute_hash(input.as_bytes(), &algo);
+            let text = format!("{}  -", hash);
+            let node = OutputNode::new(&text)
+                .with_cells(vec![hash, "-".to_string(), algo]);
+            return ExecResult::with_output_and_text(
+                OutputData::table(
+                    vec!["HASH".to_string(), "FILE".to_string(), "ALGO".to_string()],
+                    vec![node],
+                ),
+                text,
+            );
+        }
+
+        // Hash each file
+        let mut nodes = Vec::new();
+        let mut text_lines = Vec::new();
+        for path in &paths {
+            let resolved = ctx.resolve_path(path);
+            match ctx.backend.read(Path::new(&resolved), None).await {
+                Ok(data) => {
+                    let hash = compute_hash(&data, &algo);
+                    let line = format!("{}  {}", hash, path);
+                    nodes.push(
+                        OutputNode::new(&line)
+                            .with_cells(vec![hash, path.clone(), algo.clone()]),
+                    );
+                    text_lines.push(line);
+                }
+                Err(e) => {
+                    return ExecResult::failure(1, format!("checksum: {}: {}", path, e));
+                }
+            }
+        }
+
+        let text = text_lines.join("\n");
+        let output = OutputData::table(
+            vec!["HASH".to_string(), "FILE".to_string(), "ALGO".to_string()],
+            nodes,
+        );
+        ExecResult::with_output_and_text(output, text)
+    }
+}
+
+impl Checksum {
+    /// Verify checksums from a file. Each line: "HASH  FILENAME"
+    async fn verify_checksums(
+        &self,
+        ctx: &mut ExecContext,
+        check_path: &str,
+        algo: &str,
+    ) -> ExecResult {
+        let resolved = ctx.resolve_path(check_path);
+        let data = match ctx.backend.read(Path::new(&resolved), None).await {
+            Ok(d) => d,
+            Err(e) => {
+                return ExecResult::failure(1, format!("checksum: {}: {}", check_path, e))
+            }
+        };
+        let content = match String::from_utf8(data) {
+            Ok(s) => s,
+            Err(_) => {
+                return ExecResult::failure(
+                    1,
+                    format!("checksum: {}: invalid UTF-8", check_path),
+                )
+            }
+        };
+
+        let mut failures = 0;
+        let mut output = String::new();
+
+        for line in content.lines() {
+            let line = line.trim();
+            if line.is_empty() {
+                continue;
+            }
+
+            // Parse "HASH  FILENAME", "HASH *FILENAME", or "HASH FILENAME"
+            let (expected_hash, rest) = match line.split_once(' ') {
+                Some(parts) => parts,
+                None => {
+                    output.push_str(&format!("{}: FAILED (malformed line)\n", line));
+                    failures += 1;
+                    continue;
+                }
+            };
+            let filename = rest.trim_start_matches([' ', '*']);
+
+            let file_resolved = ctx.resolve_path(filename);
+            match ctx.backend.read(Path::new(&file_resolved), None).await {
+                Ok(file_data) => {
+                    let actual_hash = compute_hash(&file_data, algo);
+                    if actual_hash == expected_hash {
+                        output.push_str(&format!("{}: OK\n", filename));
+                    } else {
+                        output.push_str(&format!("{}: FAILED\n", filename));
+                        failures += 1;
+                    }
+                }
+                Err(e) => {
+                    output.push_str(&format!("{}: FAILED ({})\n", filename, e));
+                    failures += 1;
+                }
+            }
+        }
+
+        // Remove trailing newline
+        if output.ends_with('\n') {
+            output.pop();
+        }
+
+        if failures > 0 {
+            ExecResult::from_output(1, output, format!("checksum: {} computed checksum(s) did NOT match", failures))
+        } else {
+            ExecResult::with_output(OutputData::text(output))
+        }
+    }
+}
+
+/// Compute hash of bytes using the specified algorithm.
+fn compute_hash(data: &[u8], algo: &str) -> String {
+    match algo {
+        "sha256" => hex_encode(sha2::Sha256::digest(data).as_slice()),
+        "sha1" => hex_encode(sha1::Sha1::digest(data).as_slice()),
+        "md5" => hex_encode(md5::Md5::digest(data).as_slice()),
+        _ => unreachable!("algorithm validated before calling compute_hash"),
+    }
+}
+
+/// Encode bytes as lowercase hex string.
+fn hex_encode(bytes: &[u8]) -> String {
+    let mut s = String::with_capacity(bytes.len() * 2);
+    for b in bytes {
+        s.push_str(&format!("{:02x}", b));
+    }
+    s
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::vfs::{Filesystem, MemoryFs, VfsRouter};
+    use std::sync::Arc;
+
+    async fn make_ctx() -> ExecContext {
+        let mut vfs = VfsRouter::new();
+        let mem = MemoryFs::new();
+        mem.write(Path::new("hello.txt"), b"hello")
+            .await
+            .expect("write failed");
+        mem.write(Path::new("world.txt"), b"world")
+            .await
+            .expect("write failed");
+        vfs.mount("/", mem);
+        ExecContext::new(Arc::new(vfs))
+    }
+
+    #[tokio::test]
+    async fn test_sha256_file() {
+        let mut ctx = make_ctx().await;
+        let mut args = ToolArgs::new();
+        args.positional
+            .push(Value::String("/hello.txt".into()));
+
+        let result = Checksum.execute(args, &mut ctx).await;
+        assert!(result.ok());
+        // sha256 of "hello"
+        let out = result.text_out();
+        assert!(out.contains(
+            "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824"
+        ));
+        assert!(out.contains("/hello.txt"));
+    }
+
+    #[tokio::test]
+    async fn test_md5_file() {
+        let mut ctx = make_ctx().await;
+        let mut args = ToolArgs::new();
+        args.positional
+            .push(Value::String("/hello.txt".into()));
+        args.named
+            .insert("algo".to_string(), Value::String("md5".into()));
+
+        let result = Checksum.execute(args, &mut ctx).await;
+        assert!(result.ok());
+        // md5 of "hello"
+        assert!(result.text_out().contains("5d41402abc4b2a76b9719d911017c592"));
+    }
+
+    #[tokio::test]
+    async fn test_sha1_stdin() {
+        let mut ctx = make_ctx().await;
+        ctx.set_stdin("hello".to_string());
+
+        let mut args = ToolArgs::new();
+        args.named
+            .insert("algo".to_string(), Value::String("sha1".into()));
+
+        let result = Checksum.execute(args, &mut ctx).await;
+        assert!(result.ok());
+        // sha1 of "hello"
+        let out = result.text_out();
+        assert!(out.contains("aaf4c61ddcc5e8a2dabede0f3b482cd9aea9434d"));
+        assert!(out.contains('-')); // stdin marker
+    }
+
+    #[tokio::test]
+    async fn test_multiple_files() {
+        let mut ctx = make_ctx().await;
+        let mut args = ToolArgs::new();
+        args.positional
+            .push(Value::String("/hello.txt".into()));
+        args.positional
+            .push(Value::String("/world.txt".into()));
+
+        let result = Checksum.execute(args, &mut ctx).await;
+        assert!(result.ok());
+        let out = result.text_out();
+        let lines: Vec<&str> = out.lines().collect();
+        assert_eq!(lines.len(), 2);
+        assert!(lines[0].contains("/hello.txt"));
+        assert!(lines[1].contains("/world.txt"));
+    }
+
+    #[tokio::test]
+    async fn test_verify_ok() {
+        // Create a checksum file
+        let hash = "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824";
+        let checksum_content = format!("{}  /hello.txt", hash);
+        let mem = MemoryFs::new();
+        mem.write(Path::new("hello.txt"), b"hello")
+            .await
+            .expect("write failed");
+        mem.write(
+            Path::new("sums.txt"),
+            checksum_content.as_bytes(),
+        )
+        .await
+        .expect("write failed");
+        let mut vfs = VfsRouter::new();
+        vfs.mount("/", mem);
+        let mut ctx = ExecContext::new(Arc::new(vfs));
+
+        let mut args = ToolArgs::new();
+        args.named
+            .insert("check".to_string(), Value::String("/sums.txt".into()));
+
+        let result = Checksum.execute(args, &mut ctx).await;
+        assert!(result.ok());
+        assert!(result.text_out().contains("OK"));
+    }
+
+    #[tokio::test]
+    async fn test_verify_fail() {
+        let checksum_content = "0000000000000000000000000000000000000000000000000000000000000000  /hello.txt";
+        let mem = MemoryFs::new();
+        mem.write(Path::new("hello.txt"), b"hello")
+            .await
+            .expect("write failed");
+        mem.write(Path::new("sums.txt"), checksum_content.as_bytes())
+            .await
+            .expect("write failed");
+        let mut vfs = VfsRouter::new();
+        vfs.mount("/", mem);
+        let mut ctx = ExecContext::new(Arc::new(vfs));
+
+        let mut args = ToolArgs::new();
+        args.named
+            .insert("check".to_string(), Value::String("/sums.txt".into()));
+
+        let result = Checksum.execute(args, &mut ctx).await;
+        assert!(!result.ok());
+        assert!(result.text_out().contains("FAILED"));
+    }
+
+    #[tokio::test]
+    async fn test_unknown_algo() {
+        let mut ctx = make_ctx().await;
+        ctx.set_stdin("data".to_string());
+
+        let mut args = ToolArgs::new();
+        args.named
+            .insert("algo".to_string(), Value::String("blake3".into()));
+
+        let result = Checksum.execute(args, &mut ctx).await;
+        assert!(!result.ok());
+        assert!(result.err.contains("unknown algorithm"));
+    }
+
+    #[tokio::test]
+    async fn test_file_not_found() {
+        let mut ctx = make_ctx().await;
+        let mut args = ToolArgs::new();
+        args.positional
+            .push(Value::String("/nope.txt".into()));
+
+        let result = Checksum.execute(args, &mut ctx).await;
+        assert!(!result.ok());
+    }
+}

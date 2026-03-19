@@ -1,0 +1,370 @@
+//! xxd — Make a hex dump or reverse it.
+
+use async_trait::async_trait;
+use std::path::Path;
+
+use crate::ast::Value;
+use crate::interpreter::{ExecResult, OutputData};
+use crate::tools::{ExecContext, ParamSchema, Tool, ToolArgs, ToolSchema};
+
+/// Xxd tool: hex dump or reverse.
+pub struct Xxd;
+
+#[async_trait]
+impl Tool for Xxd {
+    fn name(&self) -> &str {
+        "xxd"
+    }
+
+    fn schema(&self) -> ToolSchema {
+        ToolSchema::new("xxd", "Make a hex dump or reverse it")
+            .param(ParamSchema::optional(
+                "path",
+                "string",
+                Value::Null,
+                "File to read (reads stdin if not provided)",
+            ))
+            .param(
+                ParamSchema::optional(
+                    "plain",
+                    "bool",
+                    Value::Bool(false),
+                    "Plain hex dump — no address, no ASCII (-p)",
+                )
+                .with_aliases(["-p"]),
+            )
+            .param(
+                ParamSchema::optional(
+                    "reverse",
+                    "bool",
+                    Value::Bool(false),
+                    "Reverse: convert hex dump back to binary (-r)",
+                )
+                .with_aliases(["-r"]),
+            )
+            .param(
+                ParamSchema::optional(
+                    "length",
+                    "int",
+                    Value::Null,
+                    "Limit output to N bytes (-l)",
+                )
+                .with_aliases(["-l"]),
+            )
+            .param(
+                ParamSchema::optional(
+                    "seek",
+                    "int",
+                    Value::Null,
+                    "Skip N bytes from start (-s)",
+                )
+                .with_aliases(["-s"]),
+            )
+            .example("Hex dump", "xxd file.bin")
+            .example("Plain hex", "echo hello | xxd -p")
+            .example("Reverse hex", "echo 68656c6c6f | xxd -r -p")
+    }
+
+    async fn execute(&self, args: ToolArgs, ctx: &mut ExecContext) -> ExecResult {
+        let plain = args.has_flag("plain") || args.has_flag("p");
+        let reverse = args.has_flag("reverse") || args.has_flag("r");
+        let length = args.get("length", usize::MAX).and_then(|v| match v {
+            Value::Int(i) => Some(*i as usize),
+            Value::String(s) => s.parse().ok(),
+            _ => None,
+        });
+        let seek = args
+            .get("seek", usize::MAX)
+            .and_then(|v| match v {
+                Value::Int(i) => Some(*i as usize),
+                Value::String(s) => s.parse().ok(),
+                _ => None,
+            })
+            .unwrap_or(0);
+
+        // Read raw input from file(s) or stdin, expanding globs
+        let paths = match ctx.expand_paths(&args.positional).await {
+            Ok(p) => p,
+            Err(e) => return ExecResult::failure(1, format!("xxd: {}", e)),
+        };
+
+        let input = match paths.first() {
+            Some(path) => {
+                let resolved = ctx.resolve_path(path);
+                match ctx.backend.read(Path::new(&resolved), None).await {
+                    Ok(data) => String::from_utf8_lossy(&data).into_owned(),
+                    Err(e) => return ExecResult::failure(1, format!("xxd: {}: {}", path, e)),
+                }
+            }
+            None => ctx.read_stdin_to_string().await.unwrap_or_default(),
+        };
+
+        if reverse {
+            return reverse_hex(&input, plain);
+        }
+
+        // Forward: produce hex dump
+        let bytes = input.as_bytes();
+
+        // Apply seek
+        let bytes = if seek < bytes.len() {
+            &bytes[seek..]
+        } else {
+            &[]
+        };
+
+        // Apply length limit
+        let bytes = match length {
+            Some(n) if n < bytes.len() => &bytes[..n],
+            _ => bytes,
+        };
+
+        let output = if plain {
+            plain_hex(bytes)
+        } else {
+            classic_hex(bytes, seek)
+        };
+
+        ExecResult::with_output(OutputData::text(output))
+    }
+}
+
+/// Classic xxd format: address, hex pairs, ASCII representation.
+/// 16 bytes per line.
+fn classic_hex(bytes: &[u8], base_offset: usize) -> String {
+    let mut output = String::new();
+    for (i, chunk) in bytes.chunks(16).enumerate() {
+        let addr = base_offset + i * 16;
+
+        // Address
+        output.push_str(&format!("{:08x}: ", addr));
+
+        // Hex pairs (groups of 2 bytes separated by space)
+        for (j, byte) in chunk.iter().enumerate() {
+            output.push_str(&format!("{:02x}", byte));
+            if j % 2 == 1 {
+                output.push(' ');
+            }
+        }
+
+        // Pad if short line
+        let hex_width = chunk.len() * 2 + chunk.len() / 2;
+        let full_width = 16 * 2 + 8; // 32 hex chars + 8 spaces
+        for _ in hex_width..full_width {
+            output.push(' ');
+        }
+
+        // ASCII representation
+        output.push(' ');
+        for byte in chunk {
+            if byte.is_ascii_graphic() || *byte == b' ' {
+                output.push(*byte as char);
+            } else {
+                output.push('.');
+            }
+        }
+
+        output.push('\n');
+    }
+
+    // Remove trailing newline for consistency
+    if output.ends_with('\n') {
+        output.pop();
+    }
+    output
+}
+
+/// Plain hex: just hex bytes, no address or ASCII. 30 bytes per line.
+fn plain_hex(bytes: &[u8]) -> String {
+    let mut output = String::new();
+    for (i, byte) in bytes.iter().enumerate() {
+        output.push_str(&format!("{:02x}", byte));
+        if i > 0 && (i + 1) % 30 == 0 {
+            output.push('\n');
+        }
+    }
+    output
+}
+
+/// Reverse: parse hex input back to text.
+fn reverse_hex(input: &str, plain: bool) -> ExecResult {
+    let hex_str = if plain {
+        // Plain mode: input is just hex chars
+        input
+            .chars()
+            .filter(|c| c.is_ascii_hexdigit())
+            .collect::<String>()
+    } else {
+        // Classic mode: extract hex from xxd-format lines
+        // Each line: "00000000: 6865 6c6c 6f0a       hello."
+        // Take the hex portion between address and ASCII
+        let mut hex = String::new();
+        for line in input.lines() {
+            // Skip empty lines
+            let line = line.trim();
+            if line.is_empty() {
+                continue;
+            }
+            // After the colon+space, take hex pairs until we hit two spaces (ASCII section)
+            if let Some(after_addr) = line.split(": ").nth(1) {
+                // Take until double space (which separates hex from ASCII)
+                let hex_part = after_addr.split("  ").next().unwrap_or("");
+                for ch in hex_part.chars() {
+                    if ch.is_ascii_hexdigit() {
+                        hex.push(ch);
+                    }
+                }
+            }
+        }
+        hex
+    };
+
+    // Convert hex string to bytes
+    let mut bytes = Vec::with_capacity(hex_str.len() / 2);
+    let chars: Vec<char> = hex_str.chars().collect();
+    let mut i = 0;
+    while i + 1 < chars.len() {
+        let high = chars[i].to_digit(16);
+        let low = chars[i + 1].to_digit(16);
+        match (high, low) {
+            (Some(h), Some(l)) => bytes.push((h * 16 + l) as u8),
+            _ => {
+                return ExecResult::failure(
+                    1,
+                    format!("xxd: invalid hex at position {}", i),
+                )
+            }
+        }
+        i += 2;
+    }
+
+    let text = String::from_utf8_lossy(&bytes);
+    ExecResult::with_output(OutputData::text(text.into_owned()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::vfs::{MemoryFs, VfsRouter};
+    use std::sync::Arc;
+
+    async fn make_ctx() -> ExecContext {
+        let mut vfs = VfsRouter::new();
+        vfs.mount("/", MemoryFs::new());
+        ExecContext::new(Arc::new(vfs))
+    }
+
+    #[tokio::test]
+    async fn test_xxd_classic() {
+        let mut ctx = make_ctx().await;
+        ctx.set_stdin("hello".to_string());
+
+        let args = ToolArgs::new();
+        let result = Xxd.execute(args, &mut ctx).await;
+        assert!(result.ok());
+        assert!(result.text_out().as_ref().starts_with("00000000:"));
+        assert!(result.text_out().as_ref().contains("6865"));
+        assert!(result.text_out().as_ref().contains("hello"));
+    }
+
+    #[tokio::test]
+    async fn test_xxd_plain() {
+        let mut ctx = make_ctx().await;
+        ctx.set_stdin("hello".to_string());
+
+        let mut args = ToolArgs::new();
+        args.named.insert("plain".to_string(), Value::Bool(true));
+        let result = Xxd.execute(args, &mut ctx).await;
+        assert!(result.ok());
+        assert_eq!(result.text_out().as_ref(), "68656c6c6f");
+    }
+
+    #[tokio::test]
+    async fn test_xxd_reverse_plain() {
+        let mut ctx = make_ctx().await;
+        ctx.set_stdin("68656c6c6f".to_string());
+
+        let mut args = ToolArgs::new();
+        args.named
+            .insert("reverse".to_string(), Value::Bool(true));
+        args.named.insert("plain".to_string(), Value::Bool(true));
+        let result = Xxd.execute(args, &mut ctx).await;
+        assert!(result.ok());
+        assert_eq!(result.text_out().as_ref(), "hello");
+    }
+
+    #[tokio::test]
+    async fn test_xxd_roundtrip() {
+        let mut ctx = make_ctx().await;
+        let original = "test data 123";
+        ctx.set_stdin(original.to_string());
+
+        // Forward
+        let mut args = ToolArgs::new();
+        args.named.insert("plain".to_string(), Value::Bool(true));
+        let hex = Xxd.execute(args, &mut ctx).await;
+        assert!(hex.ok());
+
+        // Reverse
+        ctx.set_stdin(hex.text_out().into_owned());
+        let mut args2 = ToolArgs::new();
+        args2
+            .named
+            .insert("reverse".to_string(), Value::Bool(true));
+        args2.named.insert("plain".to_string(), Value::Bool(true));
+        let decoded = Xxd.execute(args2, &mut ctx).await;
+        assert!(decoded.ok());
+        assert_eq!(decoded.text_out().as_ref(), original);
+    }
+
+    #[tokio::test]
+    async fn test_xxd_seek() {
+        let mut ctx = make_ctx().await;
+        ctx.set_stdin("abcdef".to_string());
+
+        let mut args = ToolArgs::new();
+        args.named.insert("seek".to_string(), Value::Int(3));
+        args.named.insert("plain".to_string(), Value::Bool(true));
+        let result = Xxd.execute(args, &mut ctx).await;
+        assert!(result.ok());
+        assert_eq!(result.text_out().as_ref(), "646566"); // "def" in hex
+    }
+
+    #[tokio::test]
+    async fn test_xxd_length() {
+        let mut ctx = make_ctx().await;
+        ctx.set_stdin("abcdef".to_string());
+
+        let mut args = ToolArgs::new();
+        args.named.insert("length".to_string(), Value::Int(3));
+        args.named.insert("plain".to_string(), Value::Bool(true));
+        let result = Xxd.execute(args, &mut ctx).await;
+        assert!(result.ok());
+        assert_eq!(result.text_out().as_ref(), "616263"); // "abc" in hex
+    }
+
+    #[tokio::test]
+    async fn test_xxd_empty() {
+        let mut ctx = make_ctx().await;
+        ctx.set_stdin("".to_string());
+
+        let args = ToolArgs::new();
+        let result = Xxd.execute(args, &mut ctx).await;
+        assert!(result.ok());
+        assert_eq!(result.text_out().as_ref(), "");
+    }
+
+    #[tokio::test]
+    async fn test_xxd_reverse_classic_format() {
+        let mut ctx = make_ctx().await;
+        // Feed classic xxd output back to reverse
+        ctx.set_stdin("00000000: 6865 6c6c 6f                             hello".to_string());
+
+        let mut args = ToolArgs::new();
+        args.named
+            .insert("reverse".to_string(), Value::Bool(true));
+        let result = Xxd.execute(args, &mut ctx).await;
+        assert!(result.ok());
+        assert_eq!(result.text_out().as_ref(), "hello");
+    }
+}
