@@ -104,6 +104,14 @@ pub struct ExecContext {
     /// Terminal state for job control (interactive mode, Unix only).
     #[cfg(unix)]
     pub terminal_state: Option<std::sync::Arc<crate::terminal::TerminalState>>,
+    /// Command dispatcher for re-dispatching through the full resolution chain.
+    ///
+    /// When set (via `Kernel::into_arc()`), builtins like `timeout` can dispatch
+    /// inner commands through the full chain (user tools → builtins → .kai scripts
+    /// → external commands) instead of being limited to `backend.call_tool()`.
+    ///
+    /// `None` when the Kernel was not wrapped via `into_arc()`.
+    pub dispatcher: Option<Arc<dyn crate::dispatch::CommandDispatcher>>,
 }
 
 impl ExecContext {
@@ -135,6 +143,7 @@ impl ExecContext {
             trash_backend: None,
             #[cfg(unix)]
             terminal_state: None,
+            dispatcher: None,
         }
     }
 
@@ -166,6 +175,7 @@ impl ExecContext {
             trash_backend: None,
             #[cfg(unix)]
             terminal_state: None,
+            dispatcher: None,
         }
     }
 
@@ -194,6 +204,7 @@ impl ExecContext {
             trash_backend: None,
             #[cfg(unix)]
             terminal_state: None,
+            dispatcher: None,
         }
     }
 
@@ -222,6 +233,7 @@ impl ExecContext {
             trash_backend: None,
             #[cfg(unix)]
             terminal_state: None,
+            dispatcher: None,
         }
     }
 
@@ -253,6 +265,7 @@ impl ExecContext {
             trash_backend: None,
             #[cfg(unix)]
             terminal_state: None,
+            dispatcher: None,
         }
     }
 
@@ -281,6 +294,7 @@ impl ExecContext {
             trash_backend: None,
             #[cfg(unix)]
             terminal_state: None,
+            dispatcher: None,
         }
     }
 
@@ -397,6 +411,7 @@ impl ExecContext {
             trash_backend: self.trash_backend.clone(),
             #[cfg(unix)]
             terminal_state: self.terminal_state.clone(),
+            dispatcher: self.dispatcher.clone(),
         }
     }
 
