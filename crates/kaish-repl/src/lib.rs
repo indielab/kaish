@@ -469,7 +469,7 @@ impl Repl {
 
         match result {
             Ok(exec_result) => {
-                if exec_result.ok() && exec_result.output.is_none() && exec_result.text_out().is_empty() {
+                if exec_result.ok() && !exec_result.has_output() && exec_result.text_out().is_empty() {
                     ProcessResult::Empty
                 } else {
                     ProcessResult::Output(format_result(&exec_result))
@@ -494,7 +494,7 @@ impl Default for Repl {
 /// Uses OutputData when available, otherwise falls back to status+output format.
 fn format_result(result: &ExecResult) -> String {
     // If there's structured output, use the formatter
-    if result.output.is_some() {
+    if result.has_output() {
         let context = format::detect_context();
         let formatted = format::format_output(result, context);
 

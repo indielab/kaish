@@ -231,10 +231,10 @@ mod tests {
         let result = Wc.execute(args, &mut ctx).await;
         assert!(result.ok());
         // 2 lines, 5 words, 24 bytes
-        assert!(result.out.contains("2"));
-        assert!(result.out.contains("5"));
-        assert!(result.out.contains("24"));
-        assert!(result.out.contains("/test.txt"));
+        assert!(result.text_out().contains("2"));
+        assert!(result.text_out().contains("5"));
+        assert!(result.text_out().contains("24"));
+        assert!(result.text_out().contains("/test.txt"));
     }
 
     #[tokio::test]
@@ -247,8 +247,8 @@ mod tests {
         let result = Wc.execute(args, &mut ctx).await;
         assert!(result.ok());
         // TSV format: filename\tcount
-        assert!(result.out.contains("2"));
-        assert!(result.out.contains("/test.txt"));
+        assert!(result.text_out().contains("2"));
+        assert!(result.text_out().contains("/test.txt"));
     }
 
     #[tokio::test]
@@ -261,7 +261,7 @@ mod tests {
         let result = Wc.execute(args, &mut ctx).await;
         assert!(result.ok());
         // TSV format: filename\tcount
-        assert!(result.out.contains("5"));
+        assert!(result.text_out().contains("5"));
     }
 
     #[tokio::test]
@@ -274,7 +274,7 @@ mod tests {
         let result = Wc.execute(args, &mut ctx).await;
         assert!(result.ok());
         // TSV format: filename\tcount
-        assert!(result.out.contains("24"));
+        assert!(result.text_out().contains("24"));
     }
 
     #[tokio::test]
@@ -288,7 +288,7 @@ mod tests {
         assert!(result.ok());
         // "héllo wörld\n" = 12 chars (é and ö are single chars)
         // TSV format: filename\tcount
-        assert!(result.out.contains("12"));
+        assert!(result.text_out().contains("12"));
     }
 
     #[tokio::test]
@@ -300,10 +300,10 @@ mod tests {
         let result = Wc.execute(args, &mut ctx).await;
         assert!(result.ok());
         // 2 lines, 5 words
-        assert!(result.out.contains("2"));
-        assert!(result.out.contains("5"));
+        assert!(result.text_out().contains("2"));
+        assert!(result.text_out().contains("5"));
         // No filename in output for stdin
-        assert!(!result.out.contains("/"));
+        assert!(!result.text_out().contains("/"));
     }
 
     #[tokio::test]
@@ -329,8 +329,8 @@ mod tests {
 
         let result = Wc.execute(args, &mut ctx).await;
         assert!(result.ok());
-        assert!(result.out.contains("2")); // lines
-        assert!(result.out.contains("5")); // words
+        assert!(result.text_out().contains("2")); // lines
+        assert!(result.text_out().contains("5")); // words
     }
 
     #[tokio::test]
@@ -353,8 +353,8 @@ mod tests {
         assert!(result_chars.ok());
 
         // "héllo wörld\n" is 14 bytes but 12 chars
-        assert!(result_bytes.out.contains("14"));
-        assert!(result_chars.out.contains("12"));
+        assert!(result_bytes.text_out().contains("14"));
+        assert!(result_chars.text_out().contains("12"));
     }
 
     #[tokio::test]
@@ -366,7 +366,7 @@ mod tests {
         let result = Wc.execute(args, &mut ctx).await;
         assert!(result.ok());
         // Should show 0s for empty input
-        assert!(result.out.contains("0"));
+        assert!(result.text_out().contains("0"));
     }
 
     #[tokio::test]
@@ -378,7 +378,7 @@ mod tests {
         let result = Wc.execute(args, &mut ctx).await;
         assert!(result.ok());
         // 0 lines (no newline), 1 word, 4 bytes
-        let out = &result.out;
+        let out = result.text_out();
         assert!(out.contains("0") || out.contains("1")); // lines or words
     }
 
@@ -393,7 +393,7 @@ mod tests {
         let result = Wc.execute(args, &mut ctx).await;
         assert!(result.ok());
         // 0 words - TSV format with empty filename for stdin
-        assert!(result.out.contains("0"));
+        assert!(result.text_out().contains("0"));
     }
 
     #[tokio::test]
@@ -407,7 +407,7 @@ mod tests {
         let result = Wc.execute(args, &mut ctx).await;
         assert!(result.ok());
         // 日本語 (3) + space (1) + テスト (3) + newline (1) = 8 chars
-        assert!(result.out.contains("8"));
+        assert!(result.text_out().contains("8"));
     }
 
     #[tokio::test]
@@ -421,7 +421,7 @@ mod tests {
 
         let result = Wc.execute(args, &mut ctx).await;
         assert!(result.ok());
-        assert!(result.out.contains("10001")); // 10000 + newline
+        assert!(result.text_out().contains("10001")); // 10000 + newline
     }
 
     #[tokio::test]
@@ -434,6 +434,6 @@ mod tests {
         let result = Wc.execute(args, &mut ctx).await;
         assert!(result.ok());
         // Should show counts for multiple files and a total
-        assert!(result.out.contains("total"));
+        assert!(result.text_out().contains("total"));
     }
 }

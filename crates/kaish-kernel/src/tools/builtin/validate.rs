@@ -185,7 +185,7 @@ mod tests {
 
         let result = Validate.execute(args, &mut ctx).await;
         // This should fail validation due to invalid regex
-        assert!(!result.ok() || result.err.contains("regex") || result.out.contains("regex"));
+        assert!(!result.ok() || result.err.contains("regex") || result.text_out().contains("regex"));
     }
 
     #[tokio::test]
@@ -196,7 +196,7 @@ mod tests {
 
         let result = Validate.execute(args, &mut ctx).await;
         assert!(!result.ok(), "break outside loop should fail validation");
-        assert!(result.err.contains("loop") || result.out.contains("loop"));
+        assert!(result.err.contains("loop") || result.text_out().contains("loop"));
     }
 
     #[tokio::test]
@@ -208,6 +208,6 @@ mod tests {
 
         let result = Validate.execute(args, &mut ctx).await;
         assert!(result.ok());
-        assert!(result.out.is_empty(), "quiet mode should have no output");
+        assert!(result.text_out().is_empty(), "quiet mode should have no output");
     }
 }

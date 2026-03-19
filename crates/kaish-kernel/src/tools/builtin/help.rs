@@ -74,8 +74,8 @@ mod tests {
 
         let result = Help.execute(args, &mut ctx).await;
         assert!(result.ok());
-        assert!(result.out.contains("kaish"));
-        assert!(result.out.contains("help syntax"));
+        assert!(result.text_out().contains("kaish"));
+        assert!(result.text_out().contains("help syntax"));
     }
 
     #[tokio::test]
@@ -86,8 +86,8 @@ mod tests {
 
         let result = Help.execute(args, &mut ctx).await;
         assert!(result.ok());
-        assert!(result.out.contains("Variables"));
-        assert!(result.out.contains("Quoting"));
+        assert!(result.text_out().contains("Variables"));
+        assert!(result.text_out().contains("Quoting"));
     }
 
     #[tokio::test]
@@ -98,9 +98,9 @@ mod tests {
 
         let result = Help.execute(args, &mut ctx).await;
         assert!(result.ok());
-        assert!(result.out.contains("echo"));
-        assert!(result.out.contains("cat"));
-        assert!(result.out.contains("ls"));
+        assert!(result.text_out().contains("echo"));
+        assert!(result.text_out().contains("cat"));
+        assert!(result.text_out().contains("ls"));
     }
 
     #[tokio::test]
@@ -111,9 +111,9 @@ mod tests {
 
         let result = Help.execute(args, &mut ctx).await;
         assert!(result.ok());
-        assert!(result.out.contains("cat —"));
-        assert!(result.out.contains("path"));
-        assert!(result.out.contains("required"));
+        assert!(result.text_out().contains("cat —"));
+        assert!(result.text_out().contains("path"));
+        assert!(result.text_out().contains("required"));
     }
 
     #[tokio::test]
@@ -125,7 +125,7 @@ mod tests {
         let result = Help.execute(args, &mut ctx).await;
         // Unknown topics still succeed, just with a helpful message
         assert!(result.ok());
-        assert!(result.out.contains("Unknown topic or tool"));
+        assert!(result.text_out().contains("Unknown topic or tool"));
     }
 
     #[tokio::test]
@@ -136,7 +136,7 @@ mod tests {
 
         let result = Help.execute(args, &mut ctx).await;
         assert!(result.ok());
-        assert!(result.out.contains("Modes"));
+        assert!(result.text_out().contains("Modes"));
     }
 
     #[tokio::test]
@@ -147,8 +147,8 @@ mod tests {
 
         let result = Help.execute(args, &mut ctx).await;
         assert!(result.ok());
-        assert!(result.out.contains("scatter"));
-        assert!(result.out.contains("gather"));
+        assert!(result.text_out().contains("scatter"));
+        assert!(result.text_out().contains("gather"));
     }
 
     #[tokio::test]
@@ -159,6 +159,6 @@ mod tests {
 
         let result = Help.execute(args, &mut ctx).await;
         assert!(result.ok());
-        assert!(result.out.contains("Limitations"));
+        assert!(result.text_out().contains("Limitations"));
     }
 }

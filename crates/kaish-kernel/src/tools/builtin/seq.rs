@@ -231,7 +231,8 @@ mod tests {
 
         let result = Seq.execute(args, &mut ctx).await;
         assert!(result.ok());
-        let lines: Vec<&str> = result.out.lines().collect();
+        let text = result.text_out();
+        let lines: Vec<&str> = text.lines().collect();
         assert_eq!(lines, vec!["1", "2", "3", "4", "5"]);
     }
 
@@ -244,7 +245,8 @@ mod tests {
 
         let result = Seq.execute(args, &mut ctx).await;
         assert!(result.ok());
-        let lines: Vec<&str> = result.out.lines().collect();
+        let text = result.text_out();
+        let lines: Vec<&str> = text.lines().collect();
         assert_eq!(lines, vec!["3", "4", "5", "6", "7"]);
     }
 
@@ -258,7 +260,8 @@ mod tests {
 
         let result = Seq.execute(args, &mut ctx).await;
         assert!(result.ok());
-        let lines: Vec<&str> = result.out.lines().collect();
+        let text = result.text_out();
+        let lines: Vec<&str> = text.lines().collect();
         assert_eq!(lines, vec!["1", "3", "5", "7", "9"]);
     }
 
@@ -272,7 +275,8 @@ mod tests {
 
         let result = Seq.execute(args, &mut ctx).await;
         assert!(result.ok());
-        let lines: Vec<&str> = result.out.lines().collect();
+        let text = result.text_out();
+        let lines: Vec<&str> = text.lines().collect();
         assert_eq!(lines, vec!["5", "4", "3", "2", "1"]);
     }
 
@@ -286,7 +290,7 @@ mod tests {
 
         let result = Seq.execute(args, &mut ctx).await;
         assert!(result.ok());
-        assert_eq!(result.out.trim(), "1, 2, 3");
+        assert_eq!(result.text_out().trim(), "1, 2, 3");
     }
 
     #[tokio::test]
@@ -298,7 +302,8 @@ mod tests {
 
         let result = Seq.execute(args, &mut ctx).await;
         assert!(result.ok());
-        let lines: Vec<&str> = result.out.lines().collect();
+        let text = result.text_out();
+        let lines: Vec<&str> = text.lines().collect();
         assert_eq!(lines[0], "01");
         assert_eq!(lines[9], "10");
     }
@@ -313,7 +318,8 @@ mod tests {
 
         let result = Seq.execute(args, &mut ctx).await;
         assert!(result.ok());
-        let lines: Vec<&str> = result.out.lines().collect();
+        let text = result.text_out();
+        let lines: Vec<&str> = text.lines().collect();
         assert_eq!(lines.len(), 3); // 1.0, 1.5, 2.0
     }
 
@@ -328,7 +334,8 @@ mod tests {
 
         let result = Seq.execute(args, &mut ctx).await;
         assert!(result.ok());
-        let lines: Vec<&str> = result.out.lines().collect();
+        let text = result.text_out();
+        let lines: Vec<&str> = text.lines().collect();
         assert_eq!(lines.len(), 10, "expected 10 values, got {}: {:?}", lines.len(), lines);
     }
 

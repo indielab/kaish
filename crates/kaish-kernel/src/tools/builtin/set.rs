@@ -228,7 +228,7 @@ mod tests {
         let args = ToolArgs::new();
         let result = Set.execute(args, &mut ctx).await;
         assert!(result.ok());
-        assert!(result.out.contains("set -e"));
+        assert!(result.text_out().contains("set -e"));
     }
 
     #[tokio::test]
@@ -312,8 +312,8 @@ mod tests {
         let args = ToolArgs::new();
         let result = Set.execute(args, &mut ctx).await;
         assert!(result.ok());
-        assert!(result.out.contains("set -o latch"));
-        assert!(result.out.contains("set -o trash"));
+        assert!(result.text_out().contains("set -o latch"));
+        assert!(result.text_out().contains("set -o trash"));
     }
 
     #[tokio::test]
@@ -379,7 +379,7 @@ mod tests {
         let args = ToolArgs::new();
         let result = Set.execute(args, &mut ctx).await;
         assert!(result.ok());
-        assert!(result.out.contains("set -o output-limit=4K"));
+        assert!(result.text_out().contains("set -o output-limit=4K"));
     }
 
     #[tokio::test]
@@ -390,7 +390,7 @@ mod tests {
         let args = ToolArgs::new();
         let result = Set.execute(args, &mut ctx).await;
         assert!(result.ok());
-        assert!(!result.out.contains("output-limit"));
+        assert!(!result.text_out().contains("output-limit"));
     }
 
     #[test]

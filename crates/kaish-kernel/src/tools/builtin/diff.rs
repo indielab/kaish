@@ -112,7 +112,7 @@ impl Tool for Diff {
         if quiet {
             let text = format!("Files {} and {} differ\n", file1, file2);
             let mut result = ExecResult::from_output(1, text.clone(), String::new());
-            result.output = Some(OutputData::text(text));
+            result.set_output(Some(OutputData::text(text)));
             return result;
         }
 
@@ -133,7 +133,7 @@ impl Tool for Diff {
 
         // Exit code 1 if files differ (POSIX convention)
         let mut result = ExecResult::from_output(1, output.clone(), String::new());
-        result.output = Some(OutputData::text(output));
+        result.set_output(Some(OutputData::text(output)));
         result
     }
 }
@@ -205,10 +205,10 @@ mod tests {
 
         let result = Diff.execute(args, &mut ctx).await;
         assert_eq!(result.code, 1); // Files differ
-        assert!(result.out.contains("---"));
-        assert!(result.out.contains("+++"));
-        assert!(result.out.contains("-line2"));
-        assert!(result.out.contains("+modified"));
+        assert!(result.text_out().contains("---"));
+        assert!(result.text_out().contains("+++"));
+        assert!(result.text_out().contains("-line2"));
+        assert!(result.text_out().contains("+modified"));
     }
 
     #[tokio::test]
@@ -220,7 +220,7 @@ mod tests {
 
         let result = Diff.execute(args, &mut ctx).await;
         assert!(result.ok()); // Files identical = exit 0
-        assert!(result.out.is_empty());
+        assert!(result.text_out().is_empty());
     }
 
     #[tokio::test]
@@ -233,8 +233,8 @@ mod tests {
 
         let result = Diff.execute(args, &mut ctx).await;
         assert_eq!(result.code, 1);
-        assert!(result.out.contains("differ"));
-        assert!(!result.out.contains("---")); // No diff output
+        assert!(result.text_out().contains("differ"));
+        assert!(!result.text_out().contains("---")); // No diff output
     }
 
     #[tokio::test]
@@ -277,9 +277,9 @@ mod tests {
         assert_eq!(result.code, 1);
         // The hunk header should reference line 5, not line 1
         assert!(
-            result.out.contains("@@ -") && !result.out.contains("@@ -1 +1 @@"),
+            result.text_out().contains("@@ -") && !result.text_out().contains("@@ -1 +1 @@"),
             "hunk header should show correct line positions: {}",
-            result.out
+            result.text_out()
         );
     }
 
@@ -311,11 +311,11 @@ mod tests {
         let result = Diff.execute(args, &mut ctx).await;
         assert_eq!(result.code, 1);
         // Should contain ANSI codes and correct hunk header (not -1 +1)
-        assert!(result.out.contains("\x1b["), "should have ANSI codes");
+        assert!(result.text_out().contains("\x1b["), "should have ANSI codes");
         assert!(
-            !result.out.contains("@@ -1 +1 @@"),
+            !result.text_out().contains("@@ -1 +1 @@"),
             "should not have hardcoded hunk header: {}",
-            result.out
+            result.text_out()
         );
     }
 
@@ -330,6 +330,6 @@ mod tests {
         let result = Diff.execute(args, &mut ctx).await;
         assert_eq!(result.code, 1);
         // Check for ANSI escape codes
-        assert!(result.out.contains("\x1b["));
+        assert!(result.text_out().contains("\x1b["));
     }
 }

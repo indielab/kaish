@@ -102,7 +102,7 @@ impl Tool for Timeout {
                     tool_result.stdout,
                     tool_result.stderr,
                 );
-                result.output = tool_result.output;
+                result.set_output(tool_result.output);
                 result.content_type = tool_result.content_type;
                 result.baggage = tool_result.baggage;
                 if let Some(json_data) = tool_result.data {

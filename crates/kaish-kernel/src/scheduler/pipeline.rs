@@ -40,61 +40,50 @@ async fn apply_redirects(
             RedirectKind::MergeStderr => {
                 // 2>&1 - append stderr to stdout
                 // Ensure output is materialized for merge
-                if result.out.is_empty() {
-                    if let Some(ref output) = result.output {
-                        result.out = output.to_canonical_string();
-                    }
-                }
+                result.materialize();
                 if !result.err.is_empty() {
-                    result.out.push_str(&result.err);
-                    result.err.clear();
+                    let err = std::mem::take(&mut result.err);
+                    result.push_out(&err);
                 }
             }
             RedirectKind::MergeStdout => {
                 // 1>&2 or >&2 - append stdout to stderr
-                if result.out.is_empty() {
-                    if let Some(ref output) = result.output {
-                        result.out = output.to_canonical_string();
-                    }
-                }
-                if !result.out.is_empty() {
-                    result.err.push_str(&result.out);
-                    result.out.clear();
+                result.materialize();
+                if !result.text_out().is_empty() {
+                    let out = result.text_out().into_owned();
+                    result.err.push_str(&out);
+                    result.clear_out();
                 }
             }
             RedirectKind::StdoutOverwrite => {
                 if let Some(path) = eval_redirect_target(&redir.target, ctx) {
                     // Stream OutputData directly to file if available
-                    if result.out.is_empty() && result.output.is_some() {
+                    if let Some(output) = result.take_output_for_stream() {
                         match std::fs::File::create(&path) {
                             Ok(mut file) => {
-                                if let Some(ref output) = result.output {
-                                    if let Err(e) = output.write_canonical(&mut file, None) {
-                                        return ExecResult::failure(1, format!("redirect: {e}"));
-                                    }
+                                if let Err(e) = output.write_canonical(&mut file, None) {
+                                    return ExecResult::failure(1, format!("redirect: {e}"));
                                 }
                             }
                             Err(e) => return ExecResult::failure(1, format!("redirect: {e}")),
                         }
                     } else {
-                        if let Err(e) = tokio::fs::write(&path, &result.out).await {
+                        if let Err(e) = tokio::fs::write(&path, result.text_out().as_ref()).await {
                             return ExecResult::failure(1, format!("redirect: {e}"));
                         }
                     }
-                    result.out.clear();
-                    result.output = None;
+                    result.clear_out();
+                    result.set_output(None);
                 }
             }
             RedirectKind::StdoutAppend => {
                 if let Some(path) = eval_redirect_target(&redir.target, ctx) {
                     // Stream OutputData directly if available
-                    if result.out.is_empty() && result.output.is_some() {
+                    if let Some(output) = result.take_output_for_stream() {
                         match std::fs::OpenOptions::new().append(true).create(true).open(&path) {
                             Ok(mut file) => {
-                                if let Some(ref output) = result.output {
-                                    if let Err(e) = output.write_canonical(&mut file, None) {
-                                        return ExecResult::failure(1, format!("redirect: {e}"));
-                                    }
+                                if let Err(e) = output.write_canonical(&mut file, None) {
+                                    return ExecResult::failure(1, format!("redirect: {e}"));
                                 }
                             }
                             Err(e) => return ExecResult::failure(1, format!("redirect: {e}")),
@@ -107,15 +96,15 @@ async fn apply_redirects(
                             .await;
                         match file {
                             Ok(mut f) => {
-                                if let Err(e) = f.write_all(result.out.as_bytes()).await {
+                                if let Err(e) = f.write_all(result.text_out().as_bytes()).await {
                                     return ExecResult::failure(1, format!("redirect: {e}"));
                                 }
                             }
                             Err(e) => return ExecResult::failure(1, format!("redirect: {e}")),
                         }
                     }
-                    result.out.clear();
-                    result.output = None;
+                    result.clear_out();
+                    result.set_output(None);
                 }
             }
             RedirectKind::Stderr => {
@@ -128,11 +117,12 @@ async fn apply_redirects(
             }
             RedirectKind::Both => {
                 if let Some(path) = eval_redirect_target(&redir.target, ctx) {
-                    let combined = format!("{}{}", result.out, result.err);
+                    let combined = format!("{}{}", result.text_out(), result.err);
                     if let Err(e) = tokio::fs::write(&path, combined).await {
                         return ExecResult::failure(1, format!("redirect: {e}"));
                     }
-                    result.out.clear();
+                    result.clear_out();
+                    result.set_output(None);
                     result.err.clear();
                 }
             }
@@ -144,11 +134,7 @@ async fn apply_redirects(
     // Callers (accumulate_result, pipeline piping) expect .out to be populated
     // after apply_redirects returns. File redirects above consume .output directly
     // via streaming; this only fires when no redirect consumed it.
-    if result.out.is_empty() {
-        if let Some(ref output) = result.output {
-            result.out = output.to_canonical_string();
-        }
-    }
+    result.materialize();
     result
 }
 
@@ -926,7 +912,7 @@ mod tests {
 
         let result = runner.run(&[cmd], &mut ctx, &dispatcher).await;
         assert!(result.ok());
-        assert_eq!(result.out.trim(), "hello");
+        assert_eq!(result.text_out().trim(), "hello");
     }
 
     #[tokio::test]
@@ -947,7 +933,7 @@ mod tests {
 
         let result = runner.run(&[echo_cmd, grep_cmd], &mut ctx, &dispatcher).await;
         assert!(result.ok());
-        assert_eq!(result.out.trim(), "world");
+        assert_eq!(result.text_out().trim(), "world");
     }
 
     #[tokio::test]
@@ -964,7 +950,7 @@ mod tests {
 
         let result = runner.run(&[cat_cmd, grep_cmd], &mut ctx, &dispatcher).await;
         assert!(result.ok());
-        assert!(result.out.contains("hello"));
+        assert!(result.text_out().contains("hello"));
     }
 
     #[tokio::test]
@@ -1008,7 +994,7 @@ mod tests {
 
         let result = runner.run(&[echo_cmd, cat_cmd], &mut ctx, &dispatcher).await;
         assert!(result.ok());
-        assert!(result.out.contains("hello"));
+        assert!(result.text_out().contains("hello"));
     }
 
     #[tokio::test]
@@ -1083,9 +1069,9 @@ mod tests {
         let result = runner.run(&[split_cmd, scatter_cmd, process_cmd, gather_cmd], &mut ctx, &dispatcher).await;
         assert!(result.ok(), "scatter with structured data should succeed: {}", result.err);
         // Each echo should output the item
-        assert!(result.out.contains("a"));
-        assert!(result.out.contains("b"));
-        assert!(result.out.contains("c"));
+        assert!(result.text_out().contains("a"));
+        assert!(result.text_out().contains("b"));
+        assert!(result.text_out().contains("c"));
     }
 
     #[tokio::test]
@@ -1108,7 +1094,7 @@ mod tests {
 
         let result = runner.run(&[echo_cmd, scatter_cmd, process_cmd, gather_cmd], &mut ctx, &dispatcher).await;
         assert!(result.ok());
-        assert!(result.out.trim().is_empty());
+        assert!(result.text_out().trim().is_empty());
     }
 
     #[tokio::test]
@@ -1129,9 +1115,9 @@ mod tests {
 
         let result = runner.run(&[scatter_cmd, process_cmd, gather_cmd], &mut ctx, &dispatcher).await;
         assert!(result.ok(), "scatter with structured stdin should succeed: {}", result.err);
-        assert!(result.out.contains("x"));
-        assert!(result.out.contains("y"));
-        assert!(result.out.contains("z"));
+        assert!(result.text_out().contains("x"));
+        assert!(result.text_out().contains("y"));
+        assert!(result.text_out().contains("z"));
     }
 
     #[tokio::test]
@@ -1152,9 +1138,9 @@ mod tests {
 
         let result = runner.run(&[scatter_cmd, process_cmd, gather_cmd], &mut ctx, &dispatcher).await;
         assert!(result.ok(), "scatter with JSON data should succeed: {}", result.err);
-        assert!(result.out.contains("one"));
-        assert!(result.out.contains("two"));
-        assert!(result.out.contains("three"));
+        assert!(result.text_out().contains("one"));
+        assert!(result.text_out().contains("two"));
+        assert!(result.text_out().contains("three"));
     }
 
     #[tokio::test]
@@ -1182,8 +1168,8 @@ mod tests {
 
         let result = runner.run(&[split_cmd, scatter_cmd, process_cmd, gather_cmd, grep_cmd], &mut ctx, &dispatcher).await;
         assert!(result.ok(), "scatter with post_gather should succeed: {}", result.err);
-        assert!(result.out.contains("a"));
-        assert!(!result.out.contains("b"));
+        assert!(result.text_out().contains("a"));
+        assert!(!result.text_out().contains("b"));
     }
 
     #[tokio::test]
@@ -1212,8 +1198,8 @@ mod tests {
 
         let result = runner.run(&[scatter_cmd, process_cmd, gather_cmd], &mut ctx, &dispatcher).await;
         assert!(result.ok(), "scatter with custom var should succeed: {}", result.err);
-        assert!(result.out.contains("test1"));
-        assert!(result.out.contains("test2"));
+        assert!(result.text_out().contains("test1"));
+        assert!(result.text_out().contains("test2"));
     }
 
     // === Backend Routing Tests ===
@@ -1241,7 +1227,7 @@ mod tests {
 
         assert!(result.ok(), "Mock backend should return success");
         assert_eq!(call_count.load(Ordering::SeqCst), 1, "call_tool should be invoked once");
-        assert!(result.out.contains("mock executed"), "Output should be from mock backend");
+        assert!(result.text_out().contains("mock executed"), "Output should be from mock backend");
     }
 
     #[tokio::test]
@@ -1778,7 +1764,7 @@ mod tests {
         let ctx = make_minimal_ctx();
         let result = apply_redirects(result, &redirects, &ctx).await;
 
-        assert_eq!(result.out, "stdout contentstderr content");
+        assert_eq!(&*result.text_out(), "stdout contentstderr content");
         assert!(result.err.is_empty());
     }
 
@@ -1795,7 +1781,7 @@ mod tests {
         let ctx = make_minimal_ctx();
         let result = apply_redirects(result, &redirects, &ctx).await;
 
-        assert_eq!(result.out, "stdout only");
+        assert_eq!(&*result.text_out(), "stdout only");
         assert!(result.err.is_empty());
     }
 
@@ -1816,7 +1802,7 @@ mod tests {
         let ctx = make_minimal_ctx();
         let result = apply_redirects(result, &redirects, &ctx).await;
 
-        assert_eq!(result.out, "stdout\nstderr\n");
+        assert_eq!(&*result.text_out(), "stdout\nstderr\n");
         assert!(result.err.is_empty());
     }
 
@@ -1837,7 +1823,7 @@ mod tests {
         let result = runner.run(&[cmd], &mut ctx, &dispatcher).await;
         assert!(result.ok());
         // echo produces no stderr, so this just validates the redirect doesn't break anything
-        assert!(result.out.contains("hello"));
+        assert!(result.text_out().contains("hello"));
     }
 
     #[tokio::test]
@@ -1862,6 +1848,6 @@ mod tests {
 
         let result = runner.run(&[echo_cmd, grep_cmd], &mut ctx, &dispatcher).await;
         assert!(result.ok(), "result failed: code={}, err={}", result.code, result.err);
-        assert!(result.out.contains("output"));
+        assert!(result.text_out().contains("output"));
     }
 }

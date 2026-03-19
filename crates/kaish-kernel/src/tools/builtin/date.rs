@@ -103,8 +103,8 @@ mod tests {
         let result = Date.execute(ToolArgs::new(), &mut ctx).await;
         assert!(result.ok());
         // Default format: YYYY-MM-DD HH:MM:SS
-        assert!(result.out.contains('-')); // Has date separators
-        assert!(result.out.contains(':')); // Has time separators
+        assert!(result.text_out().contains('-')); // Has date separators
+        assert!(result.text_out().contains(':')); // Has time separators
     }
 
     #[tokio::test]
@@ -116,7 +116,8 @@ mod tests {
         let result = Date.execute(args, &mut ctx).await;
         assert!(result.ok());
         // Should be just the year (4 digits + newline)
-        let year = result.out.trim();
+        let out = result.text_out();
+        let year = out.trim();
         assert_eq!(year.len(), 4);
         assert!(year.chars().all(|c| c.is_ascii_digit()));
     }
@@ -130,7 +131,7 @@ mod tests {
         let result = Date.execute(args, &mut ctx).await;
         assert!(result.ok());
         // ISO 8601 format contains 'T' separator
-        assert!(result.out.contains('T'));
+        assert!(result.text_out().contains('T'));
     }
 
     #[tokio::test]
@@ -142,7 +143,8 @@ mod tests {
         let result = Date.execute(args, &mut ctx).await;
         assert!(result.ok());
         // Should be all digits
-        let timestamp = result.out.trim();
+        let out = result.text_out();
+        let timestamp = out.trim();
         assert!(timestamp.chars().all(|c| c.is_ascii_digit()));
         // Reasonable timestamp (after year 2000)
         let ts: i64 = timestamp.parse().unwrap_or(0);
@@ -159,7 +161,7 @@ mod tests {
         let result = Date.execute(args, &mut ctx).await;
         assert!(result.ok());
         // UTC ISO format ends with +00:00 or Z
-        assert!(result.out.contains("+00:00") || result.out.contains('Z'));
+        assert!(result.text_out().contains("+00:00") || result.text_out().contains('Z'));
     }
 
     #[tokio::test]
@@ -171,6 +173,6 @@ mod tests {
 
         let result = Date.execute(args, &mut ctx).await;
         assert!(result.ok());
-        assert!(result.out.contains("+00:00") || result.out.contains('Z'));
+        assert!(result.text_out().contains("+00:00") || result.text_out().contains('Z'));
     }
 }

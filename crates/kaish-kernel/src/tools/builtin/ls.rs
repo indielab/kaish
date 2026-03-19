@@ -591,9 +591,9 @@ mod tests {
 
         let result = Ls.execute(args, &mut ctx).await;
         assert!(result.ok());
-        assert!(result.out.contains("file1.txt"));
-        assert!(result.out.contains("file2.txt"));
-        assert!(result.out.contains("subdir"));
+        assert!(result.text_out().contains("file1.txt"));
+        assert!(result.text_out().contains("file2.txt"));
+        assert!(result.text_out().contains("subdir"));
     }
 
     #[tokio::test]
@@ -606,10 +606,10 @@ mod tests {
         let result = Ls.execute(args, &mut ctx).await;
         assert!(result.ok());
         // Canonical output contains names (first column)
-        assert!(result.out.contains("subdir"));
-        assert!(result.out.contains("file1.txt"));
+        assert!(result.text_out().contains("subdir"));
+        assert!(result.text_out().contains("file1.txt"));
         // Check the output has table data
-        match &result.output {
+        match result.output() {
             Some(output) => {
                 assert!(output.headers.is_some());
                 assert!(!output.root.is_empty());
@@ -628,7 +628,7 @@ mod tests {
         let result = Ls.execute(args, &mut ctx).await;
         assert!(result.ok());
         // cwd is /, should list root
-        assert!(result.out.contains("file1.txt"));
+        assert!(result.text_out().contains("file1.txt"));
     }
 
     #[tokio::test]
@@ -659,9 +659,9 @@ mod tests {
 
         let result = Ls.execute(args, &mut ctx).await;
         assert!(result.ok());
-        assert!(result.out.contains("visible.txt"));
-        assert!(!result.out.contains(".hidden"));
-        assert!(!result.out.contains(".config"));
+        assert!(result.text_out().contains("visible.txt"));
+        assert!(!result.text_out().contains(".hidden"));
+        assert!(!result.text_out().contains(".config"));
     }
 
     #[tokio::test]
@@ -673,9 +673,9 @@ mod tests {
 
         let result = Ls.execute(args, &mut ctx).await;
         assert!(result.ok());
-        assert!(result.out.contains("visible.txt"));
-        assert!(result.out.contains(".hidden"));
-        assert!(result.out.contains(".config"));
+        assert!(result.text_out().contains("visible.txt"));
+        assert!(result.text_out().contains(".hidden"));
+        assert!(result.text_out().contains(".config"));
     }
 
     #[tokio::test]
@@ -687,7 +687,7 @@ mod tests {
 
         let result = Ls.execute(args, &mut ctx).await;
         assert!(result.ok());
-        assert!(result.out.contains(".hidden"));
+        assert!(result.text_out().contains(".hidden"));
     }
 
     async fn make_ctx_with_subdirs() -> ExecContext {
@@ -714,14 +714,14 @@ mod tests {
         let result = Ls.execute(args, &mut ctx).await;
         assert!(result.ok());
         // Should have directory headers
-        assert!(result.out.contains(".:"));
+        assert!(result.text_out().contains(".:"));
         // Should show files in root
-        assert!(result.out.contains("README.md"));
-        assert!(result.out.contains("src"));
+        assert!(result.text_out().contains("README.md"));
+        assert!(result.text_out().contains("src"));
         // Should show files in src
-        assert!(result.out.contains("main.rs"));
+        assert!(result.text_out().contains("main.rs"));
         // Should show nested directories
-        assert!(result.out.contains("lib"));
+        assert!(result.text_out().contains("lib"));
     }
 
     #[test]
@@ -783,9 +783,9 @@ mod tests {
         let result = Ls.execute(args, &mut ctx).await;
         assert!(result.ok());
         // Should show symlinks with @ suffix in short format
-        assert!(result.out.contains("link.txt@"), "output was: {}", result.out);
-        assert!(result.out.contains("linkdir@"), "output was: {}", result.out);
-        assert!(result.out.contains("broken@"), "output was: {}", result.out);
+        assert!(result.text_out().contains("link.txt@"), "output was: {}", result.text_out());
+        assert!(result.text_out().contains("linkdir@"), "output was: {}", result.text_out());
+        assert!(result.text_out().contains("broken@"), "output was: {}", result.text_out());
     }
 
     #[tokio::test]
@@ -798,11 +798,11 @@ mod tests {
         let result = Ls.execute(args, &mut ctx).await;
         assert!(result.ok());
         // Long format shows "name -> target"
-        assert!(result.out.contains("link.txt -> target.txt"));
-        assert!(result.out.contains("linkdir -> targetdir"));
-        assert!(result.out.contains("broken -> nonexistent"));
+        assert!(result.text_out().contains("link.txt -> target.txt"));
+        assert!(result.text_out().contains("linkdir -> targetdir"));
+        assert!(result.text_out().contains("broken -> nonexistent"));
         // Should have 'l' type character in output nodes
-        match &result.output {
+        match result.output() {
             Some(output) => {
                 // Find a node that has 'l' as the type in cells
                 let has_symlink_type = output.root.iter().any(|n| n.cells.get(0) == Some(&"l".to_string()));
@@ -822,7 +822,7 @@ mod tests {
         let result = Ls.execute(args, &mut ctx).await;
         assert!(result.ok());
         // Symlinks should appear with @ suffix
-        assert!(result.out.contains("link.txt@"));
+        assert!(result.text_out().contains("link.txt@"));
     }
 
     #[tokio::test]
@@ -833,9 +833,9 @@ mod tests {
 
         let result = Ls.execute(args, &mut ctx).await;
         assert!(result.ok());
-        assert!(result.out.contains("file1.txt"));
-        assert!(result.out.contains("file2.txt"));
-        assert!(!result.out.contains("subdir"));
+        assert!(result.text_out().contains("file1.txt"));
+        assert!(result.text_out().contains("file2.txt"));
+        assert!(!result.text_out().contains("subdir"));
     }
 
     #[tokio::test]
@@ -846,8 +846,8 @@ mod tests {
 
         let result = Ls.execute(args, &mut ctx).await;
         assert!(result.ok());
-        assert!(result.out.contains("main.rs"));
-        assert!(!result.out.contains("README.md"));
+        assert!(result.text_out().contains("main.rs"));
+        assert!(!result.text_out().contains("README.md"));
     }
 
     #[tokio::test]
@@ -859,9 +859,9 @@ mod tests {
 
         let result = Ls.execute(args, &mut ctx).await;
         assert!(result.ok());
-        assert!(result.out.contains("file1.txt"));
-        assert!(result.output.is_some());
-        let output = result.output.unwrap();
+        assert!(result.text_out().contains("file1.txt"));
+        assert!(result.has_output());
+        let output = result.output().cloned().unwrap();
         assert!(output.headers.is_some());
     }
 
@@ -873,6 +873,6 @@ mod tests {
 
         let result = Ls.execute(args, &mut ctx).await;
         assert!(result.ok());
-        assert!(result.out.is_empty());
+        assert!(result.text_out().is_empty());
     }
 }

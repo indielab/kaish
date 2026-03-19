@@ -133,8 +133,8 @@ mod tests {
         let args = ToolArgs::new();
         let result = KaishIgnore.execute(args, &mut ctx).await;
         assert!(result.ok());
-        assert!(result.out.contains("advisory"));
-        assert!(result.out.contains("off"));
+        assert!(result.text_out().contains("advisory"));
+        assert!(result.text_out().contains("off"));
     }
 
     #[tokio::test]
@@ -147,7 +147,7 @@ mod tests {
         args.positional.push(Value::String(".dockerignore".into()));
         let result = KaishIgnore.execute(args, &mut ctx).await;
         assert!(result.ok());
-        assert!(result.out.contains(".dockerignore"));
+        assert!(result.text_out().contains(".dockerignore"));
         assert!(ctx.ignore_config.files().contains(&".dockerignore".to_string()));
 
         // Remove it

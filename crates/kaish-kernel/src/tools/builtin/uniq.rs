@@ -167,7 +167,8 @@ mod tests {
 
         let result = Uniq.execute(args, &mut ctx).await;
         assert!(result.ok());
-        let lines: Vec<&str> = result.out.lines().collect();
+        let text = result.text_out();
+        let lines: Vec<&str> = text.lines().collect();
         assert_eq!(lines, vec!["apple", "banana", "cherry"]);
     }
 
@@ -180,9 +181,9 @@ mod tests {
 
         let result = Uniq.execute(args, &mut ctx).await;
         assert!(result.ok());
-        assert!(result.out.contains("2 apple"));
-        assert!(result.out.contains("1 banana"));
-        assert!(result.out.contains("3 cherry"));
+        assert!(result.text_out().contains("2 apple"));
+        assert!(result.text_out().contains("1 banana"));
+        assert!(result.text_out().contains("3 cherry"));
     }
 
     #[tokio::test]
@@ -194,9 +195,10 @@ mod tests {
 
         let result = Uniq.execute(args, &mut ctx).await;
         assert!(result.ok());
-        let lines: Vec<&str> = result.out.lines().collect();
+        let text = result.text_out();
+        let lines: Vec<&str> = text.lines().collect();
         assert_eq!(lines, vec!["apple", "cherry"]);
-        assert!(!result.out.contains("banana"));
+        assert!(!result.text_out().contains("banana"));
     }
 
     #[tokio::test]
@@ -208,7 +210,8 @@ mod tests {
 
         let result = Uniq.execute(args, &mut ctx).await;
         assert!(result.ok());
-        let lines: Vec<&str> = result.out.lines().collect();
+        let text = result.text_out();
+        let lines: Vec<&str> = text.lines().collect();
         assert_eq!(lines, vec!["banana"]);
     }
 
@@ -221,7 +224,8 @@ mod tests {
 
         let result = Uniq.execute(args, &mut ctx).await;
         assert!(result.ok());
-        let lines: Vec<&str> = result.out.lines().collect();
+        let text = result.text_out();
+        let lines: Vec<&str> = text.lines().collect();
         // First occurrence is kept when ignoring case
         assert_eq!(lines.len(), 2);
         assert_eq!(lines[0], "Hello");
@@ -236,7 +240,8 @@ mod tests {
         let args = ToolArgs::new();
         let result = Uniq.execute(args, &mut ctx).await;
         assert!(result.ok());
-        let lines: Vec<&str> = result.out.lines().collect();
+        let text = result.text_out();
+        let lines: Vec<&str> = text.lines().collect();
         assert_eq!(lines, vec!["one", "two", "three"]);
     }
 
@@ -254,9 +259,9 @@ mod tests {
         let result = Uniq.execute(args, &mut ctx).await;
         assert!(result.ok());
         // Only lines that appear more than once, with counts
-        assert!(result.out.contains("2 apple"));
-        assert!(result.out.contains("3 cherry"));
-        assert!(!result.out.contains("banana"));
+        assert!(result.text_out().contains("2 apple"));
+        assert!(result.text_out().contains("3 cherry"));
+        assert!(!result.text_out().contains("banana"));
     }
 
     #[tokio::test]
@@ -271,7 +276,7 @@ mod tests {
         let result = Uniq.execute(args, &mut ctx).await;
         assert!(result.ok());
         // "Hello", "hello", "HELLO" should be counted as 3
-        assert!(result.out.contains("3 Hello"));
+        assert!(result.text_out().contains("3 Hello"));
     }
 
     #[tokio::test]
@@ -282,7 +287,8 @@ mod tests {
         let args = ToolArgs::new();
         let result = Uniq.execute(args, &mut ctx).await;
         assert!(result.ok());
-        let lines: Vec<&str> = result.out.lines().collect();
+        let text = result.text_out();
+        let lines: Vec<&str> = text.lines().collect();
         // Adjacent duplicates collapsed, but non-adjacent remain
         assert_eq!(lines, vec!["日本", "中国", "日本"]);
     }
@@ -295,7 +301,7 @@ mod tests {
         let args = ToolArgs::new();
         let result = Uniq.execute(args, &mut ctx).await;
         assert!(result.ok());
-        assert!(result.out.is_empty());
+        assert!(result.text_out().is_empty());
     }
 
     #[tokio::test]
@@ -306,7 +312,7 @@ mod tests {
         let args = ToolArgs::new();
         let result = Uniq.execute(args, &mut ctx).await;
         assert!(result.ok());
-        assert_eq!(result.out.trim(), "only one");
+        assert_eq!(result.text_out().trim(), "only one");
     }
 
     #[tokio::test]
@@ -319,7 +325,7 @@ mod tests {
 
         let result = Uniq.execute(args, &mut ctx).await;
         assert!(result.ok());
-        assert!(result.out.contains("4 same"));
+        assert!(result.text_out().contains("4 same"));
     }
 
     #[tokio::test]
@@ -333,7 +339,7 @@ mod tests {
         let result = Uniq.execute(args, &mut ctx).await;
         assert!(result.ok());
         // No repeated lines, so output should be empty
-        assert!(result.out.is_empty());
+        assert!(result.text_out().is_empty());
     }
 
     #[tokio::test]
@@ -344,7 +350,8 @@ mod tests {
         let args = ToolArgs::new();
         let result = Uniq.execute(args, &mut ctx).await;
         assert!(result.ok());
-        let lines: Vec<&str> = result.out.lines().collect();
+        let text = result.text_out();
+        let lines: Vec<&str> = text.lines().collect();
         // Adjacent empty lines collapsed
         assert_eq!(lines, vec!["", "a", "", "b"]);
     }

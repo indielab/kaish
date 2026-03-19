@@ -68,7 +68,7 @@ mod tests {
 
         let result = Dirname.execute(args, &mut ctx).await;
         assert!(result.ok());
-        assert_eq!(result.out.trim(), "/usr/bin");
+        assert_eq!(result.text_out().trim(), "/usr/bin");
     }
 
     #[tokio::test]
@@ -79,7 +79,7 @@ mod tests {
 
         let result = Dirname.execute(args, &mut ctx).await;
         assert!(result.ok());
-        assert_eq!(result.out.trim(), "path/to");
+        assert_eq!(result.text_out().trim(), "path/to");
     }
 
     #[tokio::test]
@@ -90,7 +90,7 @@ mod tests {
 
         let result = Dirname.execute(args, &mut ctx).await;
         assert!(result.ok());
-        assert_eq!(result.out.trim(), ".");
+        assert_eq!(result.text_out().trim(), ".");
     }
 
     #[tokio::test]
@@ -102,7 +102,7 @@ mod tests {
         let result = Dirname.execute(args, &mut ctx).await;
         assert!(result.ok());
         // Root's parent is itself
-        assert_eq!(result.out.trim(), "/");
+        assert_eq!(result.text_out().trim(), "/");
     }
 
     #[tokio::test]

@@ -97,8 +97,8 @@ mod tests {
 
         let result = Scatter.execute(ToolArgs::new(), &mut ctx).await;
         assert!(result.ok());
-        assert!(result.out.contains("3 items"));
-        assert!(result.out.contains("item1"));
+        assert!(result.text_out().contains("3 items"));
+        assert!(result.text_out().contains("item1"));
     }
 
     #[tokio::test]
@@ -112,7 +112,7 @@ mod tests {
 
         let result = Scatter.execute(ToolArgs::new(), &mut ctx).await;
         assert!(result.ok());
-        assert!(result.out.is_empty());
+        assert!(result.text_out().is_empty());
     }
 
     #[tokio::test]
@@ -128,7 +128,7 @@ mod tests {
 
         let result = Scatter.execute(ToolArgs::new(), &mut ctx).await;
         assert!(result.ok());
-        assert!(result.out.contains("1 items"), "should be 1 item: {}", result.out);
+        assert!(result.text_out().contains("1 items"), "should be 1 item: {}", result.text_out());
     }
 
     #[tokio::test]
@@ -144,8 +144,8 @@ mod tests {
 
         let result = Scatter.execute(ToolArgs::new(), &mut ctx).await;
         assert!(result.ok());
-        assert!(result.out.contains("1 items"));
-        assert!(result.out.contains("hello"));
+        assert!(result.text_out().contains("1 items"));
+        assert!(result.text_out().contains("hello"));
     }
 
     #[tokio::test]
@@ -165,7 +165,7 @@ mod tests {
 
         let result = Scatter.execute(args, &mut ctx).await;
         assert!(result.ok());
-        assert!(result.out.contains("as=$URL"));
-        assert!(result.out.contains("limit=4"));
+        assert!(result.text_out().contains("as=$URL"));
+        assert!(result.text_out().contains("limit=4"));
     }
 }

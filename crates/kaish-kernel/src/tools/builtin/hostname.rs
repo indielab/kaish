@@ -46,8 +46,8 @@ mod tests {
 
         let result = Hostname.execute(ToolArgs::new(), &mut ctx).await;
         assert!(result.ok());
-        assert!(!result.out.is_empty(), "hostname should return a non-empty string");
+        assert!(!result.text_out().is_empty(), "hostname should return a non-empty string");
         // Should not contain trailing newline
-        assert!(!result.out.contains('\n'));
+        assert!(!result.text_out().contains('\n'));
     }
 }

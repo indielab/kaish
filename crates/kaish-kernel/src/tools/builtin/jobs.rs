@@ -95,7 +95,7 @@ mod tests {
         let mut ctx = make_ctx();
         let result = Jobs.execute(ToolArgs::new(), &mut ctx).await;
         assert!(result.ok());
-        assert!(result.out.contains("no job manager"));
+        assert!(result.text_out().contains("no job manager"));
     }
 
     #[tokio::test]
@@ -105,7 +105,7 @@ mod tests {
 
         let result = Jobs.execute(ToolArgs::new(), &mut ctx).await;
         assert!(result.ok());
-        assert!(result.out.contains("no jobs"));
+        assert!(result.text_out().contains("no jobs"));
     }
 
     #[tokio::test]
@@ -125,10 +125,10 @@ mod tests {
 
         let result = Jobs.execute(ToolArgs::new(), &mut ctx).await;
         assert!(result.ok());
-        assert!(result.out.contains("[1]"));
-        assert!(result.out.contains("test command"));
-        assert!(result.out.contains("Running"));
-        assert!(result.out.contains("/v/jobs/1/"));
+        assert!(result.text_out().contains("[1]"));
+        assert!(result.text_out().contains("test command"));
+        assert!(result.text_out().contains("Running"));
+        assert!(result.text_out().contains("/v/jobs/1/"));
     }
 
     #[tokio::test]
@@ -155,7 +155,7 @@ mod tests {
         let result = Jobs.execute(args, &mut ctx).await;
 
         assert!(result.ok());
-        assert!(result.out.contains("Cleaned up 1 completed job"));
+        assert!(result.text_out().contains("Cleaned up 1 completed job"));
 
         // Should have no jobs now
         assert_eq!(manager.list().await.len(), 0);
@@ -182,7 +182,7 @@ mod tests {
         let result = Jobs.execute(args, &mut ctx).await;
 
         assert!(result.ok());
-        assert!(result.out.contains("Cleaned up 0 completed job"));
+        assert!(result.text_out().contains("Cleaned up 0 completed job"));
         assert_eq!(manager.list().await.len(), 1);
     }
 }

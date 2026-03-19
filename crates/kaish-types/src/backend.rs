@@ -236,19 +236,23 @@ impl ToolResult {
 }
 
 impl From<ExecResult> for ToolResult {
-    fn from(exec: ExecResult) -> Self {
+    fn from(mut exec: ExecResult) -> Self {
         // Saturating cast: codes outside i32 range clamp to i32::MIN/MAX
         let code = exec.code.clamp(i32::MIN as i64, i32::MAX as i64) as i32;
+
+        // Materialize text before moving fields out
+        let stdout = exec.text_out().into_owned();
+        let output = exec.take_output();
 
         // Convert ast::Value to serde_json::Value if present
         let data = exec.data.map(|v| value_to_json(&v));
 
         Self {
             code,
-            stdout: exec.out,
+            stdout,
             stderr: exec.err,
             data,
-            output: exec.output,
+            output,
             content_type: exec.content_type,
             baggage: exec.baggage,
         }

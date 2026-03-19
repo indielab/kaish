@@ -58,7 +58,8 @@ async fn external_command_date_format() {
     let result = kernel.execute("date +%s").await.unwrap();
     assert!(result.ok(), "date +%s should succeed: {:?}", result);
     // Output should be a unix timestamp (all digits)
-    let out = result.out.trim();
+    let text = result.text_out();
+    let out = text.trim();
     assert!(
         out.chars().all(|c| c.is_ascii_digit()),
         "date +%s should output digits: '{}'",
@@ -73,7 +74,8 @@ async fn external_command_date_complex_format() {
     let result = kernel.execute("date +%Y-%m-%d").await.unwrap();
     assert!(result.ok(), "date +%Y-%m-%d should succeed: {:?}", result);
     // Output should match YYYY-MM-DD pattern
-    let out = result.out.trim();
+    let text = result.text_out();
+    let out = text.trim();
     assert_eq!(out.len(), 10, "Date should be 10 chars: '{}'", out);
     assert!(out.contains('-'), "Date should have dashes: '{}'", out);
 }
@@ -101,9 +103,9 @@ async fn external_command_long_flags() {
     let result = kernel.execute("spawn command=uname argv='--kernel-name'").await.unwrap();
     assert!(result.ok(), "spawn uname --kernel-name should succeed: {:?}", result);
     assert!(
-        result.out.contains("Linux"),
+        result.text_out().contains("Linux"),
         "Should show Linux: {}",
-        result.out
+        result.text_out()
     );
 }
 
@@ -145,8 +147,8 @@ async fn external_command_stdin_piping() {
     let result = kernel.execute("echo 'hello world' | wc -c").await.unwrap();
     assert!(result.ok(), "pipe should succeed: {:?}", result);
     // "hello world\n" is 12 chars
-    let count: i64 = result.out.trim().parse().unwrap_or(-1);
-    assert_eq!(count, 12, "wc -c should count 12 chars: {}", result.out);
+    let count: i64 = result.text_out().trim().parse().unwrap_or(-1);
+    assert_eq!(count, 12, "wc -c should count 12 chars: {}", result.text_out());
 }
 
 // ============================================================================
@@ -163,10 +165,10 @@ async fn external_command_respects_cwd() {
     let result = kernel.execute("pwd").await.unwrap();
     assert!(result.ok(), "pwd should succeed: {:?}", result);
     assert!(
-        result.out.contains(&path),
+        result.text_out().contains(&path),
         "Should be in {}: {}",
         path,
-        result.out
+        result.text_out()
     );
 }
 
@@ -184,7 +186,8 @@ async fn pipeline_builtin_to_external() {
         .unwrap();
     assert!(result.ok(), "pipeline should succeed: {:?}", result);
     // Sort should alphabetize
-    let lines: Vec<&str> = result.out.trim().lines().collect();
+    let text = result.text_out();
+    let lines: Vec<&str> = text.trim().lines().collect();
     assert_eq!(lines, vec!["a", "b", "c"], "Should be sorted: {:?}", lines);
 }
 
@@ -195,7 +198,8 @@ async fn pipeline_builtin_to_builtin() {
     // Using lines=3 named arg since -n 3 requires schema-aware parsing
     let result = kernel.execute("seq 1 10 | head lines=3").await.unwrap();
     assert!(result.ok(), "pipeline should succeed: {:?}", result);
-    let lines: Vec<&str> = result.out.trim().lines().collect();
+    let text = result.text_out();
+    let lines: Vec<&str> = text.trim().lines().collect();
     assert_eq!(lines, vec!["1", "2", "3"], "Should have first 3: {:?}", lines);
 }
 
@@ -211,9 +215,9 @@ async fn external_command_inherits_env() {
     let result = kernel.execute("printenv PATH").await.unwrap();
     assert!(result.ok(), "printenv should succeed: {:?}", result);
     assert!(
-        !result.out.trim().is_empty(),
+        !result.text_out().trim().is_empty(),
         "Should see PATH: {}",
-        result.out
+        result.text_out()
     );
 }
 
@@ -239,10 +243,10 @@ async fn non_interactive_stdin_is_dev_null() {
         .unwrap();
     assert!(result.ok(), "readlink should succeed: {:?}", result);
     assert_eq!(
-        result.out.trim(),
+        result.text_out().trim(),
         "/dev/null",
         "Non-interactive external command stdin should be /dev/null: {}",
-        result.out
+        result.text_out()
     );
 }
 
@@ -262,10 +266,10 @@ async fn interactive_stdin_is_not_dev_null() {
         .unwrap();
     assert!(result.ok(), "readlink should succeed: {:?}", result);
     assert_ne!(
-        result.out.trim(),
+        result.text_out().trim(),
         "/dev/null",
         "Interactive external command stdin should NOT be /dev/null: {}",
-        result.out
+        result.text_out()
     );
 }
 
@@ -297,5 +301,5 @@ async fn minus_alone_lexes_correctly() {
     // Using echo to verify "-" passes through correctly
     let result = kernel.execute("echo - foo -").await.unwrap();
     assert!(result.ok(), "echo should succeed: {:?}", result);
-    assert!(result.out.contains("- foo -"), "Should include dashes: {}", result.out);
+    assert!(result.text_out().contains("- foo -"), "Should include dashes: {}", result.text_out());
 }

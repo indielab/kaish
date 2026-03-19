@@ -96,7 +96,7 @@ mod tests {
 
         let result = Tee.execute(args, &mut ctx).await;
         assert!(result.ok());
-        assert_eq!(result.out, "hello world\n");
+        assert_eq!(&*result.text_out(), "hello world\n");
 
         let written = ctx
             .backend
@@ -155,7 +155,7 @@ mod tests {
 
         let result = Tee.execute(args, &mut ctx).await;
         assert!(result.ok());
-        assert_eq!(result.out, "");
+        assert_eq!(&*result.text_out(), "");
 
         let written = ctx
             .backend

@@ -152,7 +152,7 @@ mod tests {
         assert!(result.ok());
         assert_eq!(ctx.cwd, PathBuf::from("/"));
         // cd - prints the new directory
-        assert_eq!(result.out, "/");
+        assert_eq!(&*result.text_out(), "/");
     }
 
     #[tokio::test]

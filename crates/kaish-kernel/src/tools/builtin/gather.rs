@@ -152,7 +152,7 @@ mod tests {
 
         let result = Gather.execute(ToolArgs::new(), &mut ctx).await;
         assert!(result.ok());
-        assert_eq!(result.out, "result1\nresult2\nresult3");
+        assert_eq!(&*result.text_out(), "result1\nresult2\nresult3");
     }
 
     #[tokio::test]
@@ -170,8 +170,8 @@ mod tests {
 
         let result = Gather.execute(args, &mut ctx).await;
         assert!(result.ok());
-        assert!(result.out.contains("["));
-        assert!(result.out.contains("\"a\""));
+        assert!(result.text_out().contains("["));
+        assert!(result.text_out().contains("\"a\""));
     }
 
     #[tokio::test]
@@ -189,7 +189,7 @@ mod tests {
 
         let result = Gather.execute(args, &mut ctx).await;
         assert!(result.ok());
-        assert_eq!(result.out, "1\n2\n3");
+        assert_eq!(&*result.text_out(), "1\n2\n3");
     }
 
     #[tokio::test]
@@ -203,6 +203,6 @@ mod tests {
 
         let result = Gather.execute(ToolArgs::new(), &mut ctx).await;
         assert!(result.ok());
-        assert!(result.out.is_empty());
+        assert!(result.text_out().is_empty());
     }
 }

@@ -160,7 +160,7 @@ mod tests {
         args.positional.push(Value::String("ll".into()));
         let result = Alias.execute(args, &mut ctx).await;
         assert!(result.ok());
-        assert!(result.out.contains("ls -la"));
+        assert!(result.text_out().contains("ls -la"));
     }
 
     #[tokio::test]

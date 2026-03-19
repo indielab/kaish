@@ -140,7 +140,7 @@ mod tests {
 
         let result = Cat.execute(args, &mut ctx).await;
         assert!(result.ok());
-        assert_eq!(result.out, "hello world");
+        assert_eq!(&*result.text_out(), "hello world");
     }
 
     #[tokio::test]
@@ -151,7 +151,7 @@ mod tests {
 
         let result = Cat.execute(args, &mut ctx).await;
         assert!(result.ok());
-        assert_eq!(result.out, "nested content");
+        assert_eq!(&*result.text_out(), "nested content");
     }
 
     #[tokio::test]
@@ -184,7 +184,7 @@ mod tests {
 
         let result = Cat.execute(args, &mut ctx).await;
         assert!(result.ok());
-        assert_eq!(result.out, "hello from stdin");
+        assert_eq!(&*result.text_out(), "hello from stdin");
     }
 
     #[tokio::test]
@@ -196,9 +196,9 @@ mod tests {
 
         let result = Cat.execute(args, &mut ctx).await;
         assert!(result.ok());
-        assert!(result.out.contains("1\tline1"));
-        assert!(result.out.contains("2\tline2"));
-        assert!(result.out.contains("3\tline3"));
+        assert!(result.text_out().contains("1\tline1"));
+        assert!(result.text_out().contains("2\tline2"));
+        assert!(result.text_out().contains("3\tline3"));
     }
 
     #[tokio::test]
@@ -210,8 +210,8 @@ mod tests {
 
         let result = Cat.execute(args, &mut ctx).await;
         assert!(result.ok());
-        assert!(result.out.contains("hello world"));
-        assert!(result.out.contains("other content"));
+        assert!(result.text_out().contains("hello world"));
+        assert!(result.text_out().contains("other content"));
     }
 
     #[tokio::test]
@@ -223,9 +223,9 @@ mod tests {
 
         let result = Cat.execute(args, &mut ctx).await;
         assert!(result.ok());
-        assert!(result.out.contains("1\tline1"));
-        assert!(result.out.contains("2\tline2"));
-        assert!(result.out.contains("3\tline3"));
+        assert!(result.text_out().contains("1\tline1"));
+        assert!(result.text_out().contains("2\tline2"));
+        assert!(result.text_out().contains("3\tline3"));
     }
 
     #[tokio::test]
@@ -237,7 +237,7 @@ mod tests {
 
         let result = Cat.execute(args, &mut ctx).await;
         assert!(result.ok());
-        assert!(result.out.contains("1\tline1"));
+        assert!(result.text_out().contains("1\tline1"));
     }
 
     #[tokio::test]
@@ -251,7 +251,7 @@ mod tests {
         let result = Cat.execute(args, &mut ctx).await;
         assert!(result.ok());
         // lines.txt has 3 lines, so test.txt should start at line 4
-        assert!(result.out.contains("4\thello world"));
+        assert!(result.text_out().contains("4\thello world"));
     }
 
     #[tokio::test]
@@ -263,8 +263,8 @@ mod tests {
         let result = Cat.execute(args, &mut ctx).await;
         assert!(result.ok());
         // Should include content from test.txt, lines.txt, other.txt
-        assert!(result.out.contains("hello world"));
-        assert!(result.out.contains("other content"));
+        assert!(result.text_out().contains("hello world"));
+        assert!(result.text_out().contains("other content"));
     }
 
     #[tokio::test]

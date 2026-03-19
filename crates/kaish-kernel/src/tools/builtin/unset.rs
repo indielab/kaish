@@ -82,7 +82,7 @@ mod tests {
 
         let result = Unset.execute(args, &mut ctx).await;
         assert!(result.ok());
-        assert_eq!(result.out, "1");
+        assert_eq!(&*result.text_out(),"1");
         assert!(ctx.scope.get("X").is_none());
     }
 
@@ -95,7 +95,7 @@ mod tests {
 
         let result = Unset.execute(args, &mut ctx).await;
         assert!(result.ok());
-        assert_eq!(result.out, "0");
+        assert_eq!(&*result.text_out(),"0");
     }
 
     #[tokio::test]
@@ -112,7 +112,7 @@ mod tests {
 
         let result = Unset.execute(args, &mut ctx).await;
         assert!(result.ok());
-        assert_eq!(result.out, "2");
+        assert_eq!(&*result.text_out(),"2");
         assert!(ctx.scope.get("A").is_none());
         assert!(ctx.scope.get("B").is_none());
         assert!(ctx.scope.get("C").is_some());

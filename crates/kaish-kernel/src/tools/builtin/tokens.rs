@@ -125,17 +125,7 @@ impl Tool for Tokens {
         );
 
         // Pipe output is just the count; structured data carries the full table
-        ExecResult {
-            code: 0,
-            out: count.to_string(),
-            err: String::new(),
-            data: None,
-            output: Some(table),
-            did_spill: false,
-            original_code: None,
-            content_type: None,
-            baggage: Default::default(),
-        }
+        ExecResult::with_output_and_text(table, count.to_string())
     }
 }
 
@@ -160,7 +150,7 @@ mod tests {
         let result = Tokens.execute(args, &mut ctx).await;
         assert!(result.ok());
         // cl100k encodes "Hello world" as 2 tokens
-        assert_eq!(result.out.trim(), "2");
+        assert_eq!(result.text_out().trim(), "2");
     }
 
     #[tokio::test]
@@ -171,7 +161,7 @@ mod tests {
         let args = ToolArgs::new();
         let result = Tokens.execute(args, &mut ctx).await;
         assert!(result.ok());
-        assert_eq!(result.out.trim(), "2");
+        assert_eq!(result.text_out().trim(), "2");
     }
 
     #[tokio::test]
@@ -193,8 +183,8 @@ mod tests {
 
         let result = Tokens.execute(args, &mut ctx).await;
         assert!(result.ok());
-        assert!(result.out.contains("count:"));
-        assert!(result.out.contains("ids:"));
+        assert!(result.text_out().contains("count:"));
+        assert!(result.text_out().contains("ids:"));
     }
 
     #[tokio::test]
@@ -208,13 +198,13 @@ mod tests {
         let result = Tokens.execute(args, &mut ctx).await;
         assert!(result.ok());
         // Default pipe output is just the count
-        assert_eq!(result.out.trim(), "1");
+        assert_eq!(result.text_out().trim(), "1");
         // But OutputData carries the full table
-        assert!(result.output.is_some());
+        assert!(result.has_output());
 
         // Simulate global --json (handled by kernel)
         let result = apply_output_format(result, OutputFormat::Json);
-        let json: serde_json::Value = serde_json::from_str(&result.out).expect("valid JSON");
+        let json: serde_json::Value = serde_json::from_str(&result.text_out()).expect("valid JSON");
         // Should be an array of {INDEX, ID} objects
         let arr = json.as_array().expect("should be array");
         assert_eq!(arr.len(), 1); // "Hello" is 1 token in cl100k
@@ -232,7 +222,7 @@ mod tests {
         let result = Tokens.execute(args, &mut ctx).await;
         assert!(result.ok());
         // Should have at least 1 token
-        let count: usize = result.out.trim().parse().expect("valid number");
+        let count: usize = result.text_out().trim().parse().expect("valid number");
         assert!(count >= 1);
     }
 
@@ -244,7 +234,7 @@ mod tests {
 
         let result = Tokens.execute(args, &mut ctx).await;
         assert!(result.ok());
-        assert_eq!(result.out.trim(), "0");
+        assert_eq!(result.text_out().trim(), "0");
     }
 
     #[tokio::test]
@@ -271,7 +261,7 @@ mod tests {
         let result = Tokens.execute(args, &mut ctx).await;
         assert!(result.ok());
         // o200k also encodes "Hello world" but may have different count
-        let count: usize = result.out.trim().parse().expect("valid number");
+        let count: usize = result.text_out().trim().parse().expect("valid number");
         assert!(count >= 1);
     }
 
@@ -285,7 +275,7 @@ mod tests {
 
         let result = Tokens.execute(args, &mut ctx).await;
         assert!(result.ok());
-        let count: usize = result.out.trim().parse().expect("valid number");
+        let count: usize = result.text_out().trim().parse().expect("valid number");
         assert!(count >= 1);
     }
 
@@ -299,7 +289,7 @@ mod tests {
 
         let result = Tokens.execute(args, &mut ctx).await;
         assert!(result.ok());
-        let count: usize = result.out.trim().parse().expect("valid number");
+        let count: usize = result.text_out().trim().parse().expect("valid number");
         // Should have many tokens
         assert!(count > 10);
     }
@@ -313,7 +303,7 @@ mod tests {
 
         let result = Tokens.execute(args, &mut ctx).await;
         assert!(result.ok());
-        let count: usize = result.out.trim().parse().expect("valid number");
+        let count: usize = result.text_out().trim().parse().expect("valid number");
         assert!(count >= 1);
     }
 }

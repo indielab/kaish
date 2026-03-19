@@ -116,7 +116,7 @@ mod tests {
 
         let result = Printf.execute(args, &mut ctx).await;
         assert!(result.ok());
-        assert_eq!(result.out, "Hello, world!");
+        assert_eq!(&*result.text_out(), "Hello, world!");
     }
 
     #[tokio::test]
@@ -128,7 +128,7 @@ mod tests {
 
         let result = Printf.execute(args, &mut ctx).await;
         assert!(result.ok());
-        assert_eq!(result.out, "Number: 42");
+        assert_eq!(&*result.text_out(), "Number: 42");
     }
 
     #[tokio::test]
@@ -140,7 +140,7 @@ mod tests {
 
         let result = Printf.execute(args, &mut ctx).await;
         assert!(result.ok());
-        assert!(result.out.starts_with("Pi: 3.14159"));
+        assert!(result.text_out().starts_with("Pi: 3.14159"));
     }
 
     #[tokio::test]
@@ -152,7 +152,7 @@ mod tests {
 
         let result = Printf.execute(args, &mut ctx).await;
         assert!(result.ok());
-        assert_eq!(result.out, "Hex: ff");
+        assert_eq!(&*result.text_out(), "Hex: ff");
     }
 
     #[tokio::test]
@@ -163,7 +163,7 @@ mod tests {
 
         let result = Printf.execute(args, &mut ctx).await;
         assert!(result.ok());
-        assert_eq!(result.out, "line1\nline2");
+        assert_eq!(&*result.text_out(), "line1\nline2");
     }
 
     #[tokio::test]
@@ -174,7 +174,7 @@ mod tests {
 
         let result = Printf.execute(args, &mut ctx).await;
         assert!(result.ok());
-        assert_eq!(result.out, "100%");
+        assert_eq!(&*result.text_out(), "100%");
     }
 
     #[tokio::test]
@@ -188,7 +188,7 @@ mod tests {
 
         let result = Printf.execute(args, &mut ctx).await;
         assert!(result.ok());
-        assert_eq!(result.out, "Alice is 30 years old");
+        assert_eq!(&*result.text_out(), "Alice is 30 years old");
     }
 
     #[tokio::test]
@@ -207,7 +207,7 @@ mod tests {
         args.positional.push(Value::String("Name".into()));
         let result = Printf.execute(args, &mut ctx).await;
         assert!(result.ok());
-        assert_eq!(result.out, "Name            |\n");
+        assert_eq!(&*result.text_out(), "Name            |\n");
     }
 
     #[tokio::test]
@@ -218,7 +218,7 @@ mod tests {
         args.positional.push(Value::String("42".into()));
         let result = Printf.execute(args, &mut ctx).await;
         assert!(result.ok());
-        assert_eq!(result.out, "00000042\n");
+        assert_eq!(&*result.text_out(), "00000042\n");
     }
 
     #[tokio::test]
@@ -229,7 +229,7 @@ mod tests {
         args.positional.push(Value::String("3.14159".into()));
         let result = Printf.execute(args, &mut ctx).await;
         assert!(result.ok());
-        assert_eq!(result.out, "3.14\n");
+        assert_eq!(&*result.text_out(), "3.14\n");
     }
 
     #[tokio::test]
@@ -240,7 +240,7 @@ mod tests {
         args.positional.push(Value::String("hello".into()));
         let result = Printf.execute(args, &mut ctx).await;
         assert!(result.ok());
-        assert_eq!(result.out, "     hello|\n");
+        assert_eq!(&*result.text_out(), "     hello|\n");
     }
 
     #[tokio::test]
@@ -251,7 +251,7 @@ mod tests {
         args.positional.push(Value::Int(42));
         let result = Printf.execute(args, &mut ctx).await;
         assert!(result.ok());
-        assert_eq!(result.out, "    42\n");
+        assert_eq!(&*result.text_out(), "    42\n");
     }
 
     #[tokio::test]
@@ -262,6 +262,6 @@ mod tests {
         args.positional.push(Value::Int(255));
         let result = Printf.execute(args, &mut ctx).await;
         assert!(result.ok());
-        assert_eq!(result.out, "000000ff\n");
+        assert_eq!(&*result.text_out(), "000000ff\n");
     }
 }

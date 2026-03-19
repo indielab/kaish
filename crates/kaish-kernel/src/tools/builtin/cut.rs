@@ -192,7 +192,8 @@ mod tests {
 
         let result = Cut.execute(args, &mut ctx).await;
         assert!(result.ok());
-        let lines: Vec<&str> = result.out.lines().collect();
+        let text = result.text_out();
+        let lines: Vec<&str> = text.lines().collect();
         assert_eq!(lines, vec!["alice", "bob"]);
     }
 
@@ -208,7 +209,8 @@ mod tests {
 
         let result = Cut.execute(args, &mut ctx).await;
         assert!(result.ok());
-        let lines: Vec<&str> = result.out.lines().collect();
+        let text = result.text_out();
+        let lines: Vec<&str> = text.lines().collect();
         assert_eq!(lines, vec!["alice,engineer", "bob,manager"]);
     }
 
@@ -224,7 +226,8 @@ mod tests {
 
         let result = Cut.execute(args, &mut ctx).await;
         assert!(result.ok());
-        let lines: Vec<&str> = result.out.lines().collect();
+        let text = result.text_out();
+        let lines: Vec<&str> = text.lines().collect();
         assert_eq!(lines, vec!["25,engineer", "30,manager"]);
     }
 
@@ -238,7 +241,8 @@ mod tests {
 
         let result = Cut.execute(args, &mut ctx).await;
         assert!(result.ok());
-        let lines: Vec<&str> = result.out.lines().collect();
+        let text = result.text_out();
+        let lines: Vec<&str> = text.lines().collect();
         assert_eq!(lines, vec!["two", "five"]);
     }
 
@@ -252,7 +256,8 @@ mod tests {
 
         let result = Cut.execute(args, &mut ctx).await;
         assert!(result.ok());
-        let lines: Vec<&str> = result.out.lines().collect();
+        let text = result.text_out();
+        let lines: Vec<&str> = text.lines().collect();
         assert_eq!(lines, vec!["hello", "foo b"]);
     }
 
@@ -269,7 +274,8 @@ mod tests {
 
         let result = Cut.execute(args, &mut ctx).await;
         assert!(result.ok());
-        let lines: Vec<&str> = result.out.lines().collect();
+        let text = result.text_out();
+        let lines: Vec<&str> = text.lines().collect();
         assert_eq!(lines, vec!["b", "2"]);
     }
 
@@ -308,7 +314,8 @@ mod tests {
 
         let result = Cut.execute(args, &mut ctx).await;
         assert!(result.ok());
-        let lines: Vec<&str> = result.out.lines().collect();
+        let text = result.text_out();
+        let lines: Vec<&str> = text.lines().collect();
         assert_eq!(lines, vec!["alice,25", "bob,30"]);
     }
 
@@ -326,7 +333,7 @@ mod tests {
         let result = Cut.execute(args, &mut ctx).await;
         assert!(result.ok());
         // Fields beyond range are silently ignored
-        assert!(result.out.trim().is_empty() || result.out.lines().all(|l| l.is_empty()));
+        assert!(result.text_out().trim().is_empty() || result.text_out().lines().all(|l| l.is_empty()));
     }
 
     #[tokio::test]
@@ -341,7 +348,7 @@ mod tests {
 
         let result = Cut.execute(args, &mut ctx).await;
         assert!(result.ok());
-        assert_eq!(result.out.trim(), "日本語");
+        assert_eq!(result.text_out().trim(), "日本語");
     }
 
     #[tokio::test]
@@ -355,7 +362,7 @@ mod tests {
 
         let result = Cut.execute(args, &mut ctx).await;
         assert!(result.ok());
-        assert!(result.out.is_empty());
+        assert!(result.text_out().is_empty());
     }
 
     #[tokio::test]
@@ -371,7 +378,8 @@ mod tests {
 
         let result = Cut.execute(args, &mut ctx).await;
         assert!(result.ok());
-        let lines: Vec<&str> = result.out.lines().collect();
+        let text = result.text_out();
+        let lines: Vec<&str> = text.lines().collect();
         assert_eq!(lines, vec!["value1", "value2", "value3"]);
     }
 
@@ -389,7 +397,7 @@ mod tests {
 
         let result = Cut.execute(args, &mut ctx).await;
         assert!(result.ok());
-        assert_eq!(result.out.trim(), "a,c,d,e,g");
+        assert_eq!(result.text_out().trim(), "a,c,d,e,g");
     }
 
     #[tokio::test]
@@ -425,7 +433,8 @@ mod tests {
         let result = Cut.execute(args, &mut ctx).await;
         assert!(result.ok());
         // Should only read from first file (csv.txt has "alice,25,engineer" etc.)
-        let lines: Vec<&str> = result.out.lines().collect();
+        let text = result.text_out();
+        let lines: Vec<&str> = text.lines().collect();
         assert_eq!(lines, vec!["alice", "bob"]);
     }
 }

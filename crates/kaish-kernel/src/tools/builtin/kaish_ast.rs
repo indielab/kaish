@@ -105,7 +105,7 @@ mod tests {
 
         let result = KaishAst.execute(args, &mut ctx).await;
         assert!(result.ok());
-        assert!(result.out.contains("Echo") || result.out.contains("Command") || result.out.contains("echo"));
+        assert!(result.text_out().contains("Echo") || result.text_out().contains("Command") || result.text_out().contains("echo"));
     }
 
     #[tokio::test]
@@ -116,7 +116,7 @@ mod tests {
 
         let result = KaishAst.execute(args, &mut ctx).await;
         assert!(result.ok());
-        assert!(result.out.contains("ON"));
+        assert!(result.text_out().contains("ON"));
         assert!(ctx.scope.show_ast());
     }
 
@@ -129,7 +129,7 @@ mod tests {
 
         let result = KaishAst.execute(args, &mut ctx).await;
         assert!(result.ok());
-        assert!(result.out.contains("OFF"));
+        assert!(result.text_out().contains("OFF"));
         assert!(!ctx.scope.show_ast());
     }
 

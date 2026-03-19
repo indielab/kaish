@@ -264,6 +264,17 @@ impl OutputData {
         }
     }
 
+    /// Extract the owned String from a single-text-node OutputData.
+    /// Returns `Err(self)` for non-simple-text output (tables, trees, multi-node),
+    /// giving the caller back the unconsumed OutputData.
+    pub fn into_text(mut self) -> Result<String, Self> {
+        if self.root.len() == 1 && self.root[0].is_text_only() {
+            Ok(self.root.pop().and_then(|n| n.text).unwrap_or_default())
+        } else {
+            Err(self)
+        }
+    }
+
     /// Estimate canonical string byte size without materializing.
     ///
     /// Lower bound — actual may be slightly larger due to formatting.
@@ -483,25 +494,27 @@ pub enum OutputFormat {
 /// and `grep` (exit 1 = no matches) use non-zero exits for semantic meaning,
 /// not errors. The `--json` contract must hold for all exit codes.
 pub fn apply_output_format(mut result: ExecResult, format: OutputFormat) -> ExecResult {
-    if result.output.is_none() && result.text_out().is_empty() {
+    if !result.has_output() && result.text_out().is_empty() {
         return result;
     }
     match format {
         OutputFormat::Json => {
-            if let Some(ref output) = result.output {
+            if let Some(output) = result.output() {
                 let json_value = output.to_json();
-                result.out = serde_json::to_string(&json_value)
-                    .unwrap_or_else(|_| "null".to_string());
+                // NLL: borrow of result via output ends here (json_value is owned)
+                result.set_out(serde_json::to_string(&json_value)
+                    .unwrap_or_else(|_| "null".to_string()));
                 result.data = Some(crate::result::json_to_value(json_value));
             } else {
                 // Text-only: wrap as JSON string, try parse for data
                 let text = result.text_out().into_owned();
-                result.out = serde_json::to_string(&text)
+                let json_out = serde_json::to_string(&text)
                     .unwrap_or_else(|_| "null".to_string());
-                result.data = ExecResult::try_parse_json(&result.out);
+                result.data = ExecResult::try_parse_json(&json_out);
+                result.set_out(json_out);
             }
             // Clear sentinel — format already applied, prevents double-encoding
-            result.output = None;
+            result.set_output(None);
             result
         }
     }
@@ -596,10 +609,10 @@ mod tests {
             vec![OutputNode::new("test")],
         );
         let result = ExecResult::with_output(output);
-        assert!(result.output.is_some(), "before: sentinel present");
+        assert!(result.has_output(), "before: sentinel present");
 
         let formatted = apply_output_format(result, OutputFormat::Json);
-        assert!(formatted.output.is_none(), "after Json: sentinel cleared");
+        assert!(!formatted.has_output(), "after Json: sentinel cleared");
     }
 
     #[test]
@@ -611,8 +624,8 @@ mod tests {
         let result = ExecResult::with_output(output);
 
         let after_json = apply_output_format(result, OutputFormat::Json);
-        let json_out = after_json.out.clone();
-        assert!(after_json.output.is_none(), "sentinel cleared by Json");
+        let json_out = after_json.text_out().into_owned();
+        assert!(!after_json.has_output(), "sentinel cleared by Json");
 
         let parsed: serde_json::Value = serde_json::from_str(&json_out).expect("valid JSON");
         assert_eq!(parsed, serde_json::json!(["file1", "file2"]));
@@ -648,8 +661,9 @@ mod tests {
 
         let formatted = apply_output_format(result, OutputFormat::Json);
         // Compact JSON: no pretty-printing (no newlines within the array)
-        assert!(!formatted.out.contains('\n'), "should be compact JSON, got: {}", formatted.out);
-        assert_eq!(formatted.out, r#"["file1","file2"]"#);
+        let out = formatted.text_out();
+        assert!(!out.contains('\n'), "should be compact JSON, got: {}", out);
+        assert_eq!(&*out, r#"["file1","file2"]"#);
     }
 
     #[test]
@@ -681,5 +695,23 @@ mod tests {
         assert!(written <= 16, "should respect budget, wrote {} bytes: {}", written, output);
         // Should at least write the root name
         assert!(output.starts_with("root"), "should start with root: {}", output);
+    }
+
+    #[test]
+    fn into_text_simple() {
+        let data = OutputData::text("hello");
+        assert_eq!(data.into_text(), Ok("hello".to_string()));
+    }
+
+    #[test]
+    fn into_text_non_simple() {
+        let data = OutputData::nodes(vec![OutputNode::new("a"), OutputNode::new("b")]);
+        assert!(data.into_text().is_err());
+    }
+
+    #[test]
+    fn into_text_empty() {
+        let data = OutputData::text("");
+        assert_eq!(data.into_text(), Ok("".to_string()));
     }
 }

@@ -128,7 +128,7 @@ mod tests {
 
         let result = Readlink.execute(args, &mut ctx).await;
         assert!(result.ok());
-        assert_eq!(result.out.trim(), "/path/file");
+        assert_eq!(result.text_out().trim(), "/path/file");
     }
 
     #[tokio::test]
@@ -185,7 +185,7 @@ mod tests {
 
         let result = Readlink.execute(args, &mut ctx).await;
         assert!(result.ok());
-        assert_eq!(result.out.trim(), "target.txt");
+        assert_eq!(result.text_out().trim(), "target.txt");
     }
 
     #[tokio::test]
@@ -208,7 +208,7 @@ mod tests {
         // readlink on a broken symlink should still work (returns target)
         let result = Readlink.execute(args, &mut ctx).await;
         assert!(result.ok());
-        assert_eq!(result.out.trim(), "nonexistent");
+        assert_eq!(result.text_out().trim(), "nonexistent");
     }
 
     #[tokio::test]

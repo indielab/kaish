@@ -324,9 +324,9 @@ mod tests {
         assert!(result.ok());
         // Default format now returns structured OutputData
         // Canonical output uses brace notation for nested children
-        assert!(result.out.contains("src"));
+        assert!(result.text_out().contains("src"));
         // Should have structured output
-        assert!(result.output.is_some());
+        assert!(result.has_output());
     }
 
     #[tokio::test]
@@ -338,12 +338,12 @@ mod tests {
 
         let result = Tree.execute(args, &mut ctx).await;
         assert!(result.ok());
-        assert!(result.out.contains("main.rs"));
-        assert!(result.out.contains("lib.rs"));
+        assert!(result.text_out().contains("main.rs"));
+        assert!(result.text_out().contains("lib.rs"));
         // Check for lib directory
-        assert!(result.out.contains("lib"));
+        assert!(result.text_out().contains("lib"));
         // Traditional format uses box-drawing chars
-        assert!(result.out.contains("├") || result.out.contains("└"));
+        assert!(result.text_out().contains("├") || result.text_out().contains("└"));
     }
 
     #[tokio::test]
@@ -356,8 +356,8 @@ mod tests {
         let result = Tree.execute(args, &mut ctx).await;
         assert!(result.ok());
         // Flat format uses indentation
-        assert!(result.out.contains("src/"));
-        assert!(result.out.contains("main.rs"));
+        assert!(result.text_out().contains("src/"));
+        assert!(result.text_out().contains("main.rs"));
     }
 
     #[tokio::test]
@@ -370,12 +370,12 @@ mod tests {
 
         let result = Tree.execute(args, &mut ctx).await;
         assert!(result.ok());
-        assert!(result.output.is_some());
+        assert!(result.has_output());
 
         // Simulate global --json (handled by kernel)
         let result = apply_output_format(result, OutputFormat::Json);
-        assert!(result.out.starts_with('{'));
-        assert!(result.out.ends_with('}'));
+        assert!(result.text_out().starts_with('{'));
+        assert!(result.text_out().ends_with('}'));
     }
 
     #[tokio::test]
@@ -388,7 +388,7 @@ mod tests {
         let result = Tree.execute(args, &mut ctx).await;
         assert!(result.ok());
         // Should show immediate children but not nested
-        assert!(result.out.contains("lib/") || result.out.contains("lib"));
+        assert!(result.text_out().contains("lib/") || result.text_out().contains("lib"));
         // utils.rs is at depth 2, should not appear
         // (actually depends on how we count - lib/ is at depth 1, utils.rs at depth 2)
     }
@@ -403,7 +403,7 @@ mod tests {
         assert!(result.ok());
 
         // Default tree (no flags) should return OutputData with nested structure
-        match &result.output {
+        match result.output() {
             Some(output) => {
                 assert!(!output.root.is_empty());
                 // Root node should be "src"
@@ -427,6 +427,6 @@ mod tests {
 
         // Explicit format flags should return plain text output
         // (output is still Some but it's simple text, not a tree structure)
-        assert!(result.out.contains("├") || result.out.contains("└"));
+        assert!(result.text_out().contains("├") || result.text_out().contains("└"));
     }
 }

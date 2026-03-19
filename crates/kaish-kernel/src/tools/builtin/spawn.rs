@@ -337,7 +337,7 @@ mod tests {
 
         let result = Spawn.execute(args, &mut ctx).await;
         assert!(result.ok());
-        assert_eq!(result.out.trim(), "hello");
+        assert_eq!(result.text_out().trim(), "hello");
     }
 
     #[tokio::test]
@@ -351,7 +351,7 @@ mod tests {
 
         let result = Spawn.execute(args, &mut ctx).await;
         assert!(result.ok());
-        assert_eq!(result.out, "hello world");
+        assert_eq!(&*result.text_out(), "hello world");
     }
 
     #[tokio::test]
@@ -369,7 +369,7 @@ mod tests {
 
         let result = Spawn.execute(args, &mut ctx).await;
         assert!(result.ok());
-        assert!(result.out.contains("MY_TEST_VAR=test_value"));
+        assert!(result.text_out().contains("MY_TEST_VAR=test_value"));
     }
 
     #[tokio::test]
@@ -410,7 +410,7 @@ mod tests {
 
         let result = Spawn.execute(args, &mut ctx).await;
         assert!(result.ok());
-        assert!(result.out.contains("hello from PATH"));
+        assert!(result.text_out().contains("hello from PATH"));
     }
 
     #[tokio::test]
@@ -430,7 +430,7 @@ mod tests {
         let result = Spawn.execute(args, &mut ctx).await;
         assert!(result.ok(), "spawn failed: {}", result.err);
         // Output should contain /tmp (or its resolved path like /private/tmp on macOS)
-        assert!(result.out.contains("tmp"), "expected tmp in output: {}", result.out);
+        assert!(result.text_out().contains("tmp"), "expected tmp in output: {}", result.text_out());
     }
 
     #[tokio::test]
@@ -465,6 +465,6 @@ mod tests {
 
         let result = Spawn.execute(args, &mut ctx).await;
         assert!(result.ok());
-        assert!(result.out.contains("quick"));
+        assert!(result.text_out().contains("quick"));
     }
 }

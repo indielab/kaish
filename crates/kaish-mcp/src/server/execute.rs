@@ -108,7 +108,7 @@ impl ExecuteResult {
             stderr: result.err.clone(),
             data,
             ok: result.ok(),
-            output: result.output.clone(),
+            output: result.output().cloned(),
             content_type: result.content_type.clone(),
         }
     }

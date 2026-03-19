@@ -366,7 +366,7 @@ mod tests {
 
         let result = JqNative.execute(args, &mut ctx).await;
         assert!(result.ok(), "jq failed: {}", result.err);
-        assert_eq!(result.out.trim(), "\"Alice\"");
+        assert_eq!(result.text_out().trim(), "\"Alice\"");
     }
 
     #[tokio::test]
@@ -380,7 +380,7 @@ mod tests {
 
         let result = JqNative.execute(args, &mut ctx).await;
         assert!(result.ok(), "jq failed: {}", result.err);
-        assert_eq!(result.out.trim(), "Alice");
+        assert_eq!(result.text_out().trim(), "Alice");
     }
 
     #[tokio::test]
@@ -393,7 +393,7 @@ mod tests {
 
         let result = JqNative.execute(args, &mut ctx).await;
         assert!(result.ok(), "jq failed: {}", result.err);
-        assert_eq!(result.out.trim(), "1\n2\n3");
+        assert_eq!(result.text_out().trim(), "1\n2\n3");
     }
 
     #[tokio::test]
@@ -449,7 +449,7 @@ mod tests {
 
         let result = JqNative.execute(args, &mut ctx).await;
         assert!(result.ok(), "jq failed: {}", result.err);
-        assert_eq!(result.out.trim(), "42");
+        assert_eq!(result.text_out().trim(), "42");
     }
 
     // ============================================================================
@@ -477,7 +477,7 @@ mod tests {
 
         let result = JqNative.execute(args, &mut ctx).await;
         assert!(result.ok(), "jq positional file failed: {}", result.err);
-        assert_eq!(result.out.trim(), "1\n2\n3");
+        assert_eq!(result.text_out().trim(), "1\n2\n3");
     }
 
     #[tokio::test]
@@ -500,7 +500,7 @@ mod tests {
 
         let result = JqNative.execute(args, &mut ctx).await;
         assert!(result.ok(), "jq select failed: {}", result.err);
-        assert_eq!(result.out.trim(), "2");
+        assert_eq!(result.text_out().trim(), "2");
     }
 
     #[tokio::test]
@@ -518,7 +518,7 @@ mod tests {
 
         let result = JqNative.execute(args, &mut ctx).await;
         assert!(result.ok(), "jq type check failed: {}", result.err);
-        assert_eq!(result.out.trim(), "\"array\"");
+        assert_eq!(result.text_out().trim(), "\"array\"");
     }
 
     #[tokio::test]
@@ -540,7 +540,7 @@ mod tests {
 
         let result = JqNative.execute(args, &mut ctx).await;
         assert!(result.ok(), "jq index failed: {}", result.err);
-        assert!(result.out.contains("\"name\": \"first\""));
+        assert!(result.text_out().contains("\"name\": \"first\""));
     }
 
     #[tokio::test]
@@ -563,7 +563,7 @@ mod tests {
 
         let result = JqNative.execute(args, &mut ctx).await;
         assert!(result.ok(), "jq -r failed: {}", result.err);
-        assert_eq!(result.out.trim(), "Alice"); // No quotes with -r
+        assert_eq!(result.text_out().trim(), "Alice"); // No quotes with -r
     }
 
     #[tokio::test]
@@ -577,7 +577,7 @@ mod tests {
 
         let result = JqNative.execute(args, &mut ctx).await;
         assert!(result.ok(), "jq stdin failed: {}", result.err);
-        assert_eq!(result.out.trim(), "42");
+        assert_eq!(result.text_out().trim(), "42");
     }
 
     #[tokio::test]
@@ -596,6 +596,6 @@ mod tests {
 
         let result = JqNative.execute(args, &mut ctx).await;
         assert!(result.ok(), "jq path= failed: {}", result.err);
-        assert_eq!(result.out.trim(), "99");
+        assert_eq!(result.text_out().trim(), "99");
     }
 }

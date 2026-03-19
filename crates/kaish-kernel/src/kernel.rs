@@ -416,6 +416,11 @@ pub struct Kernel {
     /// Terminal state for job control (interactive mode only, Unix only).
     #[cfg(unix)]
     terminal_state: Option<Arc<crate::terminal::TerminalState>>,
+    /// Weak self-reference for handing out `Arc<dyn CommandDispatcher>`.
+    ///
+    /// Set by `into_arc()`. Allows builtins to re-dispatch inner commands
+    /// through the full Kernel resolution chain.
+    self_weak: std::sync::OnceLock<std::sync::Weak<Self>>,
 }
 
 impl Kernel {
@@ -610,12 +615,36 @@ impl Kernel {
             cancel_token: std::sync::Mutex::new(tokio_util::sync::CancellationToken::new()),
             #[cfg(unix)]
             terminal_state: None,
+            self_weak: std::sync::OnceLock::new(),
         })
     }
 
     /// Get the kernel name.
     pub fn name(&self) -> &str {
         &self.name
+    }
+
+    /// Wrap this Kernel in an Arc and initialize its self-reference.
+    ///
+    /// This enables the Kernel to hand out `Arc<dyn CommandDispatcher>` references
+    /// to child contexts, allowing builtins like `timeout` to dispatch inner
+    /// commands through the full resolution chain (user tools → builtins →
+    /// .kai scripts → external commands).
+    pub fn into_arc(self) -> Arc<Self> {
+        let arc = Arc::new(self);
+        let _ = arc.self_weak.set(Arc::downgrade(&arc));
+        arc
+    }
+
+    /// Get an `Arc<dyn CommandDispatcher>` to this Kernel, if wrapped via `into_arc()`.
+    ///
+    /// Returns `None` if the Kernel was not wrapped, or if all strong references
+    /// have been dropped (the `Weak` can no longer upgrade).
+    pub fn dispatcher(&self) -> Option<Arc<dyn CommandDispatcher>> {
+        self.self_weak
+            .get()
+            .and_then(|weak| weak.upgrade())
+            .map(|arc| arc as Arc<dyn CommandDispatcher>)
     }
 
     /// Initialize terminal state for interactive job control.
@@ -775,9 +804,9 @@ impl Kernel {
                     // Carry the last statement's structured output for MCP TOON encoding.
                     // Must be done here (not in accumulate_result) because accumulate_result
                     // is also used in loops where per-iteration output would be wrong.
-                    let last_output = r.output.clone();
+                    let last_output = r.output().cloned();
                     accumulate_result(&mut result, &r);
-                    result.output = last_output;
+                    result.set_output(last_output);
                 }
                 ControlFlow::Exit { code } => {
                     if !drained_stderr.is_empty() {
@@ -1123,17 +1152,7 @@ impl Kernel {
                         Value::Bool(b) => if b { 0 } else { 1 },
                         _ => 0,
                     };
-                    ExecResult {
-                        code,
-                        out: String::new(),
-                        err: String::new(),
-                        data: None,
-                        output: None,
-                        did_spill: false,
-                        original_code: None,
-                        content_type: None,
-                        baggage: Default::default(),
-                    }
+                    ExecResult::from_parts(code, String::new(), String::new(), None)
                 } else {
                     ExecResult::success("")
                 };
@@ -1298,6 +1317,7 @@ impl Kernel {
                 trash_backend: ec.trash_backend.clone(),
                 #[cfg(unix)]
                 terminal_state: ec.terminal_state.clone(),
+                dispatcher: self.dispatcher(),
             }
         }; // locks released
 
@@ -1379,6 +1399,7 @@ impl Kernel {
         let tools = self.tools.clone();
         let tool_schemas = self.tools.schemas();
         let allow_ext = self.allow_external_commands;
+        let dispatcher_arc = self.dispatcher();
 
         // Spawn the background task
         tokio::spawn(async move {
@@ -1390,13 +1411,13 @@ impl Kernel {
             bg_ctx.set_tools(tools.clone());
             bg_ctx.set_tool_schemas(tool_schemas);
             bg_ctx.allow_external_commands = allow_ext;
+            bg_ctx.dispatcher = dispatcher_arc;
 
-            // Use BackendDispatcher for background jobs (builtins only).
-            // Full Kernel dispatch requires Arc<Kernel> — planned for a future phase.
-            let dispatcher = crate::dispatch::BackendDispatcher::new(tools);
-
-            // Execute the pipeline
-            let result = runner.run(&commands, &mut bg_ctx, &dispatcher).await;
+            // Execute the pipeline — use the Kernel dispatcher from the context.
+            // The Kernel must be created via into_arc() for this to work.
+            let dispatcher = bg_ctx.dispatcher.clone()
+                .expect("background jobs require Kernel::into_arc()");
+            let result = runner.run(&commands, &mut bg_ctx, &*dispatcher).await;
 
             // Write output to streams
             let text = result.text_out();
@@ -1567,7 +1588,7 @@ impl Kernel {
                         let mut exec = ExecResult::from_output(
                             tool_result.code as i64, tool_result.stdout, tool_result.stderr,
                         );
-                        exec.output = tool_result.output;
+                        exec.set_output(tool_result.output);
                         return Ok(exec);
                     }
                     Err(BackendError::ToolNotFound(_)) => {
@@ -1972,7 +1993,7 @@ impl Kernel {
                 // Prefer structured data (enables `for i in $(cmd)` iteration)
                 if let Some(data) = &result.data {
                     Ok(data.clone())
-                } else if let Some(ref output) = result.output {
+                } else if let Some(output) = result.output() {
                     // Flat non-text node lists (glob, ls, tree) → iterable array
                     if output.is_flat() && !output.is_simple_text() && !output.root.is_empty() {
                         let items: Vec<serde_json::Value> = output.root.iter()
@@ -2307,13 +2328,13 @@ impl Kernel {
 
                     match flow {
                         ControlFlow::Normal(r) => {
-                            accumulated_out.push_str(&r.out);
+                            accumulated_out.push_str(&r.text_out());
                             accumulated_err.push_str(&r.err);
                             last_code = r.code;
                             last_data = r.data;
                         }
                         ControlFlow::Return { value } => {
-                            accumulated_out.push_str(&value.out);
+                            accumulated_out.push_str(&value.text_out());
                             accumulated_err.push_str(&value.err);
                             last_code = value.code;
                             last_data = value.data;
@@ -2324,7 +2345,7 @@ impl Kernel {
                             break;
                         }
                         ControlFlow::Break { result: r, .. } | ControlFlow::Continue { result: r, .. } => {
-                            accumulated_out.push_str(&r.out);
+                            accumulated_out.push_str(&r.text_out());
                             accumulated_err.push_str(&r.err);
                             last_code = r.code;
                             last_data = r.data;
@@ -2350,30 +2371,10 @@ impl Kernel {
             return Err(e);
         }
         if let Some(code) = exit_code {
-            return Ok(ExecResult {
-                code,
-                out: accumulated_out,
-                err: accumulated_err,
-                data: last_data,
-                output: None,
-                did_spill: false,
-                original_code: None,
-                content_type: None,
-                baggage: Default::default(),
-            });
+            return Ok(ExecResult::from_parts(code, accumulated_out, accumulated_err, last_data));
         }
 
-        Ok(ExecResult {
-            code: last_code,
-            out: accumulated_out,
-            err: accumulated_err,
-            data: last_data,
-            output: None,
-            baggage: Default::default(),
-            did_spill: false,
-            original_code: None,
-            content_type: None,
-        })
+        Ok(ExecResult::from_parts(last_code, accumulated_out, accumulated_err, last_data))
     }
 
     /// Execute the `source` / `.` command to include and run a script.
@@ -3104,17 +3105,12 @@ fn accumulate_result(accumulated: &mut ExecResult, new: &ExecResult) {
     // Materialize lazy OutputData into .out before accumulating.
     // Without this, the first command's output stays in .output while
     // the second's text gets appended to .out, losing the first.
-    if accumulated.out.is_empty() {
-        if let Some(ref output) = accumulated.output {
-            accumulated.out = output.to_canonical_string();
-            accumulated.output = None;
-        }
-    }
+    accumulated.materialize();
     let new_text = new.text_out();
-    if !accumulated.out.is_empty() && !new_text.is_empty() && !accumulated.out.ends_with('\n') {
-        accumulated.out.push('\n');
+    if !accumulated.text_out().is_empty() && !new_text.is_empty() && !accumulated.text_out().ends_with('\n') {
+        accumulated.push_out("\n");
     }
-    accumulated.out.push_str(&new_text);
+    accumulated.push_out(&new_text);
     if !accumulated.err.is_empty() && !new.err.is_empty() && !accumulated.err.ends_with('\n') {
         accumulated.err.push('\n');
     }
@@ -3172,7 +3168,7 @@ mod tests {
         let kernel = Kernel::transient().expect("failed to create kernel");
         let result = kernel.execute("echo hello").await.expect("execution failed");
         assert!(result.ok());
-        assert_eq!(result.out.trim(), "hello");
+        assert_eq!(result.text_out().trim(), "hello");
     }
 
     #[tokio::test]
@@ -3184,9 +3180,9 @@ mod tests {
             .expect("execution failed");
         assert!(result.ok());
         // Should have all three outputs separated by newlines
-        assert!(result.out.contains("one"), "missing 'one': {}", result.out);
-        assert!(result.out.contains("two"), "missing 'two': {}", result.out);
-        assert!(result.out.contains("three"), "missing 'three': {}", result.out);
+        assert!(result.text_out().contains("one"), "missing 'one': {}", result.text_out());
+        assert!(result.text_out().contains("two"), "missing 'two': {}", result.text_out());
+        assert!(result.text_out().contains("three"), "missing 'three': {}", result.text_out());
     }
 
     #[tokio::test]
@@ -3197,8 +3193,8 @@ mod tests {
             .await
             .expect("execution failed");
         assert!(result.ok());
-        assert!(result.out.contains("first"), "missing 'first': {}", result.out);
-        assert!(result.out.contains("second"), "missing 'second': {}", result.out);
+        assert!(result.text_out().contains("first"), "missing 'first': {}", result.text_out());
+        assert!(result.text_out().contains("second"), "missing 'second': {}", result.text_out());
     }
 
     #[tokio::test]
@@ -3209,9 +3205,9 @@ mod tests {
             .await
             .expect("execution failed");
         assert!(result.ok());
-        assert!(result.out.contains("item: a"), "missing 'item: a': {}", result.out);
-        assert!(result.out.contains("item: b"), "missing 'item: b': {}", result.out);
-        assert!(result.out.contains("item: c"), "missing 'item: c': {}", result.out);
+        assert!(result.text_out().contains("item: a"), "missing 'item: a': {}", result.text_out());
+        assert!(result.text_out().contains("item: b"), "missing 'item: b': {}", result.text_out());
+        assert!(result.text_out().contains("item: c"), "missing 'item: c': {}", result.text_out());
     }
 
     #[tokio::test]
@@ -3228,9 +3224,9 @@ mod tests {
             .await
             .expect("execution failed");
         assert!(result.ok());
-        assert!(result.out.contains("N=3"), "missing 'N=3': {}", result.out);
-        assert!(result.out.contains("N=2"), "missing 'N=2': {}", result.out);
-        assert!(result.out.contains("N=1"), "missing 'N=1': {}", result.out);
+        assert!(result.text_out().contains("N=3"), "missing 'N=3': {}", result.text_out());
+        assert!(result.text_out().contains("N=2"), "missing 'N=2': {}", result.text_out());
+        assert!(result.text_out().contains("N=1"), "missing 'N=1': {}", result.text_out());
     }
 
     #[tokio::test]
@@ -3251,7 +3247,7 @@ mod tests {
         let result = kernel.execute("echo \"hello ${NAME}\"").await.expect("echo failed");
 
         assert!(result.ok());
-        assert_eq!(result.out.trim(), "hello world");
+        assert_eq!(result.text_out().trim(), "hello world");
     }
 
     #[tokio::test]
@@ -3262,7 +3258,7 @@ mod tests {
 
         let last = kernel.last_result().await;
         assert!(last.ok());
-        assert_eq!(last.out.trim(), "test");
+        assert_eq!(last.text_out().trim(), "test");
     }
 
     #[tokio::test]
@@ -3367,7 +3363,7 @@ mod tests {
             .await
             .expect("execution failed");
         assert!(result.ok(), "jq pipeline failed: {}", result.err);
-        assert_eq!(result.out.trim(), "Alice");
+        assert_eq!(result.text_out().trim(), "Alice");
     }
 
     #[tokio::test]
@@ -3387,7 +3383,7 @@ mod tests {
             .expect("function call failed");
 
         assert!(result.ok(), "greet failed: {}", result.err);
-        assert_eq!(result.out.trim(), "Hello, World!");
+        assert_eq!(result.text_out().trim(), "Hello, World!");
     }
 
     #[tokio::test]
@@ -3407,7 +3403,7 @@ mod tests {
             .expect("function call failed");
 
         assert!(result.ok(), "greet failed: {}", result.err);
-        assert_eq!(result.out.trim(), "Hi Amy");
+        assert_eq!(result.text_out().trim(), "Hi Amy");
     }
 
     #[tokio::test]
@@ -3434,9 +3430,9 @@ mod tests {
 
         // Function should have access to parent scope
         assert!(
-            result.out.contains("hidden"),
+            result.text_out().contains("hidden"),
             "Function should access parent scope, got: {}",
-            result.out
+            result.text_out()
         );
 
         // Function should have modified the parent variable
@@ -3458,7 +3454,7 @@ mod tests {
             .expect("exec failed");
 
         assert!(result.ok(), "exec failed: {}", result.err);
-        assert_eq!(result.out.trim(), "hello world");
+        assert_eq!(result.text_out().trim(), "hello world");
     }
 
     #[tokio::test]
@@ -3476,7 +3472,7 @@ mod tests {
             .expect("while false failed");
 
         assert!(result.ok());
-        assert!(result.out.is_empty(), "while false should not execute body: {}", result.out);
+        assert!(result.text_out().is_empty(), "while false should not execute body: {}", result.text_out());
     }
 
     #[tokio::test]
@@ -3499,7 +3495,7 @@ mod tests {
             .expect("while with string cmp failed");
 
         assert!(result.ok());
-        assert!(result.out.contains("running"), "should have run once: {}", result.out);
+        assert!(result.text_out().contains("running"), "should have run once: {}", result.text_out());
 
         // Verify flag was changed
         let flag = kernel.get_var("FLAG").await;
@@ -3525,7 +3521,7 @@ mod tests {
             .expect("while with > failed");
 
         assert!(result.ok());
-        assert!(result.out.contains("N was greater"), "should have run once: {}", result.out);
+        assert!(result.text_out().contains("N was greater"), "should have run once: {}", result.text_out());
     }
 
     #[tokio::test]
@@ -3546,8 +3542,8 @@ mod tests {
             .expect("while with break failed");
 
         assert!(result.ok());
-        assert!(result.out.contains("before break"), "should see before break: {}", result.out);
-        assert!(!result.out.contains("after break"), "should not see after break: {}", result.out);
+        assert!(result.text_out().contains("before break"), "should see before break: {}", result.text_out());
+        assert!(!result.text_out().contains("after break"), "should not see after break: {}", result.text_out());
 
         // Verify we exited the loop
         let i = kernel.get_var("I").await;
@@ -3645,7 +3641,7 @@ mod tests {
         // Exit code should be 42 (non-zero, so not ok())
         assert_eq!(result.code, 42);
         // Output should be empty (we returned before echo)
-        assert!(result.out.is_empty());
+        assert!(result.text_out().is_empty());
     }
 
     #[tokio::test]
@@ -3670,7 +3666,7 @@ mod tests {
             .expect("function call failed");
 
         assert!(result.ok());
-        assert!(result.out.is_empty() || result.out.trim().is_empty());
+        assert!(result.text_out().is_empty() || result.text_out().trim().is_empty());
     }
 
     #[tokio::test]
@@ -3706,7 +3702,7 @@ mod tests {
             .expect("exit failed");
 
         assert_eq!(result.code, 42);
-        assert!(result.out.is_empty(), "exit should not produce stdout");
+        assert!(result.text_out().is_empty(), "exit should not produce stdout");
     }
 
     #[tokio::test]
@@ -3797,7 +3793,7 @@ mod tests {
         let result = kernel.execute("set").await.expect("set failed");
 
         assert!(result.ok());
-        assert!(result.out.contains("set -e"), "should show -e is enabled: {}", result.out);
+        assert!(result.text_out().contains("set -e"), "should show -e is enabled: {}", result.text_out());
     }
 
     #[tokio::test]
@@ -4027,7 +4023,7 @@ C=3'"#)
             .expect("greet failed");
 
         assert!(result.ok());
-        assert!(result.out.contains("Hello, World!"));
+        assert!(result.text_out().contains("Hello, World!"));
     }
 
     #[tokio::test]
@@ -4200,7 +4196,7 @@ AFTER="yes"'"#)
 
         let result = kernel.execute("echo hello").await.expect("execute failed");
         assert!(result.ok(), "execute after cancel should succeed");
-        assert_eq!(result.out.trim(), "hello");
+        assert_eq!(result.text_out().trim(), "hello");
     }
 
     #[tokio::test]
@@ -4241,7 +4237,7 @@ AFTER="yes"'"#)
             .expect("case failed");
 
         assert!(result.ok());
-        assert_eq!(result.out.trim(), "matched hello");
+        assert_eq!(result.text_out().trim(), "matched hello");
     }
 
     #[tokio::test]
@@ -4260,7 +4256,7 @@ AFTER="yes"'"#)
             .expect("case failed");
 
         assert!(result.ok());
-        assert_eq!(result.out.trim(), "Rust");
+        assert_eq!(result.text_out().trim(), "Rust");
     }
 
     #[tokio::test]
@@ -4279,7 +4275,7 @@ AFTER="yes"'"#)
             .expect("case failed");
 
         assert!(result.ok());
-        assert_eq!(result.out.trim(), "Default");
+        assert_eq!(result.text_out().trim(), "Default");
     }
 
     #[tokio::test]
@@ -4298,7 +4294,7 @@ AFTER="yes"'"#)
             .expect("case failed");
 
         assert!(result.ok());
-        assert!(result.out.is_empty(), "no match should produce empty output");
+        assert!(result.text_out().is_empty(), "no match should produce empty output");
     }
 
     #[tokio::test]
@@ -4319,7 +4315,7 @@ AFTER="yes"'"#)
             .expect("case failed");
 
         assert!(result.ok());
-        assert_eq!(result.out.trim(), "crab");
+        assert_eq!(result.text_out().trim(), "crab");
     }
 
     #[tokio::test]
@@ -4337,7 +4333,7 @@ AFTER="yes"'"#)
             .expect("case failed");
 
         assert!(result.ok());
-        assert_eq!(result.out.trim(), "affirmative");
+        assert_eq!(result.text_out().trim(), "affirmative");
     }
 
     #[tokio::test]
@@ -4355,7 +4351,7 @@ AFTER="yes"'"#)
             .expect("case failed");
 
         assert!(result.ok());
-        assert_eq!(result.out.trim(), "matched test?");
+        assert_eq!(result.text_out().trim(), "matched test?");
     }
 
     #[tokio::test]
@@ -4373,7 +4369,7 @@ AFTER="yes"'"#)
             .expect("case failed");
 
         assert!(result.ok());
-        assert_eq!(result.out.trim(), "yes-like");
+        assert_eq!(result.text_out().trim(), "yes-like");
     }
 
     // ═══════════════════════════════════════════════════════════════════════════
@@ -4390,7 +4386,7 @@ AFTER="yes"'"#)
             .expect("cat pipeline failed");
 
         assert!(result.ok(), "cat failed: {}", result.err);
-        assert_eq!(result.out.trim(), "piped text");
+        assert_eq!(result.text_out().trim(), "piped text");
     }
 
     #[tokio::test]
@@ -4403,7 +4399,7 @@ AFTER="yes"'"#)
             .expect("cat pipeline failed");
 
         assert!(result.ok(), "cat failed: {}", result.err);
-        assert!(result.out.contains("1\t"), "output: {}", result.out);
+        assert!(result.text_out().contains("1\t"), "output: {}", result.text_out());
     }
 
     // ═══════════════════════════════════════════════════════════════════════════
@@ -4420,7 +4416,7 @@ AFTER="yes"'"#)
             .expect("heredoc failed");
 
         assert!(result.ok(), "cat with heredoc failed: {}", result.err);
-        assert_eq!(result.out.trim(), "hello");
+        assert_eq!(result.text_out().trim(), "hello");
     }
 
     #[tokio::test]
@@ -4433,7 +4429,7 @@ AFTER="yes"'"#)
             .expect("arithmetic in string failed");
 
         assert!(result.ok(), "echo failed: {}", result.err);
-        assert_eq!(result.out.trim(), "result: 3");
+        assert_eq!(result.text_out().trim(), "result: 3");
     }
 
     #[tokio::test]
@@ -4446,9 +4442,9 @@ AFTER="yes"'"#)
             .expect("heredoc failed");
 
         assert!(result.ok(), "cat with heredoc failed: {}", result.err);
-        assert!(result.out.contains("line1"), "output: {}", result.out);
-        assert!(result.out.contains("line2"), "output: {}", result.out);
-        assert!(result.out.contains("line3"), "output: {}", result.out);
+        assert!(result.text_out().contains("line1"), "output: {}", result.text_out());
+        assert!(result.text_out().contains("line2"), "output: {}", result.text_out());
+        assert!(result.text_out().contains("line3"), "output: {}", result.text_out());
     }
 
     #[tokio::test]
@@ -4464,7 +4460,7 @@ AFTER="yes"'"#)
             .expect("heredoc expansion failed");
 
         assert!(result.ok(), "heredoc expansion failed: {}", result.err);
-        assert_eq!(result.out.trim(), "hello world");
+        assert_eq!(result.text_out().trim(), "hello world");
     }
 
     #[tokio::test]
@@ -4480,7 +4476,7 @@ AFTER="yes"'"#)
             .expect("quoted heredoc failed");
 
         assert!(result.ok(), "quoted heredoc failed: {}", result.err);
-        assert_eq!(result.out.trim(), "$GREETING world");
+        assert_eq!(result.text_out().trim(), "$GREETING world");
     }
 
     #[tokio::test]
@@ -4494,7 +4490,7 @@ AFTER="yes"'"#)
             .expect("heredoc default expansion failed");
 
         assert!(result.ok(), "heredoc default expansion failed: {}", result.err);
-        assert_eq!(result.out.trim(), "fallback");
+        assert_eq!(result.text_out().trim(), "fallback");
     }
 
     // ═══════════════════════════════════════════════════════════════════════════
@@ -4512,7 +4508,7 @@ AFTER="yes"'"#)
             .expect("read pipeline failed");
 
         assert!(result.ok(), "read failed: {}", result.err);
-        assert!(result.out.contains("Hello, Alice"), "output: {}", result.out);
+        assert!(result.text_out().contains("Hello, Alice"), "output: {}", result.text_out());
     }
 
     #[tokio::test]
@@ -4525,7 +4521,7 @@ AFTER="yes"'"#)
             .expect("read pipeline failed");
 
         assert!(result.ok(), "read failed: {}", result.err);
-        assert!(result.out.contains("John is 42"), "output: {}", result.out);
+        assert!(result.text_out().contains("John is 42"), "output: {}", result.text_out());
     }
 
     // ═══════════════════════════════════════════════════════════════════════════
@@ -4549,7 +4545,7 @@ AFTER="yes"'"#)
             .expect("function call failed");
 
         assert!(result.ok(), "greet failed: {}", result.err);
-        assert_eq!(result.out.trim(), "Hello, Amy!");
+        assert_eq!(result.text_out().trim(), "Hello, Amy!");
     }
 
     #[tokio::test]
@@ -4569,7 +4565,7 @@ AFTER="yes"'"#)
             .expect("function call failed");
 
         assert!(result.ok(), "function failed: {}", result.err);
-        assert_eq!(result.out.trim(), "Hello World!");
+        assert_eq!(result.text_out().trim(), "Hello World!");
     }
 
     #[tokio::test]
@@ -4589,7 +4585,7 @@ AFTER="yes"'"#)
             .expect("function call failed");
 
         assert!(result.ok(), "greet failed: {}", result.err);
-        assert_eq!(result.out.trim(), "Hi Bob");
+        assert_eq!(result.text_out().trim(), "Hi Bob");
     }
 
     #[tokio::test]
@@ -4609,7 +4605,7 @@ AFTER="yes"'"#)
             .expect("function call failed");
 
         assert!(result.ok(), "function failed: {}", result.err);
-        assert_eq!(result.out.trim(), "args: a b c");
+        assert_eq!(result.text_out().trim(), "args: a b c");
     }
 
     #[tokio::test]
@@ -4629,7 +4625,7 @@ AFTER="yes"'"#)
             .expect("function call failed");
 
         assert!(result.ok(), "function failed: {}", result.err);
-        assert_eq!(result.out.trim(), "count: 3");
+        assert_eq!(result.text_out().trim(), "count: 3");
     }
 
     #[tokio::test]
@@ -4655,9 +4651,9 @@ AFTER="yes"'"#)
         let result = kernel.execute("modify_parent").await.expect("function failed");
 
         assert!(
-            result.out.contains("visible"),
+            result.text_out().contains("visible"),
             "Shell function should access parent scope, got: {}",
-            result.out
+            result.text_out()
         );
 
         // Parent variable should be modified
@@ -4694,7 +4690,7 @@ AFTER="yes"'"#)
             .expect("script execution failed");
 
         assert!(result.ok(), "script failed: {}", result.err);
-        assert_eq!(result.out.trim(), "Hello from script!");
+        assert_eq!(result.text_out().trim(), "Hello from script!");
     }
 
     #[tokio::test]
@@ -4718,7 +4714,7 @@ AFTER="yes"'"#)
             .expect("script execution failed");
 
         assert!(result.ok(), "script failed: {}", result.err);
-        assert_eq!(result.out.trim(), "Hello, World!");
+        assert_eq!(result.text_out().trim(), "Hello, World!");
     }
 
     #[tokio::test]
@@ -4766,7 +4762,7 @@ AFTER="yes"'"#)
             .expect("script execution failed");
 
         assert!(result.ok(), "script failed: {}", result.err);
-        assert_eq!(result.out.trim(), "from first");
+        assert_eq!(result.text_out().trim(), "from first");
     }
 
     // ═══════════════════════════════════════════════════════════════════════════
@@ -4779,7 +4775,7 @@ AFTER="yes"'"#)
 
         // true exits with 0
         let result = kernel.execute("true; echo $?").await.expect("execution failed");
-        assert!(result.out.contains("0"), "expected 0, got: {}", result.out);
+        assert!(result.text_out().contains("0"), "expected 0, got: {}", result.text_out());
     }
 
     #[tokio::test]
@@ -4788,7 +4784,7 @@ AFTER="yes"'"#)
 
         // false exits with 1
         let result = kernel.execute("false; echo $?").await.expect("execution failed");
-        assert!(result.out.contains("1"), "expected 1, got: {}", result.out);
+        assert!(result.text_out().contains("1"), "expected 1, got: {}", result.text_out());
     }
 
     #[tokio::test]
@@ -4797,7 +4793,7 @@ AFTER="yes"'"#)
 
         let result = kernel.execute("echo $$").await.expect("execution failed");
         // PID should be a positive number
-        let pid: u32 = result.out.trim().parse().expect("PID should be a number");
+        let pid: u32 = result.text_out().trim().parse().expect("PID should be a number");
         assert!(pid > 0, "PID should be positive");
     }
 
@@ -4807,7 +4803,7 @@ AFTER="yes"'"#)
 
         // Unset variable in interpolation should be empty
         let result = kernel.execute(r#"echo "prefix:${UNSET_VAR}:suffix""#).await.expect("execution failed");
-        assert_eq!(result.out.trim(), "prefix::suffix");
+        assert_eq!(result.text_out().trim(), "prefix::suffix");
     }
 
     #[tokio::test]
@@ -4816,15 +4812,15 @@ AFTER="yes"'"#)
 
         // Test -eq operator
         let result = kernel.execute(r#"if [[ 5 -eq 5 ]]; then echo "eq works"; fi"#).await.expect("execution failed");
-        assert_eq!(result.out.trim(), "eq works");
+        assert_eq!(result.text_out().trim(), "eq works");
 
         // Test -ne operator
         let result = kernel.execute(r#"if [[ 5 -ne 3 ]]; then echo "ne works"; fi"#).await.expect("execution failed");
-        assert_eq!(result.out.trim(), "ne works");
+        assert_eq!(result.text_out().trim(), "ne works");
 
         // Test -eq with different values
         let result = kernel.execute(r#"if [[ 5 -eq 3 ]]; then echo "wrong"; else echo "correct"; fi"#).await.expect("execution failed");
-        assert_eq!(result.out.trim(), "correct");
+        assert_eq!(result.text_out().trim(), "correct");
     }
 
     #[tokio::test]
@@ -4833,7 +4829,7 @@ AFTER="yes"'"#)
 
         // \$ should produce literal $
         let result = kernel.execute(r#"echo "\$100""#).await.expect("execution failed");
-        assert_eq!(result.out.trim(), "$100");
+        assert_eq!(result.text_out().trim(), "$100");
     }
 
     #[tokio::test]
@@ -4842,12 +4838,13 @@ AFTER="yes"'"#)
 
         // Test $? in string interpolation
         let result = kernel.execute(r#"true; echo "exit: $?""#).await.expect("execution failed");
-        assert_eq!(result.out.trim(), "exit: 0");
+        assert_eq!(result.text_out().trim(), "exit: 0");
 
         // Test $$ in string interpolation
         let result = kernel.execute(r#"echo "pid: $$""#).await.expect("execution failed");
-        assert!(result.out.starts_with("pid: "), "unexpected output: {}", result.out);
-        let pid_part = result.out.trim().strip_prefix("pid: ").unwrap();
+        assert!(result.text_out().starts_with("pid: "), "unexpected output: {}", result.text_out());
+        let text = result.text_out();
+        let pid_part = text.trim().strip_prefix("pid: ").unwrap();
         let _pid: u32 = pid_part.parse().expect("PID in string should be a number");
     }
 
@@ -4861,7 +4858,7 @@ AFTER="yes"'"#)
 
         // Command substitution in assignment
         let result = kernel.execute(r#"X=$(echo hello); echo "$X""#).await.expect("execution failed");
-        assert_eq!(result.out.trim(), "hello");
+        assert_eq!(result.text_out().trim(), "hello");
     }
 
     #[tokio::test]
@@ -4870,7 +4867,7 @@ AFTER="yes"'"#)
 
         // Command substitution with string argument
         let result = kernel.execute(r#"X=$(echo "a b c"); echo "$X""#).await.expect("execution failed");
-        assert_eq!(result.out.trim(), "a b c");
+        assert_eq!(result.text_out().trim(), "a b c");
     }
 
     #[tokio::test]
@@ -4879,7 +4876,7 @@ AFTER="yes"'"#)
 
         // Variables inside command substitution
         let result = kernel.execute(r#"Y=world; X=$(echo "hello $Y"); echo "$X""#).await.expect("execution failed");
-        assert_eq!(result.out.trim(), "hello world");
+        assert_eq!(result.text_out().trim(), "hello world");
     }
 
     #[tokio::test]
@@ -4891,7 +4888,7 @@ AFTER="yes"'"#)
         // Run a simple background command
         let result = kernel.execute("echo hello &").await.expect("execution failed");
         assert!(result.ok(), "background command should succeed: {}", result.err);
-        assert!(result.out.contains("[1]"), "should return job ID: {}", result.out);
+        assert!(result.text_out().contains("[1]"), "should return job ID: {}", result.text_out());
 
         // Give the job time to complete
         tokio::time::sleep(Duration::from_millis(100)).await;
@@ -4900,15 +4897,15 @@ AFTER="yes"'"#)
         let status = kernel.execute("cat /v/jobs/1/status").await.expect("status check failed");
         assert!(status.ok(), "status should succeed: {}", status.err);
         assert!(
-            status.out.contains("done:") || status.out.contains("running"),
+            status.text_out().contains("done:") || status.text_out().contains("running"),
             "should have valid status: {}",
-            status.out
+            status.text_out()
         );
 
         // Check stdout
         let stdout = kernel.execute("cat /v/jobs/1/stdout").await.expect("stdout check failed");
         assert!(stdout.ok());
-        assert!(stdout.out.contains("hello"));
+        assert!(stdout.text_out().contains("hello"));
     }
 
     #[tokio::test]
@@ -4917,7 +4914,7 @@ AFTER="yes"'"#)
         let kernel = Kernel::transient().expect("kernel");
         let result = kernel.execute("cat <<EOF | cat\nhello world\nEOF").await.expect("exec");
         assert!(result.ok(), "heredoc | cat failed: {}", result.err);
-        assert_eq!(result.out.trim(), "hello world");
+        assert_eq!(result.text_out().trim(), "hello world");
     }
 
     #[tokio::test]
@@ -4936,7 +4933,7 @@ AFTER="yes"'"#)
             echo $N
         "#)).await.unwrap();
         assert!(result.ok(), "for glob failed: {}", result.err);
-        assert_eq!(result.out.trim(), "2", "Should iterate 2 files, got: {}", result.out);
+        assert_eq!(result.text_out().trim(), "2", "Should iterate 2 files, got: {}", result.text_out());
         kernel.execute(&format!("rm {dir}/a.txt")).await.unwrap();
         kernel.execute(&format!("rm {dir}/b.txt")).await.unwrap();
     }
@@ -4952,7 +4949,8 @@ AFTER="yes"'"#)
         kernel.execute(&format!("cd {dir}")).await.unwrap();
         let result = kernel.execute("echo *.txt").await.unwrap();
         assert!(result.ok(), "echo *.txt failed: {}", result.err);
-        let out = result.out.trim();
+        let out = result.text_out();
+        let out = out.trim();
         // Should contain both .txt files (order may vary)
         assert!(out.contains("a.txt"), "missing a.txt in: {}", out);
         assert!(out.contains("b.txt"), "missing b.txt in: {}", out);
@@ -4973,7 +4971,7 @@ AFTER="yes"'"#)
         match &result {
             Ok(exec) => {
                 // No-match glob should produce a non-zero exit code
-                assert!(!exec.ok(), "expected failure, got success: out={}, err={}", exec.out, exec.err);
+                assert!(!exec.ok(), "expected failure, got success: out={}, err={}", exec.text_out(), exec.err);
                 assert!(exec.err.contains("no matches"), "error should say no matches: {}", exec.err);
             }
             Err(e) => {
@@ -4994,7 +4992,7 @@ AFTER="yes"'"#)
         let result = kernel.execute("echo *.txt").await.unwrap();
         // With glob disabled, *.txt should be passed as literal string
         assert!(result.ok(), "echo should succeed: {}", result.err);
-        assert_eq!(result.out.trim(), "*.txt", "should be literal: {}", result.out);
+        assert_eq!(result.text_out().trim(), "*.txt", "should be literal: {}", result.text_out());
         // cleanup
         kernel.execute("set -o glob").await.unwrap();
         kernel.execute(&format!("rm {dir}/a.txt")).await.unwrap();
@@ -5010,7 +5008,7 @@ AFTER="yes"'"#)
         // Quoted globs should NOT expand
         let result = kernel.execute("echo \"*.txt\"").await.unwrap();
         assert!(result.ok(), "echo should succeed: {}", result.err);
-        assert_eq!(result.out.trim(), "*.txt", "quoted should be literal: {}", result.out);
+        assert_eq!(result.text_out().trim(), "*.txt", "quoted should be literal: {}", result.text_out());
         // cleanup
         kernel.execute(&format!("rm {dir}/a.txt")).await.unwrap();
     }
@@ -5031,7 +5029,7 @@ AFTER="yes"'"#)
             echo $N
         "#).await.unwrap();
         assert!(result.ok(), "for loop failed: {}", result.err);
-        assert_eq!(result.out.trim(), "2", "should iterate 2 files: {}", result.out);
+        assert_eq!(result.text_out().trim(), "2", "should iterate 2 files: {}", result.text_out());
         // cleanup
         kernel.execute(&format!("rm {dir}/a.txt")).await.unwrap();
         kernel.execute(&format!("rm {dir}/b.txt")).await.unwrap();
@@ -5042,7 +5040,7 @@ AFTER="yes"'"#)
         let kernel = Kernel::transient().expect("kernel");
         let result = kernel.execute("X=*.txt; echo $X").await.unwrap();
         assert!(result.ok());
-        assert_eq!(result.out.trim(), "*.txt", "glob in assignment should be literal");
+        assert_eq!(result.text_out().trim(), "*.txt", "glob in assignment should be literal");
     }
 
     #[tokio::test]
@@ -5056,7 +5054,7 @@ AFTER="yes"'"#)
             fi
         "#).await.unwrap();
         assert!(result.ok());
-        assert_eq!(result.out.trim(), "match", "glob in test expr should be literal");
+        assert_eq!(result.text_out().trim(), "match", "glob in test expr should be literal");
     }
 
     #[tokio::test]
@@ -5069,7 +5067,7 @@ AFTER="yes"'"#)
             echo $N
         "#).await.unwrap();
         assert!(result.ok());
-        assert_eq!(result.out.trim(), "1", "echo should be one item: {}", result.out);
+        assert_eq!(result.text_out().trim(), "1", "echo should be one item: {}", result.text_out());
     }
 
     // -- accumulate_result / newline tests --
@@ -5080,8 +5078,8 @@ AFTER="yes"'"#)
         let mut acc = ExecResult::success("line1\n");
         let new = ExecResult::success("line2\n");
         accumulate_result(&mut acc, &new);
-        assert_eq!(acc.out, "line1\nline2\n");
-        assert!(!acc.out.contains("\n\n"), "should not have double newlines: {:?}", acc.out);
+        assert_eq!(&*acc.text_out(), "line1\nline2\n");
+        assert!(!acc.text_out().contains("\n\n"), "should not have double newlines: {:?}", acc.text_out());
     }
 
     #[test]
@@ -5090,7 +5088,7 @@ AFTER="yes"'"#)
         let mut acc = ExecResult::success("line1");
         let new = ExecResult::success("line2");
         accumulate_result(&mut acc, &new);
-        assert_eq!(acc.out, "line1\nline2");
+        assert_eq!(&*acc.text_out(), "line1\nline2");
     }
 
     #[test]
@@ -5098,7 +5096,7 @@ AFTER="yes"'"#)
         let mut acc = ExecResult::success("");
         let new = ExecResult::success("hello\n");
         accumulate_result(&mut acc, &new);
-        assert_eq!(acc.out, "hello\n");
+        assert_eq!(&*acc.text_out(), "hello\n");
     }
 
     #[test]
@@ -5106,7 +5104,7 @@ AFTER="yes"'"#)
         let mut acc = ExecResult::success("hello\n");
         let new = ExecResult::success("");
         accumulate_result(&mut acc, &new);
-        assert_eq!(acc.out, "hello\n");
+        assert_eq!(&*acc.text_out(), "hello\n");
     }
 
     #[test]
@@ -5125,7 +5123,7 @@ AFTER="yes"'"#)
             .await
             .expect("execution failed");
         assert!(result.ok());
-        assert_eq!(result.out, "one\ntwo\nthree\n");
+        assert_eq!(&*result.text_out(), "one\ntwo\nthree\n");
     }
 
     #[tokio::test]
@@ -5136,7 +5134,7 @@ AFTER="yes"'"#)
             .await
             .expect("execution failed");
         assert!(result.ok());
-        assert_eq!(result.out, "item: a\nitem: b\nitem: c\n");
+        assert_eq!(&*result.text_out(), "item: a\nitem: b\nitem: c\n");
     }
 
     #[tokio::test]
@@ -5147,7 +5145,7 @@ AFTER="yes"'"#)
             .await
             .expect("execution failed");
         assert!(result.ok());
-        assert_eq!(result.out, "n=1\nn=2\nn=3\n");
+        assert_eq!(&*result.text_out(), "n=1\nn=2\nn=3\n");
     }
 
 }

@@ -226,8 +226,8 @@ mod tests {
 
         let result = Export.execute(args, &mut ctx).await;
         assert!(result.ok());
-        assert!(result.out.contains("declare -x HOME="));
-        assert!(result.out.contains("declare -x PATH="));
+        assert!(result.text_out().contains("declare -x HOME="));
+        assert!(result.text_out().contains("declare -x PATH="));
     }
 
     #[tokio::test]
@@ -238,7 +238,7 @@ mod tests {
         let args = ToolArgs::new();
         let result = Export.execute(args, &mut ctx).await;
         assert!(result.ok());
-        assert!(result.out.contains("declare -x VAR="));
+        assert!(result.text_out().contains("declare -x VAR="));
     }
 
     #[tokio::test]

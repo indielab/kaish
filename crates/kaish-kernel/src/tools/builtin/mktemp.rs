@@ -218,10 +218,10 @@ mod tests {
 
         let result = Mktemp.execute(args, &mut ctx).await;
         assert!(result.ok());
-        assert!(result.out.starts_with("/tmp/tmp."));
+        assert!(result.text_out().starts_with("/tmp/tmp."));
 
         // Verify file was created
-        let stat = ctx.backend.stat(Path::new(&result.out)).await;
+        let stat = ctx.backend.stat(Path::new(&*result.text_out())).await;
         assert!(stat.is_ok());
         assert_eq!(stat.unwrap().is_file(), true);
     }
@@ -234,10 +234,10 @@ mod tests {
 
         let result = Mktemp.execute(args, &mut ctx).await;
         assert!(result.ok());
-        assert!(result.out.starts_with("/tmp/tmp."));
+        assert!(result.text_out().starts_with("/tmp/tmp."));
 
         // Verify directory was created
-        let stat = ctx.backend.stat(Path::new(&result.out)).await;
+        let stat = ctx.backend.stat(Path::new(&*result.text_out())).await;
         assert!(stat.is_ok());
         assert_eq!(stat.unwrap().is_dir(), true);
     }
@@ -254,7 +254,7 @@ mod tests {
 
         let result = Mktemp.execute(args, &mut ctx).await;
         assert!(result.ok());
-        assert!(result.out.starts_with("/workspace/tmp."));
+        assert!(result.text_out().starts_with("/workspace/tmp."));
     }
 
     #[tokio::test]
@@ -266,8 +266,8 @@ mod tests {
 
         let result = Mktemp.execute(args, &mut ctx).await;
         assert!(result.ok());
-        assert!(result.out.starts_with("/tmp/myapp."));
-        assert_eq!(result.out.len(), "/tmp/myapp.".len() + 5);
+        assert!(result.text_out().starts_with("/tmp/myapp."));
+        assert_eq!(result.text_out().len(), "/tmp/myapp.".len() + 5);
     }
 
     #[tokio::test]
@@ -279,6 +279,6 @@ mod tests {
 
         assert!(result1.ok());
         assert!(result2.ok());
-        assert_ne!(result1.out, result2.out);
+        assert_ne!(&*result1.text_out(), &*result2.text_out());
     }
 }

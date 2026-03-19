@@ -129,13 +129,13 @@ mod tests {
         let result = Stat.execute(args, &mut ctx).await;
         assert!(result.ok());
         // Check OutputData structure
-        assert!(result.output.is_some());
-        let output = result.output.as_ref().unwrap();
+        assert!(result.has_output());
+        let output = result.output().unwrap();
         assert!(output.headers.is_some());
         assert_eq!(output.root.len(), 1);
         // Canonical output contains file info
-        assert!(result.out.contains("file.txt"));
-        assert!(result.out.contains("11")); // "hello world" = 11 bytes
+        assert!(result.text_out().contains("file.txt"));
+        assert!(result.text_out().contains("11")); // "hello world" = 11 bytes
     }
 
     #[tokio::test]
@@ -146,11 +146,11 @@ mod tests {
 
         let result = Stat.execute(args, &mut ctx).await;
         assert!(result.ok());
-        assert!(result.output.is_some());
-        let output = result.output.as_ref().unwrap();
+        assert!(result.has_output());
+        let output = result.output().unwrap();
         assert_eq!(output.root.len(), 1);
         // Check canonical output contains directory
-        assert!(result.out.contains("directory"));
+        assert!(result.text_out().contains("directory"));
     }
 
     #[tokio::test]
@@ -163,7 +163,7 @@ mod tests {
 
         let result = Stat.execute(args, &mut ctx).await;
         assert!(result.ok());
-        assert_eq!(result.out.trim(), "/file.txt: 11 bytes");
+        assert_eq!(result.text_out().trim(), "/file.txt: 11 bytes");
     }
 
     #[tokio::test]

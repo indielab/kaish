@@ -228,8 +228,8 @@ mod tests {
 
         let result = KaishTrash.execute(args, &mut ctx).await;
         assert!(result.ok());
-        assert!(result.out.contains("false")); // enabled=false
-        assert!(result.out.contains("10.0MB")); // max_size
+        assert!(result.text_out().contains("false")); // enabled=false
+        assert!(result.text_out().contains("10.0MB")); // max_size
     }
 
     #[tokio::test]
@@ -243,7 +243,7 @@ mod tests {
         let result = KaishTrash.execute(args, &mut ctx).await;
         assert!(result.ok());
         // Should show enabled=true
-        assert!(result.out.contains("true"));
+        assert!(result.text_out().contains("true"));
     }
 
     #[tokio::test]
@@ -257,7 +257,7 @@ mod tests {
 
         let result = KaishTrash.execute(args, &mut ctx).await;
         assert!(result.ok());
-        assert!(result.out.contains("50.0MB"));
+        assert!(result.text_out().contains("50.0MB"));
         assert_eq!(ctx.scope.trash_max_size(), 52_428_800);
     }
 
@@ -288,7 +288,7 @@ mod tests {
 
         let result = KaishTrash.execute(args, &mut ctx).await;
         assert!(result.ok());
-        assert!(result.out.contains("already empty"));
+        assert!(result.text_out().contains("already empty"));
     }
 
     #[tokio::test]

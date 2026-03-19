@@ -59,6 +59,6 @@ mod tests {
 
         let result = KaishStatus.execute(ToolArgs::new(), &mut ctx).await;
         assert!(result.ok());
-        assert!(result.out.contains("variables"));
+        assert!(result.text_out().contains("variables"));
     }
 }

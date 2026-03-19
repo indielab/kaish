@@ -28,7 +28,8 @@ async fn wait_for_job(kernel: &Kernel, job_id: u64, timeout: Duration) -> String
 
     loop {
         let result = kernel.execute(&status_cmd).await.expect("status check failed");
-        let status = result.out.trim();
+        let text = result.text_out();
+        let status = text.trim();
 
         if status.starts_with("done:") || status.starts_with("failed:") {
             return status.to_string();
@@ -54,9 +55,9 @@ async fn test_background_job_returns_job_id() {
     assert!(result.ok(), "background command should succeed, got: {}", result.err);
     // Should return job ID like "[1]"
     assert!(
-        result.out.contains("[1]") || result.out.contains("1"),
+        result.text_out().contains("[1]") || result.text_out().contains("1"),
         "expected job ID in output, got: {}",
-        result.out
+        result.text_out()
     );
 }
 
@@ -72,9 +73,9 @@ async fn test_background_job_creates_vfs_entry() {
     let result = kernel.execute("ls /v/jobs").await.unwrap();
     assert!(result.ok(), "ls /v/jobs failed: {}", result.err);
     assert!(
-        result.out.contains("1"),
+        result.text_out().contains("1"),
         "expected job 1 in /v/jobs, got: {}",
-        result.out
+        result.text_out()
     );
 }
 
@@ -88,9 +89,9 @@ async fn test_background_job_captures_stdout() {
     let result = kernel.execute("cat /v/jobs/1/stdout").await.unwrap();
     assert!(result.ok(), "cat stdout failed: {}", result.err);
     assert!(
-        result.out.contains("hello from background"),
+        result.text_out().contains("hello from background"),
         "expected stdout content, got: {}",
-        result.out
+        result.text_out()
     );
 }
 
@@ -105,7 +106,7 @@ async fn test_background_job_status_transitions() {
     // Check status while running (immediate check)
     let result = kernel.execute("cat /v/jobs/1/status").await.unwrap();
     assert!(result.ok(), "status check failed: {}", result.err);
-    assert_eq!(result.out.trim(), "running", "expected running status");
+    assert_eq!(result.text_out().trim(), "running", "expected running status");
 
     // Wait for completion
     let status = wait_for_job(&kernel, 1, Duration::from_secs(1)).await;
@@ -122,9 +123,9 @@ async fn test_background_job_command_file() {
     let result = kernel.execute("cat /v/jobs/1/command").await.unwrap();
     assert!(result.ok(), "cat command failed: {}", result.err);
     assert!(
-        result.out.contains("echo") && result.out.contains("test123"),
+        result.text_out().contains("echo") && result.text_out().contains("test123"),
         "expected command in output, got: {}",
-        result.out
+        result.text_out()
     );
 }
 
@@ -148,9 +149,9 @@ async fn test_multiple_background_jobs() {
     // All jobs should exist
     let result = kernel.execute("ls /v/jobs").await.unwrap();
     assert!(result.ok());
-    assert!(result.out.contains("1"), "missing job 1");
-    assert!(result.out.contains("2"), "missing job 2");
-    assert!(result.out.contains("3"), "missing job 3");
+    assert!(result.text_out().contains("1"), "missing job 1");
+    assert!(result.text_out().contains("2"), "missing job 2");
+    assert!(result.text_out().contains("3"), "missing job 3");
 }
 
 #[tokio::test]
@@ -166,8 +167,8 @@ async fn test_each_job_has_correct_output() {
     let r1 = kernel.execute("cat /v/jobs/1/stdout").await.unwrap();
     let r2 = kernel.execute("cat /v/jobs/2/stdout").await.unwrap();
 
-    assert!(r1.out.contains("output-one"), "job 1 wrong output: {}", r1.out);
-    assert!(r2.out.contains("output-two"), "job 2 wrong output: {}", r2.out);
+    assert!(r1.text_out().contains("output-one"), "job 1 wrong output: {}", r1.text_out());
+    assert!(r2.text_out().contains("output-two"), "job 2 wrong output: {}", r2.text_out());
 }
 
 // ============================================================================
@@ -186,9 +187,9 @@ async fn test_background_job_inherits_env() {
 
     let result = kernel.execute("cat /v/jobs/1/stdout").await.unwrap();
     assert!(
-        result.out.contains("test_value"),
+        result.text_out().contains("test_value"),
         "expected env var in output, got: {}",
-        result.out
+        result.text_out()
     );
 }
 
@@ -206,9 +207,9 @@ async fn test_background_job_inherits_cwd() {
 
     let result = kernel.execute("cat /v/jobs/1/stdout").await.unwrap();
     assert!(
-        result.out.contains(&dir),
+        result.text_out().contains(&dir),
         "expected cwd in output, got: {}",
-        result.out
+        result.text_out()
     );
 }
 
@@ -247,9 +248,9 @@ async fn test_pipeline_in_background() {
     assert!(result.ok(), "cat failed: {}", result.err);
     // wc -l should output "3"
     assert!(
-        result.out.trim() == "3" || result.out.contains("3"),
+        result.text_out().trim() == "3" || result.text_out().contains("3"),
         "expected 3 lines, got: {}",
-        result.out
+        result.text_out()
     );
 }
 
@@ -269,8 +270,8 @@ async fn test_jobs_builtin_shows_background_job() {
     let result = kernel.execute("jobs").await.unwrap();
     assert!(result.ok(), "jobs command failed: {}", result.err);
     assert!(
-        result.out.contains("1") && result.out.contains("/v/jobs/1/"),
+        result.text_out().contains("1") && result.text_out().contains("/v/jobs/1/"),
         "expected job info, got: {}",
-        result.out
+        result.text_out()
     );
 }

@@ -820,15 +820,17 @@ mod tests {
             panic!("Expected text content");
         }
 
-        // structured_content always present — carries OutputData for rendering
+        // structured_content always present — carries execution metadata
         let structured = result
             .structured_content
             .as_ref()
             .expect("should have structured_content");
         assert_eq!(structured["ok"], true);
         assert_eq!(structured["code"], 0);
-        // echo produces OutputData with a text node
-        assert!(structured["output"].is_object(), "should have output field");
+        // Simple text builtins (echo) route text into .out directly,
+        // so output field is null (not present). Only structured builtins
+        // (ls, ps, tree) carry OutputData.
+        assert!(structured["output"].is_null(), "simple text should not have output field");
 
         // is_error should be false for success
         assert_eq!(result.is_error, Some(false));

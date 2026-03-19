@@ -318,7 +318,7 @@ impl CommandDispatcher for BackendDispatcher {
                     tool_result.stdout,
                     tool_result.stderr,
                 );
-                exec.output = tool_result.output;
+                exec.set_output(tool_result.output);
                 exec.content_type = tool_result.content_type;
                 exec.baggage = tool_result.baggage;
                 // Restore structured data from ToolResult (preserved through backend roundtrip)

@@ -206,7 +206,8 @@ mod tests {
 
         let result = Tail.execute(args, &mut ctx).await;
         assert!(result.ok());
-        let lines: Vec<&str> = result.out.lines().collect();
+        let text = result.text_out();
+        let lines: Vec<&str> = text.lines().collect();
         assert_eq!(lines.len(), 10);
         assert_eq!(lines[0], "line 3");
         assert_eq!(lines[9], "line 12");
@@ -221,7 +222,8 @@ mod tests {
 
         let result = Tail.execute(args, &mut ctx).await;
         assert!(result.ok());
-        let lines: Vec<&str> = result.out.lines().collect();
+        let text = result.text_out();
+        let lines: Vec<&str> = text.lines().collect();
         assert_eq!(lines.len(), 3);
         assert_eq!(lines[0], "line 10");
         assert_eq!(lines[2], "line 12");
@@ -249,10 +251,10 @@ mod tests {
 
         let result = Tail.execute(args, &mut ctx).await;
         assert!(result.ok());
-        assert!(!result.out.contains("alpha"));
-        assert!(!result.out.contains("beta"));
-        assert!(result.out.contains("gamma"));
-        assert!(result.out.contains("delta"));
+        assert!(!result.text_out().contains("alpha"));
+        assert!(!result.text_out().contains("beta"));
+        assert!(result.text_out().contains("gamma"));
+        assert!(result.text_out().contains("delta"));
     }
 
     #[tokio::test]
@@ -264,7 +266,8 @@ mod tests {
 
         let result = Tail.execute(args, &mut ctx).await;
         assert!(result.ok());
-        let lines: Vec<&str> = result.out.lines().collect();
+        let text = result.text_out();
+        let lines: Vec<&str> = text.lines().collect();
         assert_eq!(lines.len(), 3);
     }
 
@@ -289,7 +292,7 @@ mod tests {
 
         let result = Tail.execute(args, &mut ctx).await;
         assert!(result.ok());
-        assert!(result.out.is_empty());
+        assert!(result.text_out().is_empty());
     }
 
     #[tokio::test]
@@ -302,7 +305,7 @@ mod tests {
 
         let result = Tail.execute(args, &mut ctx).await;
         assert!(result.ok());
-        assert_eq!(result.out.trim(), "line 12");
+        assert_eq!(result.text_out().trim(), "line 12");
     }
 
     #[tokio::test]
@@ -315,7 +318,8 @@ mod tests {
 
         let result = Tail.execute(args, &mut ctx).await;
         assert!(result.ok());
-        let lines: Vec<&str> = result.out.lines().collect();
+        let text = result.text_out();
+        let lines: Vec<&str> = text.lines().collect();
         assert_eq!(lines, vec!["中国語", "英語"]);
     }
 
@@ -342,7 +346,7 @@ mod tests {
         let args = ToolArgs::new();
         let result = Tail.execute(args, &mut ctx).await;
         assert!(result.ok());
-        assert!(result.out.is_empty());
+        assert!(result.text_out().is_empty());
     }
 
     #[tokio::test]
@@ -353,7 +357,7 @@ mod tests {
         let args = ToolArgs::new();
         let result = Tail.execute(args, &mut ctx).await;
         assert!(result.ok());
-        assert_eq!(result.out.trim(), "single line");
+        assert_eq!(result.text_out().trim(), "single line");
     }
 
     #[tokio::test]
@@ -365,7 +369,8 @@ mod tests {
 
         let result = Tail.execute(args, &mut ctx).await;
         assert!(result.ok());
-        let lines: Vec<&str> = result.out.lines().collect();
+        let text = result.text_out();
+        let lines: Vec<&str> = text.lines().collect();
         assert_eq!(lines.len(), 3);
     }
 
@@ -379,7 +384,8 @@ mod tests {
 
         let result = Tail.execute(args, &mut ctx).await;
         assert!(result.ok());
-        let lines: Vec<&str> = result.out.lines().collect();
+        let text = result.text_out();
+        let lines: Vec<&str> = text.lines().collect();
         assert_eq!(lines, vec!["one", "two", "three"]);
     }
 
@@ -392,8 +398,8 @@ mod tests {
         args.positional.push(Value::String("/lines.txt".into()));
         let result = Tail.execute(args, &mut ctx).await;
         assert!(result.ok());
-        assert_eq!(result.out.lines().count(), 3);
-        assert!(result.out.contains("line 12")); // should be last 3 lines
+        assert_eq!(result.text_out().lines().count(), 3);
+        assert!(result.text_out().contains("line 12")); // should be last 3 lines
     }
 
     #[tokio::test]
@@ -404,10 +410,10 @@ mod tests {
         args.positional.push(Value::Int(-3));
         let result = Tail.execute(args, &mut ctx).await;
         assert!(result.ok());
-        assert_eq!(result.out.lines().count(), 3);
-        assert!(result.out.contains("e"));
-        assert!(result.out.contains("f"));
-        assert!(result.out.contains("g"));
+        assert_eq!(result.text_out().lines().count(), 3);
+        assert!(result.text_out().contains("e"));
+        assert!(result.text_out().contains("f"));
+        assert!(result.text_out().contains("g"));
     }
 
     #[tokio::test]
@@ -420,13 +426,13 @@ mod tests {
         let result = Tail.execute(args, &mut ctx).await;
         assert!(result.ok());
         // Multiple files: should have headers
-        assert!(result.out.contains("==>"));
+        assert!(result.text_out().contains("==>"));
         // Should contain last 2 lines from lines.txt
-        assert!(result.out.contains("line 11"));
-        assert!(result.out.contains("line 12"));
+        assert!(result.text_out().contains("line 11"));
+        assert!(result.text_out().contains("line 12"));
         // Should contain last 2 lines from short.txt
-        assert!(result.out.contains("two"));
-        assert!(result.out.contains("three"));
+        assert!(result.text_out().contains("two"));
+        assert!(result.text_out().contains("three"));
     }
 
     #[tokio::test]
@@ -440,9 +446,9 @@ mod tests {
         let result = Tail.execute(args, &mut ctx).await;
         assert!(result.ok());
         // Should show both files with headers
-        assert!(result.out.contains("==> /lines.txt <=="));
-        assert!(result.out.contains("==> /short.txt <=="));
-        assert!(result.out.contains("line 12"));
-        assert!(result.out.contains("three"));
+        assert!(result.text_out().contains("==> /lines.txt <=="));
+        assert!(result.text_out().contains("==> /short.txt <=="));
+        assert!(result.text_out().contains("line 12"));
+        assert!(result.text_out().contains("three"));
     }
 }

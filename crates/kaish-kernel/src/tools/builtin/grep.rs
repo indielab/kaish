@@ -620,7 +620,7 @@ mod tests {
 
         let result = Grep.execute(args, &mut ctx).await;
         assert!(result.ok());
-        assert_eq!(result.out, "hello world\n");
+        assert_eq!(&*result.text_out(), "hello world\n");
     }
 
     #[tokio::test]
@@ -633,8 +633,8 @@ mod tests {
 
         let result = Grep.execute(args, &mut ctx).await;
         assert!(result.ok());
-        assert!(result.out.contains("hello world"));
-        assert!(result.out.contains("HELLO WORLD"));
+        assert!(result.text_out().contains("hello world"));
+        assert!(result.text_out().contains("HELLO WORLD"));
     }
 
     #[tokio::test]
@@ -647,9 +647,9 @@ mod tests {
 
         let result = Grep.execute(args, &mut ctx).await;
         assert!(result.ok());
-        assert!(result.out.contains("1:line one"));
-        assert!(result.out.contains("2:line two"));
-        assert!(result.out.contains("3:line three"));
+        assert!(result.text_out().contains("1:line one"));
+        assert!(result.text_out().contains("2:line two"));
+        assert!(result.text_out().contains("3:line three"));
     }
 
     #[tokio::test]
@@ -662,7 +662,7 @@ mod tests {
 
         let result = Grep.execute(args, &mut ctx).await;
         assert!(result.ok());
-        assert_eq!(result.out, "four\n");
+        assert_eq!(&*result.text_out(), "four\n");
     }
 
     #[tokio::test]
@@ -675,7 +675,7 @@ mod tests {
 
         let result = Grep.execute(args, &mut ctx).await;
         assert!(result.ok());
-        assert_eq!(result.out, "3\n");
+        assert_eq!(&*result.text_out(), "3\n");
     }
 
     #[tokio::test]
@@ -702,9 +702,9 @@ mod tests {
 
         let result = Grep.execute(args, &mut ctx).await;
         assert!(result.ok());
-        assert!(result.out.contains("apple"));
-        assert!(result.out.contains("apricot"));
-        assert!(!result.out.contains("banana"));
+        assert!(result.text_out().contains("apple"));
+        assert!(result.text_out().contains("apricot"));
+        assert!(!result.text_out().contains("banana"));
     }
 
     #[tokio::test]
@@ -716,8 +716,8 @@ mod tests {
 
         let result = Grep.execute(args, &mut ctx).await;
         assert!(result.ok());
-        assert!(result.out.contains("line one"));
-        assert!(!result.out.contains("four")); // "four" doesn't start with "line"
+        assert!(result.text_out().contains("line one"));
+        assert!(!result.text_out().contains("four")); // "four" doesn't start with "line"
     }
 
     #[tokio::test]
@@ -763,7 +763,8 @@ mod tests {
         let result = Grep.execute(args, &mut ctx).await;
         assert!(result.ok());
         // Should output "hello" twice (two matches on first line)
-        let lines: Vec<&str> = result.out.lines().collect();
+        let text = result.text_out();
+        let lines: Vec<&str> = text.lines().collect();
         assert_eq!(lines.len(), 2);
         assert_eq!(lines[0], "hello");
         assert_eq!(lines[1], "hello");
@@ -779,7 +780,7 @@ mod tests {
 
         let result = Grep.execute(args, &mut ctx).await;
         assert!(result.ok());
-        assert!(result.out.is_empty());
+        assert!(result.text_out().is_empty());
     }
 
     #[tokio::test]
@@ -807,7 +808,7 @@ mod tests {
         let result = Grep.execute(args, &mut ctx).await;
         assert!(result.ok());
         // Only "foo bar" matches (foo as whole word)
-        assert_eq!(result.out, "foo bar\n");
+        assert_eq!(&*result.text_out(), "foo bar\n");
     }
 
     #[tokio::test]
@@ -820,7 +821,7 @@ mod tests {
 
         let result = Grep.execute(args, &mut ctx).await;
         assert!(result.ok());
-        assert_eq!(result.out.trim(), "/test.txt");
+        assert_eq!(result.text_out().trim(), "/test.txt");
     }
 
     #[tokio::test]
@@ -834,9 +835,9 @@ mod tests {
         let result = Grep.execute(args, &mut ctx).await;
         assert!(result.ok());
         // Should include lines before and after "line two"
-        assert!(result.out.contains("line one"));
-        assert!(result.out.contains("line two"));
-        assert!(result.out.contains("line three"));
+        assert!(result.text_out().contains("line one"));
+        assert!(result.text_out().contains("line two"));
+        assert!(result.text_out().contains("line three"));
     }
 
     async fn make_recursive_ctx() -> ExecContext {
@@ -874,10 +875,10 @@ mod tests {
         let result = Grep.execute(args, &mut ctx).await;
         assert!(result.ok());
         // Should find TODO in multiple files
-        assert!(result.out.contains("TODO"));
-        assert!(result.out.contains("main.rs"));
-        assert!(result.out.contains("lib.rs"));
-        assert!(result.out.contains("README.md"));
+        assert!(result.text_out().contains("TODO"));
+        assert!(result.text_out().contains("main.rs"));
+        assert!(result.text_out().contains("lib.rs"));
+        assert!(result.text_out().contains("README.md"));
     }
 
     #[tokio::test]
@@ -892,7 +893,7 @@ mod tests {
         let result = Grep.execute(args, &mut ctx).await;
         assert!(result.ok());
         // Should have filename:linenum:content format
-        assert!(result.out.contains(":"));
+        assert!(result.text_out().contains(":"));
     }
 
     #[tokio::test]
@@ -908,8 +909,8 @@ mod tests {
         let result = Grep.execute(args, &mut ctx).await;
         assert!(result.ok());
         // Should find TODO in .rs files but not README.md
-        assert!(result.out.contains("main.rs") || result.out.contains("lib.rs"));
-        assert!(!result.out.contains("README.md"));
+        assert!(result.text_out().contains("main.rs") || result.text_out().contains("lib.rs"));
+        assert!(!result.text_out().contains("README.md"));
     }
 
     #[tokio::test]
@@ -924,7 +925,8 @@ mod tests {
         let result = Grep.execute(args, &mut ctx).await;
         assert!(result.ok());
         // Should only list filenames, not content
-        let lines: Vec<&str> = result.out.lines().collect();
+        let text = result.text_out();
+        let lines: Vec<&str> = text.lines().collect();
         assert!(lines.len() >= 2); // At least 2 files have TODO
         // Each line should be a filename, not contain ":"
         for line in &lines {
@@ -943,7 +945,7 @@ mod tests {
 
         let result = Grep.execute(args, &mut ctx).await;
         assert!(result.ok());
-        assert!(result.out.contains("TODO"));
-        assert!(result.out.contains("main.rs") || result.out.contains("lib.rs"));
+        assert!(result.text_out().contains("TODO"));
+        assert!(result.text_out().contains("main.rs") || result.text_out().contains("lib.rs"));
     }
 }

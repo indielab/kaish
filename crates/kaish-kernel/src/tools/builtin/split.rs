@@ -189,7 +189,7 @@ mod tests {
 
         let result = Split.execute(args, &mut ctx).await;
         assert!(result.ok());
-        assert_eq!(result.out, "hello\nworld\nfoo");
+        assert_eq!(&*result.text_out(), "hello\nworld\nfoo");
 
         // Check structured data
         let data = result.data.unwrap();
@@ -212,7 +212,7 @@ mod tests {
 
         let result = Split.execute(args, &mut ctx).await;
         assert!(result.ok());
-        assert_eq!(result.out, "a\nb\nc");
+        assert_eq!(&*result.text_out(), "a\nb\nc");
     }
 
     #[tokio::test]
@@ -224,7 +224,7 @@ mod tests {
 
         let result = Split.execute(args, &mut ctx).await;
         assert!(result.ok());
-        assert_eq!(result.out, "a\nb\nc\n");  // trailing empty string from split
+        assert_eq!(&*result.text_out(), "a\nb\nc\n");  // trailing empty string from split
     }
 
     #[tokio::test]
@@ -237,7 +237,7 @@ mod tests {
 
         let result = Split.execute(args, &mut ctx).await;
         assert!(result.ok());
-        assert_eq!(result.out, "a\nb\nc:d");
+        assert_eq!(&*result.text_out(), "a\nb\nc:d");
     }
 
     #[tokio::test]
@@ -248,7 +248,7 @@ mod tests {
 
         let result = Split.execute(args, &mut ctx).await;
         assert!(result.ok());
-        assert_eq!(result.out, "");
+        assert_eq!(&*result.text_out(), "");
     }
 
     #[tokio::test]
@@ -272,7 +272,7 @@ mod tests {
         let result = Split.execute(args, &mut ctx).await;
         assert!(result.ok());
         // Default whitespace split should handle multiple spaces
-        assert_eq!(result.out, "a\nb\nc");
+        assert_eq!(&*result.text_out(), "a\nb\nc");
     }
 
     #[tokio::test]
@@ -285,7 +285,7 @@ mod tests {
 
         let result = Split.execute(args, &mut ctx).await;
         assert!(result.ok());
-        assert_eq!(result.out, "a\nb\nc");
+        assert_eq!(&*result.text_out(), "a\nb\nc");
     }
 
     #[tokio::test]
@@ -296,7 +296,7 @@ mod tests {
 
         let result = Split.execute(args, &mut ctx).await;
         assert!(result.ok());
-        assert_eq!(result.out, "hello\nworld\nfoo");
+        assert_eq!(&*result.text_out(), "hello\nworld\nfoo");
     }
 
     #[tokio::test]
@@ -319,6 +319,6 @@ mod tests {
 
         let result = Split.execute(args, &mut ctx).await;
         assert!(result.ok());
-        assert_eq!(result.out, "a\nb\nc");
+        assert_eq!(&*result.text_out(), "a\nb\nc");
     }
 }

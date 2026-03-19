@@ -229,7 +229,8 @@ mod tests {
 
         let result = Sort.execute(args, &mut ctx).await;
         assert!(result.ok());
-        let lines: Vec<&str> = result.out.lines().collect();
+        let text = result.text_out();
+        let lines: Vec<&str> = text.lines().collect();
         assert_eq!(lines[0], "apple");
         assert_eq!(lines[1], "apple");
         assert_eq!(lines[2], "banana");
@@ -245,7 +246,8 @@ mod tests {
 
         let result = Sort.execute(args, &mut ctx).await;
         assert!(result.ok());
-        let lines: Vec<&str> = result.out.lines().collect();
+        let text = result.text_out();
+        let lines: Vec<&str> = text.lines().collect();
         assert_eq!(lines[0], "cherry");
         assert_eq!(lines[3], "apple");
     }
@@ -259,7 +261,8 @@ mod tests {
 
         let result = Sort.execute(args, &mut ctx).await;
         assert!(result.ok());
-        let lines: Vec<&str> = result.out.lines().collect();
+        let text = result.text_out();
+        let lines: Vec<&str> = text.lines().collect();
         assert_eq!(lines, vec!["1", "2", "3", "10", "20"]);
     }
 
@@ -272,7 +275,8 @@ mod tests {
 
         let result = Sort.execute(args, &mut ctx).await;
         assert!(result.ok());
-        let lines: Vec<&str> = result.out.lines().collect();
+        let text = result.text_out();
+        let lines: Vec<&str> = text.lines().collect();
         assert_eq!(lines.len(), 3); // apple appears only once
     }
 
@@ -286,7 +290,8 @@ mod tests {
 
         let result = Sort.execute(args, &mut ctx).await;
         assert!(result.ok());
-        let lines: Vec<&str> = result.out.lines().collect();
+        let text = result.text_out();
+        let lines: Vec<&str> = text.lines().collect();
         assert_eq!(lines[0], "alice 25");
         assert_eq!(lines[1], "bob 30");
         assert_eq!(lines[2], "charlie 35");
@@ -304,7 +309,8 @@ mod tests {
 
         let result = Sort.execute(args, &mut ctx).await;
         assert!(result.ok());
-        let lines: Vec<&str> = result.out.lines().collect();
+        let text = result.text_out();
+        let lines: Vec<&str> = text.lines().collect();
         assert_eq!(lines[0], "alice,25");
         assert_eq!(lines[2], "charlie,35");
     }
@@ -317,7 +323,8 @@ mod tests {
         let args = ToolArgs::new();
         let result = Sort.execute(args, &mut ctx).await;
         assert!(result.ok());
-        let lines: Vec<&str> = result.out.lines().collect();
+        let text = result.text_out();
+        let lines: Vec<&str> = text.lines().collect();
         assert_eq!(lines[0], "aardvark");
         assert_eq!(lines[2], "zebra");
     }
@@ -335,7 +342,8 @@ mod tests {
 
         let result = Sort.execute(args, &mut ctx).await;
         assert!(result.ok());
-        let lines: Vec<&str> = result.out.lines().collect();
+        let text = result.text_out();
+        let lines: Vec<&str> = text.lines().collect();
         assert_eq!(lines, vec!["20", "10", "3", "2", "1"]);
     }
 
@@ -351,7 +359,8 @@ mod tests {
 
         let result = Sort.execute(args, &mut ctx).await;
         assert!(result.ok());
-        let lines: Vec<&str> = result.out.lines().collect();
+        let text = result.text_out();
+        let lines: Vec<&str> = text.lines().collect();
         assert_eq!(lines[0], "charlie 35");
         assert_eq!(lines[2], "alice 25");
     }
@@ -368,7 +377,8 @@ mod tests {
 
         let result = Sort.execute(args, &mut ctx).await;
         assert!(result.ok());
-        let lines: Vec<&str> = result.out.lines().collect();
+        let text = result.text_out();
+        let lines: Vec<&str> = text.lines().collect();
         assert_eq!(lines, vec!["1", "3", "5"]);
     }
 
@@ -381,7 +391,7 @@ mod tests {
         let result = Sort.execute(args, &mut ctx).await;
         assert!(result.ok());
         // Just verify it doesn't crash and produces output
-        assert_eq!(result.out.lines().count(), 3);
+        assert_eq!(result.text_out().lines().count(), 3);
     }
 
     #[tokio::test]
@@ -392,7 +402,8 @@ mod tests {
         let args = ToolArgs::new();
         let result = Sort.execute(args, &mut ctx).await;
         assert!(result.ok());
-        let lines: Vec<&str> = result.out.lines().collect();
+        let text = result.text_out();
+        let lines: Vec<&str> = text.lines().collect();
         // Empty strings sort before non-empty
         assert_eq!(lines[0], "");
         assert_eq!(lines[1], "");
@@ -409,7 +420,8 @@ mod tests {
 
         let result = Sort.execute(args, &mut ctx).await;
         assert!(result.ok());
-        let lines: Vec<&str> = result.out.lines().collect();
+        let text = result.text_out();
+        let lines: Vec<&str> = text.lines().collect();
         // Non-numeric values parse as 0, so abc and xyz come first
         assert!(lines[0] == "abc" || lines[0] == "xyz");
         assert_eq!(lines[4], "10");
@@ -423,7 +435,7 @@ mod tests {
         let args = ToolArgs::new();
         let result = Sort.execute(args, &mut ctx).await;
         assert!(result.ok());
-        assert!(result.out.is_empty());
+        assert!(result.text_out().is_empty());
     }
 
     #[tokio::test]
@@ -435,7 +447,8 @@ mod tests {
         args.flags.insert("n".to_string());
         let result = Sort.execute(args, &mut ctx).await;
         assert!(result.ok());
-        let lines: Vec<&str> = result.out.lines().collect();
+        let text = result.text_out();
+        let lines: Vec<&str> = text.lines().collect();
         assert_eq!(lines, vec!["11 bar", "22 baz", "33 foo"]);
     }
 
@@ -448,7 +461,8 @@ mod tests {
         args.flags.insert("r".to_string());
         let result = Sort.execute(args, &mut ctx).await;
         assert!(result.ok());
-        let lines: Vec<&str> = result.out.lines().collect();
+        let text = result.text_out();
+        let lines: Vec<&str> = text.lines().collect();
         assert_eq!(lines, vec!["89 b", "33 a", "24 c"]);
     }
 
@@ -460,6 +474,6 @@ mod tests {
         let args = ToolArgs::new();
         let result = Sort.execute(args, &mut ctx).await;
         assert!(result.ok());
-        assert_eq!(result.out.trim(), "only one line");
+        assert_eq!(result.text_out().trim(), "only one line");
     }
 }

@@ -118,7 +118,7 @@ async fn validation_allows_split_in_for_loop() {
     assert!(result.is_ok(), "split in for loop should pass validation");
     let exec = result.unwrap();
     assert!(exec.ok(), "split in for loop should execute successfully");
-    assert!(exec.out.contains("a") && exec.out.contains("b") && exec.out.contains("c"));
+    assert!(exec.text_out().contains("a") && exec.text_out().contains("b") && exec.text_out().contains("c"));
 }
 
 #[tokio::test]
@@ -284,7 +284,7 @@ async fn validation_passes_for_valid_seq() {
     assert!(result.is_ok(), "valid seq should pass validation");
     let exec = result.unwrap();
     assert!(exec.ok(), "valid seq should execute successfully");
-    assert!(exec.out.contains("1") && exec.out.contains("9"));
+    assert!(exec.text_out().contains("1") && exec.text_out().contains("9"));
 }
 
 // ============================================================================
@@ -404,7 +404,7 @@ async fn validation_allows_quoted_glob_pattern() {
     assert!(result.is_ok(), "quoted pattern should pass validation");
     let exec = result.unwrap();
     assert!(exec.ok(), "quoted pattern should execute");
-    assert!(exec.out.contains("*.txt"), "pattern should be literal");
+    assert!(exec.text_out().contains("*.txt"), "pattern should be literal");
 }
 
 #[tokio::test]
@@ -582,9 +582,9 @@ async fn scatter_seq_structured_data() {
     assert!(result.is_ok(), "seq | scatter | gather should pass: {:?}", result.err());
     let exec = result.unwrap();
     assert!(exec.ok(), "pipeline should succeed: {}", exec.err);
-    assert!(exec.out.contains("1"), "should contain 1: {}", exec.out);
-    assert!(exec.out.contains("2"), "should contain 2: {}", exec.out);
-    assert!(exec.out.contains("3"), "should contain 3: {}", exec.out);
+    assert!(exec.text_out().contains("1"), "should contain 1: {}", exec.text_out());
+    assert!(exec.text_out().contains("2"), "should contain 2: {}", exec.text_out());
+    assert!(exec.text_out().contains("3"), "should contain 3: {}", exec.text_out());
 }
 
 #[tokio::test]
@@ -596,9 +596,9 @@ async fn scatter_split_structured_data() {
     assert!(result.is_ok(), "split | scatter | gather should pass: {:?}", result.err());
     let exec = result.unwrap();
     assert!(exec.ok(), "pipeline should succeed: {}", exec.err);
-    assert!(exec.out.contains("got a"), "should contain 'got a': {}", exec.out);
-    assert!(exec.out.contains("got b"), "should contain 'got b': {}", exec.out);
-    assert!(exec.out.contains("got c"), "should contain 'got c': {}", exec.out);
+    assert!(exec.text_out().contains("got a"), "should contain 'got a': {}", exec.text_out());
+    assert!(exec.text_out().contains("got b"), "should contain 'got b': {}", exec.text_out());
+    assert!(exec.text_out().contains("got c"), "should contain 'got c': {}", exec.text_out());
 }
 
 #[tokio::test]
@@ -610,9 +610,9 @@ async fn scatter_split_stdin_pipe() {
     assert!(result.is_ok(), "echo | split | scatter should pass: {:?}", result.err());
     let exec = result.unwrap();
     assert!(exec.ok(), "pipeline should succeed: {}", exec.err);
-    assert!(exec.out.contains("got x"), "should contain 'got x': {}", exec.out);
-    assert!(exec.out.contains("got y"), "should contain 'got y': {}", exec.out);
-    assert!(exec.out.contains("got z"), "should contain 'got z': {}", exec.out);
+    assert!(exec.text_out().contains("got x"), "should contain 'got x': {}", exec.text_out());
+    assert!(exec.text_out().contains("got y"), "should contain 'got y': {}", exec.text_out());
+    assert!(exec.text_out().contains("got z"), "should contain 'got z': {}", exec.text_out());
 }
 
 #[tokio::test]
@@ -624,7 +624,7 @@ async fn scatter_single_item() {
     assert!(result.is_ok(), "single item scatter should pass: {:?}", result.err());
     let exec = result.unwrap();
     assert!(exec.ok(), "pipeline should succeed: {}", exec.err);
-    assert!(exec.out.contains("hello"), "should contain 'hello': {}", exec.out);
+    assert!(exec.text_out().contains("hello"), "should contain 'hello': {}", exec.text_out());
 }
 
 #[tokio::test]

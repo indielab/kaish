@@ -97,7 +97,7 @@ mod tests {
 
         let result = Vars.execute(args, &mut ctx).await;
         assert!(result.ok());
-        assert!(result.out.is_empty());
+        assert!(result.text_out().is_empty());
     }
 
     #[tokio::test]
@@ -111,9 +111,9 @@ mod tests {
 
         assert!(result.ok());
         // Table output: NAME\tVALUE\tTYPE per row (canonical TSV)
-        assert!(result.out.contains("X"));
-        assert!(result.out.contains("42"));
-        assert!(result.out.contains("NAME"));
+        assert!(result.text_out().contains("X"));
+        assert!(result.text_out().contains("42"));
+        assert!(result.text_out().contains("NAME"));
     }
 
     #[tokio::test]
@@ -128,7 +128,8 @@ mod tests {
 
         // Simulate global --json flag (handled by kernel)
         let result = apply_output_format(result, OutputFormat::Json);
-        let data: Vec<serde_json::Value> = serde_json::from_str(&result.out).expect("should be valid JSON");
+        let text = result.text_out();
+        let data: Vec<serde_json::Value> = serde_json::from_str(&text).expect("should be valid JSON");
         assert_eq!(data.len(), 2);
 
         let names: Vec<&str> = data
@@ -149,7 +150,7 @@ mod tests {
         assert!(result.ok());
 
         // Should have structured OutputData with table headers
-        let output = result.output.as_ref().expect("should have OutputData");
+        let output = result.output().expect("should have OutputData");
         let headers = output.headers.as_ref().expect("should have headers");
         assert_eq!(headers, &["NAME", "VALUE", "TYPE"]);
         assert!(!output.root.is_empty());
@@ -169,14 +170,14 @@ mod tests {
 
         assert!(result.ok());
         // Table canonical output includes name + value + type
-        assert!(result.out.contains("NULL_VAL"));
-        assert!(result.out.contains("null"));
-        assert!(result.out.contains("BOOL_VAL"));
-        assert!(result.out.contains("false"));
-        assert!(result.out.contains("INT_VAL"));
-        assert!(result.out.contains("-5"));
-        assert!(result.out.contains("FLOAT_VAL"));
-        assert!(result.out.contains("3.14"));
-        assert!(result.out.contains("STR_VAL"));
+        assert!(result.text_out().contains("NULL_VAL"));
+        assert!(result.text_out().contains("null"));
+        assert!(result.text_out().contains("BOOL_VAL"));
+        assert!(result.text_out().contains("false"));
+        assert!(result.text_out().contains("INT_VAL"));
+        assert!(result.text_out().contains("-5"));
+        assert!(result.text_out().contains("FLOAT_VAL"));
+        assert!(result.text_out().contains("3.14"));
+        assert!(result.text_out().contains("STR_VAL"));
     }
 }

@@ -264,10 +264,10 @@ mod tests {
 
         let result = Glob.execute(args, &mut ctx).await;
         assert!(result.ok());
-        assert!(result.out.contains("main.rs"));
-        assert!(result.out.contains("lib.rs"));
-        assert!(result.out.contains("utils.rs"));
-        assert!(!result.out.contains("README.md"));
+        assert!(result.text_out().contains("main.rs"));
+        assert!(result.text_out().contains("lib.rs"));
+        assert!(result.text_out().contains("utils.rs"));
+        assert!(!result.text_out().contains("README.md"));
     }
 
     #[tokio::test]
@@ -278,9 +278,9 @@ mod tests {
 
         let result = Glob.execute(args, &mut ctx).await;
         assert!(result.ok());
-        assert!(result.out.contains("main.rs"));
-        assert!(result.out.contains("lib.rs"));
-        assert!(!result.out.contains("main_test.rs"));
+        assert!(result.text_out().contains("main.rs"));
+        assert!(result.text_out().contains("lib.rs"));
+        assert!(!result.text_out().contains("main_test.rs"));
     }
 
     #[tokio::test]
@@ -294,12 +294,12 @@ mod tests {
         let result = Glob.execute(args, &mut ctx).await;
         assert!(result.ok());
         // Should have structured OutputData
-        assert!(result.output.is_some());
+        assert!(result.has_output());
 
         // Simulate global --json (handled by kernel)
         let result = apply_output_format(result, OutputFormat::Json);
-        assert!(result.out.starts_with('['));
-        assert!(result.out.ends_with(']'));
+        assert!(result.text_out().starts_with('['));
+        assert!(result.text_out().ends_with(']'));
     }
 
     #[tokio::test]
@@ -312,8 +312,8 @@ mod tests {
 
         let result = Glob.execute(args, &mut ctx).await;
         assert!(result.ok());
-        assert!(result.out.contains("main.rs"));
-        assert!(!result.out.contains("main_test.rs"));
+        assert!(result.text_out().contains("main.rs"));
+        assert!(!result.text_out().contains("main_test.rs"));
     }
 
     #[tokio::test]
@@ -327,7 +327,7 @@ mod tests {
 
         let result = Glob.execute(args, &mut ctx).await;
         assert!(result.ok());
-        assert!(result.out.contains(".hidden"));
+        assert!(result.text_out().contains(".hidden"));
     }
 
     #[tokio::test]
@@ -399,9 +399,9 @@ mod tests {
 
         let result = Glob.execute(args, &mut ctx).await;
         assert!(result.ok());
-        assert!(result.out.contains("main.rs"));
+        assert!(result.text_out().contains("main.rs"));
         // With none config, target/ files should be included
-        assert!(result.out.contains("app.rs"), "none config should include target/debug/app.rs");
+        assert!(result.text_out().contains("app.rs"), "none config should include target/debug/app.rs");
     }
 
     #[tokio::test]
@@ -415,9 +415,9 @@ mod tests {
 
         let result = Glob.execute(args, &mut ctx).await;
         assert!(result.ok());
-        assert!(result.out.contains("main.rs"));
+        assert!(result.text_out().contains("main.rs"));
         // MCP config has defaults on — target/ should be filtered
-        assert!(!result.out.contains("app.rs"), "mcp config should filter target/debug/app.rs");
+        assert!(!result.text_out().contains("app.rs"), "mcp config should filter target/debug/app.rs");
     }
 
     #[tokio::test]
@@ -432,8 +432,8 @@ mod tests {
 
         let result = Glob.execute(args, &mut ctx).await;
         assert!(result.ok());
-        assert!(result.out.contains("main.rs"));
+        assert!(result.text_out().contains("main.rs"));
         // --no-ignore overrides: target/ files should be visible
-        assert!(result.out.contains("app.rs"), "--no-ignore should bypass config");
+        assert!(result.text_out().contains("app.rs"), "--no-ignore should bypass config");
     }
 }

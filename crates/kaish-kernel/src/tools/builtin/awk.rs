@@ -2572,7 +2572,7 @@ test result: ok. 629 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out";
 
         let result = Awk.execute(args, &mut ctx).await;
         assert!(result.ok());
-        assert_eq!(result.out, "60\n");
+        assert_eq!(&*result.text_out(), "60\n");
     }
 
     #[tokio::test]
@@ -2585,7 +2585,7 @@ test result: ok. 629 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out";
 
         let result = Awk.execute(args, &mut ctx).await;
         assert!(result.ok());
-        assert_eq!(result.out, "alice\nbob\ncarol\n");
+        assert_eq!(&*result.text_out(), "alice\nbob\ncarol\n");
     }
 
     #[tokio::test]
@@ -2599,7 +2599,7 @@ test result: ok. 629 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out";
 
         let result = Awk.execute(args, &mut ctx).await;
         assert!(result.ok());
-        assert_eq!(result.out, "root\nuser\n");
+        assert_eq!(&*result.text_out(), "root\nuser\n");
     }
 
     #[tokio::test]
@@ -2612,7 +2612,7 @@ test result: ok. 629 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out";
 
         let result = Awk.execute(args, &mut ctx).await;
         assert!(result.ok());
-        assert_eq!(result.out, "bob\ncarol\n");
+        assert_eq!(&*result.text_out(), "bob\ncarol\n");
     }
 
     #[tokio::test]
@@ -2647,7 +2647,7 @@ test result: ok. 629 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out";
 
         let result = Awk.execute(args, &mut ctx).await;
         assert!(result.ok());
-        assert_eq!(result.out, "世界\n");
+        assert_eq!(&*result.text_out(), "世界\n");
     }
 
     #[tokio::test]
@@ -2661,7 +2661,7 @@ test result: ok. 629 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out";
 
         let result = Awk.execute(args, &mut ctx).await;
         assert!(result.ok());
-        assert_eq!(result.out, "     hello|\n");
+        assert_eq!(&*result.text_out(), "     hello|\n");
     }
 
     #[tokio::test]
@@ -2674,7 +2674,7 @@ test result: ok. 629 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out";
 
         let result = Awk.execute(args, &mut ctx).await;
         assert!(result.ok());
-        assert_eq!(result.out, "hi        |");
+        assert_eq!(&*result.text_out(), "hi        |");
     }
 
     #[tokio::test]
@@ -2687,6 +2687,6 @@ test result: ok. 629 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out";
 
         let result = Awk.execute(args, &mut ctx).await;
         assert!(result.ok());
-        assert_eq!(result.out, "000042");
+        assert_eq!(&*result.text_out(), "000042");
     }
 }

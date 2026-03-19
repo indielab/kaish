@@ -900,7 +900,7 @@ mod tests {
 
         let result = Sed.execute(args, &mut ctx).await;
         assert!(result.ok());
-        assert_eq!(result.out, "hi kaish\n".replace("hi", "hello"));
+        assert_eq!(&*result.text_out(), "hi kaish\n".replace("hi", "hello"));
     }
 
     #[tokio::test]
@@ -913,7 +913,7 @@ mod tests {
 
         let result = Sed.execute(args, &mut ctx).await;
         assert!(result.ok());
-        assert!(result.out.contains("hi world"));
+        assert!(result.text_out().contains("hi world"));
     }
 
     #[tokio::test]
@@ -927,7 +927,7 @@ mod tests {
 
         let result = Sed.execute(args, &mut ctx).await;
         assert!(result.ok());
-        assert_eq!(result.out, "pattern\n");
+        assert_eq!(&*result.text_out(), "pattern\n");
     }
 
     #[tokio::test]
@@ -975,6 +975,6 @@ mod tests {
 
         let result = Sed.execute(args, &mut ctx).await;
         assert!(result.ok());
-        assert_eq!(result.out, "こんにちは kaish\n");
+        assert_eq!(&*result.text_out(), "こんにちは kaish\n");
     }
 }

@@ -317,8 +317,8 @@ mod tests {
         let result = Env.execute(args, &mut ctx).await;
 
         assert!(result.ok());
-        assert!(result.out.contains("PATH=/usr/bin"));
-        assert!(result.out.contains("HOME=/home/user"));
+        assert!(result.text_out().contains("PATH=/usr/bin"));
+        assert!(result.text_out().contains("HOME=/home/user"));
     }
 
     #[tokio::test]
@@ -328,7 +328,7 @@ mod tests {
 
         let result = Env.execute(args, &mut ctx).await;
         assert!(result.ok());
-        assert!(result.out.is_empty());
+        assert!(result.text_out().is_empty());
     }
 
     #[tokio::test]
@@ -345,7 +345,7 @@ mod tests {
 
         let result = Env.execute(args, &mut ctx).await;
         assert!(result.ok());
-        assert_eq!(result.out.trim(), "hello");
+        assert_eq!(result.text_out().trim(), "hello");
     }
 
     #[tokio::test]
@@ -361,7 +361,7 @@ mod tests {
         let result = Env.execute(args, &mut ctx).await;
         assert!(result.ok());
         // Should be empty or nearly empty (no EXISTING)
-        assert!(!result.out.contains("EXISTING="));
+        assert!(!result.text_out().contains("EXISTING="));
     }
 
     #[tokio::test]
@@ -375,9 +375,9 @@ mod tests {
 
         let result = Env.execute(args, &mut ctx).await;
         assert!(result.ok());
-        assert!(result.out.contains("A=1"));
-        assert!(result.out.contains("B=2"));
-        assert!(result.out.contains("C=3"));
+        assert!(result.text_out().contains("A=1"));
+        assert!(result.text_out().contains("B=2"));
+        assert!(result.text_out().contains("C=3"));
     }
 
     #[tokio::test]
@@ -391,7 +391,7 @@ mod tests {
 
         let result = Env.execute(args, &mut ctx).await;
         assert!(result.ok());
-        assert!(result.out.contains('\0'));
-        assert!(!result.out.ends_with('\n'));
+        assert!(result.text_out().contains('\0'));
+        assert!(!result.text_out().ends_with('\n'));
     }
 }

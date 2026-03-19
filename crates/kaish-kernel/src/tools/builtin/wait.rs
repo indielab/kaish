@@ -77,7 +77,7 @@ impl Tool for Wait {
 
             if any_failed {
                 let mut result = ExecResult::from_output(1, output.clone(), "");
-                result.output = Some(OutputData::text(output));
+                result.set_output(Some(OutputData::text(output)));
                 result
             } else {
                 ExecResult::with_output(OutputData::text(output))
@@ -105,7 +105,7 @@ mod tests {
         let mut ctx = make_ctx();
         let result = Wait.execute(ToolArgs::new(), &mut ctx).await;
         assert!(result.ok());
-        assert!(result.out.contains("no job manager"));
+        assert!(result.text_out().contains("no job manager"));
     }
 
     #[tokio::test]
@@ -115,7 +115,7 @@ mod tests {
 
         let result = Wait.execute(ToolArgs::new(), &mut ctx).await;
         assert!(result.ok());
-        assert!(result.out.contains("no jobs"));
+        assert!(result.text_out().contains("no jobs"));
     }
 
     #[tokio::test]
@@ -139,9 +139,9 @@ mod tests {
 
         let result = Wait.execute(ToolArgs::new(), &mut ctx).await;
         assert!(result.ok());
-        assert!(result.out.contains("[1]"));
-        assert!(result.out.contains("[2]"));
-        assert!(result.out.contains("Done"));
+        assert!(result.text_out().contains("[1]"));
+        assert!(result.text_out().contains("[2]"));
+        assert!(result.text_out().contains("Done"));
     }
 
     #[tokio::test]
@@ -164,7 +164,7 @@ mod tests {
 
         let result = Wait.execute(args, &mut ctx).await;
         assert!(result.ok());
-        assert!(result.out.contains(&format!("[{}]", id)));
+        assert!(result.text_out().contains(&format!("[{}]", id)));
     }
 
     #[tokio::test]
@@ -196,6 +196,6 @@ mod tests {
 
         let result = Wait.execute(ToolArgs::new(), &mut ctx).await;
         assert!(!result.ok()); // Overall result fails if any job failed
-        assert!(result.out.contains("Failed"));
+        assert!(result.text_out().contains("Failed"));
     }
 }

@@ -326,9 +326,9 @@ mod tests {
 
         let result = Find.execute(args, &mut ctx).await;
         assert!(result.ok());
-        assert!(result.out.contains("main.rs"));
-        assert!(result.out.contains("lib.rs"));
-        assert!(result.out.contains("README.md"));
+        assert!(result.text_out().contains("main.rs"));
+        assert!(result.text_out().contains("lib.rs"));
+        assert!(result.text_out().contains("README.md"));
     }
 
     #[tokio::test]
@@ -340,10 +340,10 @@ mod tests {
 
         let result = Find.execute(args, &mut ctx).await;
         assert!(result.ok());
-        assert!(result.out.contains("main.rs"));
-        assert!(result.out.contains("lib.rs"));
-        assert!(result.out.contains("utils.rs"));
-        assert!(!result.out.contains("README.md"));
+        assert!(result.text_out().contains("main.rs"));
+        assert!(result.text_out().contains("lib.rs"));
+        assert!(result.text_out().contains("utils.rs"));
+        assert!(!result.text_out().contains("README.md"));
     }
 
     #[tokio::test]
@@ -355,8 +355,8 @@ mod tests {
 
         let result = Find.execute(args, &mut ctx).await;
         assert!(result.ok());
-        assert!(result.out.contains("main.rs"));
-        assert!(!result.out.contains("/src\n")); // src is a directory
+        assert!(result.text_out().contains("main.rs"));
+        assert!(!result.text_out().contains("/src\n")); // src is a directory
     }
 
     #[tokio::test]
@@ -368,9 +368,9 @@ mod tests {
 
         let result = Find.execute(args, &mut ctx).await;
         assert!(result.ok());
-        assert!(result.out.contains("src"));
-        assert!(result.out.contains("lib"));
-        assert!(!result.out.contains("main.rs"));
+        assert!(result.text_out().contains("src"));
+        assert!(result.text_out().contains("lib"));
+        assert!(!result.text_out().contains("main.rs"));
     }
 
     #[tokio::test]
@@ -384,9 +384,9 @@ mod tests {
         let result = Find.execute(args, &mut ctx).await;
         assert!(result.ok());
         // Files at depth 1 (directly under /src or /test)
-        assert!(result.out.contains("main.rs"));
+        assert!(result.text_out().contains("main.rs"));
         // Files at depth 2 (under /src/lib) should NOT be present
-        assert!(!result.out.contains("utils.rs"));
+        assert!(!result.text_out().contains("utils.rs"));
     }
 
     #[tokio::test]
@@ -409,8 +409,8 @@ mod tests {
         let result = Find.execute(args, &mut ctx).await;
         assert!(result.ok());
         // find includes hidden files by default
-        assert!(result.out.contains(".hidden"));
-        assert!(result.out.contains("secret.txt"));
+        assert!(result.text_out().contains(".hidden"));
+        assert!(result.text_out().contains("secret.txt"));
     }
 
     /// Create a ctx with build artifact dirs to test ignore filtering.
@@ -452,9 +452,9 @@ mod tests {
         let result = Find.execute(args, &mut ctx).await;
         assert!(result.ok());
         // Advisory scope: find does NOT filter, even with defaults on
-        assert!(result.out.contains("target"), "Advisory find should show target/");
-        assert!(result.out.contains("node_modules"), "Advisory find should show node_modules/");
-        assert!(result.out.contains("main.rs"));
+        assert!(result.text_out().contains("target"), "Advisory find should show target/");
+        assert!(result.text_out().contains("node_modules"), "Advisory find should show node_modules/");
+        assert!(result.text_out().contains("main.rs"));
     }
 
     #[tokio::test]
@@ -469,11 +469,11 @@ mod tests {
         let result = Find.execute(args, &mut ctx).await;
         assert!(result.ok());
         // Enforced scope with defaults: target/ and node_modules/ are filtered
-        assert!(!result.out.contains("target"), "Enforced find should skip target/");
-        assert!(!result.out.contains("node_modules"), "Enforced find should skip node_modules/");
+        assert!(!result.text_out().contains("target"), "Enforced find should skip target/");
+        assert!(!result.text_out().contains("node_modules"), "Enforced find should skip node_modules/");
         // Source files still visible
-        assert!(result.out.contains("main.rs"));
-        assert!(result.out.contains("README.md"));
+        assert!(result.text_out().contains("main.rs"));
+        assert!(result.text_out().contains("README.md"));
     }
 
     #[tokio::test]
@@ -490,8 +490,8 @@ mod tests {
 
         let result = Find.execute(args, &mut ctx).await;
         assert!(result.ok());
-        assert!(result.out.contains("target"), "Enforced but inactive should show target/");
-        assert!(result.out.contains("node_modules"));
+        assert!(result.text_out().contains("target"), "Enforced but inactive should show target/");
+        assert!(result.text_out().contains("node_modules"));
     }
 
     #[test]

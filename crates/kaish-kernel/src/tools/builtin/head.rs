@@ -318,7 +318,8 @@ mod tests {
 
         let result = Head.execute(args, &mut ctx).await;
         assert!(result.ok());
-        let lines: Vec<&str> = result.out.lines().collect();
+        let text = result.text_out();
+        let lines: Vec<&str> = text.lines().collect();
         assert_eq!(lines.len(), 10);
         assert_eq!(lines[0], "line 1");
         assert_eq!(lines[9], "line 10");
@@ -333,7 +334,8 @@ mod tests {
 
         let result = Head.execute(args, &mut ctx).await;
         assert!(result.ok());
-        let lines: Vec<&str> = result.out.lines().collect();
+        let text = result.text_out();
+        let lines: Vec<&str> = text.lines().collect();
         assert_eq!(lines.len(), 3);
         assert_eq!(lines[2], "line 3");
     }
@@ -360,9 +362,9 @@ mod tests {
 
         let result = Head.execute(args, &mut ctx).await;
         assert!(result.ok());
-        assert!(result.out.contains("alpha"));
-        assert!(result.out.contains("beta"));
-        assert!(!result.out.contains("gamma"));
+        assert!(result.text_out().contains("alpha"));
+        assert!(result.text_out().contains("beta"));
+        assert!(!result.text_out().contains("gamma"));
     }
 
     #[tokio::test]
@@ -374,7 +376,8 @@ mod tests {
 
         let result = Head.execute(args, &mut ctx).await;
         assert!(result.ok());
-        let lines: Vec<&str> = result.out.lines().collect();
+        let text = result.text_out();
+        let lines: Vec<&str> = text.lines().collect();
         assert_eq!(lines.len(), 3);
     }
 
@@ -399,7 +402,7 @@ mod tests {
 
         let result = Head.execute(args, &mut ctx).await;
         assert!(result.ok());
-        assert!(result.out.is_empty());
+        assert!(result.text_out().is_empty());
     }
 
     #[tokio::test]
@@ -412,7 +415,7 @@ mod tests {
 
         let result = Head.execute(args, &mut ctx).await;
         assert!(result.ok());
-        assert_eq!(result.out.trim(), "line 1");
+        assert_eq!(result.text_out().trim(), "line 1");
     }
 
     #[tokio::test]
@@ -425,7 +428,8 @@ mod tests {
 
         let result = Head.execute(args, &mut ctx).await;
         assert!(result.ok());
-        let lines: Vec<&str> = result.out.lines().collect();
+        let text = result.text_out();
+        let lines: Vec<&str> = text.lines().collect();
         assert_eq!(lines, vec!["日本語", "中国語"]);
     }
 
@@ -452,7 +456,7 @@ mod tests {
         let args = ToolArgs::new();
         let result = Head.execute(args, &mut ctx).await;
         assert!(result.ok());
-        assert!(result.out.is_empty());
+        assert!(result.text_out().is_empty());
     }
 
     #[tokio::test]
@@ -463,7 +467,7 @@ mod tests {
         let args = ToolArgs::new();
         let result = Head.execute(args, &mut ctx).await;
         assert!(result.ok());
-        assert_eq!(result.out.trim(), "single line no newline");
+        assert_eq!(result.text_out().trim(), "single line no newline");
     }
 
     #[tokio::test]
@@ -476,7 +480,8 @@ mod tests {
 
         let result = Head.execute(args, &mut ctx).await;
         assert!(result.ok());
-        let lines: Vec<&str> = result.out.lines().collect();
+        let text = result.text_out();
+        let lines: Vec<&str> = text.lines().collect();
         assert_eq!(lines.len(), 3);
     }
 
@@ -489,7 +494,7 @@ mod tests {
         args.positional.push(Value::String("/lines.txt".into()));
         let result = Head.execute(args, &mut ctx).await;
         assert!(result.ok());
-        assert_eq!(result.out.lines().count(), 3);
+        assert_eq!(result.text_out().lines().count(), 3);
     }
 
     #[tokio::test]
@@ -501,7 +506,7 @@ mod tests {
         args.positional.push(Value::Int(-5));
         let result = Head.execute(args, &mut ctx).await;
         assert!(result.ok());
-        assert_eq!(result.out.lines().count(), 5);
+        assert_eq!(result.text_out().lines().count(), 5);
     }
 
     #[tokio::test]
@@ -514,13 +519,13 @@ mod tests {
         let result = Head.execute(args, &mut ctx).await;
         assert!(result.ok());
         // Multiple files: should have headers
-        assert!(result.out.contains("==>"));
+        assert!(result.text_out().contains("==>"));
         // Should contain first 2 lines from lines.txt
-        assert!(result.out.contains("line 1"));
-        assert!(result.out.contains("line 2"));
+        assert!(result.text_out().contains("line 1"));
+        assert!(result.text_out().contains("line 2"));
         // Should contain first 2 lines from short.txt
-        assert!(result.out.contains("one"));
-        assert!(result.out.contains("two"));
+        assert!(result.text_out().contains("one"));
+        assert!(result.text_out().contains("two"));
     }
 
     #[tokio::test]
@@ -534,9 +539,9 @@ mod tests {
         let result = Head.execute(args, &mut ctx).await;
         assert!(result.ok());
         // Should show both files with headers
-        assert!(result.out.contains("==> /lines.txt <=="));
-        assert!(result.out.contains("==> /short.txt <=="));
-        assert!(result.out.contains("line 1"));
-        assert!(result.out.contains("one"));
+        assert!(result.text_out().contains("==> /lines.txt <=="));
+        assert!(result.text_out().contains("==> /short.txt <=="));
+        assert!(result.text_out().contains("line 1"));
+        assert!(result.text_out().contains("one"));
     }
 }

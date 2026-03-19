@@ -97,7 +97,7 @@ mod tests {
 
         let result = Realpath.execute(args, &mut ctx).await;
         assert!(result.ok());
-        assert_eq!(result.out.trim(), "/usr/bin/sort");
+        assert_eq!(result.text_out().trim(), "/usr/bin/sort");
     }
 
     #[tokio::test]
@@ -108,7 +108,7 @@ mod tests {
 
         let result = Realpath.execute(args, &mut ctx).await;
         assert!(result.ok());
-        assert_eq!(result.out.trim(), "/usr/lib");
+        assert_eq!(result.text_out().trim(), "/usr/lib");
     }
 
     #[tokio::test]
@@ -120,7 +120,7 @@ mod tests {
 
         let result = Realpath.execute(args, &mut ctx).await;
         assert!(result.ok());
-        assert_eq!(result.out.trim(), "/usr/bin/sort");
+        assert_eq!(result.text_out().trim(), "/usr/bin/sort");
     }
 
     #[tokio::test]
@@ -133,7 +133,7 @@ mod tests {
 
         let result = Realpath.execute(args, &mut ctx).await;
         assert!(result.ok());
-        assert_eq!(result.out.trim(), "/home/user/documents/file.txt");
+        assert_eq!(result.text_out().trim(), "/home/user/documents/file.txt");
     }
 
     #[tokio::test]

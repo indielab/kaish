@@ -113,8 +113,8 @@ pub async fn spill_if_needed(
     let max = config.max_bytes?;
 
     // If result.out is already populated (external commands), check it directly
-    if !result.out.is_empty() {
-        let total = result.out.len();
+    if !result.text_out().is_empty() && !result.has_output() {
+        let total = result.text_out().len();
         if total <= max {
             return None;
         }
@@ -122,13 +122,13 @@ pub async fn spill_if_needed(
     }
 
     // If we have structured OutputData, estimate size before materializing
-    if let Some(ref output) = result.output {
+    if let Some(output) = result.output() {
         let estimate = output.estimated_byte_size();
         if estimate <= max {
             // Small enough — materialize normally
-            result.out = output.to_canonical_string();
+            result.materialize();
             // Re-check actual size (estimate is a lower bound)
-            if result.out.len() <= max {
+            if result.text_out().len() <= max {
                 return None;
             }
             return spill_string(result, config, max).await;
@@ -147,10 +147,11 @@ async fn spill_string(
     config: &OutputLimitConfig,
     max: usize,
 ) -> Option<SpillResult> {
-    let total = result.out.len();
-    match write_spill_file(result.out.as_bytes()).await {
+    let total = result.text_out().len();
+    match write_spill_file(result.text_out().as_bytes()).await {
         Ok((path, written)) => {
-            result.out = build_truncated_output(&result.out, config, &path, total);
+            let truncated = build_truncated_output(&result.text_out(), config, &path, total);
+            result.set_out(truncated);
             result.did_spill = true;
             Some(SpillResult {
                 path,
@@ -174,7 +175,7 @@ async fn spill_output_data(
     config: &OutputLimitConfig,
     max: usize,
 ) -> Option<SpillResult> {
-    let output = result.output.as_ref()?;
+    let output = result.output()?;
 
     let dir = paths::spill_dir();
     if let Err(e) = tokio::fs::create_dir_all(&dir).await {
@@ -216,10 +217,10 @@ async fn spill_output_data(
     let tail = read_tail_from_file(&path, config.tail_bytes).await.unwrap_or_default();
     let path_str = path.to_string_lossy();
 
-    result.out = format!(
+    result.set_out(format!(
         "{}\n...\n{}\n[output truncated: {} bytes total — full output at {}]",
         head, tail, total, path_str
-    );
+    ));
     result.did_spill = true;
 
     Some(SpillResult {
@@ -652,7 +653,7 @@ mod tests {
         let mut result = ExecResult::success("short output");
         let spill = spill_if_needed(&mut result, &config).await;
         assert!(spill.is_none());
-        assert_eq!(result.out, "short output");
+        assert_eq!(&*result.text_out(), "short output");
         assert!(!result.did_spill);
     }
 
@@ -674,12 +675,12 @@ mod tests {
         assert!(spill.path.exists());
 
         // Verify truncated output
-        assert!(result.out.contains("..."));
-        assert!(result.out.contains("[output truncated: 200 bytes total"));
-        assert!(result.out.contains(&spill.path.to_string_lossy().to_string()));
+        assert!(result.text_out().contains("..."));
+        assert!(result.text_out().contains("[output truncated: 200 bytes total"));
+        assert!(result.text_out().contains(&spill.path.to_string_lossy().to_string()));
 
         // Verify head (first 20 bytes)
-        assert!(result.out.starts_with(&"x".repeat(20)));
+        assert!(result.text_out().starts_with(&"x".repeat(20)));
 
         // Verify spill file has full content
         let spill_content = tokio::fs::read_to_string(&spill.path).await.unwrap();
@@ -696,7 +697,7 @@ mod tests {
         let mut result = ExecResult::success(big_output.clone());
         let spill = spill_if_needed(&mut result, &config).await;
         assert!(spill.is_none());
-        assert_eq!(result.out, big_output);
+        assert_eq!(&*result.text_out(), big_output);
         assert!(!result.did_spill);
     }
 
@@ -731,10 +732,10 @@ mod tests {
 
         // seq 1 10000 produces lots of output
         let result = kernel.execute("seq 1 10000").await.expect("execute");
-        assert!(result.out.contains("[output truncated:"));
-        assert!(result.out.contains("full output at"));
+        assert!(result.text_out().contains("[output truncated:"));
+        assert!(result.text_out().contains("full output at"));
         // Head should contain the first numbers
-        assert!(result.out.starts_with("1\n"));
+        assert!(result.text_out().starts_with("1\n"));
     }
 
     #[tokio::test]
@@ -753,7 +754,7 @@ mod tests {
         let result = kernel.execute(&format!("echo '{}'", big)).await.expect("execute");
         assert_eq!(result.code, 3, "spill should always exit 3");
         assert_eq!(result.original_code, Some(0), "original command exit code preserved");
-        assert!(result.out.contains("[output truncated:"));
+        assert!(result.text_out().contains("[output truncated:"));
     }
 
     #[tokio::test]
@@ -765,8 +766,8 @@ mod tests {
         let kernel = Kernel::new(config).expect("kernel creation");
 
         let result = kernel.execute("seq 1 100").await.expect("execute");
-        assert!(!result.out.contains("[output truncated:"));
-        assert!(result.out.contains("100"));
+        assert!(!result.text_out().contains("[output truncated:"));
+        assert!(result.text_out().contains("100"));
     }
 
     #[tokio::test]
@@ -785,7 +786,7 @@ mod tests {
         // echo with a large string
         let big = "x".repeat(200);
         let result = kernel.execute(&format!("echo '{}'", big)).await.expect("execute");
-        assert!(result.out.contains("[output truncated:"));
+        assert!(result.text_out().contains("[output truncated:"));
     }
 
     // ── OutputData estimation and streaming tests ──
@@ -894,7 +895,7 @@ mod tests {
         let spill = spill_if_needed(&mut result, &config).await;
         assert!(spill.is_some(), "should have spilled");
         assert!(result.did_spill);
-        assert!(result.out.contains("[output truncated:"));
+        assert!(result.text_out().contains("[output truncated:"));
 
         // Clean up
         if let Some(s) = spill {

@@ -88,7 +88,7 @@ mod tests {
 
         let result = Echo.execute(args, &mut ctx).await;
         assert!(result.ok());
-        assert_eq!(result.out, "hello\n");
+        assert_eq!(&*result.text_out(), "hello\n");
     }
 
     #[tokio::test]
@@ -100,7 +100,7 @@ mod tests {
 
         let result = Echo.execute(args, &mut ctx).await;
         assert!(result.ok());
-        assert_eq!(result.out, "hello world\n");
+        assert_eq!(&*result.text_out(), "hello world\n");
     }
 
     #[tokio::test]
@@ -113,7 +113,7 @@ mod tests {
 
         let result = Echo.execute(args, &mut ctx).await;
         assert!(result.ok());
-        assert_eq!(result.out, "42 true 3.14\n");
+        assert_eq!(&*result.text_out(), "42 true 3.14\n");
     }
 
     #[tokio::test]
@@ -123,7 +123,7 @@ mod tests {
 
         let result = Echo.execute(args, &mut ctx).await;
         assert!(result.ok());
-        assert_eq!(result.out, ""); // Empty output, no newline added
+        assert_eq!(&*result.text_out(), ""); // Empty output, no newline added
     }
 
     #[tokio::test]
@@ -135,7 +135,7 @@ mod tests {
 
         let result = Echo.execute(args, &mut ctx).await;
         assert!(result.ok());
-        assert_eq!(result.out, "hello"); // No trailing newline
+        assert_eq!(&*result.text_out(), "hello"); // No trailing newline
     }
 
     #[tokio::test]
@@ -147,6 +147,6 @@ mod tests {
 
         let result = Echo.execute(args, &mut ctx).await;
         assert!(result.ok());
-        assert_eq!(result.out, "test");
+        assert_eq!(&*result.text_out(), "test");
     }
 }

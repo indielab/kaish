@@ -626,7 +626,7 @@ mod tests {
         assert!(result.is_some());
         let result = result.unwrap();
         assert!(result.ok());
-        assert_eq!(result.out, "done");
+        assert_eq!(&*result.text_out(), "done");
     }
 
     #[tokio::test]
@@ -752,7 +752,7 @@ mod tests {
 
         let result = manager.wait(id).await;
         assert!(result.is_some());
-        assert_eq!(result.unwrap().out, "from channel");
+        assert_eq!(&*result.unwrap().text_out(), "from channel");
     }
 
     #[tokio::test]

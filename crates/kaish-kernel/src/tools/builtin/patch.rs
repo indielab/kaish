@@ -493,7 +493,7 @@ mod tests {
         let result = Patch.execute(args, &mut ctx).await;
 
         assert!(result.ok(), "patch failed: {}", result.err);
-        assert!(result.out.contains("patching file"));
+        assert!(result.text_out().contains("patching file"));
 
         // Verify the file was modified
         let content = ctx.backend.read(Path::new("/test.txt"), None).await.unwrap();
@@ -514,7 +514,7 @@ mod tests {
         let result = Patch.execute(args, &mut ctx).await;
 
         assert!(result.ok(), "dry-run failed: {}", result.err);
-        assert!(result.out.contains("changes"), "output: {}", result.out);
+        assert!(result.text_out().contains("changes"), "output: {}", result.text_out());
 
         // Verify the file was NOT modified
         let content = ctx.backend.read(Path::new("/test.txt"), None).await.unwrap();

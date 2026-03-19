@@ -186,7 +186,7 @@ mod tests {
         let result = Which.execute(args, &mut ctx).await;
         // ls should exist on any Unix system
         if result.ok() {
-            assert!(result.out.contains("/ls"));
+            assert!(result.text_out().contains("/ls"));
         }
         // If not found, that's also valid (might be in a different location)
     }
@@ -226,7 +226,8 @@ mod tests {
         let result = Which.execute(args, &mut ctx).await;
         // Should find at least one of them on Unix
         if result.ok() {
-            let lines: Vec<&str> = result.out.lines().collect();
+            let text = result.text_out();
+            let lines: Vec<&str> = text.lines().collect();
             assert!(lines.len() >= 1);
         }
     }
@@ -243,7 +244,7 @@ mod tests {
         // Should search in the specified PATH
         if result.ok() {
             assert!(
-                result.out.starts_with("/usr/bin/") || result.out.starts_with("/bin/")
+                result.text_out().starts_with("/usr/bin/") || result.text_out().starts_with("/bin/")
             );
         }
     }

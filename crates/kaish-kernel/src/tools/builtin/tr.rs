@@ -204,7 +204,7 @@ mod tests {
 
         let result = Tr.execute(args, &mut ctx).await;
         assert!(result.ok());
-        assert_eq!(result.out, "h2ll4");
+        assert_eq!(&*result.text_out(), "h2ll4");
     }
 
     #[tokio::test]
@@ -218,7 +218,7 @@ mod tests {
 
         let result = Tr.execute(args, &mut ctx).await;
         assert!(result.ok());
-        assert_eq!(result.out, "HELLO WORLD");
+        assert_eq!(&*result.text_out(), "HELLO WORLD");
     }
 
     #[tokio::test]
@@ -232,7 +232,7 @@ mod tests {
 
         let result = Tr.execute(args, &mut ctx).await;
         assert!(result.ok());
-        assert_eq!(result.out, "hll wrld");
+        assert_eq!(&*result.text_out(), "hll wrld");
     }
 
     #[tokio::test]
@@ -248,7 +248,7 @@ mod tests {
         let result = Tr.execute(args, &mut ctx).await;
         assert!(result.ok());
         // After translate (eo -> eo, identity), squeeze removes consecutive chars in set2
-        assert_eq!(result.out, "hello world");
+        assert_eq!(&*result.text_out(), "hello world");
     }
 
     #[tokio::test]
@@ -262,7 +262,7 @@ mod tests {
 
         let result = Tr.execute(args, &mut ctx).await;
         assert!(result.ok());
-        assert_eq!(result.out, "abcdef");
+        assert_eq!(&*result.text_out(), "abcdef");
     }
 
     #[tokio::test]
@@ -311,7 +311,7 @@ mod tests {
 
         let result = Tr.execute(args, &mut ctx).await;
         assert!(result.ok());
-        assert_eq!(result.out, "123456");
+        assert_eq!(&*result.text_out(), "123456");
     }
 
     // --- Additional tests for common patterns ---
@@ -328,7 +328,7 @@ mod tests {
 
         let result = Tr.execute(args, &mut ctx).await;
         assert!(result.ok());
-        assert_eq!(result.out, "hello   world");
+        assert_eq!(&*result.text_out(), "hello   world");
     }
 
     #[tokio::test]
@@ -343,7 +343,7 @@ mod tests {
 
         let result = Tr.execute(args, &mut ctx).await;
         assert!(result.ok());
-        assert_eq!(result.out, "line1 line2 line3");
+        assert_eq!(&*result.text_out(), "line1 line2 line3");
     }
 
     #[tokio::test]
@@ -358,7 +358,7 @@ mod tests {
 
         let result = Tr.execute(args, &mut ctx).await;
         assert!(result.ok());
-        assert_eq!(result.out, "helloworld\n");
+        assert_eq!(&*result.text_out(), "helloworld\n");
     }
 
     #[tokio::test]
@@ -374,7 +374,7 @@ mod tests {
 
         let result = Tr.execute(args, &mut ctx).await;
         assert!(result.ok());
-        assert_eq!(result.out, "hello world");
+        assert_eq!(&*result.text_out(), "hello world");
     }
 
     #[tokio::test]
@@ -389,7 +389,7 @@ mod tests {
 
         let result = Tr.execute(args, &mut ctx).await;
         assert!(result.ok());
-        assert_eq!(result.out, "uryyb");
+        assert_eq!(&*result.text_out(), "uryyb");
     }
 
     #[tokio::test]
@@ -403,7 +403,7 @@ mod tests {
 
         let result = Tr.execute(args, &mut ctx).await;
         assert!(result.ok());
-        assert_eq!(result.out, "abcdef");
+        assert_eq!(&*result.text_out(), "abcdef");
     }
 
     #[tokio::test]
@@ -417,7 +417,7 @@ mod tests {
 
         let result = Tr.execute(args, &mut ctx).await;
         assert!(result.ok());
-        assert!(result.out.is_empty());
+        assert!(result.text_out().is_empty());
     }
 
     #[tokio::test]
@@ -431,7 +431,7 @@ mod tests {
 
         let result = Tr.execute(args, &mut ctx).await;
         assert!(result.ok());
-        assert_eq!(result.out, "hello world");
+        assert_eq!(&*result.text_out(), "hello world");
     }
 
     #[tokio::test]
@@ -446,6 +446,6 @@ mod tests {
 
         let result = Tr.execute(args, &mut ctx).await;
         assert!(result.ok());
-        assert_eq!(result.out, "helloworld");
+        assert_eq!(&*result.text_out(), "helloworld");
     }
 }

@@ -73,7 +73,7 @@ mod tests {
 
         let result = Basename.execute(args, &mut ctx).await;
         assert!(result.ok());
-        assert_eq!(result.out.trim(), "sort");
+        assert_eq!(result.text_out().trim(), "sort");
     }
 
     #[tokio::test]
@@ -85,7 +85,7 @@ mod tests {
 
         let result = Basename.execute(args, &mut ctx).await;
         assert!(result.ok());
-        assert_eq!(result.out.trim(), "file");
+        assert_eq!(result.text_out().trim(), "file");
     }
 
     #[tokio::test]
@@ -96,7 +96,7 @@ mod tests {
 
         let result = Basename.execute(args, &mut ctx).await;
         assert!(result.ok());
-        assert_eq!(result.out.trim(), "filename.rs");
+        assert_eq!(result.text_out().trim(), "filename.rs");
     }
 
     #[tokio::test]
@@ -107,7 +107,7 @@ mod tests {
 
         let result = Basename.execute(args, &mut ctx).await;
         assert!(result.ok());
-        assert_eq!(result.out.trim(), "dir");
+        assert_eq!(result.text_out().trim(), "dir");
     }
 
     #[tokio::test]

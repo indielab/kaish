@@ -123,7 +123,7 @@ impl ScatterGatherRunner {
             if !result.ok() {
                 return result;
             }
-            (result.out, result.data)
+            (result.text_out().into_owned(), result.data)
         };
 
         // Extract items from structured data or text
@@ -282,7 +282,7 @@ fn gather_results(results: &[ScatterResult], opts: &GatherOptions) -> String {
                     "item": r.item,
                     "ok": r.result.ok(),
                     "code": r.result.code,
-                    "out": r.result.out.trim(),
+                    "out": r.result.text_out().trim(),
                     "err": r.result.err.trim(),
                 })
             })
@@ -294,7 +294,8 @@ fn gather_results(results: &[ScatterResult], opts: &GatherOptions) -> String {
         results_to_use
             .iter()
             .filter(|r| r.result.ok())
-            .map(|r| r.result.out.trim())
+            .map(|r| r.result.text_out())
+            .map(|t| t.trim().to_string())
             .collect::<Vec<_>>()
             .join("\n")
     }

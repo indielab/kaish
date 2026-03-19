@@ -212,7 +212,7 @@ mod tests {
         let mut ctx = make_ctx();
         let result = Uname.execute(ToolArgs::new(), &mut ctx).await;
         assert!(result.ok());
-        assert_eq!(result.out, "kaish");
+        assert_eq!(&*result.text_out(), "kaish");
     }
 
     #[tokio::test]
@@ -222,7 +222,7 @@ mod tests {
         args.flags.insert("s".to_string());
         let result = Uname.execute(args, &mut ctx).await;
         assert!(result.ok());
-        assert_eq!(result.out, "kaish");
+        assert_eq!(&*result.text_out(), "kaish");
     }
 
     #[tokio::test]
@@ -233,7 +233,7 @@ mod tests {
         let result = Uname.execute(args, &mut ctx).await;
         assert!(result.ok());
         // Should be non-empty hostname
-        assert!(!result.out.is_empty());
+        assert!(!result.text_out().is_empty());
     }
 
     #[tokio::test]
@@ -243,7 +243,7 @@ mod tests {
         args.flags.insert("r".to_string());
         let result = Uname.execute(args, &mut ctx).await;
         assert!(result.ok());
-        assert_eq!(result.out, env!("CARGO_PKG_VERSION"));
+        assert_eq!(&*result.text_out(), env!("CARGO_PKG_VERSION"));
     }
 
     #[tokio::test]
@@ -253,8 +253,8 @@ mod tests {
         args.flags.insert("v".to_string());
         let result = Uname.execute(args, &mut ctx).await;
         assert!(result.ok());
-        assert!(result.out.starts_with("kaish "));
-        assert!(result.out.contains(env!("CARGO_PKG_VERSION")));
+        assert!(result.text_out().starts_with("kaish "));
+        assert!(result.text_out().contains(env!("CARGO_PKG_VERSION")));
     }
 
     #[tokio::test]
@@ -264,7 +264,7 @@ mod tests {
         args.flags.insert("m".to_string());
         let result = Uname.execute(args, &mut ctx).await;
         assert!(result.ok());
-        assert_eq!(result.out, std::env::consts::ARCH);
+        assert_eq!(&*result.text_out(), std::env::consts::ARCH);
     }
 
     #[tokio::test]
@@ -274,7 +274,7 @@ mod tests {
         args.flags.insert("o".to_string());
         let result = Uname.execute(args, &mut ctx).await;
         assert!(result.ok());
-        assert_eq!(result.out, "Kaijutsu");
+        assert_eq!(&*result.text_out(), "Kaijutsu");
     }
 
     #[tokio::test]
@@ -290,13 +290,13 @@ mod tests {
         args_m.flags.insert("m".to_string());
         let result_m = Uname.execute(args_m, &mut ctx).await;
 
-        assert_eq!(result_p.out, result_m.out);
+        assert_eq!(&*result_p.text_out(), &*result_m.text_out());
 
         // -i should match -m
         let mut args_i = ToolArgs::new();
         args_i.flags.insert("i".to_string());
         let result_i = Uname.execute(args_i, &mut ctx).await;
-        assert_eq!(result_i.out, result_m.out);
+        assert_eq!(&*result_i.text_out(), &*result_m.text_out());
     }
 
     #[tokio::test]
@@ -308,7 +308,8 @@ mod tests {
         let result = Uname.execute(args, &mut ctx).await;
         assert!(result.ok());
 
-        let fields: Vec<&str> = result.out.split_whitespace().collect();
+        let text = result.text_out();
+        let fields: Vec<&str> = text.split_whitespace().collect();
         // -a produces: sysname nodename release version(multi-word) machine os
         // At minimum 6 whitespace-separated tokens (version has parens with spaces)
         assert!(fields.len() >= 6, "expected ≥6 fields, got: {:?}", fields);
@@ -326,7 +327,8 @@ mod tests {
         let result = Uname.execute(args, &mut ctx).await;
         assert!(result.ok());
 
-        let parts: Vec<&str> = result.out.split(' ').collect();
+        let text = result.text_out();
+        let parts: Vec<&str> = text.split(' ').collect();
         assert_eq!(parts.len(), 2);
         assert_eq!(parts[0], "kaish");
     }
@@ -340,9 +342,9 @@ mod tests {
         let result = Uname.execute(args, &mut ctx).await;
         assert!(result.ok());
         // In host mode, sysname should NOT be "kaish"
-        assert_ne!(result.out, "kaish", "host mode should return real OS");
+        assert_ne!(&*result.text_out(), "kaish", "host mode should return real OS");
         // On Linux it should be "Linux"
-        assert_eq!(result.out, "Linux");
+        assert_eq!(&*result.text_out(), "Linux");
     }
 
     #[tokio::test]
@@ -355,7 +357,8 @@ mod tests {
         let result = Uname.execute(args, &mut ctx).await;
         assert!(result.ok());
 
-        let fields: Vec<&str> = result.out.split_whitespace().collect();
+        let text = result.text_out();
+        let fields: Vec<&str> = text.split_whitespace().collect();
         assert_eq!(fields[0], "Linux");
         assert_eq!(*fields.last().unwrap(), "GNU/Linux");
     }

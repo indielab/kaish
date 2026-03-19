@@ -21,13 +21,13 @@ pub struct ExecResult {
     /// Exit code. 0 means success.
     pub code: i64,
     /// Raw standard output as a string (canonical for pipes).
-    pub out: String,
+    out: String,
     /// Raw standard error as a string.
     pub err: String,
     /// Parsed JSON data from stdout, if stdout was valid JSON.
     pub data: Option<Value>,
     /// Structured output data for rendering.
-    pub output: Option<OutputData>,
+    output: Option<OutputData>,
     /// True if output was truncated and written to a spill file.
     pub did_spill: bool,
     /// The command's original exit code before spill logic overwrote it with 2 or 3.
@@ -72,21 +72,21 @@ impl ExecResult {
     /// For text-type output, JSON auto-detection still runs so that
     /// `echo '{"key":1}'` populates `data` for command substitution.
     pub fn with_output(output: OutputData) -> Self {
-        let data = if output.is_simple_text() {
-            output.as_text().and_then(Self::try_parse_json)
-        } else {
-            None
-        };
-        Self {
-            code: 0,
-            out: String::new(),
-            err: String::new(),
-            data,
-            output: Some(output),
-            did_spill: false,
-            original_code: None,
-            content_type: None,
-            baggage: BTreeMap::new(),
+        // Simple text: move string into .out directly for efficient Cow::Borrowed.
+        // Structured output: store in .output, materialize lazily.
+        match output.into_text() {
+            Ok(text) => Self::success(text),
+            Err(output) => Self {
+                code: 0,
+                out: String::new(),
+                err: String::new(),
+                data: None,
+                output: Some(output),
+                did_spill: false,
+                original_code: None,
+                content_type: None,
+                baggage: BTreeMap::new(),
+            },
         }
     }
 
@@ -191,6 +191,34 @@ impl ExecResult {
         }
     }
 
+    /// Create a result from parts — for kernel struct literal sites.
+    pub fn from_parts(
+        code: i64,
+        out: String,
+        err: String,
+        data: Option<Value>,
+    ) -> Self {
+        Self {
+            code,
+            out,
+            err,
+            data,
+            output: None,
+            did_spill: false,
+            original_code: None,
+            content_type: None,
+            baggage: BTreeMap::new(),
+        }
+    }
+
+    /// Builder: set the exit code, returning self for chaining.
+    pub fn with_code(mut self, code: i64) -> Self {
+        self.code = code;
+        self
+    }
+
+    // ── Read accessors ──
+
     /// Get text output, materializing from OutputData on demand.
     ///
     /// Returns `self.out` if non-empty, otherwise falls back to
@@ -203,6 +231,64 @@ impl ExecResult {
             Cow::Owned(output.to_canonical_string())
         } else {
             Cow::Borrowed("")
+        }
+    }
+
+    /// Get a reference to structured output data.
+    pub fn output(&self) -> Option<&OutputData> {
+        self.output.as_ref()
+    }
+
+    /// True if structured output data is present.
+    pub fn has_output(&self) -> bool {
+        self.output.is_some()
+    }
+
+    // ── Mutation accessors ──
+
+    /// Replace `.out` with a new string.
+    pub fn set_out(&mut self, s: String) {
+        self.out = s;
+    }
+
+    /// Append to `.out`.
+    pub fn push_out(&mut self, s: &str) {
+        self.out.push_str(s);
+    }
+
+    /// Clear `.out`.
+    pub fn clear_out(&mut self) {
+        self.out.clear();
+    }
+
+    /// Replace `.output`.
+    pub fn set_output(&mut self, o: Option<OutputData>) {
+        self.output = o;
+    }
+
+    /// Take `.output`, leaving None.
+    pub fn take_output(&mut self) -> Option<OutputData> {
+        self.output.take()
+    }
+
+    /// Materialize: if `.out` is empty and `.output` is present,
+    /// populate `.out` from canonical string and clear `.output`.
+    pub fn materialize(&mut self) {
+        if self.out.is_empty() {
+            if let Some(ref output) = self.output {
+                self.out = output.to_canonical_string();
+            }
+        }
+        self.output = None;
+    }
+
+    /// Take `.output` only if `.out` is empty (no custom text),
+    /// so caller can stream directly without materializing.
+    pub fn take_output_for_stream(&mut self) -> Option<OutputData> {
+        if self.out.is_empty() {
+            self.output.take()
+        } else {
+            None
         }
     }
 
@@ -411,5 +497,119 @@ mod tests {
         assert!(result.data.is_none());
         assert!(result.content_type.is_none());
         assert!(result.baggage.is_empty());
+    }
+
+    #[test]
+    fn from_parts_creates_result() {
+        let result = ExecResult::from_parts(42, "out".into(), "err".into(), None);
+        assert_eq!(result.code, 42);
+        assert_eq!(result.out, "out");
+        assert_eq!(result.err, "err");
+        assert!(result.data.is_none());
+        assert!(result.output.is_none());
+    }
+
+    #[test]
+    fn with_code_sets_code() {
+        let result = ExecResult::success("hi").with_code(42);
+        assert_eq!(result.code, 42);
+        assert_eq!(result.out, "hi");
+    }
+
+    #[test]
+    fn output_getter() {
+        use crate::output::{OutputData, OutputNode};
+        // Use structured (non-text) output so with_output preserves .output
+        let nodes = OutputData::nodes(vec![OutputNode::new("a"), OutputNode::new("b")]);
+        let result = ExecResult::with_output(nodes);
+        assert!(result.output().is_some());
+        assert!(result.has_output());
+
+        // Simple text now routes to .out, so output is None
+        let text_result = ExecResult::with_output(OutputData::text("test"));
+        assert!(!text_result.has_output());
+        assert_eq!(&*text_result.text_out(), "test");
+
+        let plain = ExecResult::success("text");
+        assert!(plain.output().is_none());
+        assert!(!plain.has_output());
+    }
+
+    #[test]
+    fn set_out_and_push_out_and_clear_out() {
+        let mut result = ExecResult::success("");
+        result.set_out("hello".into());
+        assert_eq!(result.out, "hello");
+        result.push_out(" world");
+        assert_eq!(result.out, "hello world");
+        result.clear_out();
+        assert!(result.out.is_empty());
+    }
+
+    #[test]
+    fn set_output_and_take_output() {
+        use crate::output::OutputData;
+        let mut result = ExecResult::success("");
+        assert!(result.take_output().is_none());
+
+        result.set_output(Some(OutputData::text("data")));
+        assert!(result.has_output());
+
+        let taken = result.take_output();
+        assert!(taken.is_some());
+        assert!(!result.has_output());
+    }
+
+    #[test]
+    fn materialize_populates_out_from_output() {
+        use crate::output::{OutputData, OutputNode};
+        // Use structured output to test materialization
+        let nodes = OutputData::nodes(vec![OutputNode::new("a"), OutputNode::new("b")]);
+        let mut result = ExecResult::with_output(nodes);
+        assert!(result.out.is_empty());
+        assert!(result.has_output());
+        result.materialize();
+        assert_eq!(result.out, "a\nb");
+        assert!(result.output.is_none());
+    }
+
+    #[test]
+    fn materialize_preserves_existing_out() {
+        use crate::output::OutputData;
+        let mut result = ExecResult::with_output_and_text(OutputData::text("ignored"), "custom");
+        result.materialize();
+        assert_eq!(result.out, "custom");
+    }
+
+    #[test]
+    fn take_output_for_stream_when_out_empty() {
+        use crate::output::{OutputData, OutputNode};
+        // Use structured output — text now goes to .out directly
+        let nodes = OutputData::nodes(vec![OutputNode::new("a")]);
+        let mut result = ExecResult::with_output(nodes);
+        let taken = result.take_output_for_stream();
+        assert!(taken.is_some());
+        assert!(!result.has_output());
+    }
+
+    #[test]
+    fn with_output_simple_text_populates_out_directly() {
+        use crate::output::OutputData;
+        let result = ExecResult::with_output(OutputData::text("hello"));
+        // Simple text should go to .out, not .output
+        assert!(!result.has_output());
+        assert_eq!(&*result.text_out(), "hello");
+        // Should detect JSON in simple text
+        let json_result = ExecResult::with_output(OutputData::text(r#"{"key": 1}"#));
+        assert!(json_result.data.is_some());
+    }
+
+    #[test]
+    fn take_output_for_stream_when_out_populated() {
+        use crate::output::OutputData;
+        let mut result = ExecResult::with_output_and_text(OutputData::text("x"), "custom");
+        let taken = result.take_output_for_stream();
+        assert!(taken.is_none());
+        assert!(result.has_output()); // not taken
     }
 }

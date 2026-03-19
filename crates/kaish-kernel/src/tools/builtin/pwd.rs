@@ -39,7 +39,7 @@ mod tests {
 
         let result = Pwd.execute(ToolArgs::new(), &mut ctx).await;
         assert!(result.ok());
-        assert_eq!(result.out, "/");
+        assert_eq!(&*result.text_out(), "/");
     }
 
     #[tokio::test]
@@ -51,6 +51,6 @@ mod tests {
 
         let result = Pwd.execute(ToolArgs::new(), &mut ctx).await;
         assert!(result.ok());
-        assert_eq!(result.out, "/mnt/project");
+        assert_eq!(&*result.text_out(), "/mnt/project");
     }
 }

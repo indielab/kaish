@@ -337,8 +337,8 @@ mod tests {
         // Should succeed and show at least the current process
         assert!(result.ok());
         // Check OutputData is present with table headers
-        assert!(result.output.is_some());
-        let output = result.output.as_ref().unwrap();
+        assert!(result.has_output());
+        let output = result.output().unwrap();
         assert!(output.headers.is_some());
         let headers = output.headers.as_ref().unwrap();
         assert!(headers.contains(&"PID".to_string()));
@@ -354,8 +354,8 @@ mod tests {
         let result = Ps.execute(args, &mut ctx).await;
         assert!(result.ok());
         // Should have OutputData with processes
-        assert!(result.output.is_some());
-        let output = result.output.as_ref().unwrap();
+        assert!(result.has_output());
+        let output = result.output().unwrap();
         assert!(!output.root.is_empty());
     }
 
@@ -373,7 +373,7 @@ mod tests {
         let result = apply_output_format(result, OutputFormat::Json);
 
         // Should be valid JSON array of objects with table headers as keys
-        let parsed: serde_json::Value = serde_json::from_str(&result.out).expect("valid JSON");
+        let parsed: serde_json::Value = serde_json::from_str(&result.text_out()).expect("valid JSON");
         let arr = parsed.as_array().expect("should be an array");
         assert!(!arr.is_empty());
         // Each entry should have PID and COMMAND keys (table headers)
@@ -408,7 +408,7 @@ mod tests {
         // Simulate global --json (handled by kernel)
         let result = apply_output_format(result, OutputFormat::Json);
 
-        let parsed: serde_json::Value = serde_json::from_str(&result.out).expect("valid JSON");
+        let parsed: serde_json::Value = serde_json::from_str(&result.text_out()).expect("valid JSON");
         let procs = parsed.as_array().expect("should be an array");
         // Should have multiple processes
         assert!(!procs.is_empty());

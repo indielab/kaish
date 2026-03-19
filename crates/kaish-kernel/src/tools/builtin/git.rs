@@ -697,7 +697,7 @@ mod tests {
         .await;
 
         assert!(result.ok(), "status failed: {}", result.err);
-        assert!(result.out.contains("nothing to commit"));
+        assert!(result.text_out().contains("nothing to commit"));
 
         cleanup(&dir).await;
     }
@@ -724,7 +724,7 @@ mod tests {
         let result = Git.execute(args, &mut ctx).await;
 
         assert!(result.ok());
-        assert!(result.out.contains("test.txt"));
+        assert!(result.text_out().contains("test.txt"));
 
         cleanup(&dir).await;
     }
@@ -749,7 +749,7 @@ mod tests {
         args.named.insert("m".into(), Value::String("Add new file".into()));
         let result = Git.execute(args, &mut ctx).await;
         assert!(result.ok(), "commit failed: {}", result.err);
-        assert!(result.out.contains("Add new file"));
+        assert!(result.text_out().contains("Add new file"));
 
         cleanup(&dir).await;
     }
@@ -772,7 +772,7 @@ mod tests {
 
         let result = Git.execute(args, &mut ctx).await;
         assert!(result.ok());
-        assert!(result.out.contains("Test commit message"));
+        assert!(result.text_out().contains("Test commit message"));
 
         cleanup(&dir).await;
     }
@@ -797,7 +797,8 @@ mod tests {
 
         let result = Git.execute(args, &mut ctx).await;
         assert!(result.ok(), "log failed: {}", result.err);
-        assert_eq!(result.out.lines().count(), 3, "Expected 3 lines, got: {}", result.out);
+        let text = result.text_out();
+        assert_eq!(text.lines().count(), 3, "Expected 3 lines, got: {}", text);
 
         cleanup(&dir).await;
     }
@@ -819,7 +820,7 @@ mod tests {
         args.positional.push(Value::String("branch".into()));
         let result = Git.execute(args, &mut ctx).await;
         assert!(result.ok());
-        assert!(result.out.contains("*")); // Current branch marker
+        assert!(result.text_out().contains("*")); // Current branch marker
 
         // Create new branch
         let mut args = ToolArgs::new();
@@ -875,7 +876,8 @@ mod tests {
         let result = Git.execute(args, &mut ctx).await;
         assert!(result.ok(), "worktree list failed: {}", result.err);
         // Should show at least the main worktree
-        assert!(result.out.contains("(main)") || result.out.contains("master") || !result.out.is_empty());
+        let text = result.text_out();
+        assert!(text.contains("(main)") || text.contains("master") || !text.is_empty());
 
         cleanup(&dir).await;
     }
@@ -922,7 +924,7 @@ mod tests {
 
         let result = Git.execute(args, &mut ctx).await;
         assert!(result.ok());
-        assert!(result.out.contains("test-worktree"));
+        assert!(result.text_out().contains("test-worktree"));
 
         // Remove the worktree
         let mut args = ToolArgs::new();

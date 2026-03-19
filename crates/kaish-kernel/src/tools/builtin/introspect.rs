@@ -155,10 +155,10 @@ mod tests {
 
         let result = Tools.execute(args, &mut ctx).await;
         assert!(result.ok());
-        assert!(result.out.contains("echo"));
-        assert!(result.out.contains("cat"));
+        assert!(result.text_out().contains("echo"));
+        assert!(result.text_out().contains("cat"));
         // Should have structured OutputData with table headers
-        let output = result.output.as_ref().expect("should have OutputData");
+        let output = result.output().expect("should have OutputData");
         assert!(output.headers.is_some());
     }
 
@@ -172,7 +172,7 @@ mod tests {
 
         // Simulate global --json (handled by kernel)
         let result = apply_output_format(result, OutputFormat::Json);
-        let data: Vec<serde_json::Value> = serde_json::from_str(&result.out).expect("valid JSON");
+        let data: Vec<serde_json::Value> = serde_json::from_str(&*result.text_out()).expect("valid JSON");
         assert_eq!(data.len(), 2);
         assert!(data[0].get("NAME").is_some());
     }
@@ -185,8 +185,8 @@ mod tests {
 
         let result = Tools.execute(args, &mut ctx).await;
         assert!(result.ok());
-        assert!(result.out.contains("echo"));
-        assert!(result.out.contains("Print arguments"));
+        assert!(result.text_out().contains("echo"));
+        assert!(result.text_out().contains("Print arguments"));
     }
 
     #[tokio::test]
@@ -211,9 +211,9 @@ mod tests {
 
         let result = Mounts.execute(args, &mut ctx).await;
         assert!(result.ok());
-        assert!(result.out.contains("/"));
-        assert!(result.out.contains("/tmp"));
-        assert!(result.out.contains("rw"));
+        assert!(result.text_out().contains("/"));
+        assert!(result.text_out().contains("/tmp"));
+        assert!(result.text_out().contains("rw"));
     }
 
     #[tokio::test]
@@ -226,7 +226,7 @@ mod tests {
 
         // Simulate global --json (handled by kernel)
         let result = apply_output_format(result, OutputFormat::Json);
-        let data: Vec<serde_json::Value> = serde_json::from_str(&result.out).expect("valid JSON");
+        let data: Vec<serde_json::Value> = serde_json::from_str(&*result.text_out()).expect("valid JSON");
         assert!(!data.is_empty());
 
         let paths: Vec<&str> = data

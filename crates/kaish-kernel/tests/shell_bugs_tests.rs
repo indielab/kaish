@@ -13,14 +13,14 @@ use kaish_kernel::Kernel;
 async fn test_braced_last_exit_code_after_success() {
     let kernel = Kernel::transient().unwrap();
     let result = kernel.execute("true; echo ${?}").await.unwrap();
-    assert_eq!(result.out.trim(), "0", "Expected 0 after true command");
+    assert_eq!(result.text_out().trim(), "0", "Expected 0 after true command");
 }
 
 #[tokio::test]
 async fn test_braced_last_exit_code_after_failure() {
     let kernel = Kernel::transient().unwrap();
     let result = kernel.execute("false; echo ${?}").await.unwrap();
-    assert_eq!(result.out.trim(), "1", "Expected 1 after false command");
+    assert_eq!(result.text_out().trim(), "1", "Expected 1 after false command");
 }
 
 #[tokio::test]
@@ -30,8 +30,8 @@ async fn test_braced_vs_unbraced_exit_code_equivalence() {
     let result1 = kernel.execute("false; echo $?").await.unwrap();
     let result2 = kernel.execute("false; echo ${?}").await.unwrap();
     assert_eq!(
-        result1.out.trim(),
-        result2.out.trim(),
+        result1.text_out().trim(),
+        result2.text_out().trim(),
         "Braced and unbraced $? should be equivalent"
     );
 }
@@ -44,14 +44,14 @@ async fn test_braced_vs_unbraced_exit_code_equivalence() {
 async fn test_exit_code_in_arithmetic() {
     let kernel = Kernel::transient().unwrap();
     let result = kernel.execute("false; echo $(( $? + 10 ))").await.unwrap();
-    assert_eq!(result.out.trim(), "11", "Expected 1 + 10 = 11");
+    assert_eq!(result.text_out().trim(), "11", "Expected 1 + 10 = 11");
 }
 
 #[tokio::test]
 async fn test_exit_code_in_arithmetic_after_success() {
     let kernel = Kernel::transient().unwrap();
     let result = kernel.execute("true; echo $(( $? * 5 ))").await.unwrap();
-    assert_eq!(result.out.trim(), "0", "Expected 0 * 5 = 0");
+    assert_eq!(result.text_out().trim(), "0", "Expected 0 * 5 = 0");
 }
 
 #[tokio::test]
@@ -59,7 +59,7 @@ async fn test_pid_in_arithmetic() {
     let kernel = Kernel::transient().unwrap();
     let result = kernel.execute("echo $(( $$ % 100000 ))").await.unwrap();
     // Just verify it parses and returns a number
-    let val: i64 = result.out.trim().parse().expect("Should be a number");
+    let val: i64 = result.text_out().trim().parse().expect("Should be a number");
     assert!(val >= 0, "PID mod should be non-negative");
 }
 
@@ -67,7 +67,7 @@ async fn test_pid_in_arithmetic() {
 async fn test_braced_exit_code_in_arithmetic() {
     let kernel = Kernel::transient().unwrap();
     let result = kernel.execute("false; echo $(( ${?} + 5 ))").await.unwrap();
-    assert_eq!(result.out.trim(), "6", "Expected 1 + 5 = 6");
+    assert_eq!(result.text_out().trim(), "6", "Expected 1 + 5 = 6");
 }
 
 // ============================================================================
@@ -92,15 +92,15 @@ echo "captured: [$X]"
         .unwrap();
     // The captured output should only contain "output", not the return value
     assert!(
-        result.out.contains("captured: [output]"),
+        result.text_out().contains("captured: [output]"),
         "Expected 'captured: [output]', got: {}",
-        result.out
+        result.text_out()
     );
     // Should NOT contain JSON or the number 5 in the captured var
     assert!(
-        !result.out.contains("captured: [5"),
+        !result.text_out().contains("captured: [5"),
         "Return value leaked to stdout: {}",
-        result.out
+        result.text_out()
     );
 }
 
@@ -118,9 +118,9 @@ echo $?
         .await
         .unwrap();
     assert!(
-        result.out.contains("42"),
+        result.text_out().contains("42"),
         "Expected exit code 42, got: {}",
-        result.out
+        result.text_out()
     );
 }
 
@@ -138,9 +138,9 @@ echo "got: [$X]"
         .await
         .unwrap();
     assert!(
-        result.out.contains("got: [hi]"),
+        result.text_out().contains("got: [hi]"),
         "Expected 'got: [hi]', got: {}",
-        result.out
+        result.text_out()
     );
 }
 
@@ -166,14 +166,14 @@ echo "after func: $x"
         .await
         .unwrap();
     assert!(
-        result.out.contains("in func: inner"),
+        result.text_out().contains("in func: inner"),
         "Local var should be 'inner' inside function: {}",
-        result.out
+        result.text_out()
     );
     assert!(
-        result.out.contains("after func: outer"),
+        result.text_out().contains("after func: outer"),
         "Outer var should be 'outer' after function: {}",
-        result.out
+        result.text_out()
     );
 }
 
@@ -194,10 +194,10 @@ echo $count
         .await
         .unwrap();
     assert_eq!(
-        result.out.trim(),
+        result.text_out().trim(),
         "0",
         "Outer 'count' should still be 0: {}",
-        result.out
+        result.text_out()
     );
 }
 
@@ -218,10 +218,10 @@ echo $count
         .await
         .unwrap();
     assert_eq!(
-        result.out.trim(),
+        result.text_out().trim(),
         "99",
         "Without local, 'count' should be modified: {}",
-        result.out
+        result.text_out()
     );
 }
 
@@ -234,10 +234,10 @@ async fn test_nested_command_substitution() {
     let kernel = Kernel::transient().unwrap();
     let result = kernel.execute("echo $(echo $(echo hello))").await.unwrap();
     assert_eq!(
-        result.out.trim(),
+        result.text_out().trim(),
         "hello",
         "Nested cmd subst should work: {}",
-        result.out
+        result.text_out()
     );
 }
 
@@ -249,10 +249,10 @@ async fn test_deeply_nested_command_substitution() {
         .await
         .unwrap();
     assert_eq!(
-        result.out.trim(),
+        result.text_out().trim(),
         "deep",
         "Deeply nested cmd subst should work: {}",
-        result.out
+        result.text_out()
     );
 }
 
@@ -278,15 +278,15 @@ done
         .unwrap();
     // Should iterate ONCE with the whole string
     assert!(
-        result.out.contains("item: a b c"),
+        result.text_out().contains("item: a b c"),
         "Should have whole string: {}",
-        result.out
+        result.text_out()
     );
     // Should NOT have separate items
     assert!(
-        !result.out.contains("item: a\n"),
+        !result.text_out().contains("item: a\n"),
         "Should NOT split: {}",
-        result.out
+        result.text_out()
     );
 }
 
@@ -305,19 +305,19 @@ done
         .await
         .unwrap();
     assert!(
-        result.out.contains("item: a"),
+        result.text_out().contains("item: a"),
         "Should have item a: {}",
-        result.out
+        result.text_out()
     );
     assert!(
-        result.out.contains("item: b"),
+        result.text_out().contains("item: b"),
         "Should have item b: {}",
-        result.out
+        result.text_out()
     );
     assert!(
-        result.out.contains("item: c"),
+        result.text_out().contains("item: c"),
         "Should have item c: {}",
-        result.out
+        result.text_out()
     );
 }
 
@@ -336,19 +336,19 @@ done
         .await
         .unwrap();
     assert!(
-        result.out.contains("number 1"),
+        result.text_out().contains("number 1"),
         "Should have number 1: {}",
-        result.out
+        result.text_out()
     );
     assert!(
-        result.out.contains("number 2"),
+        result.text_out().contains("number 2"),
         "Should have number 2: {}",
-        result.out
+        result.text_out()
     );
     assert!(
-        result.out.contains("number 3"),
+        result.text_out().contains("number 3"),
         "Should have number 3: {}",
-        result.out
+        result.text_out()
     );
 }
 
@@ -365,7 +365,7 @@ async fn test_stdout_to_stderr_redirect_1_ampersand_2() {
     assert!(
         result.err.contains("error"),
         "Expected 'error' in stderr: stdout={}, stderr={}",
-        result.out,
+        result.text_out(),
         result.err
     );
 }
@@ -378,7 +378,7 @@ async fn test_stdout_to_stderr_redirect_ampersand_2() {
     assert!(
         result.err.contains("warning"),
         "Expected 'warning' in stderr: stdout={}, stderr={}",
-        result.out,
+        result.text_out(),
         result.err
     );
 }
@@ -393,7 +393,7 @@ async fn test_braced_current_pid() {
     let result = kernel.execute("echo ${$}").await.unwrap();
     // Should be a positive integer (the PID)
     let pid: u32 = result
-        .out
+        .text_out()
         .trim()
         .parse()
         .expect("${$} should be a number");
@@ -406,8 +406,8 @@ async fn test_braced_vs_unbraced_pid_equivalence() {
     let result1 = kernel.execute("echo $$").await.unwrap();
     let result2 = kernel.execute("echo ${$}").await.unwrap();
     assert_eq!(
-        result1.out.trim(),
-        result2.out.trim(),
+        result1.text_out().trim(),
+        result2.text_out().trim(),
         "Braced and unbraced $$ should be equivalent"
     );
 }
@@ -424,9 +424,9 @@ async fn test_exit_code_in_string_interpolation() {
         .await
         .unwrap();
     assert!(
-        result.out.contains("exit code: 1"),
+        result.text_out().contains("exit code: 1"),
         "Expected 'exit code: 1': {}",
-        result.out
+        result.text_out()
     );
 }
 
@@ -438,9 +438,9 @@ async fn test_braced_exit_code_in_string_interpolation() {
         .await
         .unwrap();
     assert!(
-        result.out.contains("exit code: 1"),
+        result.text_out().contains("exit code: 1"),
         "Expected 'exit code: 1': {}",
-        result.out
+        result.text_out()
     );
 }
 
@@ -453,9 +453,9 @@ async fn test_cmd_subst_with_true() {
     let kernel = Kernel::transient().unwrap();
     let result = kernel.execute("VAR=$(true); echo \"exit: $?\"").await.unwrap();
     assert!(
-        result.out.contains("exit: 0"),
+        result.text_out().contains("exit: 0"),
         "$(true) should succeed with exit 0: {}",
-        result.out
+        result.text_out()
     );
 }
 
@@ -464,9 +464,9 @@ async fn test_cmd_subst_with_false() {
     let kernel = Kernel::transient().unwrap();
     let result = kernel.execute("VAR=$(false); echo \"exit: $?\"").await.unwrap();
     assert!(
-        result.out.contains("exit: 1"),
+        result.text_out().contains("exit: 1"),
         "$(false) should fail with exit 1: {}",
-        result.out
+        result.text_out()
     );
 }
 
@@ -482,10 +482,10 @@ async fn test_export_with_value() {
     let kernel = Kernel::transient().unwrap();
     let result = kernel.execute("export FOO=\"bar\"; echo $FOO").await.unwrap();
     assert_eq!(
-        result.out.trim(),
+        result.text_out().trim(),
         "bar",
         "export should set variable value: {}",
-        result.out
+        result.text_out()
     );
 }
 
@@ -494,10 +494,10 @@ async fn test_export_multiple_vars() {
     let kernel = Kernel::transient().unwrap();
     let result = kernel.execute("export A=1; export B=2; echo \"$A $B\"").await.unwrap();
     assert_eq!(
-        result.out.trim(),
+        result.text_out().trim(),
         "1 2",
         "export should set multiple variables: {}",
-        result.out
+        result.text_out()
     );
 }
 
@@ -520,10 +520,10 @@ add 3 4
         .await
         .unwrap();
     assert_eq!(
-        result.out.trim(),
+        result.text_out().trim(),
         "7",
         "$(($1 + $2)) with 3 4 should be 7: {}",
-        result.out
+        result.text_out()
     );
 }
 
@@ -542,10 +542,10 @@ mul 5 6
         .await
         .unwrap();
     assert_eq!(
-        result.out.trim(),
+        result.text_out().trim(),
         "30",
         "$(($1 * $2)) with 5 6 should be 30: {}",
-        result.out
+        result.text_out()
     );
 }
 
@@ -565,10 +565,10 @@ calc 5
         .await
         .unwrap();
     assert_eq!(
-        result.out.trim(),
+        result.text_out().trim(),
         "15",
         "$(($base + $1)) with base=10 and $1=5 should be 15: {}",
-        result.out
+        result.text_out()
     );
 }
 
@@ -590,14 +590,14 @@ echo "outer: $val"
         .await
         .unwrap();
     assert!(
-        result.out.contains("local: from_cmd"),
+        result.text_out().contains("local: from_cmd"),
         "Local with cmd subst: {}",
-        result.out
+        result.text_out()
     );
     assert!(
-        result.out.contains("outer: original"),
+        result.text_out().contains("outer: original"),
         "Outer unchanged: {}",
-        result.out
+        result.text_out()
     );
 }
 
@@ -611,10 +611,10 @@ async fn test_nested_var_default() {
     // All variables unset, should return the innermost default "deep"
     let result = kernel.execute(r#"echo "${A:-${B:-deep}}""#).await.unwrap();
     assert_eq!(
-        result.out.trim(),
+        result.text_out().trim(),
         "deep",
         "Nested defaults should work: {}",
-        result.out
+        result.text_out()
     );
 }
 
@@ -624,10 +624,10 @@ async fn test_nested_var_default_outer_set() {
     // A is set, should return A's value
     let result = kernel.execute(r#"A=outer; echo "${A:-${B:-deep}}""#).await.unwrap();
     assert_eq!(
-        result.out.trim(),
+        result.text_out().trim(),
         "outer",
         "Outer var set should return outer: {}",
-        result.out
+        result.text_out()
     );
 }
 
@@ -637,10 +637,10 @@ async fn test_nested_var_default_middle_set() {
     // A unset, B set - should return B's value
     let result = kernel.execute(r#"B=middle; echo "${A:-${B:-deep}}""#).await.unwrap();
     assert_eq!(
-        result.out.trim(),
+        result.text_out().trim(),
         "middle",
         "Middle var set should return middle: {}",
-        result.out
+        result.text_out()
     );
 }
 
@@ -650,10 +650,10 @@ async fn test_deeply_nested_defaults() {
     // Three levels of nesting
     let result = kernel.execute(r#"echo "${A:-${B:-${C:-deepest}}}""#).await.unwrap();
     assert_eq!(
-        result.out.trim(),
+        result.text_out().trim(),
         "deepest",
         "Deeply nested defaults should work: {}",
-        result.out
+        result.text_out()
     );
 }
 
@@ -666,10 +666,10 @@ async fn test_cmd_subst_in_string() {
     let kernel = Kernel::transient().unwrap();
     let result = kernel.execute(r#"echo "inner: $(echo nested)""#).await.unwrap();
     assert_eq!(
-        result.out.trim(),
+        result.text_out().trim(),
         "inner: nested",
         "Command subst in string should work: {}",
-        result.out
+        result.text_out()
     );
 }
 
@@ -678,10 +678,10 @@ async fn test_cmd_subst_in_string_with_var() {
     let kernel = Kernel::transient().unwrap();
     let result = kernel.execute(r#"VAL=world; echo "hello $(echo $VAL)""#).await.unwrap();
     assert_eq!(
-        result.out.trim(),
+        result.text_out().trim(),
         "hello world",
         "Command subst with var in string should work: {}",
-        result.out
+        result.text_out()
     );
 }
 
@@ -690,10 +690,10 @@ async fn test_var_in_default_with_cmd_subst() {
     let kernel = Kernel::transient().unwrap();
     let result = kernel.execute(r#"echo "${UNSET:-$(echo computed)}""#).await.unwrap();
     assert_eq!(
-        result.out.trim(),
+        result.text_out().trim(),
         "computed",
         "Command subst in default value should work: {}",
-        result.out
+        result.text_out()
     );
 }
 
@@ -709,14 +709,14 @@ async fn test_var_in_default_with_cmd_subst() {
 async fn test_cmd_subst_in_test_comparison() {
     let kernel = Kernel::transient().unwrap();
     let result = kernel.execute(r#"[[ $(echo hello) == "hello" ]] && echo "match" || echo "nope""#).await.unwrap();
-    assert_eq!(result.out.trim(), "match", "$(cmd) in [[ == ]] should work: {}", result.out);
+    assert_eq!(result.text_out().trim(), "match", "$(cmd) in [[ == ]] should work: {}", result.text_out());
 }
 
 #[tokio::test]
 async fn test_cmd_subst_in_test_not_equal() {
     let kernel = Kernel::transient().unwrap();
     let result = kernel.execute(r#"[[ $(echo hello) != "world" ]] && echo "diff" || echo "same""#).await.unwrap();
-    assert_eq!(result.out.trim(), "diff", "$(cmd) in [[ != ]] should work: {}", result.out);
+    assert_eq!(result.text_out().trim(), "diff", "$(cmd) in [[ != ]] should work: {}", result.text_out());
 }
 
 #[tokio::test]
@@ -728,7 +728,7 @@ case $(echo hello) in
     *) echo "nope" ;;
 esac
 "#).await.unwrap();
-    assert!(result.out.contains("matched"), "$(cmd) in case should work: {}", result.out);
+    assert!(result.text_out().contains("matched"), "$(cmd) in case should work: {}", result.text_out());
 }
 
 #[tokio::test]
@@ -739,7 +739,7 @@ f() { return $(echo 42); }
 f
 echo $?
 "#).await.unwrap();
-    assert!(result.out.contains("42"), "return $(cmd) should work: {}", result.out);
+    assert!(result.text_out().contains("42"), "return $(cmd) should work: {}", result.text_out());
 }
 
 #[tokio::test]
@@ -751,7 +751,7 @@ f() { return $(echo 7); }
 f
 echo "code: $?"
 "#).await.unwrap();
-    assert!(result.out.contains("code: 7"), "$(cmd) in return should set exit code: {}", result.out);
+    assert!(result.text_out().contains("code: 7"), "$(cmd) in return should set exit code: {}", result.text_out());
 }
 
 // ============================================================================
@@ -766,7 +766,7 @@ async fn test_file_test_sees_vfs_dirs() {
     let kernel = Kernel::transient().unwrap();
     kernel.execute("mkdir -p /v/testdir").await.unwrap();
     let result = kernel.execute(r#"[[ -d /v/testdir ]] && echo "found" || echo "missing""#).await.unwrap();
-    assert_eq!(result.out.trim(), "found", "[[ -d ]] should see VFS dirs: {}", result.out);
+    assert_eq!(result.text_out().trim(), "found", "[[ -d ]] should see VFS dirs: {}", result.text_out());
 }
 
 #[tokio::test]
@@ -774,7 +774,7 @@ async fn test_file_test_sees_vfs_files() {
     let kernel = Kernel::transient().unwrap();
     kernel.execute("write /v/testfile 'hello'").await.unwrap();
     let result = kernel.execute(r#"[[ -f /v/testfile ]] && echo "found" || echo "missing""#).await.unwrap();
-    assert_eq!(result.out.trim(), "found", "[[ -f ]] should see VFS files: {}", result.out);
+    assert_eq!(result.text_out().trim(), "found", "[[ -f ]] should see VFS files: {}", result.text_out());
 }
 
 #[tokio::test]
@@ -782,7 +782,7 @@ async fn test_file_test_exists_vfs() {
     let kernel = Kernel::transient().unwrap();
     kernel.execute("write /v/somefile 'data'").await.unwrap();
     let result = kernel.execute(r#"[[ -e /v/somefile ]] && echo "found" || echo "missing""#).await.unwrap();
-    assert_eq!(result.out.trim(), "found", "[[ -e ]] should see VFS entries: {}", result.out);
+    assert_eq!(result.text_out().trim(), "found", "[[ -e ]] should see VFS entries: {}", result.text_out());
 }
 
 #[tokio::test]
@@ -793,7 +793,7 @@ async fn test_compound_and_both_true() {
     let a = dir_a.path().display();
     let b = dir_b.path().display();
     let result = kernel.execute(&format!(r#"[[ -d {a} && -d {b} ]] && echo "both""#)).await.unwrap();
-    assert_eq!(result.out.trim(), "both", "AND with both true should pass: {}", result.out);
+    assert_eq!(result.text_out().trim(), "both", "AND with both true should pass: {}", result.text_out());
 }
 
 #[tokio::test]
@@ -802,7 +802,7 @@ async fn test_compound_and_one_false() {
     let dir = tempfile::tempdir().unwrap();
     let d = dir.path().display();
     let result = kernel.execute(&format!(r#"[[ -d {d} && -f /nonexistent_kaish_test ]] && echo "both" || echo "failed""#)).await.unwrap();
-    assert_eq!(result.out.trim(), "failed", "AND with one false should fail: {}", result.out);
+    assert_eq!(result.text_out().trim(), "failed", "AND with one false should fail: {}", result.text_out());
 }
 
 #[tokio::test]
@@ -811,7 +811,7 @@ async fn test_compound_or_first_true() {
     let dir = tempfile::tempdir().unwrap();
     let d = dir.path().display();
     let result = kernel.execute(&format!(r#"[[ -d {d} || -f /nonexistent_kaish_test ]] && echo "one""#)).await.unwrap();
-    assert_eq!(result.out.trim(), "one", "OR with first true should pass: {}", result.out);
+    assert_eq!(result.text_out().trim(), "one", "OR with first true should pass: {}", result.text_out());
 }
 
 #[tokio::test]
@@ -820,21 +820,21 @@ async fn test_compound_or_second_true() {
     let dir = tempfile::tempdir().unwrap();
     let d = dir.path().display();
     let result = kernel.execute(&format!(r#"[[ -f /nonexistent_kaish_test || -d {d} ]] && echo "one""#)).await.unwrap();
-    assert_eq!(result.out.trim(), "one", "OR with second true should pass: {}", result.out);
+    assert_eq!(result.text_out().trim(), "one", "OR with second true should pass: {}", result.text_out());
 }
 
 #[tokio::test]
 async fn test_compound_or_both_false() {
     let kernel = Kernel::transient().unwrap();
     let result = kernel.execute(r#"[[ -f /nonexistent_kaish_test || -f /also_nonexistent_kaish ]] && echo "yes" || echo "no""#).await.unwrap();
-    assert_eq!(result.out.trim(), "no", "OR with both false should fail: {}", result.out);
+    assert_eq!(result.text_out().trim(), "no", "OR with both false should fail: {}", result.text_out());
 }
 
 #[tokio::test]
 async fn test_compound_not_true() {
     let kernel = Kernel::transient().unwrap();
     let result = kernel.execute(r#"[[ ! -f /nonexistent_kaish_test ]] && echo "correct""#).await.unwrap();
-    assert_eq!(result.out.trim(), "correct", "NOT on false should be true: {}", result.out);
+    assert_eq!(result.text_out().trim(), "correct", "NOT on false should be true: {}", result.text_out());
 }
 
 #[tokio::test]
@@ -843,7 +843,7 @@ async fn test_compound_not_false() {
     let dir = tempfile::tempdir().unwrap();
     let d = dir.path().display();
     let result = kernel.execute(&format!(r#"[[ ! -d {d} ]] && echo "yes" || echo "no""#)).await.unwrap();
-    assert_eq!(result.out.trim(), "no", "NOT on true should be false: {}", result.out);
+    assert_eq!(result.text_out().trim(), "no", "NOT on true should be false: {}", result.text_out());
 }
 
 #[tokio::test]
@@ -852,7 +852,7 @@ async fn test_compound_double_not() {
     let dir = tempfile::tempdir().unwrap();
     let d = dir.path().display();
     let result = kernel.execute(&format!(r#"[[ ! ! -d {d} ]] && echo "yes" || echo "no""#)).await.unwrap();
-    assert_eq!(result.out.trim(), "yes", "Double NOT should cancel out: {}", result.out);
+    assert_eq!(result.text_out().trim(), "yes", "Double NOT should cancel out: {}", result.text_out());
 }
 
 #[tokio::test]
@@ -862,21 +862,21 @@ async fn test_compound_not_with_and() {
     let d = dir.path().display();
     // ! binds tighter than &&, so this is: (! -f /nonexistent) && (-d dir)
     let result = kernel.execute(&format!(r#"[[ ! -f /nonexistent_kaish_test && -d {d} ]] && echo "both""#)).await.unwrap();
-    assert_eq!(result.out.trim(), "both", "NOT with AND should work: {}", result.out);
+    assert_eq!(result.text_out().trim(), "both", "NOT with AND should work: {}", result.text_out());
 }
 
 #[tokio::test]
 async fn test_compound_string_tests() {
     let kernel = Kernel::transient().unwrap();
     let result = kernel.execute(r#"VAR=""; [[ -z "$VAR" || -n "default" ]] && echo "ok""#).await.unwrap();
-    assert_eq!(result.out.trim(), "ok", "String tests with OR should work: {}", result.out);
+    assert_eq!(result.text_out().trim(), "ok", "String tests with OR should work: {}", result.text_out());
 }
 
 #[tokio::test]
 async fn test_compound_with_comparison() {
     let kernel = Kernel::transient().unwrap();
     let result = kernel.execute(r#"X=5; [[ $X -gt 3 && $X -lt 10 ]] && echo "in range""#).await.unwrap();
-    assert_eq!(result.out.trim(), "in range", "Comparisons with AND should work: {}", result.out);
+    assert_eq!(result.text_out().trim(), "in range", "Comparisons with AND should work: {}", result.text_out());
 }
 
 #[tokio::test]
@@ -890,7 +890,7 @@ async fn test_compound_in_if() {
             echo "invalid"
         fi
     "#).await.unwrap();
-    assert_eq!(result.out.trim(), "valid", "Compound test in if should work: {}", result.out);
+    assert_eq!(result.text_out().trim(), "valid", "Compound test in if should work: {}", result.text_out());
 }
 
 #[tokio::test]
@@ -904,7 +904,7 @@ async fn test_compound_precedence() {
     // [[ -f /x || -d a && -d b ]] = [[ -f /x || (-d a && -d b) ]]
     // false || (true && true) = true
     let result = kernel.execute(&format!(r#"[[ -f /nonexistent_kaish_test || -d {a} && -d {b} ]] && echo "yes" || echo "no""#)).await.unwrap();
-    assert_eq!(result.out.trim(), "yes", "Precedence: && binds tighter than ||: {}", result.out);
+    assert_eq!(result.text_out().trim(), "yes", "Precedence: && binds tighter than ||: {}", result.text_out());
 }
 
 #[tokio::test]
@@ -912,7 +912,7 @@ async fn test_compound_short_circuit_and() {
     let kernel = Kernel::transient().unwrap();
     // If first fails, second shouldn't be evaluated (would error on /x)
     let result = kernel.execute(r#"[[ -f /nonexistent_kaish_test && $(cat /nonexistent_file) == "x" ]] && echo "yes" || echo "no""#).await.unwrap();
-    assert_eq!(result.out.trim(), "no", "AND should short-circuit: {}", result.out);
+    assert_eq!(result.text_out().trim(), "no", "AND should short-circuit: {}", result.text_out());
 }
 
 #[tokio::test]
@@ -922,7 +922,7 @@ async fn test_compound_short_circuit_or() {
     let d = dir.path().display();
     // If first succeeds, second shouldn't be evaluated
     let result = kernel.execute(&format!(r#"[[ -d {d} || $(cat /nonexistent_file) == "x" ]] && echo "yes" || echo "no""#)).await.unwrap();
-    assert_eq!(result.out.trim(), "yes", "OR should short-circuit: {}", result.out);
+    assert_eq!(result.text_out().trim(), "yes", "OR should short-circuit: {}", result.text_out());
 }
 
 // ============================================================================
@@ -943,7 +943,8 @@ async fn test_short_flag_with_value_head() {
     // head -n 3 should return first 3 lines
     let result = kernel.execute(&format!("head -n 3 {path}")).await.unwrap();
     assert!(result.ok(), "head -n 3 should succeed: err={}", result.err);
-    let lines: Vec<&str> = result.out.trim().lines().collect();
+    let text = result.text_out();
+    let lines: Vec<&str> = text.trim().lines().collect();
     assert_eq!(lines, vec!["1", "2", "3"], "head -n 3 should return first 3 lines, got: {:?}", lines);
 }
 
@@ -957,7 +958,8 @@ async fn test_short_flag_with_value_tail() {
     // tail -n 3 should return last 3 lines
     let result = kernel.execute(&format!("tail -n 3 {path}")).await.unwrap();
     assert!(result.ok(), "tail -n 3 should succeed: err={}", result.err);
-    let lines: Vec<&str> = result.out.trim().lines().collect();
+    let text = result.text_out();
+    let lines: Vec<&str> = text.trim().lines().collect();
     assert_eq!(lines, vec!["8", "9", "10"], "tail -n 3 should return last 3 lines, got: {:?}", lines);
 }
 
@@ -967,7 +969,8 @@ async fn test_short_flag_with_value_in_pipeline() {
     // Piped input: echo | head -n 3
     let result = kernel.execute(r#"printf "a\nb\nc\nd\ne\n" | head -n 3"#).await.unwrap();
     assert!(result.ok(), "pipeline head -n 3 should succeed: err={}", result.err);
-    let lines: Vec<&str> = result.out.trim().lines().collect();
+    let text = result.text_out();
+    let lines: Vec<&str> = text.trim().lines().collect();
     assert_eq!(lines, vec!["a", "b", "c"], "head -n 3 in pipeline should return first 3 lines, got: {:?}", lines);
 }
 
@@ -996,7 +999,8 @@ pwd
         .unwrap();
     assert!(result.ok(), "Should succeed: err={}", result.err);
     // pwd should NOT be "/", it should be the original working dir
-    let pwd_output = result.out.trim();
+    let text = result.text_out();
+    let pwd_output = text.trim();
     assert_ne!(
         pwd_output, "/",
         "CWD should not leak from command substitution, got: {}",
@@ -1021,10 +1025,10 @@ echo $X
         .unwrap();
     assert!(result.ok(), "Should succeed: err={}", result.err);
     assert_eq!(
-        result.out.trim(),
+        result.text_out().trim(),
         "outer",
         "Variable should not leak from command substitution: {}",
-        result.out
+        result.text_out()
     );
 }
 
@@ -1043,7 +1047,8 @@ pwd
         .await
         .unwrap();
     assert!(result.ok(), "Should succeed: err={}", result.err);
-    let lines: Vec<&str> = result.out.trim().lines().collect();
+    let text = result.text_out();
+    let lines: Vec<&str> = text.trim().lines().collect();
     assert!(lines.len() >= 2, "Expected at least 2 lines: {:?}", lines);
     assert!(
         lines[0].contains("dir: /"),
@@ -1074,9 +1079,9 @@ echo "captured: $X"
         .unwrap();
     assert!(result.ok(), "Should succeed: err={}", result.err);
     assert!(
-        result.out.contains("captured: /"),
+        result.text_out().contains("captured: /"),
         "Should capture '/' from subshell: {}",
-        result.out
+        result.text_out()
     );
 }
 
@@ -1085,7 +1090,7 @@ async fn test_colon_in_unquoted_arg() {
     let kernel = Kernel::transient().expect("kernel");
     let result = kernel.execute("echo foo::bar").await.expect("execute");
     assert!(result.ok(), "Should succeed: err={}", result.err);
-    assert_eq!(result.out.trim(), "foo::bar");
+    assert_eq!(result.text_out().trim(), "foo::bar");
 }
 
 #[tokio::test]
@@ -1093,7 +1098,7 @@ async fn test_colon_port_in_arg() {
     let kernel = Kernel::transient().expect("kernel");
     let result = kernel.execute("echo host:8080").await.expect("execute");
     assert!(result.ok(), "Should succeed: err={}", result.err);
-    assert_eq!(result.out.trim(), "host:8080");
+    assert_eq!(result.text_out().trim(), "host:8080");
 }
 
 #[tokio::test]
@@ -1104,7 +1109,7 @@ async fn test_colon_in_variable_assignment() {
         .await
         .expect("execute");
     assert!(result.ok(), "Should succeed: err={}", result.err);
-    assert_eq!(result.out.trim(), "/usr/bin:/usr/local/bin");
+    assert_eq!(result.text_out().trim(), "/usr/bin:/usr/local/bin");
 }
 
 // ============================================================================
@@ -1128,7 +1133,7 @@ async fn test_pipeline_large_output_no_deadlock() {
     assert!(result.is_ok(), "pipeline deadlocked on >64KB output");
     let exec = result.unwrap().unwrap();
     assert!(exec.ok(), "pipeline should succeed: err={}", exec.err);
-    assert_eq!(exec.out.trim(), "20000");
+    assert_eq!(exec.text_out().trim(), "20000");
 }
 
 // ============================================================================
@@ -1258,9 +1263,9 @@ done
         .await
         .unwrap();
     assert!(
-        result.out.contains("a") && result.out.contains("b") && result.out.contains("c"),
+        result.text_out().contains("a") && result.text_out().contains("b") && result.text_out().contains("c"),
         "Second for-loop should work after first loop's body failures: {}",
-        result.out
+        result.text_out()
     );
 }
 
@@ -1281,9 +1286,9 @@ echo "after first: [$i]"
         .unwrap();
     // Loop variable should not be visible after the loop
     assert!(
-        result.out.contains("after first: []"),
+        result.text_out().contains("after first: []"),
         "Loop var should not leak outside loop scope: {}",
-        result.out
+        result.text_out()
     );
 }
 
@@ -1307,9 +1312,9 @@ echo "should not reach"
         .await
         .unwrap();
     assert!(
-        !result.out.contains("should not reach"),
+        !result.text_out().contains("should not reach"),
         "set -e should exit after `false` following && chain: {}",
-        result.out
+        result.text_out()
     );
 }
 
@@ -1329,9 +1334,9 @@ echo "should not reach"
         .await
         .unwrap();
     assert!(
-        !result.out.contains("should not reach"),
+        !result.text_out().contains("should not reach"),
         "set -e should exit after `false` following || chain: {}",
-        result.out
+        result.text_out()
     );
 }
 
@@ -1350,13 +1355,13 @@ echo "reached"
         .await
         .unwrap();
     assert!(
-        result.out.contains("reached"),
+        result.text_out().contains("reached"),
         "false && ... should not trigger errexit: {}",
-        result.out
+        result.text_out()
     );
     assert!(
-        !result.out.contains("right"),
+        !result.text_out().contains("right"),
         "Right side should not run when left fails: {}",
-        result.out
+        result.text_out()
     );
 }

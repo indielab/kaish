@@ -141,8 +141,8 @@ mod tests {
         let args = ToolArgs::new();
         let result = KaishOutputLimit.execute(args, &mut ctx).await;
         assert!(result.ok());
-        assert!(result.out.contains("off"));
-        assert!(result.out.contains("unlimited"));
+        assert!(result.text_out().contains("off"));
+        assert!(result.text_out().contains("unlimited"));
     }
 
     #[tokio::test]
@@ -154,7 +154,7 @@ mod tests {
         let result = KaishOutputLimit.execute(args, &mut ctx).await;
         assert!(result.ok());
         assert_eq!(ctx.output_limit.max_bytes(), Some(64 * 1024));
-        assert!(result.out.contains("64K"));
+        assert!(result.text_out().contains("64K"));
     }
 
     #[tokio::test]

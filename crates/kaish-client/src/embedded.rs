@@ -212,7 +212,7 @@ mod tests {
         let client = EmbeddedClient::transient().expect("failed to create client");
         let result = client.execute("echo hello").await.expect("execute failed");
         assert!(result.ok());
-        assert_eq!(result.out.trim(), "hello");
+        assert_eq!(result.text_out().trim(), "hello");
     }
 
     #[tokio::test]
@@ -267,7 +267,7 @@ mod tests {
         client.execute("echo test").await.expect("execute failed");
         let last = client.last_result().await.expect("last_result failed");
         assert!(last.ok());
-        assert_eq!(last.out.trim(), "test");
+        assert_eq!(last.text_out().trim(), "test");
     }
 
     #[tokio::test]

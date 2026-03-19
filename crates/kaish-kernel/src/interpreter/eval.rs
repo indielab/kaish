@@ -700,7 +700,7 @@ fn result_to_value(result: &ExecResult) -> Value {
         return data.clone();
     }
     // Otherwise return stdout as single string (NO implicit splitting)
-    Value::String(result.out.trim_end().to_string())
+    Value::String(result.text_out().trim_end().to_string())
 }
 
 /// Perform regex match or not-match on two values.

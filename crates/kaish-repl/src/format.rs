@@ -20,7 +20,7 @@ use kaish_kernel::tools::OutputContext;
 /// structured OutputData if present, otherwise uses raw output.
 pub fn format_output(result: &ExecResult, context: OutputContext) -> String {
     // Use OutputData if present
-    if let Some(ref output) = result.output {
+    if let Some(output) = result.output() {
         return format_output_data(output, context);
     }
 
