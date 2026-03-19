@@ -79,6 +79,31 @@ async fn sandbox_write_and_read_via_vfs() {
 }
 
 #[tokio::test]
+async fn sandbox_append_redirect_via_vfs() {
+    let k = sandbox_kernel().await;
+    let r = k.execute("echo first > /tmp/app && echo second >> /tmp/app && cat /tmp/app")
+        .await.expect("execute failed");
+    assert!(r.ok());
+    assert_eq!(r.text_out().trim(), "first\nsecond");
+}
+
+#[tokio::test]
+async fn sandbox_test_builtin_cannot_probe_host() {
+    let k = sandbox_kernel().await;
+    // test -r should route through VFS, not the real filesystem.
+    // /etc/passwd exists on the host but not in MemoryFs.
+    let r = k.execute("test -r /etc/passwd").await.expect("execute failed");
+    assert!(!r.ok(), "test -r /etc/passwd should be false in sandbox (file doesn't exist in VFS)");
+
+    let r = k.execute("test -w /etc/shadow").await.expect("execute failed");
+    assert!(!r.ok(), "test -w /etc/shadow should be false in sandbox");
+
+    // But files written to VFS should be readable/writable
+    let r = k.execute("echo data > /tmp/probe && test -r /tmp/probe").await.expect("execute failed");
+    assert!(r.ok(), "test -r should work for VFS files");
+}
+
+#[tokio::test]
 async fn sandbox_external_commands_blocked() {
     let k = sandbox_kernel().await;
     // Use a command name that is definitely not a builtin

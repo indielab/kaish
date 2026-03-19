@@ -83,20 +83,24 @@ impl Tool for Bracket {
 
 /// Evaluate a test expression.
 async fn evaluate_test(args: ToolArgs, ctx: &mut ExecContext, bracket_mode: bool) -> ExecResult {
-    // Collect all positional arguments as strings
-    let mut tokens: Vec<String> = args
-        .positional
-        .iter()
-        .filter_map(|v| match v {
-            Value::String(s) => Some(s.clone()),
-            Value::Int(i) => Some(i.to_string()),
-            Value::Float(f) => Some(f.to_string()),
-            Value::Bool(b) => Some(if *b { "true" } else { "false" }.to_string()),
-            Value::Null => None,
-            Value::Json(json) => Some(json.to_string()),
-            Value::Blob(blob) => Some(format!("[blob: {} {}]", blob.formatted_size(), blob.content_type)),
-        })
-        .collect();
+    // Reconstruct the original token sequence from parsed ToolArgs.
+    // The schema-aware parser splits "-r" into args.flags, but test needs
+    // it as a positional operator. Prepend flags as "-{flag}" tokens.
+    let mut tokens: Vec<String> = Vec::new();
+    for flag in &args.flags {
+        tokens.push(format!("-{flag}"));
+    }
+    for v in &args.positional {
+        match v {
+            Value::String(s) => tokens.push(s.clone()),
+            Value::Int(i) => tokens.push(i.to_string()),
+            Value::Float(f) => tokens.push(f.to_string()),
+            Value::Bool(b) => tokens.push(if *b { "true" } else { "false" }.to_string()),
+            Value::Null => {}
+            Value::Json(json) => tokens.push(json.to_string()),
+            Value::Blob(blob) => tokens.push(format!("[blob: {} {}]", blob.formatted_size(), blob.content_type)),
+        }
+    }
 
     // In bracket mode, verify and remove trailing ]
     if bracket_mode {
@@ -250,19 +254,27 @@ async fn evaluate_unary(op: &str, arg: &str, ctx: &ExecContext) -> Result<bool, 
             }
         }
         "-r" => {
-            // Check if file is readable
             let path = ctx.resolve_path(arg);
-            check_readable(Path::new(&path))
+            match ctx.backend.stat(Path::new(&path)).await {
+                // MemoryFs has no permissions — assume readable if file exists
+                Ok(info) => Ok(info.permissions.is_none_or(|p| p & 0o444 != 0)),
+                Err(_) => Ok(false),
+            }
         }
         "-w" => {
-            // Check if file is writable
             let path = ctx.resolve_path(arg);
-            check_writable(Path::new(&path))
+            match ctx.backend.stat(Path::new(&path)).await {
+                Ok(info) => Ok(info.permissions.is_none_or(|p| p & 0o222 != 0)),
+                Err(_) => Ok(false),
+            }
         }
         "-x" => {
-            // Check if file is executable
             let path = ctx.resolve_path(arg);
-            check_executable(Path::new(&path))
+            match ctx.backend.stat(Path::new(&path)).await {
+                // Not executable by default when permissions unknown
+                Ok(info) => Ok(info.permissions.is_some_and(|p| p & 0o111 != 0)),
+                Err(_) => Ok(false),
+            }
         }
         "-s" => {
             // File exists and has size > 0
@@ -340,55 +352,6 @@ async fn evaluate_binary(
 fn parse_int(s: &str) -> Result<i64, String> {
     s.parse::<i64>()
         .map_err(|_| format!("invalid integer: {}", s))
-}
-
-/// Check if a path is readable by the current process.
-fn check_readable(path: &Path) -> Result<bool, String> {
-    // First check if file exists
-    if !path.exists() {
-        return Ok(false);
-    }
-    // Try to open for reading
-    Ok(std::fs::File::open(path).is_ok())
-}
-
-/// Check if a path is writable by the current process.
-fn check_writable(path: &Path) -> Result<bool, String> {
-    if !path.exists() {
-        return Ok(false);
-    }
-    // Try to open for writing (append mode to avoid truncating)
-    Ok(std::fs::OpenOptions::new()
-        .append(true)
-        .open(path)
-        .is_ok())
-}
-
-/// Check if a path is executable.
-fn check_executable(path: &Path) -> Result<bool, String> {
-    if !path.exists() {
-        return Ok(false);
-    }
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        match path.metadata() {
-            Ok(metadata) => {
-                let mode = metadata.permissions().mode();
-                // Check if any execute bit is set
-                Ok(mode & 0o111 != 0)
-            }
-            Err(_) => Ok(false),
-        }
-    }
-    #[cfg(not(unix))]
-    {
-        // On non-Unix platforms, check file extension
-        match path.extension().and_then(|e| e.to_str()) {
-            Some("exe") | Some("bat") | Some("cmd") | Some("com") => Ok(true),
-            _ => Ok(false),
-        }
-    }
 }
 
 #[cfg(test)]

@@ -4,6 +4,10 @@
 //! JSON `ExecResult` to stdout. Runs with `NoLocal` VFS and no external
 //! commands — a pure-function shell for text transforms.
 //!
+//! Uses synchronous stdin/stdout because tokio's `io-std` feature is not
+//! available on `wasm32-wasip1`. This is fine for a line-oriented REPL
+//! where each line is fully processed before reading the next.
+//!
 //! # Usage
 //!
 //! ```sh
@@ -67,7 +71,6 @@ async fn run() {
             "err": if result.err.is_empty() { None } else { Some(&result.err) },
         });
 
-        // Write JSON result followed by newline
         let _ = serde_json::to_writer(&mut stdout, &json);
         let _ = stdout.write_all(b"\n");
         let _ = stdout.flush();
