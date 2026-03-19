@@ -1,0 +1,13 @@
+[package]
+name = "kaish-wasi"
+description = "kaish as a WASI binary — a pure-function shell for sandboxed text transforms"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+
+[dependencies]
+kaish-kernel = { path = "../kaish-kernel", default-features = false }
+kaish-types = { path = "../kaish-types" }
+tokio = { version = "1", features = ["rt", "sync", "time", "macros", "io-util"] }
+serde_json = { workspace = true }

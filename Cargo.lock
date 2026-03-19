@@ -1264,6 +1264,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "kaish-wasi"
+version = "0.5.0"
+dependencies = [
+ "kaish-kernel",
+ "kaish-types",
+ "serde_json",
+ "tokio",
+]
+
+[[package]]
 name = "kqueue"
 version = "1.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"

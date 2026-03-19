@@ -7,6 +7,7 @@ members = [
     "crates/kaish-mcp",
     "crates/kaish-client",
     "crates/kaish-repl",
+    "crates/kaish-wasi",
 ]
 
 [workspace.package]
