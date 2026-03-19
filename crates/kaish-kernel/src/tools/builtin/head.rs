@@ -128,8 +128,9 @@ impl Tool for Head {
         });
 
         if let Some(byte_count) = bytes {
-            // Byte mode: output first N bytes (keep as text, no structure)
-            let output: String = input.chars().take(byte_count).collect();
+            // Byte mode: output first N bytes (POSIX head -c counts bytes, not chars)
+            let limit = byte_count.min(input.len());
+            let output = String::from_utf8_lossy(&input.as_bytes()[..limit]).into_owned();
             return ExecResult::with_output(OutputData::text(output));
         }
 
@@ -346,7 +347,7 @@ mod tests {
 
         let result = Head.execute(args, &mut ctx).await;
         assert!(result.ok());
-        assert_eq!(result.out, "one\nt");
+        assert_eq!(result.text_out().as_ref(), "one\nt");
     }
 
     #[tokio::test]
@@ -430,17 +431,17 @@ mod tests {
 
     #[tokio::test]
     async fn test_head_bytes_unicode() {
-        // Byte mode with multibyte chars
+        // Byte mode with multibyte chars — POSIX head -c counts bytes
         let mut ctx = make_ctx().await;
-        ctx.set_stdin("日本語".to_string()); // 9 bytes in UTF-8
+        ctx.set_stdin("日本語".to_string()); // 9 bytes in UTF-8, 3 bytes per char
 
         let mut args = ToolArgs::new();
         args.named.insert("bytes".to_string(), Value::Int(3));
 
         let result = Head.execute(args, &mut ctx).await;
         assert!(result.ok());
-        // Note: we're taking 3 chars (head -c counts chars not bytes in our impl)
-        assert_eq!(result.out.chars().count(), 3);
+        // 3 bytes = first UTF-8 char "日" (e6 97 a5)
+        assert_eq!(result.text_out().as_ref(), "日");
     }
 
     #[tokio::test]

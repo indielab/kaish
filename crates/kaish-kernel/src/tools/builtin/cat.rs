@@ -58,20 +58,18 @@ impl Tool for Cat {
                 }
             }
 
-            // Buffered path: read all stdin
-            if let Some(stdin) = ctx.read_stdin_to_string().await {
-                if number_lines {
-                    let numbered = stdin
-                        .lines()
-                        .enumerate()
-                        .map(|(i, line)| format!("{:6}\t{}", i + 1, line))
-                        .collect::<Vec<_>>()
-                        .join("\n");
-                    return ExecResult::with_output(OutputData::text(numbered));
-                }
-                return ExecResult::with_output(OutputData::text(stdin));
+            // Buffered path: read all stdin (empty stdin is valid — POSIX cat exits 0)
+            let stdin = ctx.read_stdin_to_string().await.unwrap_or_default();
+            if number_lines && !stdin.is_empty() {
+                let numbered = stdin
+                    .lines()
+                    .enumerate()
+                    .map(|(i, line)| format!("{:6}\t{}", i + 1, line))
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                return ExecResult::with_output(OutputData::text(numbered));
             }
-            return ExecResult::failure(1, "cat: missing path argument");
+            return ExecResult::with_output(OutputData::text(stdin));
         }
         // Collect paths, expanding any glob patterns
         let paths = match ctx.expand_paths(&args.positional).await {
@@ -169,12 +167,13 @@ mod tests {
 
     #[tokio::test]
     async fn test_cat_no_arg_no_stdin() {
+        // POSIX: cat with no args and no stdin exits 0 with empty output
         let mut ctx = make_ctx().await;
         let args = ToolArgs::new();
 
         let result = Cat.execute(args, &mut ctx).await;
-        assert!(!result.ok());
-        assert!(result.err.contains("missing"));
+        assert!(result.ok());
+        assert!(result.text_out().is_empty());
     }
 
     #[tokio::test]

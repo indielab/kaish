@@ -91,10 +91,9 @@ impl Tool for Tail {
         });
 
         if let Some(byte_count) = bytes {
-            // Byte mode: output last N bytes (keep as text, no structure)
-            let char_count = input.chars().count();
-            let skip = char_count.saturating_sub(byte_count);
-            let output: String = input.chars().skip(skip).collect();
+            // Byte mode: output last N bytes (POSIX tail -c counts bytes, not chars)
+            let start = input.len().saturating_sub(byte_count);
+            let output = String::from_utf8_lossy(&input.as_bytes()[start..]).into_owned();
             return ExecResult::with_output(OutputData::text(output));
         }
 
@@ -237,7 +236,7 @@ mod tests {
 
         let result = Tail.execute(args, &mut ctx).await;
         assert!(result.ok());
-        assert_eq!(result.out, "three");
+        assert_eq!(result.text_out().as_ref(), "three");
     }
 
     #[tokio::test]
@@ -322,17 +321,17 @@ mod tests {
 
     #[tokio::test]
     async fn test_tail_bytes_unicode() {
-        // Byte mode with multibyte chars
+        // Byte mode with multibyte chars — POSIX tail -c counts bytes
         let mut ctx = make_ctx().await;
-        ctx.set_stdin("abc日本語".to_string()); // 3 ASCII + 9 UTF-8 bytes
+        ctx.set_stdin("abc日本語".to_string()); // 3 ASCII + 9 UTF-8 bytes = 12 total
 
         let mut args = ToolArgs::new();
         args.named.insert("bytes".to_string(), Value::Int(3));
 
         let result = Tail.execute(args, &mut ctx).await;
         assert!(result.ok());
-        // Takes last 3 chars (our impl uses chars not bytes)
-        assert_eq!(result.out, "日本語");
+        // Last 3 bytes = last UTF-8 char "語" (e8 aa 9e)
+        assert_eq!(result.text_out().as_ref(), "語");
     }
 
     #[tokio::test]
