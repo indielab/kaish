@@ -1,15 +1,33 @@
-# CLAUDE.md
+# kaish
+
+**kaish** (会sh) is a predictable shell for AI agents, embeddable, and available as an MCP server.
 
 ## Project Overview
 
-**kaish** (会sh — "the gathering shell") is a predictable shell for AI agents, exposed as an MCP server.
-Part of [Kaijutsu](https://github.com/tobert/kaijutsu).
+会sh is stable and the language has settled down. There may still be some changes before 1.0
+for ergonomics or correctness. The MCP is mature and will continue to follow rmcp updates and
+utilize maximum MCP features. The repl is kept up to date to ensure that use case is possible.
+[Kaijutsu](https://github.com/tobert/kaijutsu) is the only known embedder of kaish and has the
+same maintainer, so API changes are still straightforward where they improve both projects.
 
-**Status**: Core implementation complete. Lexer, parser, interpreter, builtins, MCP server, VFS.
+**Philosophy**: 80% rule applied to POSIX/Bourne/bash shell. Kaish implements a `sh` subset that passes `shellcheck --enable=all`.
 
-**Philosophy**: 80% of a POSIX/Bourne/bash shell, 100% unambiguous. Bourne-compatible subset passes `shellcheck --enable=all`. Extensions (floats, typed params, scatter/gather) are outside ShellCheck's scope.
+**Explicitly dropped features**: process substitution `<(cmd)`, backticks, `eval`, word splitting
 
-**What's intentionally missing**: process substitution `<(cmd)`, backticks, `eval`
+## Crate Structure
+
+Eagerly read the `crates/kaish-types/` crate in full.
+
+```
+crates/
+├── kaish-types/     # Pure-data leaf crate: OutputData, ExecResult, Value, DirEntry, etc.
+├── kaish-glob/      # Glob matching and async file walking with gitignore support
+├── kaish-kernel/    # Core: lexer, parser, interpreter, tools, VFS, validator
+├── kaish-mcp/       # MCP server (expose kaish as an MCP tool)
+├── kaish-client/    # Client implementations (embedded)
+├── kaish-repl/      # Interactive REPL with rustyline
+└── kaish-wasi/      # WASI target (wasm32-wasip1)
+```
 
 ## Build Commands
 
@@ -37,23 +55,22 @@ cargo insta review                       # Interactive review of pending snapsho
 
 ### Code Style
 
-- Comments only for non-obvious "why"
+- Comments only for non-obvious intent or complex behavior
 - Avoid `mod.rs` — use `src/module_name.rs`
 - Full words for names, avoid abbreviations
 - Tokio for all async. Blocking in async: `tokio::task::block_in_place(|| ...)`
 
 ### Version Control
 
-- **Always add files by name** — no `git add -A` or `git add .`
+- **Always add files by name**
 - Run `cargo test` before committing
-- Models include attribution: `Co-Authored-By: Claude <claude@anthropic.com>`
 
 ## Architecture
 
 The 核 (kaku/kernel) is the unit of execution. Multiple frontends connect to the same kernel:
 
 ```
-Frontends (REPL, Script Runner, Embedded)
+Frontends (REPL, Embedded, MCP)
     ↓ KernelClient trait
         └── EmbeddedClient (direct in-process)
     ↓
@@ -67,30 +84,18 @@ Kernel (核)
     └── Job Scheduler (background jobs, scatter/gather)
 ```
 
-### Crate Structure
-
-```
-crates/
-├── kaish-types/     # Pure-data leaf crate: OutputData, ExecResult, Value, DirEntry, etc.
-├── kaish-glob/      # Glob matching and async file walking with gitignore support
-├── kaish-kernel/    # Core: lexer, parser, interpreter, tools, VFS, validator
-├── kaish-mcp/       # MCP server (expose kaish as an MCP tool)
-├── kaish-client/    # Client implementations (embedded)
-└── kaish-repl/      # Interactive REPL with rustyline
-```
-
-The MCP server binary accepts `--init <path>` (repeatable) to load `.kai` scripts before each `execute()` call.
-
 ## Testing
 
 Uses **rstest** for parameterized tests and **insta** for snapshot testing.
-Tests live in `crates/kaish-kernel/tests/`. Snapshots in `snapshots/*.snap`.
+Tests live in `crates/kaish-kernel/tests/`. Snapshots in `crates/kaish-kernel/tests/snapshots/*.snap`.
 
 ## Documentation
 
 - `docs/LANGUAGE.md` — complete language reference
-- `docs/help/*.md` — help system content, embedded at compile time into the kernel
+- `crates/kaish-kernel/docs/help/*.md` — help system content, embedded at compile time into the kernel
 
 **Keep in sync:** When adding builtins or changing syntax, update the relevant help files.
 The builtin list in `help builtins` is generated dynamically from tool schemas, but
 `syntax.md` and `limits.md` need manual updates.
+
+
