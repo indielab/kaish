@@ -17,6 +17,25 @@ use std::path::Path;
 use super::result::ExecResult;
 use super::scope::Scope;
 
+/// Strip leading tabs from each line, per POSIX `<<-EOF` heredoc semantics.
+///
+/// Only tab characters are stripped (not spaces), matching POSIX. Applied at
+/// materialization time so source byte offsets in the AST remain aligned with
+/// the original source for span-tracking purposes.
+pub fn strip_leading_tabs(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut at_line_start = true;
+    for ch in s.chars() {
+        if at_line_start && ch == '\t' {
+            // skip leading tabs at start of line
+            continue;
+        }
+        out.push(ch);
+        at_line_start = ch == '\n';
+    }
+    out
+}
+
 /// Errors that can occur during expression evaluation.
 #[derive(Debug, Clone, PartialEq)]
 pub enum EvalError {
@@ -130,6 +149,22 @@ impl<'a, E: Executor> Evaluator<'a, E> {
             Expr::Literal(value) => self.eval_literal(value),
             Expr::VarRef(path) => self.eval_var_ref(path),
             Expr::Interpolated(parts) => self.eval_interpolated(parts),
+            Expr::HereDocBody { parts, strip_tabs } => {
+                // Materialize the body using the existing interpolation logic,
+                // then apply POSIX tab stripping for the `<<-` form.
+                let unwrapped: Vec<StringPart> =
+                    parts.iter().map(|sp| sp.part.clone()).collect();
+                let value = self.eval_interpolated(&unwrapped)?;
+                if *strip_tabs {
+                    if let Value::String(s) = value {
+                        Ok(Value::String(strip_leading_tabs(&s)))
+                    } else {
+                        Ok(value)
+                    }
+                } else {
+                    Ok(value)
+                }
+            }
             Expr::BinaryOp { left, op, right } => self.eval_binary_op(left, *op, right),
             Expr::CommandSubst(pipeline) => self.eval_command_subst(pipeline),
             Expr::Test(test_expr) => self.eval_test(test_expr),

@@ -777,6 +777,20 @@ fn eval_simple_expr(expr: &Expr, ctx: &ExecContext) -> Option<Value> {
             Some(Value::String(result))
         }
         Expr::GlobPattern(s) => Some(Value::String(s.clone())),
+        Expr::HereDocBody { parts, strip_tabs } => {
+            // Heredoc body materialization for redirect targets. Reuses the
+            // shared sync part-walker; tab stripping is applied after the
+            // body is assembled, matching the interpreter's eval path.
+            let unwrapped: Vec<crate::ast::StringPart> =
+                parts.iter().map(|sp| sp.part.clone()).collect();
+            let raw = eval_string_parts_sync(&unwrapped, ctx);
+            let body = if *strip_tabs {
+                crate::interpreter::strip_leading_tabs(&raw)
+            } else {
+                raw
+            };
+            Some(Value::String(body))
+        }
         _ => None, // Binary ops and command subst need more context
     }
 }

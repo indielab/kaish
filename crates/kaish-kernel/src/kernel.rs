@@ -890,10 +890,10 @@ impl Kernel {
         let program = parse(input).map_err(|errors| {
             let msg = errors
                 .iter()
-                .map(|e| e.to_string())
+                .map(|e| e.format(input))
                 .collect::<Vec<_>>()
-                .join("; ");
-            anyhow::anyhow!("parse error: {}", msg)
+                .join("\n");
+            anyhow::anyhow!("parse error:\n{}", msg)
         })?;
 
         // AST display mode: show AST instead of executing
@@ -1652,6 +1652,7 @@ impl Kernel {
                 format!("${{{}}}", name)
             }
             Expr::Interpolated(_) => "\"...\"".to_string(),
+            Expr::HereDocBody { .. } => "<<heredoc".to_string(),
             _ => "...".to_string(),
         }
     }
@@ -2089,6 +2090,17 @@ impl Kernel {
                     result.push_str(&self.eval_string_part_async(part).await?);
                 }
                 Ok(Value::String(result))
+            }
+            Expr::HereDocBody { parts, strip_tabs } => {
+                let mut result = String::new();
+                for sp in parts {
+                    result.push_str(&self.eval_string_part_async(&sp.part).await?);
+                }
+                if *strip_tabs {
+                    Ok(Value::String(crate::interpreter::strip_leading_tabs(&result)))
+                } else {
+                    Ok(Value::String(result))
+                }
             }
             Expr::BinaryOp { left, op, right } => {
                 match op {
@@ -3645,6 +3657,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[ignore = "exec replaces the test binary via CommandExt::exec, hangs libtest; cannot be run under cargo test"]
     async fn test_exec_builtin() {
         let kernel = Kernel::transient().expect("failed to create kernel");
         // argv is now a space-separated string or JSON array string

@@ -254,6 +254,17 @@ pub fn format_expr(expr: &Expr) -> String {
                 .collect();
             format!("(interpolated {})", parts_str.join(" "))
         }
+        Expr::HereDocBody { parts, strip_tabs } => {
+            let parts_str: Vec<String> = parts
+                .iter()
+                .map(|sp| format_string_part(&sp.part))
+                .collect();
+            format!(
+                "(heredoc-body strip-tabs={} {})",
+                strip_tabs,
+                parts_str.join(" ")
+            )
+        }
         Expr::BinaryOp { left, op, right } => {
             let op_str = match op {
                 BinaryOp::And => "and",

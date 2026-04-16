@@ -211,6 +211,23 @@ pub enum RedirectKind {
     MergeStdout,
 }
 
+/// A `StringPart` together with its byte offset in the original source.
+///
+/// Used by [`Expr::HereDocBody`] so the validator and interpreter can attribute
+/// diagnostics to a precise location inside an interpolated heredoc body.
+/// Double-quoted strings continue to use the spanless [`Expr::Interpolated`];
+/// universal spanning is a separate, larger refactor (see plan
+/// `make-heredocs-precious-puzzle`).
+#[derive(Debug, Clone, PartialEq)]
+pub struct SpannedPart {
+    /// The part itself.
+    pub part: StringPart,
+    /// Byte offset of this part in the original source string.
+    pub offset: usize,
+    /// Byte length of the part's source representation.
+    pub len: usize,
+}
+
 /// An expression that evaluates to a value.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Expr {
@@ -220,6 +237,18 @@ pub enum Expr {
     VarRef(VarPath),
     /// String with interpolation: `"hello ${NAME}"` or `"hello $NAME"`
     Interpolated(Vec<StringPart>),
+    /// Interpolated heredoc body with per-part spans for diagnostic precision.
+    ///
+    /// Heredoc bodies use this variant; double-quoted strings still use
+    /// `Interpolated` to keep the existing path untouched. `strip_tabs` is
+    /// `true` for the `<<-EOF` form — leading tabs on each body line are
+    /// stripped from `StringPart::Literal` content at materialization time
+    /// (POSIX semantics); offsets in `parts` reference the verbatim source
+    /// so spans remain meaningful.
+    HereDocBody {
+        parts: Vec<SpannedPart>,
+        strip_tabs: bool,
+    },
     /// Binary operation: `a && b`, `a || b`
     BinaryOp {
         left: Box<Expr>,

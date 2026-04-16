@@ -5,8 +5,8 @@
 
 use crate::ast::{
     Arg, Assignment, BinaryOp, CaseBranch, CaseStmt, Command, Expr, FileTestOp, ForLoop, IfStmt,
-    Pipeline, Program, Redirect, RedirectKind, Stmt, StringPart, StringTestOp, TestCmpOp, TestExpr,
-    ToolDef, Value, VarPath, VarSegment, WhileLoop,
+    Pipeline, Program, Redirect, RedirectKind, SpannedPart, Stmt, StringPart, StringTestOp,
+    TestCmpOp, TestExpr, ToolDef, Value, VarPath, VarSegment, WhileLoop,
 };
 use crate::lexer::{self, HereDocData, Token};
 use chumsky::{input::ValueInput, prelude::*};
@@ -122,6 +122,338 @@ fn stmt_to_pipeline(stmt: Stmt) -> Option<Pipeline> {
         }),
         _ => None,
     }
+}
+
+/// Parse an unquoted heredoc body's interpolation while tracking each part's
+/// byte offset in the source.
+///
+/// `base_offset` is added to every part's offset so callers can attribute
+/// positions to a larger source (e.g., heredoc body inside the original
+/// script). Returns parts in source order with offset+len populated.
+///
+/// **Heredoc-specific behaviour**: per POSIX, unquoted heredoc bodies process
+/// three backslash escapes — `\$` (suppress expansion), `\\` (literal
+/// backslash), and `\<newline>` (line continuation). All other backslashes
+/// are kept verbatim. This differs from [`parse_interpolated_string`], which
+/// is called on double-quoted string content where the lexer has already
+/// processed escapes via `__KAISH_ESCAPED_DOLLAR__`.
+///
+/// This sibling of [`parse_interpolated_string`] duplicates parsing logic
+/// for now; unifying them behind a position-tracking core is a follow-up
+/// cleanup. Behaviour MUST stay aligned for the non-escape paths — bug fixes
+/// for the shared interpolation logic here should land there as well.
+fn parse_interpolated_string_spanned(s: &str, base_offset: usize) -> Vec<SpannedPart> {
+    let s = s.replace("__KAISH_ESCAPED_DOLLAR__", "\x00DOLLAR\x00");
+
+    let chars_vec: Vec<char> = s.chars().collect();
+    let mut i = 0;
+    let mut pos: usize = 0;
+
+    let mut parts: Vec<SpannedPart> = Vec::new();
+    let mut current_text = String::new();
+    let mut current_text_start: usize = pos;
+
+    let push_literal =
+        |current_text: &mut String, start: &mut usize, end: usize, parts: &mut Vec<SpannedPart>| {
+            if !current_text.is_empty() {
+                parts.push(SpannedPart {
+                    part: StringPart::Literal(std::mem::take(current_text)),
+                    offset: base_offset + *start,
+                    len: end - *start,
+                });
+                *start = end;
+            }
+        };
+
+    while i < chars_vec.len() {
+        let ch = chars_vec[i];
+
+        if ch == '\x00' {
+            // Escaped-dollar marker: \x00 DOLLAR \x00 → literal '$'
+            let start = pos;
+            i += 1;
+            pos += 1;
+            let mut marker = String::new();
+            while let Some(&c) = chars_vec.get(i) {
+                if c == '\x00' {
+                    i += 1;
+                    pos += 1;
+                    break;
+                }
+                marker.push(c);
+                i += 1;
+                pos += c.len_utf8();
+            }
+            if marker == "DOLLAR" {
+                if current_text.is_empty() {
+                    current_text_start = start;
+                }
+                current_text.push('$');
+            }
+        } else if ch == '\\' {
+            // POSIX heredoc-body escape processing for unquoted heredocs.
+            // Only `\$`, `\\`, and `\<newline>` are escapes; everything else
+            // keeps the backslash verbatim. Each case advances `pos` by the
+            // bytes consumed from the source so subsequent part offsets stay
+            // anchored to original-source coordinates.
+            let next = chars_vec.get(i + 1).copied();
+            match next {
+                Some('$') => {
+                    if current_text.is_empty() {
+                        current_text_start = pos;
+                    }
+                    current_text.push('$');
+                    i += 2;
+                    pos += 2;
+                }
+                Some('\\') => {
+                    if current_text.is_empty() {
+                        current_text_start = pos;
+                    }
+                    current_text.push('\\');
+                    i += 2;
+                    pos += 2;
+                }
+                Some('\n') => {
+                    // Line continuation: consume both bytes, emit nothing.
+                    // The literal run resumes on the next line.
+                    i += 2;
+                    pos += 2;
+                    if current_text.is_empty() {
+                        current_text_start = pos;
+                    }
+                }
+                Some('\r') => {
+                    // \<CR> or \<CR><LF>: line continuation
+                    i += 2;
+                    pos += 2;
+                    if chars_vec.get(i) == Some(&'\n') {
+                        i += 1;
+                        pos += 1;
+                    }
+                    if current_text.is_empty() {
+                        current_text_start = pos;
+                    }
+                }
+                _ => {
+                    // Other backslash sequences: keep `\` literally,
+                    // consume only the backslash. The next iteration will
+                    // process the following char on its own merits.
+                    if current_text.is_empty() {
+                        current_text_start = pos;
+                    }
+                    current_text.push('\\');
+                    i += 1;
+                    pos += 1;
+                }
+            }
+        } else if ch == '$' {
+            // Possible expansion. Save current run before peeking ahead.
+            let part_start = pos;
+            let next = chars_vec.get(i + 1).copied();
+
+            if next == Some('(') && chars_vec.get(i + 2) != Some(&'(') {
+                // $(...) command substitution
+                push_literal(&mut current_text, &mut current_text_start, pos, &mut parts);
+                i += 2; // consume "$("
+                pos += 2;
+                let mut cmd_content = String::new();
+                let mut depth = 1;
+                while let Some(&c) = chars_vec.get(i) {
+                    i += 1;
+                    pos += c.len_utf8();
+                    if c == '(' {
+                        depth += 1;
+                        cmd_content.push(c);
+                    } else if c == ')' {
+                        depth -= 1;
+                        if depth == 0 {
+                            break;
+                        }
+                        cmd_content.push(c);
+                    } else {
+                        cmd_content.push(c);
+                    }
+                }
+                let inserted = if let Ok(program) = parse(&cmd_content) {
+                    if let Some(stmt) = program.statements.first() {
+                        if let Some(pipeline) = stmt_to_pipeline(stmt.clone()) {
+                            parts.push(SpannedPart {
+                                part: StringPart::CommandSubst(pipeline),
+                                offset: base_offset + part_start,
+                                len: pos - part_start,
+                            });
+                            true
+                        } else {
+                            false
+                        }
+                    } else {
+                        false
+                    }
+                } else {
+                    false
+                };
+                if inserted {
+                    // Successfully pushed a CommandSubst; the next literal
+                    // run will start after the closing ')'.
+                    current_text_start = pos;
+                } else {
+                    // Fall back to literal text. The literal run starts at
+                    // the leading '$' (set above only if current_text was
+                    // empty); leave current_text_start alone otherwise so we
+                    // don't lose an in-progress run.
+                    if current_text.is_empty() {
+                        current_text_start = part_start;
+                    }
+                    current_text.push_str("$(");
+                    current_text.push_str(&cmd_content);
+                    current_text.push(')');
+                }
+            } else if next == Some('{') {
+                push_literal(&mut current_text, &mut current_text_start, pos, &mut parts);
+                i += 2; // consume "${"
+                pos += 2;
+                let mut var_content = String::new();
+                let mut depth = 1;
+                while let Some(&c) = chars_vec.get(i) {
+                    i += 1;
+                    pos += c.len_utf8();
+                    if c == '{' && var_content.ends_with('$') {
+                        depth += 1;
+                        var_content.push(c);
+                    } else if c == '}' {
+                        depth -= 1;
+                        if depth == 0 {
+                            break;
+                        }
+                        var_content.push(c);
+                    } else {
+                        var_content.push(c);
+                    }
+                }
+                let part = if let Some(name) = var_content.strip_prefix('#') {
+                    StringPart::VarLength(name.to_string())
+                } else if var_content.starts_with("__ARITH:") && var_content.ends_with("__") {
+                    let expr = var_content
+                        .strip_prefix("__ARITH:")
+                        .and_then(|s| s.strip_suffix("__"))
+                        .unwrap_or("");
+                    StringPart::Arithmetic(expr.to_string())
+                } else if let Some(colon_idx) = find_default_separator_in_content(&var_content) {
+                    let name = var_content[..colon_idx].to_string();
+                    let default_str = &var_content[colon_idx + 2..];
+                    // Default value spans recursively kept relative to the
+                    // outer body — the inner parts get their own offsets via
+                    // the recursive call when needed. For now, the default's
+                    // parts are stored without spans (default is a Vec<StringPart>).
+                    let default = parse_interpolated_string(default_str);
+                    StringPart::VarWithDefault { name, default }
+                } else {
+                    StringPart::Var(parse_varpath(&format!("${{{}}}", var_content)))
+                };
+                parts.push(SpannedPart {
+                    part,
+                    offset: base_offset + part_start,
+                    len: pos - part_start,
+                });
+                current_text_start = pos;
+            } else if next.map(|c| c.is_ascii_digit()).unwrap_or(false) {
+                push_literal(&mut current_text, &mut current_text_start, pos, &mut parts);
+                i += 1; // consume '$'
+                pos += 1;
+                if let Some(&digit) = chars_vec.get(i) {
+                    let n = digit.to_digit(10).unwrap_or(0) as usize;
+                    i += 1;
+                    pos += digit.len_utf8();
+                    parts.push(SpannedPart {
+                        part: StringPart::Positional(n),
+                        offset: base_offset + part_start,
+                        len: pos - part_start,
+                    });
+                }
+                current_text_start = pos;
+            } else if next == Some('@') {
+                push_literal(&mut current_text, &mut current_text_start, pos, &mut parts);
+                i += 2; // consume "$@"
+                pos += 2;
+                parts.push(SpannedPart {
+                    part: StringPart::AllArgs,
+                    offset: base_offset + part_start,
+                    len: pos - part_start,
+                });
+                current_text_start = pos;
+            } else if next == Some('#') {
+                push_literal(&mut current_text, &mut current_text_start, pos, &mut parts);
+                i += 2; // consume "$#"
+                pos += 2;
+                parts.push(SpannedPart {
+                    part: StringPart::ArgCount,
+                    offset: base_offset + part_start,
+                    len: pos - part_start,
+                });
+                current_text_start = pos;
+            } else if next == Some('?') {
+                push_literal(&mut current_text, &mut current_text_start, pos, &mut parts);
+                i += 2; // consume "$?"
+                pos += 2;
+                parts.push(SpannedPart {
+                    part: StringPart::LastExitCode,
+                    offset: base_offset + part_start,
+                    len: pos - part_start,
+                });
+                current_text_start = pos;
+            } else if next == Some('$') {
+                push_literal(&mut current_text, &mut current_text_start, pos, &mut parts);
+                i += 2; // consume "$$"
+                pos += 2;
+                parts.push(SpannedPart {
+                    part: StringPart::CurrentPid,
+                    offset: base_offset + part_start,
+                    len: pos - part_start,
+                });
+                current_text_start = pos;
+            } else if next.map(|c| c.is_ascii_alphabetic() || c == '_').unwrap_or(false) {
+                push_literal(&mut current_text, &mut current_text_start, pos, &mut parts);
+                i += 1; // consume '$'
+                pos += 1;
+                let mut var_name = String::new();
+                while let Some(&c) = chars_vec.get(i) {
+                    if c.is_ascii_alphanumeric() || c == '_' {
+                        var_name.push(c);
+                        i += 1;
+                        pos += c.len_utf8();
+                    } else {
+                        break;
+                    }
+                }
+                parts.push(SpannedPart {
+                    part: StringPart::Var(VarPath::simple(var_name)),
+                    offset: base_offset + part_start,
+                    len: pos - part_start,
+                });
+                current_text_start = pos;
+            } else {
+                // Bare $ — treat as literal
+                if current_text.is_empty() {
+                    current_text_start = pos;
+                }
+                current_text.push(ch);
+                i += 1;
+                pos += 1;
+            }
+        } else {
+            if current_text.is_empty() {
+                current_text_start = pos;
+            }
+            current_text.push(ch);
+            i += 1;
+            pos += ch.len_utf8();
+        }
+    }
+
+    push_literal(&mut current_text, &mut current_text_start, pos, &mut parts);
+
+    parts
 }
 
 fn parse_interpolated_string(s: &str) -> Vec<StringPart> {
@@ -324,6 +656,46 @@ fn parse_interpolated_string(s: &str) -> Vec<StringPart> {
 pub struct ParseError {
     pub span: Span,
     pub message: String,
+}
+
+impl ParseError {
+    /// Format the error against the original source, emitting a 1-indexed
+    /// `line:col [parse]: <message>` prefix and a snippet of the offending
+    /// line. Mirrors `ValidationIssue::format` so error reporting feels
+    /// consistent across pipeline phases.
+    pub fn format(&self, source: &str) -> String {
+        let start = self.span.start;
+        let mut line = 1usize;
+        let mut col = 1usize;
+        for (i, ch) in source.char_indices() {
+            if i >= start {
+                break;
+            }
+            if ch == '\n' {
+                line += 1;
+                col = 1;
+            } else {
+                col += 1;
+            }
+        }
+        let line_content = {
+            let line_start = source[..start.min(source.len())]
+                .rfind('\n')
+                .map_or(0, |i| i + 1);
+            let line_end = source[start.min(source.len())..]
+                .find('\n')
+                .map_or(source.len(), |i| start + i);
+            source.get(line_start..line_end).unwrap_or("")
+        };
+        if line_content.is_empty() {
+            format!("{}:{} [parse]: {}", line, col, self.message)
+        } else {
+            format!(
+                "{}:{} [parse]: {}\n  | {}",
+                line, col, self.message, line_content
+            )
+        }
+    }
 }
 
 impl std::fmt::Display for ParseError {
@@ -1089,23 +1461,40 @@ where
     // Here-doc redirect: << content
     // Quoted delimiters (<<'EOF' or <<"EOF") produce literal heredocs (no expansion).
     // Unquoted delimiters produce interpolated heredocs (variables are expanded).
+    // For literal heredocs the `<<-EOF` tab stripping is applied here at parse
+    // time (the body is fully known); for interpolated heredocs the stripping
+    // is deferred to the interpreter so source byte offsets in `parts` stay
+    // aligned with the original source for span reporting.
     let heredoc_redirect = just(Token::HereDocStart)
         .ignore_then(select! { Token::HereDoc(data) => data })
         .map(|data: HereDocData| {
             let target = if data.literal {
-                Expr::Literal(Value::String(data.content))
+                let body = if data.strip_tabs {
+                    crate::interpreter::strip_leading_tabs(&data.content)
+                } else {
+                    data.content
+                };
+                Expr::Literal(Value::String(body))
             } else {
-                let parts = parse_interpolated_string(&data.content);
-                // If there's only one literal part, simplify to Expr::Literal
-                if parts.len() == 1 {
-                    if let StringPart::Literal(text) = &parts[0] {
+                let parts = parse_interpolated_string_spanned(
+                    &data.content,
+                    data.body_start_offset,
+                );
+                // If there's only one literal part and no tab stripping is
+                // needed, simplify to Expr::Literal — keeps the AST shape
+                // identical to the pre-spans path for trivial bodies.
+                if parts.len() == 1 && !data.strip_tabs {
+                    if let StringPart::Literal(text) = &parts[0].part {
                         return Redirect {
                             kind: RedirectKind::HereDoc,
                             target: Expr::Literal(Value::String(text.clone())),
                         };
                     }
                 }
-                Expr::Interpolated(parts)
+                Expr::HereDocBody {
+                    parts,
+                    strip_tabs: data.strip_tabs,
+                }
             };
             Redirect {
                 kind: RedirectKind::HereDoc,
@@ -3117,5 +3506,178 @@ cmd < "input.txt"
             }
             other => panic!("expected Exit(1), got {:?}", other),
         }
+    }
+
+    // ========================================================================
+    // parse_interpolated_string_spanned — body-internal span tracking for
+    // heredoc bodies. The byte offsets these tests pin become validator
+    // issue spans via the HereDocBody → SpannedPart flow.
+    // ========================================================================
+
+    #[test]
+    fn spanned_literal_only_records_byte_range() {
+        let parts = parse_interpolated_string_spanned("hello world", 100);
+        assert_eq!(parts.len(), 1);
+        assert!(matches!(&parts[0].part, StringPart::Literal(s) if s == "hello world"));
+        assert_eq!(parts[0].offset, 100, "base_offset must propagate to literals");
+        assert_eq!(parts[0].len, 11);
+    }
+
+    #[test]
+    fn spanned_braced_var_at_zero() {
+        let parts = parse_interpolated_string_spanned("${X}", 50);
+        assert_eq!(parts.len(), 1);
+        assert!(matches!(&parts[0].part, StringPart::Var(_)));
+        assert_eq!(parts[0].offset, 50);
+        assert_eq!(parts[0].len, 4); // "${X}"
+    }
+
+    #[test]
+    fn spanned_simple_var_then_literal() {
+        let parts = parse_interpolated_string_spanned("$X end", 10);
+        assert_eq!(parts.len(), 2);
+        assert!(matches!(&parts[0].part, StringPart::Var(_)));
+        assert_eq!(parts[0].offset, 10);
+        assert_eq!(parts[0].len, 2); // "$X"
+        assert!(matches!(&parts[1].part, StringPart::Literal(s) if s == " end"));
+        assert_eq!(parts[1].offset, 12);
+        assert_eq!(parts[1].len, 4);
+    }
+
+    #[test]
+    fn spanned_mixed_literal_var_literal() {
+        let parts = parse_interpolated_string_spanned("hi ${X} bye", 0);
+        assert_eq!(parts.len(), 3);
+        // "hi "
+        assert!(matches!(&parts[0].part, StringPart::Literal(s) if s == "hi "));
+        assert_eq!(parts[0].offset, 0);
+        assert_eq!(parts[0].len, 3);
+        // ${X}
+        assert!(matches!(&parts[1].part, StringPart::Var(_)));
+        assert_eq!(parts[1].offset, 3);
+        assert_eq!(parts[1].len, 4);
+        // " bye"
+        assert!(matches!(&parts[2].part, StringPart::Literal(s) if s == " bye"));
+        assert_eq!(parts[2].offset, 7);
+        assert_eq!(parts[2].len, 4);
+    }
+
+    #[test]
+    fn spanned_positional_param() {
+        let parts = parse_interpolated_string_spanned("$1 done", 0);
+        assert_eq!(parts.len(), 2);
+        assert!(matches!(&parts[0].part, StringPart::Positional(1)));
+        assert_eq!(parts[0].offset, 0);
+        assert_eq!(parts[0].len, 2); // "$1"
+    }
+
+    #[test]
+    fn spanned_special_dollar_dollar() {
+        let parts = parse_interpolated_string_spanned("$$", 5);
+        assert_eq!(parts.len(), 1);
+        assert!(matches!(&parts[0].part, StringPart::CurrentPid));
+        assert_eq!(parts[0].offset, 5);
+        assert_eq!(parts[0].len, 2);
+    }
+
+    #[test]
+    fn spanned_arithmetic_marker_recognised() {
+        // The lexer wraps arithmetic markers as ${__ARITH:expr__} for
+        // interpolated heredocs; the spanned parser must produce
+        // StringPart::Arithmetic for that shape.
+        let parts = parse_interpolated_string_spanned("${__ARITH:1+2__}", 0);
+        assert_eq!(parts.len(), 1);
+        assert!(matches!(&parts[0].part, StringPart::Arithmetic(e) if e == "1+2"));
+    }
+
+    #[test]
+    fn spanned_default_separator_yields_var_with_default() {
+        let parts = parse_interpolated_string_spanned("${X:-fallback}", 0);
+        assert_eq!(parts.len(), 1);
+        assert!(matches!(&parts[0].part, StringPart::VarWithDefault { .. }));
+        assert_eq!(parts[0].offset, 0);
+        assert_eq!(parts[0].len, 14); // "${X:-fallback}"
+    }
+
+    #[test]
+    fn spanned_no_dollar_runs_one_literal() {
+        let parts = parse_interpolated_string_spanned("plain text only", 7);
+        assert_eq!(parts.len(), 1);
+        assert!(matches!(&parts[0].part, StringPart::Literal(s) if s == "plain text only"));
+        assert_eq!(parts[0].offset, 7);
+        assert_eq!(parts[0].len, 15);
+    }
+
+    #[test]
+    fn spanned_matches_unspanned_part_count() {
+        // Spanned and spanless variants must agree on the part decomposition.
+        // Bug fixes in one should land in the other.
+        let cases = [
+            "hello",
+            "$X",
+            "${X}",
+            "${X:-d}",
+            "hi $A and $B",
+            "$0 $1 $2",
+            "$$ $? $#",
+        ];
+        for s in &cases {
+            let unspanned = parse_interpolated_string(s);
+            let spanned = parse_interpolated_string_spanned(s, 0);
+            assert_eq!(
+                unspanned.len(),
+                spanned.len(),
+                "part count differs for {:?}",
+                s
+            );
+        }
+    }
+
+    #[test]
+    fn spanned_multibyte_utf8_before_var_uses_byte_offsets() {
+        // 🚀 is 4 bytes in UTF-8 and a space is 1 byte, so the literal
+        // prefix is 5 bytes total. `${X}` then sits at byte offset 5.
+        // Right-by-luck for char-vs-byte indexing is precisely what this
+        // test catches: if someone swaps .len_utf8() for 1, offset becomes 2.
+        let parts = parse_interpolated_string_spanned("🚀 ${X}", 0);
+        assert_eq!(parts.len(), 2);
+
+        assert!(matches!(&parts[0].part, StringPart::Literal(s) if s == "🚀 "));
+        assert_eq!(parts[0].offset, 0);
+        assert_eq!(parts[0].len, 5, "literal len must be bytes, not chars");
+
+        assert!(matches!(&parts[1].part, StringPart::Var(_)));
+        assert_eq!(parts[1].offset, 5, "var offset must be bytes, not chars");
+        assert_eq!(parts[1].len, 4);
+    }
+
+    #[test]
+    fn spanned_multibyte_utf8_pure_literal_is_byte_length() {
+        // "hello 世界 world": 5 + 1 + 6 (3 per CJK char) + 1 + 5 = 18 bytes,
+        // 13 chars. The `len` field must report 18, not 13.
+        let parts = parse_interpolated_string_spanned("hello 世界 world", 0);
+        assert_eq!(parts.len(), 1);
+        assert!(matches!(&parts[0].part, StringPart::Literal(s) if s == "hello 世界 world"));
+        assert_eq!(parts[0].offset, 0);
+        assert_eq!(parts[0].len, 18);
+    }
+
+    #[test]
+    fn spanned_escape_dollar_consumes_two_bytes_emits_one_char() {
+        // `\$` is 2 source bytes and resolves to a single literal `$`.
+        // The literal part's `len` should reflect the SOURCE length (2).
+        let parts = parse_interpolated_string_spanned("\\$", 0);
+        assert_eq!(parts.len(), 1);
+        assert!(matches!(&parts[0].part, StringPart::Literal(s) if s == "$"));
+        assert_eq!(parts[0].offset, 0);
+        assert_eq!(parts[0].len, 2, "len is source byte length, not rendered length");
+    }
+
+    #[test]
+    fn spanned_escape_backslash_collapses_pair_to_one() {
+        let parts = parse_interpolated_string_spanned("\\\\", 0);
+        assert_eq!(parts.len(), 1);
+        assert!(matches!(&parts[0].part, StringPart::Literal(s) if s == "\\"));
+        assert_eq!(parts[0].len, 2);
     }
 }

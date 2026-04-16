@@ -4,8 +4,9 @@ use std::collections::HashMap;
 
 use crate::ast::{
     Arg, Assignment, CaseBranch, CaseStmt, Command, Expr, ForLoop, IfStmt, Pipeline, Program,
-    Stmt, StringPart, TestExpr, ToolDef, VarPath, VarSegment, WhileLoop, Value,
+    SpannedPart, Stmt, StringPart, TestExpr, ToolDef, VarPath, VarSegment, WhileLoop, Value,
 };
+use crate::validator::issue::Span;
 use crate::tools::{ToolArgs, ToolRegistry};
 
 use super::issue::{IssueCode, ValidationIssue};
@@ -373,6 +374,11 @@ impl<'a> Validator<'a> {
                     self.validate_string_part(part);
                 }
             }
+            Expr::HereDocBody { parts, .. } => {
+                for sp in parts {
+                    self.validate_spanned_string_part(sp);
+                }
+            }
             Expr::BinaryOp { left, right, .. } => {
                 self.validate_expr(left);
                 self.validate_expr(right);
@@ -398,6 +404,20 @@ impl<'a> Validator<'a> {
     fn validate_var_ref(&mut self, path: &VarPath) {
         if let Some(VarSegment::Field(name)) = path.segments.first() {
             self.check_var_defined(name);
+        }
+    }
+
+    /// Validate a spanned heredoc-body part, attaching the part's span to any
+    /// new issues raised during the inner walk. Issues already carrying a span
+    /// are left alone (e.g., from a nested validator that already knew better).
+    fn validate_spanned_string_part(&mut self, sp: &SpannedPart) {
+        let issues_before = self.issues.len();
+        self.validate_string_part(&sp.part);
+        let span = Span::new(sp.offset, sp.offset + sp.len);
+        for issue in &mut self.issues[issues_before..] {
+            if issue.span.is_none() {
+                issue.span = Some(span);
+            }
         }
     }
 
