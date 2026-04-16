@@ -1,0 +1,8 @@
+---
+source: crates/kaish-kernel/tests/validation_tests.rs
+assertion_line: 748
+expression: undef.format(source)
+---
+2:1: warning [W002]: variable 'STILL_UNDEFINED' may be undefined
+  → use ${STILL_UNDEFINED:-default} if this is intentional
+  | ${STILL_UNDEFINED}

@@ -637,3 +637,113 @@ async fn scatter_empty_input() {
     let exec = result.unwrap();
     assert!(exec.ok(), "pipeline should succeed: {}", exec.err);
 }
+
+// ============================================================================
+// Span tracking for issues raised inside heredoc bodies.
+//
+// Pre-fix the validator emitted None spans for issues found inside heredoc
+// interpolations — `format(source)` produced a bare message with no location.
+// With the SpannedPart flow added by the heredoc work, body-internal issues
+// now carry byte offsets in the original source, and `format(source)`
+// renders `line:col [code]: msg\n  | source-line`.
+// ============================================================================
+
+#[tokio::test]
+async fn validation_issue_in_heredoc_body_carries_span() {
+    use std::collections::HashMap;
+    use kaish_kernel::parser::parse;
+    use kaish_kernel::tools::{register_builtins, ToolRegistry};
+    use kaish_kernel::validator::Validator;
+
+    let source = "cat <<EOF\n${UNDEFINED_VAR}\nEOF";
+    let program = parse(source).expect("source parses");
+
+    let mut registry = ToolRegistry::new();
+    register_builtins(&mut registry);
+    let user_tools = HashMap::new();
+    let validator = Validator::new(&registry, &user_tools);
+    let issues = validator.validate(&program);
+
+    // The body references UNDEFINED_VAR — validator should warn about it
+    // and the warning should now carry a span (was always None pre-fix).
+    let undef = issues
+        .iter()
+        .find(|i| i.message.contains("UNDEFINED_VAR"))
+        .expect("should warn about UNDEFINED_VAR");
+    let span = undef.span.expect("span must be populated for body-internal issue");
+
+    // "cat <<EOF\n" is 10 bytes; "${UNDEFINED_VAR}" lives on line 2 col 1.
+    let (line, col) = span.to_line_col(source);
+    assert_eq!(line, 2, "body-internal issue should report line 2");
+    assert_eq!(col, 1, "issue should start at column 1 of body line");
+
+    // format(source) must render line:col + the offending source line.
+    let rendered = undef.format(source);
+    assert!(rendered.starts_with("2:1"), "rendered should start with line:col, got: {rendered}");
+    assert!(
+        rendered.contains("UNDEFINED_VAR"),
+        "rendered should mention the variable: {rendered}",
+    );
+    assert!(
+        rendered.contains("${UNDEFINED_VAR}"),
+        "rendered should include the source-line caret showing the offending line: {rendered}",
+    );
+}
+
+#[tokio::test]
+async fn validation_issue_in_double_quoted_string_still_works() {
+    // Sibling check: spanless interpolation (regular double-quoted strings)
+    // still produces issues, just without spans. This pins the asymmetry —
+    // universal spanning is a follow-up refactor.
+    use std::collections::HashMap;
+    use kaish_kernel::parser::parse;
+    use kaish_kernel::tools::{register_builtins, ToolRegistry};
+    use kaish_kernel::validator::Validator;
+
+    let source = r#"echo "value is ${UNDEFINED_VAR_TWO}""#;
+    let program = parse(source).expect("source parses");
+
+    let mut registry = ToolRegistry::new();
+    register_builtins(&mut registry);
+    let user_tools = HashMap::new();
+    let validator = Validator::new(&registry, &user_tools);
+    let issues = validator.validate(&program);
+
+    let undef = issues
+        .iter()
+        .find(|i| i.message.contains("UNDEFINED_VAR_TWO"))
+        .expect("should still warn about double-quoted-string undefs");
+    // Spanless path — span is None until universal spanning lands.
+    assert!(
+        undef.span.is_none(),
+        "double-quoted strings remain spanless until follow-up refactor",
+    );
+}
+
+#[tokio::test]
+async fn validation_issue_in_heredoc_body_full_rendering_snapshot() {
+    // Snapshot the full ValidationIssue::format(source) output for a
+    // body-internal warning. Locks the user-visible diagnostic layout —
+    // the `line:col [code]: msg\n  | source-line` shape. If the format
+    // changes (e.g., adding colours, switching to ariadne), this test
+    // will alert and the snapshot can be reviewed with `cargo insta`.
+    use std::collections::HashMap;
+    use kaish_kernel::parser::parse;
+    use kaish_kernel::tools::{register_builtins, ToolRegistry};
+    use kaish_kernel::validator::Validator;
+
+    let source = "cat <<EOF\n${STILL_UNDEFINED}\nEOF";
+    let program = parse(source).expect("source parses");
+    let mut registry = ToolRegistry::new();
+    register_builtins(&mut registry);
+    let user_tools = HashMap::new();
+    let validator = Validator::new(&registry, &user_tools);
+    let issues = validator.validate(&program);
+
+    let undef = issues
+        .iter()
+        .find(|i| i.message.contains("STILL_UNDEFINED"))
+        .expect("expected undefined-variable warning");
+
+    insta::assert_snapshot!(undef.format(source));
+}
