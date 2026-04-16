@@ -8,7 +8,7 @@ input | scatter [as=VAR] [limit=N] | command | gather [first=N] [format=lines|js
 
 ## Parameters
 
-**scatter:** `as=VAR` (default: `ITEM`) — variable name per item. `limit=N` (default: 8) — max concurrent workers.
+**scatter:** `as=VAR` (default: `ITEM`) — variable name per item. `limit=N` (default: 8, clamped to 1..=10000) — max concurrent workers. Requests above 10000 are clamped and emit a `tracing::warn` on the `kaish::scatter` target.
 
 **gather:** `first=N` (default: 0/all) — take first N results. `format=lines|json` (default: `lines`) — output format.
 

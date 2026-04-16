@@ -150,12 +150,25 @@ impl fmt::Display for LexerError {
 /// the parsed value directly. This ensures the parser has access to actual
 /// data, not just token types.
 /// Here-doc content data.
-/// `literal` is true when the delimiter was quoted (<<'EOF' or <<"EOF"),
-/// meaning no variable expansion should occur.
+///
+/// - `literal` is true when the delimiter was quoted (`<<'EOF'` or `<<"EOF"`),
+///   meaning no variable expansion should occur.
+/// - `strip_tabs` is true for the `<<-EOF` form. Per POSIX, leading tabs on
+///   each body line are stripped at materialization time. Stripping happens
+///   downstream of the parser so byte offsets in `content` stay aligned with
+///   their original-source positions for span-tracking purposes.
+/// - `body_start_offset` is the byte offset of the first character of `content`
+///   in the source string fed into the lexer's `tokenize`. This lets the parser
+///   compute absolute spans for parts found inside the body during interpolation.
+///   In sources without arithmetic preprocessing rewrites, this equals the
+///   original-source offset; with arithmetic before the heredoc, line numbers
+///   may shift slightly until full preprocessing-layer composition lands.
 #[derive(Debug, Clone, PartialEq)]
 pub struct HereDocData {
     pub content: String,
     pub literal: bool,
+    pub strip_tabs: bool,
+    pub body_start_offset: usize,
 }
 
 #[derive(Logos, Debug, Clone, PartialEq)]
@@ -922,6 +935,9 @@ impl fmt::Display for Token {
 
 impl Token {
     /// Returns true if this token is a keyword.
+    // Must match the Keyword variants in `Token::category()` (minus the
+    // TypeX variants, which `is_type()` covers separately). Currently
+    // uncalled — kept exhaustive so future callers don't get wrong answers.
     pub fn is_keyword(&self) -> bool {
         matches!(
             self,
@@ -936,9 +952,14 @@ impl Token {
                 | Token::In
                 | Token::Do
                 | Token::Done
+                | Token::While
                 | Token::Case
                 | Token::Esac
                 | Token::Function
+                | Token::Return
+                | Token::Break
+                | Token::Continue
+                | Token::Exit
                 | Token::True
                 | Token::False
         )
@@ -956,10 +977,19 @@ impl Token {
     }
 
     /// Returns true if this token starts a statement.
+    // Currently uncalled — kept exhaustive so future callers don't get wrong answers.
     pub fn starts_statement(&self) -> bool {
         matches!(
             self,
-            Token::Set | Token::Local | Token::Function | Token::If | Token::For | Token::Case | Token::Ident(_) | Token::LBracket
+            Token::Set
+                | Token::Local
+                | Token::Function
+                | Token::If
+                | Token::For
+                | Token::While
+                | Token::Case
+                | Token::Ident(_)
+                | Token::LBracket
         )
     }
 
@@ -1259,36 +1289,70 @@ fn preprocess_arithmetic(source: &str) -> Result<ArithmeticPreprocessResult, Lex
     })
 }
 
+/// Per-heredoc metadata collected during preprocessing.
+///
+/// Stored verbatim alongside the substituted marker so the parser, validator,
+/// and interpreter can reconstitute the body with correct semantics:
+/// - `body` is the raw body bytes; tab stripping for `<<-` is applied later
+///   (at materialization), so byte offsets stay aligned with the original
+///   source for span tracking.
+/// - `strip_tabs` records whether the `<<-` form was used.
+/// - `literal` records whether the delimiter was quoted (no interpolation).
+/// - `body_start_offset` is the byte offset of the first body character in
+///   the source string passed to `preprocess_heredocs`. When heredocs are
+///   preprocessed AFTER arithmetic, this is in arith-preprocessed coordinates;
+///   in the common case (no arithmetic before the heredoc) this equals the
+///   original-source offset. See span-correction notes in `tokenize`.
+#[derive(Debug, Clone)]
+struct HeredocReplacement {
+    marker: String,
+    body: String,
+    literal: bool,
+    strip_tabs: bool,
+    body_start_offset: usize,
+}
+
 /// Preprocess here-docs in source code.
 ///
 /// Finds `<<WORD` patterns and collects content until the delimiter line.
-/// Returns the preprocessed source and a vector of (marker, content) pairs.
+/// Returns the preprocessed source and a vector of replacement records.
 ///
 /// Example:
 ///   `cat <<EOF\nhello\nworld\nEOF`
 /// Becomes:
 ///   `cat <<__HEREDOC_0__`
-/// With heredocs[0] = ("__HEREDOC_0__", "hello\nworld")
-fn preprocess_heredocs(source: &str) -> (String, Vec<(String, String, bool)>) {
+/// With heredocs[0] = HeredocReplacement { marker: "__HEREDOC_0__",
+/// body: "hello\nworld", literal: false, strip_tabs: false }
+fn preprocess_heredocs(source: &str) -> (String, Vec<HeredocReplacement>) {
     let mut result = String::with_capacity(source.len());
-    let mut heredocs: Vec<(String, String, bool)> = Vec::new();
-    let mut chars = source.chars().peekable();
+    let mut heredocs: Vec<HeredocReplacement> = Vec::new();
+    let chars_vec: Vec<char> = source.chars().collect();
+    let mut i = 0;
+    // `pos` tracks the byte offset into `source` corresponding to chars_vec[i].
+    // `result` accumulates output; we record body offsets in `pos` (input-side)
+    // and emit positions via `result.len()` (output-side) where needed.
+    let mut pos: usize = 0;
 
-    while let Some(ch) = chars.next() {
+    while i < chars_vec.len() {
+        let ch = chars_vec[i];
+
         // Look for << (potential here-doc)
-        if ch == '<' && chars.peek() == Some(&'<') {
-            chars.next(); // consume second <
+        if ch == '<' && chars_vec.get(i + 1) == Some(&'<') {
+            i += 2; // consume both '<'
+            pos += 2;
 
             // Check for optional - (strip leading tabs)
-            let strip_tabs = chars.peek() == Some(&'-');
+            let strip_tabs = chars_vec.get(i) == Some(&'-');
             if strip_tabs {
-                chars.next();
+                i += 1;
+                pos += 1;
             }
 
             // Skip whitespace before delimiter
-            while let Some(&c) = chars.peek() {
+            while let Some(&c) = chars_vec.get(i) {
                 if c == ' ' || c == '\t' {
-                    chars.next();
+                    i += 1;
+                    pos += 1;
                 } else {
                     break;
                 }
@@ -1296,21 +1360,29 @@ fn preprocess_heredocs(source: &str) -> (String, Vec<(String, String, bool)>) {
 
             // Collect the delimiter word
             let mut delimiter = String::new();
-            let quoted = chars.peek() == Some(&'\'') || chars.peek() == Some(&'"');
-            let quote_char = if quoted { chars.next() } else { None };
+            let quoted = chars_vec.get(i) == Some(&'\'') || chars_vec.get(i) == Some(&'"');
+            let quote_char = if quoted {
+                let q = chars_vec.get(i).copied();
+                i += 1;
+                pos += 1;
+                q
+            } else {
+                None
+            };
 
-            while let Some(&c) = chars.peek() {
+            while let Some(&c) = chars_vec.get(i) {
                 if quoted {
                     if Some(c) == quote_char {
-                        chars.next(); // consume closing quote
+                        i += 1; // consume closing quote
+                        pos += 1;
                         break;
                     }
                 } else if c.is_whitespace() || c == '\n' || c == '\r' {
                     break;
                 }
-                if let Some(ch) = chars.next() {
-                    delimiter.push(ch);
-                }
+                delimiter.push(c);
+                i += 1;
+                pos += c.len_utf8();
             }
 
             if delimiter.is_empty() {
@@ -1325,29 +1397,40 @@ fn preprocess_heredocs(source: &str) -> (String, Vec<(String, String, bool)>) {
             // Buffer text after delimiter word (e.g., " | jq" in "cat <<EOF | jq")
             // This must be emitted AFTER the heredoc marker, not before.
             let mut after_delimiter = String::new();
-            while let Some(&c) = chars.peek() {
+            while let Some(&c) = chars_vec.get(i) {
                 if c == '\n' {
-                    chars.next();
+                    i += 1;
+                    pos += 1;
                     break;
                 } else if c == '\r' {
-                    chars.next();
-                    if chars.peek() == Some(&'\n') {
-                        chars.next();
+                    i += 1;
+                    pos += 1;
+                    if chars_vec.get(i) == Some(&'\n') {
+                        i += 1;
+                        pos += 1;
                     }
                     break;
                 }
-                if let Some(ch) = chars.next() {
-                    after_delimiter.push(ch);
-                }
+                after_delimiter.push(c);
+                i += 1;
+                pos += c.len_utf8();
             }
 
-            // Collect content until delimiter on its own line
+            // Collect content until delimiter on its own line.
+            // `body_start_offset` is the byte position of the first char of
+            // the body in the source — first char after the newline that
+            // ended the delimiter line. See HeredocReplacement docs for
+            // coordinate-system caveat (arith-preprocessed, not original).
+            let body_start_offset = pos;
             let mut content = String::new();
             let mut current_line = String::new();
 
             loop {
-                match chars.next() {
+                let next = chars_vec.get(i).copied();
+                match next {
                     Some('\n') => {
+                        i += 1;
+                        pos += 1;
                         // Check if this line is the delimiter
                         let trimmed = if strip_tabs {
                             current_line.trim_start_matches('\t')
@@ -1364,9 +1447,12 @@ fn preprocess_heredocs(source: &str) -> (String, Vec<(String, String, bool)>) {
                         current_line.clear();
                     }
                     Some('\r') => {
+                        i += 1;
+                        pos += 1;
                         // Handle \r\n
-                        if chars.peek() == Some(&'\n') {
-                            chars.next();
+                        if chars_vec.get(i) == Some(&'\n') {
+                            i += 1;
+                            pos += 1;
                         }
                         let trimmed = if strip_tabs {
                             current_line.trim_start_matches('\t')
@@ -1382,6 +1468,8 @@ fn preprocess_heredocs(source: &str) -> (String, Vec<(String, String, bool)>) {
                     }
                     Some(c) => {
                         current_line.push(c);
+                        i += 1;
+                        pos += c.len_utf8();
                     }
                     None => {
                         // EOF - check if current line is the delimiter
@@ -1408,7 +1496,13 @@ fn preprocess_heredocs(source: &str) -> (String, Vec<(String, String, bool)>) {
 
             // Create a unique marker for this here-doc (collision-resistant)
             let marker = format!("__KAISH_HEREDOC_{}__", unique_marker_id());
-            heredocs.push((marker.clone(), content, quoted));
+            heredocs.push(HeredocReplacement {
+                marker: marker.clone(),
+                body: content,
+                literal: quoted,
+                strip_tabs,
+                body_start_offset,
+            });
 
             // Output <<marker first, then any text that followed the delimiter
             // (e.g., " | jq") so the heredoc attaches to the correct command.
@@ -1418,6 +1512,8 @@ fn preprocess_heredocs(source: &str) -> (String, Vec<(String, String, bool)>) {
             result.push('\n');
         } else {
             result.push(ch);
+            i += 1;
+            pos += ch.len_utf8();
         }
     }
 
@@ -1679,9 +1775,39 @@ pub fn tokenize(source: &str) -> Result<Vec<Spanned<Token>>, Vec<Spanned<LexerEr
                 && let Token::Ident(ref name) = tokens[i + 1].token
                     && name.starts_with("__KAISH_HEREDOC_") && name.ends_with("__") {
                         // Find the corresponding content
-                        if let Some((_, content, literal)) = heredocs.iter().find(|(marker, _, _)| marker == name) {
+                        if let Some(hd) = heredocs.iter().find(|h| h.marker == *name) {
+                            // Re-thread arithmetic markers that the arith
+                            // preprocessor planted in the source — without
+                            // this, `<<EOF\n$((1+2))\nEOF` materializes the
+                            // marker text instead of `3`. Mirrors the
+                            // String-content translation a few lines below.
+                            // - Literal heredocs (no expansion): restore the
+                            //   original `$((expr))` text verbatim.
+                            // - Interpolated heredocs: wrap as
+                            //   `${__ARITH:expr__}` so the spanned
+                            //   interpolation parser turns it into a
+                            //   StringPart::Arithmetic.
+                            let mut content = hd.body.clone();
+                            for (marker, expr) in &arith_result.arithmetics {
+                                if content.contains(marker) {
+                                    let replacement = if hd.literal {
+                                        format!("$(({}))", expr)
+                                    } else {
+                                        format!("${{__ARITH:{}__}}", expr)
+                                    };
+                                    content = content.replace(marker, &replacement);
+                                }
+                            }
                             final_tokens.push(Spanned::new(Token::HereDocStart, tokens[i].span.clone()));
-                            final_tokens.push(Spanned::new(Token::HereDoc(HereDocData { content: content.clone(), literal: *literal }), tokens[i + 1].span.clone()));
+                            final_tokens.push(Spanned::new(
+                                Token::HereDoc(HereDocData {
+                                    content,
+                                    literal: hd.literal,
+                                    strip_tabs: hd.strip_tabs,
+                                    body_start_offset: hd.body_start_offset,
+                                }),
+                                tokens[i + 1].span.clone(),
+                            ));
                             i += 2;
                             continue;
                         }
@@ -2728,10 +2854,16 @@ mod tests {
     fn heredoc_simple() {
         let source = "cat <<EOF\nhello\nworld\nEOF";
         let tokens = lex(source);
+        // body_start_offset = byte offset of 'h' in "hello", i.e. just after "cat <<EOF\n"
         assert_eq!(tokens, vec![
             Token::Ident("cat".to_string()),
             Token::HereDocStart,
-            Token::HereDoc(HereDocData { content: "hello\nworld".to_string(), literal: false }),
+            Token::HereDoc(HereDocData {
+                content: "hello\nworld".to_string(),
+                literal: false,
+                strip_tabs: false,
+                body_start_offset: 10,
+            }),
             Token::Newline,
         ]);
     }
@@ -2743,7 +2875,12 @@ mod tests {
         assert_eq!(tokens, vec![
             Token::Ident("cat".to_string()),
             Token::HereDocStart,
-            Token::HereDoc(HereDocData { content: "".to_string(), literal: false }),
+            Token::HereDoc(HereDocData {
+                content: "".to_string(),
+                literal: false,
+                strip_tabs: false,
+                body_start_offset: 10,
+            }),
             Token::Newline,
         ]);
     }
@@ -2755,7 +2892,12 @@ mod tests {
         assert_eq!(tokens, vec![
             Token::Ident("cat".to_string()),
             Token::HereDocStart,
-            Token::HereDoc(HereDocData { content: "$VAR and \"quoted\" 'single'".to_string(), literal: false }),
+            Token::HereDoc(HereDocData {
+                content: "$VAR and \"quoted\" 'single'".to_string(),
+                literal: false,
+                strip_tabs: false,
+                body_start_offset: 10,
+            }),
             Token::Newline,
         ]);
     }
@@ -2767,7 +2909,12 @@ mod tests {
         assert_eq!(tokens, vec![
             Token::Ident("cat".to_string()),
             Token::HereDocStart,
-            Token::HereDoc(HereDocData { content: "line1\nline2\nline3".to_string(), literal: false }),
+            Token::HereDoc(HereDocData {
+                content: "line1\nline2\nline3".to_string(),
+                literal: false,
+                strip_tabs: false,
+                body_start_offset: 10,
+            }),
             Token::Newline,
         ]);
     }
@@ -2779,7 +2926,12 @@ mod tests {
         assert_eq!(tokens, vec![
             Token::Ident("cat".to_string()),
             Token::HereDocStart,
-            Token::HereDoc(HereDocData { content: "hello".to_string(), literal: false }),
+            Token::HereDoc(HereDocData {
+                content: "hello".to_string(),
+                literal: false,
+                strip_tabs: false,
+                body_start_offset: 10,
+            }),
             Token::Newline,
             Token::Ident("echo".to_string()),
             Token::Ident("goodbye".to_string()),
@@ -2790,11 +2942,18 @@ mod tests {
     fn heredoc_strip_tabs() {
         let source = "cat <<-EOF\n\thello\n\tworld\n\tEOF";
         let tokens = lex(source);
-        // Content has tabs preserved, only delimiter matching strips tabs
+        // Content keeps tabs verbatim — strip_tabs is recorded on the token so
+        // the interpreter can apply POSIX leading-tab stripping at materialization
+        // without disturbing source byte offsets used for span tracking.
         assert_eq!(tokens, vec![
             Token::Ident("cat".to_string()),
             Token::HereDocStart,
-            Token::HereDoc(HereDocData { content: "\thello\n\tworld".to_string(), literal: false }),
+            Token::HereDoc(HereDocData {
+                content: "\thello\n\tworld".to_string(),
+                literal: false,
+                strip_tabs: true,
+                body_start_offset: 11,
+            }),
             Token::Newline,
         ]);
     }
@@ -2893,7 +3052,15 @@ mod tests {
         // Strings
         assert_eq!(Token::String("test".to_string()).category(), TokenCategory::String);
         assert_eq!(Token::SingleString("test".to_string()).category(), TokenCategory::String);
-        assert_eq!(Token::HereDoc(HereDocData { content: "test".to_string(), literal: false }).category(), TokenCategory::String);
+        assert_eq!(
+            Token::HereDoc(HereDocData {
+                content: "test".to_string(),
+                literal: false,
+                strip_tabs: false,
+                body_start_offset: 0,
+            }).category(),
+            TokenCategory::String,
+        );
 
         // Numbers
         assert_eq!(Token::Int(42).category(), TokenCategory::Number);
@@ -3076,5 +3243,34 @@ mod tests {
             lex("/usr/bin:8080"),
             vec![Token::Ident("/usr/bin:8080".into())]
         );
+    }
+
+    // ═══════════════════════════════════════════════════════════════════
+    // Token predicate coverage (is_keyword / starts_statement)
+    // ═══════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn is_keyword_covers_control_flow() {
+        for t in [
+            Token::While,
+            Token::Return,
+            Token::Break,
+            Token::Continue,
+            Token::Exit,
+        ] {
+            assert!(t.is_keyword(), "{t:?} should be a keyword");
+        }
+    }
+
+    #[test]
+    fn starts_statement_covers_while() {
+        assert!(Token::While.starts_statement());
+    }
+
+    #[test]
+    fn is_keyword_rejects_operators() {
+        for t in [Token::Pipe, Token::Amp, Token::Eq, Token::LBrace] {
+            assert!(!t.is_keyword(), "{t:?} should not be a keyword");
+        }
     }
 }

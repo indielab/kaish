@@ -186,24 +186,22 @@ impl Ls {
         pattern: &str,
         opts: &ListOptions,
     ) -> ExecResult {
-        let paths = match ctx.expand_glob(pattern).await {
-            Ok(p) => p,
+        let patterns = [Value::String(pattern.to_string())];
+        let names = match ctx.expand_paths(&patterns).await {
+            Ok(n) => n,
             Err(e) => return ExecResult::failure(1, format!("ls: {}", e)),
         };
 
-        let root = ctx.resolve_path(".");
-
-        if paths.is_empty() {
+        if names.is_empty() {
             return ExecResult::with_output(OutputData::new());
         }
 
         // Stat each match and build DirEntry list for sorting/formatting
         let mut entries: Vec<(String, DirEntry)> = Vec::new();
-        for p in &paths {
-            let rel = p.strip_prefix(&root).unwrap_or(p);
-            let name = rel.to_string_lossy().to_string();
-            match ctx.backend.stat(p).await {
-                Ok(info) => entries.push((name, info)),
+        for name in &names {
+            let abs = ctx.resolve_path(name);
+            match ctx.backend.stat(Path::new(&abs)).await {
+                Ok(info) => entries.push((name.clone(), info)),
                 Err(_) => {
                     // File disappeared between walk and stat; skip it
                 }

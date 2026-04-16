@@ -313,11 +313,26 @@ pub fn parse_scatter_options(args: &crate::tools::ToolArgs) -> ScatterOptions {
     }
 
     if let Some(Value::Int(n)) = args.named.get("limit") {
-        opts.limit = (*n).max(1) as usize;
+        let requested = *n;
+        let clamped = requested.clamp(1, SCATTER_LIMIT_MAX as i64);
+        if requested > SCATTER_LIMIT_MAX as i64 {
+            tracing::warn!(
+                target: "kaish::scatter",
+                requested = requested,
+                ceiling = SCATTER_LIMIT_MAX,
+                "scatter limit clamped to ceiling"
+            );
+        }
+        opts.limit = clamped as usize;
     }
 
     opts
 }
+
+/// Upper bound on the concurrency `scatter limit=N` accepts. Users who
+/// ask for more get a `tracing::warn` and are clamped to this value —
+/// silent clamping would violate the "no silent fallbacks" rule.
+pub const SCATTER_LIMIT_MAX: usize = 10_000;
 
 /// Parse gather options from tool args.
 pub fn parse_gather_options(args: &crate::tools::ToolArgs) -> GatherOptions {
@@ -473,5 +488,45 @@ mod tests {
         let opts = parse_gather_options(&args);
         assert_eq!(opts.first, 5);
         assert_eq!(opts.format, "json");
+    }
+
+    #[test]
+    fn scatter_limit_clamps_to_ceiling() {
+        use crate::tools::ToolArgs;
+
+        let mut args = ToolArgs::new();
+        args.named.insert("limit".to_string(), Value::Int(999_999));
+        let opts = parse_scatter_options(&args);
+        assert_eq!(opts.limit, SCATTER_LIMIT_MAX);
+    }
+
+    #[test]
+    fn scatter_limit_raises_zero_to_one() {
+        use crate::tools::ToolArgs;
+
+        let mut args = ToolArgs::new();
+        args.named.insert("limit".to_string(), Value::Int(0));
+        let opts = parse_scatter_options(&args);
+        assert_eq!(opts.limit, 1);
+    }
+
+    #[test]
+    fn scatter_limit_raises_negative_to_one() {
+        use crate::tools::ToolArgs;
+
+        let mut args = ToolArgs::new();
+        args.named.insert("limit".to_string(), Value::Int(-42));
+        let opts = parse_scatter_options(&args);
+        assert_eq!(opts.limit, 1);
+    }
+
+    #[test]
+    fn scatter_limit_preserves_valid_values() {
+        use crate::tools::ToolArgs;
+
+        let mut args = ToolArgs::new();
+        args.named.insert("limit".to_string(), Value::Int(500));
+        let opts = parse_scatter_options(&args);
+        assert_eq!(opts.limit, 500);
     }
 }

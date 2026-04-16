@@ -271,8 +271,13 @@ impl Filesystem for VfsRouter {
     }
 
     fn read_only(&self) -> bool {
-        // Router itself isn't read-only; individual mounts might be
-        false
+        // Router is read-only iff every mount is. Empty router returns
+        // false — a router with no mounts isn't meaningfully read-only,
+        // and false preserves the behaviour callers saw before this change.
+        if self.mounts.is_empty() {
+            return false;
+        }
+        self.mounts.values().all(|fs| fs.read_only())
     }
 }
 
@@ -497,5 +502,38 @@ mod tests {
         let result = router.rename(Path::new("/mount1/file.txt"), Path::new("/mount2/file.txt")).await;
         assert!(result.is_err());
         assert_eq!(result.unwrap_err().kind(), io::ErrorKind::Unsupported);
+    }
+
+    #[tokio::test]
+    async fn read_only_empty_router_returns_false() {
+        let router = VfsRouter::new();
+        assert!(!router.read_only());
+    }
+
+    #[tokio::test]
+    async fn read_only_all_read_only_mounts_returns_true() {
+        use crate::vfs::local::LocalFs;
+
+        let t1 = tempfile::tempdir().unwrap();
+        let t2 = tempfile::tempdir().unwrap();
+
+        let mut router = VfsRouter::new();
+        router.mount("/a", LocalFs::read_only(t1.path().to_path_buf()));
+        router.mount("/b", LocalFs::read_only(t2.path().to_path_buf()));
+
+        assert!(router.read_only());
+    }
+
+    #[tokio::test]
+    async fn read_only_mixed_mounts_returns_false() {
+        use crate::vfs::local::LocalFs;
+
+        let t1 = tempfile::tempdir().unwrap();
+
+        let mut router = VfsRouter::new();
+        router.mount("/ro", LocalFs::read_only(t1.path().to_path_buf()));
+        router.mount("/rw", MemoryFs::new());
+
+        assert!(!router.read_only());
     }
 }

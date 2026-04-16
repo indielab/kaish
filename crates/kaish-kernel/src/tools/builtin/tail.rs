@@ -172,7 +172,7 @@ impl Tail {
         }
 
         let trimmed = output.trim_end().to_string();
-        ExecResult::with_output_and_text(OutputData::text(trimmed.clone()), trimmed)
+        ExecResult::with_output(OutputData::text(trimmed))
     }
 }
 
