@@ -1,7 +1,7 @@
 # Known Issues & Open Work
 
 Actionable punch list. Narrative context lives in [reviews.md](reviews.md).
-Last validation pass: 2026-04-16 (updated after easy-batch cleanup).
+Last validation pass: 2026-04-16 (updated after heredoc-span work).
 
 Priorities follow the convention from `reviews.md`:
 
@@ -25,13 +25,6 @@ opaque — only `$?` supports nested field access. Directly contradicts
 the structured-data thesis: `RESULT=$(some-tool --json); echo
 "${RESULT.key}"` is the natural agent pattern and it silently returns
 nothing.
-
-### Heredoc span tracking
-`lexer.rs:1631` — explicitly punted ("not implemented for simplicity").
-Errors inside heredocs report wrong line/column, which undermines the
-pre-validation leverage. The heredoc+arithmetic preprocessing pair
-share quote-handling logic; a `skip_quoted_content()` extraction would
-reduce the surface area for this fix.
 
 ### `gather` line-format silently drops failures
 `scheduler/scatter.rs:299` — `.filter(|r| r.result.ok())` drops failed
@@ -215,3 +208,12 @@ isn't lost when those files are deleted.
   `#[ignore = "..."]` with the reason. `test_timeout_numeric_duration`
   (distinct failure, P2) and `test_symlink_absolute_target_escape_blocked`
   (security-relevant, P2) were intentionally not silenced.
+- **Heredoc span tracking** — 2026-04-16 (commits `c21e09c`
+  source, `2490127` tests). Interpolated heredoc bodies now carry
+  per-part byte offsets via `SpannedPart` and a new `Expr::HereDocBody`
+  AST variant; validator attaches the span to any issue raised inside
+  the body. `ParseError::format(source)` renders `line:col` with a
+  source snippet. Literal heredocs and double-quoted strings keep the
+  spanless paths for now — universal spanning is a separate refactor.
+  The `skip_quoted_content()` extraction called out as a dependency
+  was not needed for this fix; it remains a standalone P4 cleanup.
