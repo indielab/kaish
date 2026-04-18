@@ -154,16 +154,17 @@ fn format_tool_list(schemas: &[ToolSchema]) -> String {
         let entry = (schema.name.as_str(), schema.description.as_str());
         match schema.name.as_str() {
             "grep" | "sed" | "awk" | "cut" | "tr" | "sort" | "uniq" | "wc" | "head" | "tail"
-            | "split" | "diff" => text_tools.push(entry),
+            | "split" | "diff" | "tac" | "xxd" | "base64" => text_tools.push(entry),
             "cat" | "ls" | "tree" | "cd" | "pwd" | "mkdir" | "rm" | "cp" | "mv" | "touch"
             | "ln" | "readlink" | "write" | "glob" | "find" | "stat" | "dirname" | "basename"
-            | "realpath" | "mktemp" | "patch" => file_tools.push(entry),
+            | "realpath" | "mktemp" | "patch" | "checksum" => file_tools.push(entry),
             "alias" | "unalias" | "echo" | "printf" | "read" | "sleep" | "date" | "env"
             | "export" | "set" | "unset" | "true" | "false" | "test" | "[" | "assert" | "seq"
             | "tee" | "hostname" | "uname" | "which" => system_tools.push(entry),
             "jq" => json_tools.push(entry),
             "scatter" | "gather" => parallel_tools.push(entry),
-            "exec" | "spawn" | "jobs" | "wait" | "ps" | "git" | "bg" | "fg" | "kill" => process_tools.push(entry),
+            "exec" | "spawn" | "jobs" | "wait" | "ps" | "git" | "bg" | "fg" | "kill"
+            | "timeout" => process_tools.push(entry),
             "help" | "kaish-validate" | "kaish-vars" | "kaish-mounts" | "kaish-tools" | "tokens"
             | "kaish-ast" | "kaish-clear" | "kaish-status" | "kaish-trash" | "kaish-version"
             | "kaish-ignore" | "kaish-output-limit" => {
