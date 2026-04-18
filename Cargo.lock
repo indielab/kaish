@@ -1141,7 +1141,7 @@ dependencies = [
 
 [[package]]
 name = "kaish-client"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -1155,7 +1155,7 @@ dependencies = [
 
 [[package]]
 name = "kaish-glob"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "async-trait",
  "rstest",
@@ -1165,7 +1165,7 @@ dependencies = [
 
 [[package]]
 name = "kaish-kernel"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "anyhow",
  "ariadne",
@@ -1206,7 +1206,7 @@ dependencies = [
 
 [[package]]
 name = "kaish-mcp"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -1235,7 +1235,7 @@ dependencies = [
 
 [[package]]
 name = "kaish-repl"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "anyhow",
  "chrono",
@@ -1255,7 +1255,7 @@ dependencies = [
 
 [[package]]
 name = "kaish-types"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "schemars",
  "serde",
@@ -1265,7 +1265,7 @@ dependencies = [
 
 [[package]]
 name = "kaish-wasi"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "kaish-kernel",
  "kaish-types",
