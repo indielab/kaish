@@ -110,7 +110,24 @@ impl KaishHelper {
             }
         }
 
-        depth > 0
+        if depth > 0 {
+            return true;
+        }
+
+        // Heredoc continuation: ask the lexer whether any heredoc started
+        // without seeing its closing delimiter line. Single source of truth
+        // with the parser — no parallel hand-rolled heredoc scanner.
+        // Other lexer errors (invalid token, etc.) aren't continuation
+        // signals; let the kernel surface them on submit.
+        if let Err(errs) = kaish_kernel::lexer::tokenize(input)
+            && errs
+                .iter()
+                .any(|e| matches!(e.token, kaish_kernel::lexer::LexerError::UnterminatedHeredoc { .. }))
+        {
+            return true;
+        }
+
+        false
     }
 }
 
@@ -752,6 +769,20 @@ mod tests {
         let helper = make_test_helper();
         assert!(!helper.is_incomplete(""));
         assert!(!helper.is_incomplete("echo hello"));
+    }
+
+    #[test]
+    fn test_is_incomplete_unterminated_heredoc() {
+        let helper = make_test_helper();
+        // No closing EOF — REPL should prompt for more input.
+        assert!(helper.is_incomplete("cat <<EOF"));
+        assert!(helper.is_incomplete("cat <<EOF\nhello"));
+        // <<-form (tab-strip) and quoted delimiters too.
+        assert!(helper.is_incomplete("cat <<-DONE\n\thi"));
+        assert!(helper.is_incomplete("cat <<'EOF'\n$VAR"));
+        // Closing delimiter on its own line — complete.
+        assert!(!helper.is_incomplete("cat <<EOF\nhello\nEOF"));
+        assert!(!helper.is_incomplete("cat <<-DONE\n\thi\n\tDONE"));
     }
 
     #[test]
