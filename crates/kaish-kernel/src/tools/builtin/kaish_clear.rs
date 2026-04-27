@@ -20,7 +20,12 @@ impl Tool for KaishClear {
     }
 
     async fn execute(&self, _args: ToolArgs, ctx: &mut ExecContext) -> ExecResult {
+        // Preserve $$ across the reset — the kernel hasn't restarted, just
+        // the variables/cwd were cleared. A user comparing $$ before and
+        // after kaish-clear would expect the same identifier.
+        let pid = ctx.scope.pid();
         ctx.scope = Scope::new();
+        ctx.scope.set_pid(pid);
         ctx.cwd = std::path::PathBuf::from("/");
         ExecResult::with_output(OutputData::text("Session reset (variables cleared)\n"))
     }

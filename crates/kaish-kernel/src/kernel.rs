@@ -25,9 +25,23 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use anyhow::{Context, Result};
 use tokio::sync::RwLock;
+
+/// Monotonic counter assigned to each Kernel at construction time, exposed
+/// via `$$` / `${$}`. Starts at 1; each new Kernel gets the next value.
+/// `Kernel::fork()` inherits the parent's value (matching bash's "subshell
+/// keeps parent's $$" semantics) because forks clone the parent's Scope
+/// rather than calling `set_pid` again.
+///
+/// Deliberately *not* the OS PID — kaish runs as a long-lived MCP server
+/// or embedded inside other binaries (kaijutsu), where the host PID is
+/// meaningless to the script. See
+/// `~/.claude/projects/-home-atobey-src-kaish/memory/lang_dollar_dollar_identifier.md`
+/// for the design rationale.
+static KERNEL_COUNTER: AtomicU64 = AtomicU64::new(1);
 
 use async_trait::async_trait;
 
@@ -656,6 +670,7 @@ impl Kernel {
             name,
             scope: RwLock::new({
                 let mut scope = Scope::new();
+                scope.set_pid(KERNEL_COUNTER.fetch_add(1, Ordering::Relaxed));
                 if let Ok(home) = std::env::var("HOME") {
                     scope.set("HOME", Value::String(home));
                 }

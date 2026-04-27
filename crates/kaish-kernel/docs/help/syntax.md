@@ -19,7 +19,15 @@ ${VAR:-default}           # default if unset/empty
 ${#VAR}                   # string length
 $0 $1 $@ $#              # script name, args, all args, count
 $?                        # last exit code (0-255)
+$$ ${$}                   # kaish session id — see note below
 ```
+
+**`$$` is a kaish-internal session identifier**, not the OS PID. It's a
+monotonic `u64` counter (starts at 1) assigned at kernel construction;
+forks/subshells inherit the parent's value. This is an intentional
+divergence from bash — kaish runs as a long-lived MCP server or
+embedded inside other binaries, where the host PID is meaningless to
+the script.
 
 ## Paths
 

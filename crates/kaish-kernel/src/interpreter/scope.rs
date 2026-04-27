@@ -12,14 +12,6 @@ use crate::ast::{Value, VarPath, VarSegment};
 
 use super::result::ExecResult;
 
-/// Get process ID, returning 0 on platforms where it's unsupported (WASI).
-fn get_pid() -> u32 {
-    #[cfg(target_os = "wasi")]
-    { 0 }
-    #[cfg(not(target_os = "wasi"))]
-    { std::process::id() }
-}
-
 /// Variable scope with nested frames and last-result tracking.
 ///
 /// Variables are looked up from innermost to outermost frame.
@@ -59,12 +51,19 @@ pub struct Scope {
     trash_max_size: u64,
     /// Glob expansion mode (set -o glob): expand bare glob patterns in arguments.
     glob_enabled: bool,
-    /// Current process ID ($$), captured at scope creation.
-    pid: u32,
+    /// Kaish session identifier ($$). A monotonic counter assigned at Kernel
+    /// construction (see `KERNEL_COUNTER` in kernel.rs) — *not* the OS PID.
+    /// Subshells / forks inherit the parent's value (Scope clone copies it).
+    /// 0 is a sentinel meaning "this scope was constructed outside a Kernel"
+    /// (e.g. arithmetic unit tests, kaish-clear before its setter runs).
+    pid: u64,
 }
 
 impl Scope {
     /// Create a new scope with one empty frame.
+    ///
+    /// `pid` defaults to 0 (sentinel). The owning Kernel calls `set_pid()`
+    /// during construction to assign the real session identifier.
     pub fn new() -> Self {
         Self {
             frames: Arc::new(vec![HashMap::new()]),
@@ -79,13 +78,20 @@ impl Scope {
             trash_enabled: false,
             trash_max_size: 10 * 1024 * 1024, // 10 MB
             glob_enabled: true,
-            pid: get_pid(),
+            pid: 0,
         }
     }
 
-    /// Get the process ID ($$).
-    pub fn pid(&self) -> u32 {
+    /// Get the kaish session identifier ($$).
+    pub fn pid(&self) -> u64 {
         self.pid
+    }
+
+    /// Set the kaish session identifier ($$). Called by the Kernel during
+    /// construction to thread the assigned counter value into the scope.
+    /// Also used by `kaish-clear` to preserve $$ across a session reset.
+    pub fn set_pid(&mut self, pid: u64) {
+        self.pid = pid;
     }
 
     /// Push a new scope frame (for entering a loop, tool call, etc.)

@@ -38,7 +38,12 @@ async fn test_braced_vs_unbraced_exit_code_equivalence() {
 }
 
 // ============================================================================
-// PID forms: $$ and ${$} — values can't be compared cross-process
+// $$ / ${$} — kaish-internal session identifier (monotonic u64 counter)
+//
+// kaish exposes $$ as a per-Kernel counter, *not* the OS PID. Compat with
+// bash via `bash -c` would always disagree (different processes), so these
+// live here rather than in the compat suite. See
+// memory/lang_dollar_dollar_identifier.md for the rationale.
 // ============================================================================
 
 #[tokio::test]
@@ -53,8 +58,7 @@ async fn test_pid_in_arithmetic() {
 async fn test_braced_current_pid() {
     let kernel = Kernel::transient().unwrap();
     let result = kernel.execute("echo ${$}").await.unwrap();
-    // Should be a positive integer (the PID)
-    let pid: u32 = result
+    let pid: u64 = result
         .text_out()
         .trim()
         .parse()
@@ -72,6 +76,51 @@ async fn test_braced_vs_unbraced_pid_equivalence() {
         result2.text_out().trim(),
         "Braced and unbraced $$ should be equivalent"
     );
+}
+
+#[tokio::test]
+async fn test_two_kernels_have_distinct_pids() {
+    // Each Kernel construction takes the next counter value, so two
+    // kernels created in the same test run must report different $$.
+    let k1 = Kernel::transient().unwrap();
+    let k2 = Kernel::transient().unwrap();
+    let p1 = k1.execute("echo $$").await.unwrap().text_out().trim().to_string();
+    let p2 = k2.execute("echo $$").await.unwrap().text_out().trim().to_string();
+    assert_ne!(p1, p2, "two kernels should have different $$, got {p1} and {p2}");
+}
+
+#[tokio::test]
+async fn test_fork_inherits_parent_pid() {
+    // A forked subkernel must share its parent's $$ — matches bash's
+    // "subshell keeps parent's $$" semantics.
+    let parent = Kernel::transient().unwrap();
+    let parent_pid = parent
+        .execute("echo $$")
+        .await
+        .unwrap()
+        .text_out()
+        .trim()
+        .to_string();
+    let fork = parent.fork().await;
+    let fork_pid = fork
+        .execute("echo $$")
+        .await
+        .unwrap()
+        .text_out()
+        .trim()
+        .to_string();
+    assert_eq!(parent_pid, fork_pid, "fork should inherit parent $$");
+}
+
+#[tokio::test]
+async fn test_kaish_clear_preserves_pid() {
+    // kaish-clear resets variables/cwd but the kernel hasn't restarted —
+    // $$ should be the same identifier before and after.
+    let kernel = Kernel::transient().unwrap();
+    let before = kernel.execute("echo $$").await.unwrap().text_out().trim().to_string();
+    kernel.execute("kaish-clear").await.unwrap();
+    let after = kernel.execute("echo $$").await.unwrap().text_out().trim().to_string();
+    assert_eq!(before, after, "kaish-clear should preserve $$");
 }
 
 // ============================================================================
