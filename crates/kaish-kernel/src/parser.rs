@@ -1199,6 +1199,8 @@ where
     let pattern_part = choice((
         select! { Token::GlobWord(s) => s },
         select! { Token::Ident(s) => s },
+        select! { Token::NumberIdent(s) => s },
+        select! { Token::DottedIdent(s) => s },
         select! { Token::String(s) => s },
         select! { Token::SingleString(s) => s },
         select! { Token::Int(n) => n.to_string() },
@@ -1830,6 +1832,13 @@ where
                 Token::TildePath(s) => Expr::Literal(Value::String(s)),
                 Token::RelativePath(s) => Expr::Literal(Value::String(s)),
                 Token::DotSlashPath(s) => Expr::Literal(Value::String(s)),
+                // Digit-leading bareword (SHA prefix `019dda1c`, UUIDs).
+                Token::NumberIdent(s) => Expr::Literal(Value::String(s)),
+                // Dot-prefixed bareword (`.gitignore`, `.parent`, `.parent.parent`).
+                // Distinct from `Token::Dot` (the source alias), which only
+                // matches a bare `.` and requires whitespace before its file
+                // argument.
+                Token::DottedIdent(s) => Expr::Literal(Value::String(s)),
             },
             plus_minus_bare,
             // Keywords can be used as barewords in argument position

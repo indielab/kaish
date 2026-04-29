@@ -128,6 +128,8 @@ fn format_token(token: &Token) -> String {
 
         // Identifiers and paths
         Token::Ident(s) => format!("IDENT({})", s),
+        Token::NumberIdent(s) => format!("NUMIDENT({})", s),
+        Token::DottedIdent(s) => format!("DOTIDENT({})", s),
         Token::Path(s) => format!("PATH({})", s),
 
         // Structural
@@ -136,7 +138,6 @@ fn format_token(token: &Token) -> String {
         Token::LineContinuation => "LINECONT".to_string(),
 
         // Invalid variants (should never be produced)
-        Token::InvalidNumberIdent => "INVALID_NUMBER_IDENT".to_string(),
         Token::InvalidFloatNoLeading => "INVALID_FLOAT_NO_LEADING".to_string(),
         Token::InvalidFloatNoTrailing => "INVALID_FLOAT_NO_TRAILING".to_string(),
     }
@@ -194,10 +195,37 @@ fn lexer_identifiers(#[case] input: &str, #[case] expected: &[&str]) {
     run_lexer_test(input, expected);
 }
 
+// Digit-leading bare words are valid argv tokens: SHA prefixes (019dda1c),
+// UUIDs, version-ish identifiers. Lex them as NumberIdent so the parser
+// can treat them as bareword strings. (Pure digit sequences still lex as
+// Int — at least one alpha character is required to land here.)
 #[rstest]
-#[case::number_ident("123abc")]
-fn lexer_identifier_errors(#[case] input: &str) {
-    run_lexer_error_test(input);
+#[case::numident_hex("019dda1c", &["NUMIDENT(019dda1c)"])]
+#[case::numident_alpha_after_digit("123abc", &["NUMIDENT(123abc)"])]
+#[case::numident_with_dash("019dda1c-5b3f-7000", &["NUMIDENT(019dda1c-5b3f-7000)"])]
+#[case::numident_with_dot("019dda1c.commit", &["NUMIDENT(019dda1c.commit)"])]
+fn lexer_number_idents(#[case] input: &str, #[case] expected: &[&str]) {
+    run_lexer_test(input, expected);
+}
+
+// Dot-prefixed bare words: `.gitignore`, `.parent`, `.parent.parent`. Must
+// lex as a single token, not Dot + Ident, so they are not misparsed as the
+// POSIX `.` (source) command followed by an argument.
+#[rstest]
+#[case::dotident_simple(".parent", &["DOTIDENT(.parent)"])]
+#[case::dotident_chained(".parent.parent", &["DOTIDENT(.parent.parent)"])]
+#[case::dotident_hidden_file(".gitignore", &["DOTIDENT(.gitignore)"])]
+#[case::dotident_with_dash(".foo-bar", &["DOTIDENT(.foo-bar)"])]
+fn lexer_dot_idents(#[case] input: &str, #[case] expected: &[&str]) {
+    run_lexer_test(input, expected);
+}
+
+// `. file` (with whitespace) must remain Dot + Ident so the source alias works.
+#[rstest]
+#[case::source_alias_with_space(". script", &["DOT", "IDENT(script)"])]
+#[case::source_alias_with_dotted_file(". script.kai", &["DOT", "IDENT(script.kai)"])]
+fn lexer_source_alias_preserved(#[case] input: &str, #[case] expected: &[&str]) {
+    run_lexer_test(input, expected);
 }
 
 // =============================================================================

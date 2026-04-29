@@ -109,7 +109,6 @@ pub enum LexerError {
     InvalidNumber,
     AmbiguousBoolean(String),
     AmbiguousBooleanLike(String),
-    InvalidNumberIdent(String),
     InvalidFloatNoLeading,
     InvalidFloatNoTrailing,
     /// Nesting depth exceeded (too many nested parentheses in arithmetic).
@@ -134,9 +133,6 @@ impl fmt::Display for LexerError {
             LexerError::AmbiguousBooleanLike(s) => {
                 let suggest = if s.eq_ignore_ascii_case("yes") { "true" } else { "false" };
                 write!(f, "ambiguous boolean-like '{}', use '{}' or '\"{}\"'", s, suggest, s)
-            }
-            LexerError::InvalidNumberIdent(s) => {
-                write!(f, "identifier cannot start with digit: {}", s)
             }
             LexerError::InvalidFloatNoLeading => write!(f, "float must have leading digit"),
             LexerError::InvalidFloatNoTrailing => write!(f, "float must have trailing digit"),
@@ -367,6 +363,14 @@ pub enum Token {
     #[regex(r"\./[a-zA-Z0-9_./-]+", lex_dot_slash_path, priority = 3)]
     DotSlashPath(String),
 
+    /// Dot-prefixed bareword: `.parent`, `.gitignore`, `.foo.bar`.
+    /// Treated as an opaque string in argv position. Distinct from `Token::Dot`
+    /// (the POSIX `.` source alias) which only matches a bare `.` — the source
+    /// alias requires whitespace before its file argument (`. script`), so
+    /// `.parent` (no space) is unambiguously a single bareword.
+    #[regex(r"\.[a-zA-Z_][a-zA-Z0-9_.-]*", lex_dotted_ident, priority = 3)]
+    DottedIdent(String),
+
     #[token("{")]
     LBrace,
 
@@ -507,9 +511,12 @@ pub enum Token {
     // Invalid patterns (caught before valid tokens for better errors)
     // ═══════════════════════════════════════════════════════════════════
 
-    /// Invalid: number followed by identifier characters (like 123abc)
-    #[regex(r"[0-9]+[a-zA-Z_][a-zA-Z0-9_-]*", lex_invalid_number_ident, priority = 3)]
-    InvalidNumberIdent,
+    /// Digit-leading bareword: `019dda1c` (SHA prefix), UUIDs, version-ish
+    /// strings. Distinguished from `Int` because at least one alpha character
+    /// follows the leading digits — the lexer commits to "this is a string,
+    /// not a number." Treated as a bareword string in expression position.
+    #[regex(r"[0-9]+[a-zA-Z_][a-zA-Z0-9_.-]*", lex_number_ident, priority = 3)]
+    NumberIdent(String),
 
     /// Invalid: float without leading digit (like .5)
     #[regex(r"\.[0-9]+", lex_invalid_float_no_leading, priority = 3)]
@@ -697,11 +704,12 @@ impl Token {
             Token::Ident(_)
             | Token::PlusBare(_)
             | Token::MinusBare(_)
-            | Token::MinusAlone => TokenCategory::Command,
+            | Token::MinusAlone
+            | Token::NumberIdent(_)
+            | Token::DottedIdent(_) => TokenCategory::Command,
 
             // Errors
-            Token::InvalidNumberIdent
-            | Token::InvalidFloatNoLeading
+            Token::InvalidFloatNoLeading
             | Token::InvalidFloatNoTrailing => TokenCategory::Error,
         }
     }
@@ -754,10 +762,16 @@ fn lex_float(lex: &mut logos::Lexer<Token>) -> Result<f64, LexerError> {
     lex.slice().parse().map_err(|_| LexerError::InvalidNumber)
 }
 
-/// Lex an invalid number-identifier pattern (like 123abc).
-/// Always returns Err to produce a lexer error instead of a token.
-fn lex_invalid_number_ident(lex: &mut logos::Lexer<Token>) -> Result<(), LexerError> {
-    Err(LexerError::InvalidNumberIdent(lex.slice().to_string()))
+/// Lex a digit-leading bareword like `019dda1c` or `019dda1c-5b3f-7000`.
+/// Distinguished from `Int` because at least one alpha character follows the
+/// leading digits — the slice is treated as a string, not a number.
+fn lex_number_ident(lex: &mut logos::Lexer<Token>) -> String {
+    lex.slice().to_string()
+}
+
+/// Lex a dot-prefixed bareword like `.gitignore` or `.parent.parent`.
+fn lex_dotted_ident(lex: &mut logos::Lexer<Token>) -> String {
+    lex.slice().to_string()
 }
 
 /// Lex an invalid float without leading digit (like .5).
@@ -934,11 +948,12 @@ impl fmt::Display for Token {
             Token::Float(n) => write!(f, "FLOAT({})", n),
             Token::Path(s) => write!(f, "PATH({})", s),
             Token::Ident(s) => write!(f, "IDENT({})", s),
+            Token::NumberIdent(s) => write!(f, "NUMIDENT({})", s),
+            Token::DottedIdent(s) => write!(f, "DOTIDENT({})", s),
             Token::Comment => write!(f, "COMMENT"),
             Token::Newline => write!(f, "NEWLINE"),
             Token::LineContinuation => write!(f, "LINECONT"),
-            // These variants should never be produced - their callbacks always return errors
-            Token::InvalidNumberIdent => write!(f, "INVALID_NUMBER_IDENT"),
+            // These variants should never be produced — their callbacks always return errors
             Token::InvalidFloatNoLeading => write!(f, "INVALID_FLOAT_NO_LEADING"),
             Token::InvalidFloatNoTrailing => write!(f, "INVALID_FLOAT_NO_TRAILING"),
         }
@@ -1566,6 +1581,8 @@ fn preprocess_heredocs(source: &str) -> Result<(String, Vec<HeredocReplacement>)
 fn mergeable_text(token: &Token) -> Option<String> {
     match token {
         Token::Ident(s) => Some(s.clone()),
+        Token::NumberIdent(s) => Some(s.clone()),
+        Token::DottedIdent(s) => Some(s.clone()),
         Token::Colon => Some(":".to_string()),
         Token::Int(n) => Some(n.to_string()),
         Token::Path(p) => Some(p.clone()),
@@ -1659,6 +1676,8 @@ fn glob_mergeable_text(token: &Token) -> Option<String> {
         Token::Dot => Some(".".to_string()),
         Token::DotDot => Some("..".to_string()),
         Token::Ident(s) => Some(s.clone()),
+        Token::NumberIdent(s) => Some(s.clone()),
+        Token::DottedIdent(s) => Some(s.clone()),
         Token::Path(s) => Some(s.clone()),
         Token::Int(n) => Some(n.to_string()),
         Token::LBracket => Some("[".to_string()),
@@ -3139,9 +3158,10 @@ mod tests {
 
         // Commands
         assert_eq!(Token::Ident("echo".to_string()).category(), TokenCategory::Command);
+        assert_eq!(Token::NumberIdent("019dda1c".to_string()).category(), TokenCategory::Command);
+        assert_eq!(Token::DottedIdent(".gitignore".to_string()).category(), TokenCategory::Command);
 
         // Errors
-        assert_eq!(Token::InvalidNumberIdent.category(), TokenCategory::Error);
         assert_eq!(Token::InvalidFloatNoLeading.category(), TokenCategory::Error);
         assert_eq!(Token::InvalidFloatNoTrailing.category(), TokenCategory::Error);
     }

@@ -582,3 +582,94 @@ async fn test_find_type_filter_through_parser() {
         "-type d should exclude files: {dirs_out}"
     );
 }
+
+// ============================================================================
+// Bareword argv tokens: digit-leading and dot-prefixed strings
+//
+// These forms are common in real-world argv: SHA prefixes (`019dda1c`),
+// hidden files (`.gitignore`), and context refs (`.parent`, `.parent.parent`).
+// The lexer must produce a single bareword token for each so they aren't
+// rejected (digit-leading) or misparsed as the POSIX `.` source alias
+// (dot-prefixed).
+// ============================================================================
+
+#[tokio::test]
+async fn test_argv_digit_leading_hex_passes_through() {
+    let kernel = Kernel::transient().unwrap();
+    let result = kernel
+        .execute(r#"echo 019dda1c "msg""#)
+        .await
+        .expect("parse + exec should succeed for digit-leading bareword");
+    assert!(result.ok(), "echo failed: err={}", result.err);
+    assert_eq!(result.text_out().trim(), "019dda1c msg");
+}
+
+#[tokio::test]
+async fn test_argv_digit_leading_uuid_passes_through() {
+    let kernel = Kernel::transient().unwrap();
+    let result = kernel
+        .execute("echo 019dda1c-5b3f-7000-abcd-0123456789ab")
+        .await
+        .expect("UUID-like bareword should lex");
+    assert!(result.ok(), "echo failed: err={}", result.err);
+    assert_eq!(
+        result.text_out().trim(),
+        "019dda1c-5b3f-7000-abcd-0123456789ab"
+    );
+}
+
+#[tokio::test]
+async fn test_argv_dot_prefixed_simple() {
+    let kernel = Kernel::transient().unwrap();
+    let result = kernel
+        .execute(r#"echo .parent "msg""#)
+        .await
+        .expect("dot-prefixed bareword should lex");
+    assert!(result.ok(), "echo failed: err={}", result.err);
+    assert_eq!(result.text_out().trim(), ".parent msg");
+}
+
+#[tokio::test]
+async fn test_argv_dot_prefixed_chained() {
+    let kernel = Kernel::transient().unwrap();
+    let result = kernel
+        .execute("echo .parent.parent")
+        .await
+        .expect("chained .parent.parent should lex as one token");
+    assert!(result.ok(), "echo failed: err={}", result.err);
+    assert_eq!(result.text_out().trim(), ".parent.parent");
+}
+
+#[tokio::test]
+async fn test_argv_dot_prefixed_hidden_file() {
+    let kernel = Kernel::transient().unwrap();
+    let result = kernel
+        .execute("echo .gitignore")
+        .await
+        .expect("hidden filename should not be parsed as source command");
+    assert!(result.ok(), "echo failed: err={}", result.err);
+    assert_eq!(result.text_out().trim(), ".gitignore");
+}
+
+// `. file` (with whitespace) must still be the source alias — POSIX behavior.
+#[tokio::test]
+async fn test_source_alias_with_space_still_works() {
+    let kernel = Kernel::transient().unwrap();
+    // Trying to source a non-existent file should hit the source builtin's
+    // missing-file error, not silently succeed.
+    let result = kernel
+        .execute(". /nonexistent-kaish-source-test")
+        .await
+        .expect("`. file` should still be parsed as source command");
+    assert!(
+        !result.ok(),
+        "source of nonexistent file should fail (proves source ran)"
+    );
+    assert!(
+        result.err.contains("source") || result.err.contains("not found")
+            || result.err.contains("No such file"),
+        "expected source error, got: stdout={}, stderr={}",
+        result.text_out(),
+        result.err,
+    );
+}
