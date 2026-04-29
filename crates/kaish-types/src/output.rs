@@ -200,6 +200,17 @@ pub struct OutputData {
     pub headers: Option<Vec<String>>,
     /// Top-level nodes.
     pub root: Vec<OutputNode>,
+    /// Render-only override for `--json` consumers. When `Some`,
+    /// `to_json()` returns this verbatim instead of inferring from
+    /// `headers` / `root` / `cells`. Use it when a builtin wants its
+    /// `--json` shape to be richer than the table form (e.g. grep
+    /// emitting per-match objects with submatches and byte offsets).
+    ///
+    /// Skipped by serde (and thus by postcard / bincode) — this is a
+    /// transient render hint, not part of the persisted shape.
+    #[serde(skip)]
+    #[cfg_attr(feature = "schema", schemars(skip))]
+    pub rich_json: Option<serde_json::Value>,
 }
 
 impl OutputData {
@@ -215,6 +226,7 @@ impl OutputData {
         Self {
             headers: None,
             root: vec![OutputNode::text(content)],
+            rich_json: None,
         }
     }
 
@@ -223,6 +235,7 @@ impl OutputData {
         Self {
             headers: None,
             root: nodes,
+            rich_json: None,
         }
     }
 
@@ -231,12 +244,19 @@ impl OutputData {
         Self {
             headers: Some(headers),
             root: nodes,
+            rich_json: None,
         }
     }
 
     /// Set column headers.
     pub fn with_headers(mut self, headers: Vec<String>) -> Self {
         self.headers = Some(headers);
+        self
+    }
+
+    /// Attach a render-only `--json` override. See `rich_json` field doc.
+    pub fn with_rich_json(mut self, value: serde_json::Value) -> Self {
+        self.rich_json = Some(value);
         self
     }
 
@@ -420,6 +440,11 @@ impl OutputData {
     /// | Table (headers + cells) | `[{"col1": "v1", ...}, ...]` |
     /// | Tree (nested children) | `{"dir": {"file": null}}` |
     pub fn to_json(&self) -> serde_json::Value {
+        // Builtin-supplied override wins (used by `grep --json` to expose
+        // submatches/byte offsets that don't fit the table model).
+        if let Some(rich) = &self.rich_json {
+            return rich.clone();
+        }
         // Simple text -> JSON string
         if let Some(text) = self.as_text() {
             return serde_json::Value::String(text.to_string());

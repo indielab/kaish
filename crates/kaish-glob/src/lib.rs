@@ -71,6 +71,16 @@ pub trait WalkerFs: Send + Sync {
     async fn canonicalize(&self, path: &Path) -> PathBuf {
         path.to_path_buf()
     }
+
+    /// Return the file size in bytes, or `None` if size cannot be determined.
+    ///
+    /// Used by `FileWalker` to honor `WalkOptions::max_filesize`.
+    /// Implementations that don't know file sizes (or for which a size query
+    /// is too expensive) may return `None` — the walker treats that as
+    /// "unknown size" and yields the file regardless of the limit.
+    async fn file_size(&self, _path: &Path) -> Option<u64> {
+        None
+    }
 }
 
 /// A single entry returned by `WalkerFs::list_dir`.

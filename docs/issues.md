@@ -24,6 +24,23 @@ subprocess capture, arithmetic token leak) **all validate as fixed** on
 Instead, added here-string `<<<` so the natural agent pattern is
 `jq -r '.key' <<< "$RESULT"`. kaish ships a native in-process jq. -->
 
+### `rg` parallel walking
+The 2026-04-29 rg builtin uses `ignore::WalkBuilder::build()`, which
+yields a sequential iterator. `WalkParallel::run()` is a few lines'
+diff plus careful synchronization (work-stealing crossbeam deques,
+results merged across workers). High value on large trees — rg's
+real-world advantage. Skipped this round to ship the feature; revisit
+when single-thread perf bites.
+
+### `rg` async stdin streaming
+`rg.rs::run_with_matcher` reads stdin via `ctx.read_stdin_to_string()`
+into a `String` and uses `Searcher::search_slice` on the bytes. Fine
+for small/medium pipes; blocks the runtime worker on large pipes.
+A `SyncPipeReader` adapter (sync `std::io::Read` over async
+`PipeReader` via `Handle::block_on`) plus `Searcher::search_reader`
+would stream chunks. Expected modest payoff; defer until a real
+workload pushes against the buffer.
+
 ### Here-string `<<<` — parse-error message polish
 `parser.rs` command_parser `.try_map(...)` emits
 "multiple stdin redirects on one command are ambiguous" when two of
@@ -132,6 +149,14 @@ mutation acquires a new write lock. Concurrent task can invalidate the
 parent setup between the two. Affects `rename`, `write`, `mkdir`,
 `symlink`. Fix: hold one lock across both operations, or inline
 `ensure_parents`.
+
+### `scheduler::job::tests::test_cleanup_removes_temp_files` flake
+Test reaches into the shared real-FS `/tmp/kaish/jobs/` path and races
+parallel test runs. Passes in isolation, fails intermittently under
+`cargo test --all`. Same root cause as the "job output files in
+`/tmp/kaish/jobs/` persist indefinitely" entry above. Switch the
+JobManager test path to `tempfile::tempdir()` (each test gets its own
+root) until the GC fix lands.
 
 ---
 

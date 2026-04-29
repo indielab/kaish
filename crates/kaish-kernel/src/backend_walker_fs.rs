@@ -58,4 +58,8 @@ impl WalkerFs for BackendWalkerFs<'_> {
     async fn exists(&self, path: &Path) -> bool {
         self.0.exists(path).await
     }
+
+    async fn file_size(&self, path: &Path) -> Option<u64> {
+        self.0.stat(path).await.ok().map(|info| info.size)
+    }
 }

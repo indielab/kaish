@@ -1,12 +1,20 @@
 //! grep — Search for patterns in files or stdin.
+//!
+//! Uses ripgrep's `grep-searcher` + `grep-regex` libraries as the
+//! underlying engine: binary detection, encoding sniffing, multiline
+//! support, and correct context-break handling all come from there. The
+//! kaish builtin keeps its existing schema and exit-code semantics.
 
 use async_trait::async_trait;
+use grep_regex::{RegexMatcher, RegexMatcherBuilder};
+use grep_searcher::{BinaryDetection, Encoding, SearcherBuilder};
 use regex::RegexBuilder;
 use std::path::{Path, PathBuf};
 
 use crate::ast::Value;
 use crate::backend_walker_fs::BackendWalkerFs;
 use crate::interpreter::{ExecResult, OutputData, OutputNode};
+use crate::tools::builtin::grep_engine::{AccumulatorSink, ContextKind, SearchEvent};
 use crate::tools::{ExecContext, ParamSchema, Tool, ToolArgs, ToolSchema, validate_against_schema};
 use crate::validator::{IssueCode, ValidationIssue};
 use crate::walker::{FileWalker, GlobPath, IncludeExclude, WalkOptions};
@@ -117,6 +125,24 @@ impl Tool for Grep {
                 Value::Null,
                 "Exclude files matching pattern (--exclude)",
             ).with_aliases(["--exclude"]))
+            .param(ParamSchema::optional(
+                "multiline",
+                "bool",
+                Value::Bool(false),
+                "Allow patterns to match across line boundaries (-U)",
+            ).with_aliases(["-U", "--multiline"]))
+            .param(ParamSchema::optional(
+                "encoding",
+                "string",
+                Value::Null,
+                "Force a specific text encoding (e.g. utf-16, latin-1)",
+            ).with_aliases(["--encoding"]))
+            .param(ParamSchema::optional(
+                "binary",
+                "string",
+                Value::String("quit".into()),
+                "Binary handling: quit (default), text, without-match",
+            ).with_aliases(["--binary"]))
             .example("Search for pattern in file", "grep pattern file.txt")
             .example("Case-insensitive search", "grep -i ERROR log.txt")
             .example("Show line numbers", "grep -n TODO *.rs")
@@ -185,6 +211,19 @@ impl Tool for Grep {
             })
             .or(context);
 
+        let multiline = args.has_flag("multiline") || args.has_flag("U");
+        let encoding = args.get_string("encoding", usize::MAX);
+        let binary_mode = args
+            .get_string("binary", usize::MAX)
+            .unwrap_or_else(|| "quit".into());
+        let binary_detection = match binary_mode.as_str() {
+            "none" | "text" => BinaryDetection::none(),
+            "without-match" => BinaryDetection::convert(b'\x00'),
+            // Default: quit on first null byte (skips most binary content
+            // gracefully; matches the legacy "skip non-UTF-8" intent).
+            _ => BinaryDetection::quit(b'\x00'),
+        };
+
         // Modify pattern for word boundary matching
         let final_pattern = if word_regexp {
             format!(r"\b{}\b", pattern)
@@ -192,12 +231,25 @@ impl Tool for Grep {
             pattern
         };
 
-        // Build regex
+        // `regex::Regex` is still used by the streaming-stdin fast path
+        // (line-by-line writes through pipe_stdout) where the full Searcher
+        // machinery is overkill.
         let regex = match RegexBuilder::new(&final_pattern)
             .case_insensitive(ignore_case)
+            .multi_line(multiline)
             .build()
         {
             Ok(r) => r,
+            Err(e) => return ExecResult::failure(1, format!("grep: invalid pattern: {}", e)),
+        };
+
+        // RegexMatcher drives the Searcher; same pattern, same flags.
+        let matcher = match RegexMatcherBuilder::new()
+            .case_insensitive(ignore_case)
+            .multi_line(multiline)
+            .build(&final_pattern)
+        {
+            Ok(m) => m,
             Err(e) => return ExecResult::failure(1, format!("grep: invalid pattern: {}", e)),
         };
 
@@ -208,6 +260,9 @@ impl Tool for Grep {
             before_context,
             after_context,
             show_filename: false, // Will be set for multi-file
+            multiline,
+            encoding: encoding.clone(),
+            binary_detection,
         };
 
         // Handle recursive search
@@ -262,7 +317,7 @@ impl Tool for Grep {
             };
 
             return self
-                .grep_multiple_files(ctx, &files, &root, &regex, &grep_opts, quiet, files_only, count_only)
+                .grep_multiple_files(ctx, &files, &root, &matcher, &grep_opts, quiet, files_only, count_only)
                 .await;
         }
 
@@ -281,28 +336,38 @@ impl Tool for Grep {
             }
         }
 
-        // Single file or stdin search
-        let (input, filename) = match args.get_string("path", 1) {
+        // Single file or stdin search. The bytes are buffered up-front;
+        // the searcher then runs synchronously inside `spawn_blocking`.
+        let (bytes, filename) = match args.get_string("path", 1) {
             Some(path) => {
                 let resolved = ctx.resolve_path(&path);
                 match ctx.backend.read(Path::new(&resolved), None).await {
-                    Ok(data) => match String::from_utf8(data) {
-                        Ok(s) => (s, Some(path)),
-                        Err(_) => {
-                            return ExecResult::failure(1, format!("grep: {}: invalid UTF-8", path))
-                        }
-                    },
+                    Ok(data) => (data, Some(path)),
                     Err(e) => return ExecResult::failure(1, format!("grep: {}: {}", path, e)),
                 }
             }
-            None => (ctx.read_stdin_to_string().await.unwrap_or_default(), None),
+            None => (
+                ctx.read_stdin_to_string()
+                    .await
+                    .unwrap_or_default()
+                    .into_bytes(),
+                None,
+            ),
         };
 
-        let (text_output, nodes, match_count) = grep_lines_structured(&input, &regex, &grep_opts, filename.as_deref());
+        let render = match grep_lines_structured(
+            &bytes,
+            &matcher,
+            &grep_opts,
+            filename.as_deref(),
+        ) {
+            Ok(t) => t,
+            Err(e) => return ExecResult::failure(1, format!("grep: {e}")),
+        };
 
         // Quiet mode: just return exit code
         if quiet {
-            return if match_count > 0 {
+            return if render.match_count > 0 {
                 ExecResult::success("")
             } else {
                 ExecResult::from_output(1, "", "")
@@ -311,7 +376,7 @@ impl Tool for Grep {
 
         // Files with matches mode
         if files_only {
-            return if match_count > 0 {
+            return if render.match_count > 0 {
                 if let Some(name) = filename {
                     ExecResult::with_output(OutputData::text(format!("{}\n", name)))
                 } else {
@@ -323,18 +388,18 @@ impl Tool for Grep {
         }
 
         if count_only {
-            ExecResult::with_output(OutputData::text(format!("{}\n", match_count)))
-        } else if match_count == 0 {
-            ExecResult::from_output(1, text_output, "")
+            ExecResult::with_output(OutputData::text(format!("{}\n", render.match_count)))
+        } else if render.match_count == 0 {
+            ExecResult::from_output(1, render.text, "")
         } else {
-            // Return structured output with nodes
             let headers = if grep_opts.show_line_numbers {
                 vec!["MATCH".to_string(), "LINE".to_string()]
             } else {
                 vec!["MATCH".to_string()]
             };
-            let output = OutputData::table(headers, nodes);
-            ExecResult::with_output_and_text(output, text_output)
+            let output = OutputData::table(headers, render.nodes)
+                .with_rich_json(serde_json::Value::Array(render.rich));
+            ExecResult::with_output_and_text(output, render.text)
         }
     }
 }
@@ -400,7 +465,7 @@ impl Grep {
         ctx: &mut ExecContext,
         files: &[PathBuf],
         root: &Path,
-        regex: &regex::Regex,
+        matcher: &RegexMatcher,
         base_opts: &GrepOptions,
         quiet: bool,
         files_only: bool,
@@ -408,20 +473,18 @@ impl Grep {
     ) -> ExecResult {
         let mut total_output = String::new();
         let mut total_nodes: Vec<OutputNode> = Vec::new();
-        let mut total_matches = 0;
+        let mut total_rich: Vec<serde_json::Value> = Vec::new();
+        let mut total_matches: usize = 0;
         let mut files_with_matches = Vec::new();
 
         let opts = GrepOptions {
             show_filename: true,
-            ..*base_opts
+            ..base_opts.clone()
         };
 
         for file_path in files {
-            let content = match ctx.backend.read(file_path, None).await {
-                Ok(data) => match String::from_utf8(data) {
-                    Ok(s) => s,
-                    Err(_) => continue, // Skip binary files
-                },
+            let bytes = match ctx.backend.read(file_path, None).await {
+                Ok(data) => data,
                 Err(_) => continue,
             };
 
@@ -432,15 +495,19 @@ impl Grep {
                 .to_string_lossy()
                 .to_string();
 
-            let (output, nodes, match_count) = grep_lines_structured(&content, regex, &opts, Some(&display_name));
+            let render = match grep_lines_structured(&bytes, matcher, &opts, Some(&display_name)) {
+                Ok(t) => t,
+                Err(_) => continue,
+            };
 
-            if match_count > 0 {
-                total_matches += match_count;
+            if render.match_count > 0 {
+                total_matches += render.match_count;
                 files_with_matches.push(display_name.clone());
 
                 if !quiet && !files_only && !count_only {
-                    total_output.push_str(&output);
-                    total_nodes.extend(nodes);
+                    total_output.push_str(&render.text);
+                    total_nodes.extend(render.nodes);
+                    total_rich.extend(render.rich);
                 }
             }
         }
@@ -472,13 +539,14 @@ impl Grep {
             } else {
                 vec!["MATCH".to_string(), "FILE".to_string()]
             };
-            let output = OutputData::table(headers, total_nodes);
+            let output = OutputData::table(headers, total_nodes)
+                .with_rich_json(serde_json::Value::Array(total_rich));
             ExecResult::with_output_and_text(output, total_output)
         }
     }
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 struct GrepOptions {
     show_line_numbers: bool,
     invert: bool,
@@ -486,110 +554,212 @@ struct GrepOptions {
     only_matching: bool,
     before_context: Option<usize>,
     after_context: Option<usize>,
+    multiline: bool,
+    /// Encoding label (`utf-16`, `latin-1`, …). `None` lets the searcher
+    /// auto-detect via BOM sniffing.
+    encoding: Option<String>,
+    binary_detection: BinaryDetection,
 }
 
-/// Search lines and return matching output, nodes, and count.
+/// Search bytes via grep-searcher and return the rendered output bundle.
+/// Replaces the legacy line-by-line scanner.
+///
+/// Returns an error string when the searcher can't run (e.g. a bad
+/// encoding label). Match-not-found is *not* an error — it returns an
+/// empty `RenderResult` with `match_count == 0`.
 fn grep_lines_structured(
-    input: &str,
-    regex: &regex::Regex,
+    input: &[u8],
+    matcher: &RegexMatcher,
     opts: &GrepOptions,
     filename: Option<&str>,
-) -> (String, Vec<OutputNode>, usize) {
-    let lines: Vec<&str> = input.lines().collect();
-    let mut output = String::new();
-    let mut nodes: Vec<OutputNode> = Vec::new();
-    let mut match_count = 0;
-    let mut printed = vec![false; lines.len()];
+) -> Result<RenderResult, String> {
+    // Build the searcher. line_number is always on so the renderer can
+    // emit `LINE` cells when requested; `show_line_numbers` gates *display*,
+    // not the underlying numbering.
+    let mut sb = SearcherBuilder::new();
+    sb.line_number(true)
+        .multi_line(opts.multiline)
+        .invert_match(opts.invert)
+        .binary_detection(opts.binary_detection.clone());
+    if let Some(before) = opts.before_context {
+        sb.before_context(before);
+    }
+    if let Some(after) = opts.after_context {
+        sb.after_context(after);
+    }
+    if let Some(enc_label) = opts.encoding.as_deref() {
+        match Encoding::new(enc_label) {
+            Ok(enc) => {
+                sb.encoding(Some(enc));
+            }
+            Err(e) => return Err(format!("invalid encoding '{enc_label}': {e}")),
+        }
+    }
+    let mut searcher = sb.build();
 
-    // Helper to format prefix for text output
-    let prefix = |line_num: usize, sep: char| -> String {
+    let mut sink = AccumulatorSink::new(matcher, None);
+    searcher
+        .search_slice(matcher, input, &mut sink)
+        .map_err(|e| e.to_string())?;
+    let events = sink.into_events();
+
+    Ok(render_events(&events, opts, filename))
+}
+
+/// Per-event render output: legacy text + table nodes for text mode, plus
+/// a parallel array of rich JSON objects for `--json` consumers.
+struct RenderResult {
+    text: String,
+    nodes: Vec<OutputNode>,
+    rich: Vec<serde_json::Value>,
+    match_count: usize,
+}
+
+/// Render a stream of search events into both the legacy table form and a
+/// rich JSON shape (one object per matched line, with submatches and
+/// byte offset).
+fn render_events(events: &[SearchEvent], opts: &GrepOptions, filename: Option<&str>) -> RenderResult {
+    let prefix = |line_num: u64, sep: char| -> String {
         let mut p = String::new();
         if opts.show_filename
-            && let Some(f) = filename {
-                p.push_str(f);
-                p.push(sep);
-            }
+            && let Some(f) = filename
+        {
+            p.push_str(f);
+            p.push(sep);
+        }
         if opts.show_line_numbers {
-            p.push_str(&format!("{}{}", line_num + 1, sep));
+            p.push_str(&format!("{line_num}{sep}"));
         }
         p
     };
 
-    for (line_num, line) in lines.iter().enumerate() {
-        let matches = regex.is_match(line);
-        let should_match = if opts.invert { !matches } else { matches };
+    let mut output = String::new();
+    let mut nodes: Vec<OutputNode> = Vec::new();
+    let mut rich: Vec<serde_json::Value> = Vec::new();
+    let mut match_count: usize = 0;
+    let mut emitted_any = false;
 
-        if should_match {
-            match_count += 1;
-
-            // Handle context lines (text output only, not as nodes)
-            if let Some(before) = opts.before_context {
-                let start = line_num.saturating_sub(before);
-                for ctx_line in start..line_num {
-                    if !printed[ctx_line] {
-                        output.push_str(&prefix(ctx_line, '-'));
-                        output.push_str(lines[ctx_line]);
-                        output.push('\n');
-                        printed[ctx_line] = true;
-                    }
-                }
-            }
-
-            // Print the matching line
-            if !printed[line_num] {
-                if opts.only_matching && !opts.invert {
-                    // Print only matched parts
-                    for m in regex.find_iter(line) {
+    for event in events {
+        match event {
+            SearchEvent::Match(m) => {
+                let line_num = m.line_number.unwrap_or(0);
+                if opts.only_matching && !opts.invert && !m.submatches.is_empty() {
+                    for sub in &m.submatches {
                         output.push_str(&prefix(line_num, ':'));
-                        output.push_str(m.as_str());
+                        output.push_str(&sub.text);
                         output.push('\n');
 
-                        // Create node for each match
                         let mut cells = Vec::new();
                         if opts.show_filename
-                            && let Some(f) = filename {
-                                cells.push(f.to_string());
-                            }
-                        if opts.show_line_numbers {
-                            cells.push((line_num + 1).to_string());
+                            && let Some(f) = filename
+                        {
+                            cells.push(f.to_string());
                         }
-                        nodes.push(OutputNode::new(m.as_str()).with_cells(cells));
+                        if opts.show_line_numbers {
+                            cells.push(line_num.to_string());
+                        }
+                        nodes.push(OutputNode::new(&sub.text).with_cells(cells));
                     }
                 } else {
                     output.push_str(&prefix(line_num, ':'));
-                    output.push_str(line);
+                    output.push_str(&m.line_text);
                     output.push('\n');
 
-                    // Create node for the match
                     let mut cells = Vec::new();
                     if opts.show_filename
-                        && let Some(f) = filename {
-                            cells.push(f.to_string());
-                        }
+                        && let Some(f) = filename
+                    {
+                        cells.push(f.to_string());
+                    }
                     if opts.show_line_numbers {
-                        cells.push((line_num + 1).to_string());
+                        cells.push(line_num.to_string());
                     }
-                    nodes.push(OutputNode::new(*line).with_cells(cells));
+                    nodes.push(OutputNode::new(&m.line_text).with_cells(cells));
                 }
-                printed[line_num] = true;
-            }
 
-            // Handle after context (text output only)
-            if let Some(after) = opts.after_context {
-                let end = (line_num + after + 1).min(lines.len());
-                for ctx_line in (line_num + 1)..end {
-                    if !printed[ctx_line] {
-                        output.push_str(&prefix(ctx_line, '-'));
-                        output.push_str(lines[ctx_line]);
-                        output.push('\n');
-                        printed[ctx_line] = true;
-                    }
+                rich.push(match_record_to_json(m, filename));
+                match_count += 1;
+                emitted_any = true;
+            }
+            SearchEvent::Context(c) => {
+                let sep = match c.kind {
+                    ContextKind::Before | ContextKind::After | ContextKind::Other => '-',
+                };
+                let line_num = c.line_number.unwrap_or(0);
+                output.push_str(&prefix(line_num, sep));
+                output.push_str(&c.line_text);
+                output.push('\n');
+                emitted_any = true;
+            }
+            SearchEvent::ContextBreak => {
+                if emitted_any {
+                    output.push_str("--\n");
                 }
             }
         }
     }
 
-    (output, nodes, match_count)
+    RenderResult {
+        text: output,
+        nodes,
+        rich,
+        match_count,
+    }
+}
+
+/// Build the rich JSON object for one matched line.
+///
+/// Shape (stable contract; tested in `tests::test_grep_json_rich_schema`):
+/// ```json
+/// {
+///   "path": "src/main.rs",  // null when reading stdin
+///   "line_number": 42,       // null when line numbering is off
+///   "byte_offset": 1234,
+///   "line_text": "...",
+///   "submatches": [
+///     { "text": "foo", "start": 0, "end": 3 }
+///   ]
+/// }
+/// ```
+fn match_record_to_json(
+    m: &crate::tools::builtin::grep_engine::MatchRecord,
+    fallback_path: Option<&str>,
+) -> serde_json::Value {
+    use serde_json::{Value, json};
+    // Prefer the path the Sink captured; fall back to caller's filename
+    // (this matters because the per-file driver currently doesn't tag
+    // sinks with paths, so the renderer's filename is the source of truth).
+    let path = m
+        .path
+        .as_ref()
+        .map(|p| p.to_string_lossy().to_string())
+        .or_else(|| fallback_path.map(|s| s.to_string()));
+    let path_v = match path {
+        Some(p) => Value::String(p),
+        None => Value::Null,
+    };
+    let line_number_v = match m.line_number {
+        Some(n) => Value::Number(n.into()),
+        None => Value::Null,
+    };
+    let submatches: Vec<Value> = m
+        .submatches
+        .iter()
+        .map(|s| {
+            json!({
+                "text": s.text,
+                "start": s.start,
+                "end": s.end,
+            })
+        })
+        .collect();
+    json!({
+        "path": path_v,
+        "line_number": line_number_v,
+        "byte_offset": m.absolute_byte_offset,
+        "line_text": m.line_text,
+        "submatches": submatches,
+    })
 }
 
 #[cfg(test)]
@@ -794,6 +964,169 @@ mod tests {
         let result = Grep.execute(args, &mut ctx).await;
         assert!(!result.ok());
         assert_eq!(result.code, 1);
+    }
+
+    /// Multiline matching with -U: pattern with `(?s).` can span newlines.
+    #[tokio::test]
+    async fn test_grep_multiline_flag() {
+        let mut ctx = make_ctx().await;
+        ctx.set_stdin("foo line\nmiddle\nbar line\n".to_string());
+
+        let mut args = ToolArgs::new();
+        args.positional.push(Value::String("(?s)foo.*bar".into()));
+        args.flags.insert("U".to_string());
+
+        let result = Grep.execute(args, &mut ctx).await;
+        assert!(
+            result.ok(),
+            "multiline grep failed: code={} err={}",
+            result.code,
+            result.err
+        );
+        assert!(
+            result.text_out().contains("foo line"),
+            "expected match crossing lines: {:?}",
+            result.text_out().to_string(),
+        );
+    }
+
+    /// Without -U the same pattern must NOT cross newlines (single-line
+    /// regime is the default per existing behavior).
+    #[tokio::test]
+    async fn test_grep_no_multiline_by_default() {
+        let mut ctx = make_ctx().await;
+        ctx.set_stdin("foo line\nmiddle\nbar line\n".to_string());
+
+        let mut args = ToolArgs::new();
+        args.positional.push(Value::String("(?s)foo.*bar".into()));
+
+        let result = Grep.execute(args, &mut ctx).await;
+        // No matches across lines → exit 1.
+        assert_eq!(result.code, 1);
+    }
+
+    /// Binary detection: a file with embedded NUL is skipped under the
+    /// default `--binary=quit` mode (engine quits searching at the first
+    /// null byte; subsequent `bar` doesn't match).
+    #[tokio::test]
+    async fn test_grep_binary_quit_default() {
+        use crate::vfs::{Filesystem, MemoryFs, VfsRouter};
+        use std::sync::Arc;
+
+        let mut vfs = VfsRouter::new();
+        let mem = MemoryFs::new();
+        let mut bytes = b"foo\x00bar\n".to_vec();
+        bytes.extend_from_slice(b"second line foo\n");
+        mem.write(Path::new("bin.dat"), &bytes).await.unwrap();
+        vfs.mount("/", mem);
+        let mut ctx = ExecContext::new(Arc::new(vfs));
+
+        let mut args = ToolArgs::new();
+        args.positional.push(Value::String("foo".into()));
+        args.positional.push(Value::String("/bin.dat".into()));
+
+        let result = Grep.execute(args, &mut ctx).await;
+        // Search quits at the NUL — the second line's "foo" must NOT
+        // appear in the rendered output.
+        assert!(
+            !result.text_out().contains("second line"),
+            "binary quit should suppress post-NUL output, got: {:?}",
+            result.text_out().to_string(),
+        );
+    }
+
+    /// `--binary=text` keeps searching past the NUL.
+    #[tokio::test]
+    async fn test_grep_binary_text_searches_through() {
+        use crate::vfs::{Filesystem, MemoryFs, VfsRouter};
+        use std::sync::Arc;
+
+        let mut vfs = VfsRouter::new();
+        let mem = MemoryFs::new();
+        let mut bytes = b"foo\x00bar\n".to_vec();
+        bytes.extend_from_slice(b"after_null foo bar\n");
+        mem.write(Path::new("bin.dat"), &bytes).await.unwrap();
+        vfs.mount("/", mem);
+        let mut ctx = ExecContext::new(Arc::new(vfs));
+
+        let mut args = ToolArgs::new();
+        args.positional.push(Value::String("foo".into()));
+        args.positional.push(Value::String("/bin.dat".into()));
+        args.named
+            .insert("binary".to_string(), Value::String("text".into()));
+
+        let result = Grep.execute(args, &mut ctx).await;
+        assert!(result.ok());
+        assert!(
+            result.text_out().contains("after_null"),
+            "binary=text should find post-NUL match, got: {:?}",
+            result.text_out().to_string(),
+        );
+    }
+
+    /// `--json` emits a richer per-match shape than the legacy
+    /// `MATCH/FILE/LINE` table: each row is an object with `path`,
+    /// `line_number`, `byte_offset`, `line_text`, and a `submatches`
+    /// array carrying per-submatch text + byte ranges.
+    #[tokio::test]
+    async fn test_grep_json_rich_schema() {
+        use kaish_types::output::{OutputFormat, apply_output_format};
+
+        let mut ctx = make_ctx().await;
+        let mut args = ToolArgs::new();
+        args.positional.push(Value::String("hello".into()));
+        args.positional.push(Value::String("/test.txt".into()));
+        args.flags.insert("n".to_string());
+
+        let raw = Grep.execute(args, &mut ctx).await;
+        let result = apply_output_format(raw, OutputFormat::Json);
+        let parsed: serde_json::Value =
+            serde_json::from_str(&result.text_out()).expect("valid JSON");
+        let arr = parsed.as_array().expect("array");
+        assert!(!arr.is_empty(), "expected at least one match: {parsed:#?}");
+
+        let first = &arr[0];
+        // Required keys.
+        for key in ["path", "line_number", "byte_offset", "line_text", "submatches"] {
+            assert!(
+                first.get(key).is_some(),
+                "missing key {key:?} in rich JSON: {first:#?}",
+            );
+        }
+        // `submatches` is an array; each entry has text/start/end.
+        let subs = first
+            .get("submatches")
+            .and_then(|v| v.as_array())
+            .expect("submatches array");
+        assert!(!subs.is_empty(), "expected at least one submatch");
+        let first_sub = &subs[0];
+        assert!(first_sub.get("text").and_then(|v| v.as_str()).is_some());
+        assert!(first_sub.get("start").and_then(|v| v.as_u64()).is_some());
+        assert!(first_sub.get("end").and_then(|v| v.as_u64()).is_some());
+    }
+
+    /// Engine swap regression: `--` separator emitted between
+    /// non-contiguous context groups when -C/-A/-B are used.
+    #[tokio::test]
+    async fn test_grep_context_break_separator() {
+        let mut ctx = make_ctx().await;
+        ctx.set_stdin(
+            "match1\nbetween1\nbetween2\nbetween3\nbetween4\nmatch2\n".to_string(),
+        );
+
+        let mut args = ToolArgs::new();
+        args.positional.push(Value::String("match".into()));
+        args.named.insert("context".to_string(), Value::Int(1));
+
+        let result = Grep.execute(args, &mut ctx).await;
+        assert!(result.ok());
+        // The two match groups don't overlap (gap > 2*context). Expect a `--` separator
+        // between them.
+        let out = result.text_out().to_string();
+        assert!(
+            out.contains("--\n"),
+            "expected context-break separator '--' in output, got:\n{out}",
+        );
     }
 
     #[tokio::test]

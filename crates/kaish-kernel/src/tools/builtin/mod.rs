@@ -36,6 +36,8 @@ mod gather;
 #[cfg(feature = "native")]
 mod git;
 mod grep;
+mod grep_engine;
+mod rg;
 mod head;
 mod ignore;
 mod help;
@@ -129,6 +131,7 @@ pub fn register_builtins(registry: &mut ToolRegistry) {
     #[cfg(feature = "native")]
     registry.register(git::Git);
     registry.register(grep::Grep);
+    registry.register(rg::Rg);
     registry.register(head::Head);
     registry.register(help::Help);
     registry.register(ignore::KaishIgnore);

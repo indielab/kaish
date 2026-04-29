@@ -51,6 +51,15 @@ regex = { workspace = true }
 chrono = { workspace = true }
 similar = { workspace = true }
 
+# ripgrep family — `ignore` provides global-gitignore lookup and (later)
+# WalkBuilder for the rg builtin's real-FS path. `grep-*` / `bstr` back
+# the engine swap inside the existing `grep` builtin and the new `rg`.
+ignore = { workspace = true }
+grep-searcher = { workspace = true }
+grep-regex = { workspace = true }
+grep-matcher = { workspace = true }
+bstr = { workspace = true }
+
 # jq (native implementation via jaq v2)
 jaq-core = { workspace = true }
 jaq-std = { workspace = true }
@@ -61,6 +70,10 @@ git2 = { workspace = true, optional = true }
 trash = { workspace = true, optional = true }
 directories = { workspace = true, optional = true }
 tiktoken-rs = { workspace = true, optional = true }
+
+# PCRE2 backing for `rg -P`. Off by default — enabling pulls in a C
+# library, so we keep it opt-in.
+grep-pcre2 = { workspace = true, optional = true }
 
 [target.'cfg(unix)'.dependencies]
 nix = { version = "0.29", features = ["signal", "process", "term"], optional = true }
@@ -76,6 +89,8 @@ native = [
     "tokio/process", "tokio/fs", "tokio/rt-multi-thread", "tokio/signal",
 ]
 schema = ["dep:schemars", "kaish-types/schema"]
+# Opt-in PCRE2 backend for the `rg` builtin's `-P` flag.
+pcre2 = ["dep:grep-pcre2"]
 
 [build-dependencies]
 chrono = { workspace = true }

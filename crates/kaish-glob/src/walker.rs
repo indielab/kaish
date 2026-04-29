@@ -57,6 +57,14 @@ pub type ErrorCallback = Arc<dyn Fn(&Path, &WalkerError) + Send + Sync>;
 pub struct WalkOptions {
     /// Maximum depth to recurse (None = unlimited).
     pub max_depth: Option<usize>,
+    /// Suppress yielding entries whose containing directory is at depth less
+    /// than this. Descent is unaffected — deeper entries are still found.
+    /// `None` and `Some(0)` are equivalent (yield everything).
+    pub min_depth: Option<usize>,
+    /// Skip files whose size exceeds this many bytes. Files for which the
+    /// underlying `WalkerFs::file_size` returns `None` (size unknown) are
+    /// always yielded regardless of the limit.
+    pub max_filesize: Option<u64>,
     /// Types of entries to include.
     pub entry_types: EntryTypes,
     /// Respect .gitignore files and default ignores.
@@ -72,18 +80,25 @@ pub struct WalkOptions {
     /// Optional callback for non-fatal errors (unreadable dirs, bad .gitignore).
     /// Default `None` silently skips errors (preserving original behavior).
     pub on_error: Option<ErrorCallback>,
+    /// File-type filter using ripgrep's `ignore::types::Types`.
+    /// Builds e.g. with `TypesBuilder::new().add_defaults().select("rust")`.
+    /// Pure path-name matching — no I/O.
+    pub types: Option<Arc<ignore::types::Types>>,
 }
 
 impl fmt::Debug for WalkOptions {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("WalkOptions")
             .field("max_depth", &self.max_depth)
+            .field("min_depth", &self.min_depth)
+            .field("max_filesize", &self.max_filesize)
             .field("entry_types", &self.entry_types)
             .field("respect_gitignore", &self.respect_gitignore)
             .field("include_hidden", &self.include_hidden)
             .field("filter", &self.filter)
             .field("follow_symlinks", &self.follow_symlinks)
             .field("on_error", &self.on_error.as_ref().map(|_| "..."))
+            .field("types", &self.types.as_ref().map(|_| "..."))
             .finish()
     }
 }
@@ -92,12 +107,15 @@ impl Clone for WalkOptions {
     fn clone(&self) -> Self {
         Self {
             max_depth: self.max_depth,
+            min_depth: self.min_depth,
+            max_filesize: self.max_filesize,
             entry_types: self.entry_types,
             respect_gitignore: self.respect_gitignore,
             include_hidden: self.include_hidden,
             filter: self.filter.clone(),
             follow_symlinks: self.follow_symlinks,
             on_error: self.on_error.clone(),
+            types: self.types.clone(),
         }
     }
 }
@@ -106,12 +124,15 @@ impl Default for WalkOptions {
     fn default() -> Self {
         Self {
             max_depth: None,
+            min_depth: None,
+            max_filesize: None,
             entry_types: EntryTypes::files_only(),
             respect_gitignore: true,
             include_hidden: false,
             filter: IncludeExclude::new(),
             follow_symlinks: false,
             on_error: None,
+            types: None,
         }
     }
 }
@@ -251,6 +272,14 @@ impl<'a, F: WalkerFs> FileWalker<'a, F> {
                     }
                 }
 
+                // Check type filter (-tjs / -Trust style filename matching).
+                // `Types::matched` returns Match::None for directories, so dirs
+                // always pass through and we can still recurse into them.
+                if let Some(ref types) = self.options.types
+                    && types.matched(&full_path, entry_is_dir).is_ignore() {
+                        continue;
+                    }
+
                 // Check include/exclude filter
                 if !self.options.filter.is_empty() {
                     let relative = self.relative_path(&full_path);
@@ -272,7 +301,11 @@ impl<'a, F: WalkerFs> FileWalker<'a, F> {
                     // Symlink directory handling
                     if entry_is_symlink && !self.options.follow_symlinks {
                         // Don't recurse into symlink dirs — yield as a file entry
-                        if self.options.entry_types.files && self.matches_pattern(&full_path) {
+                        if self.options.entry_types.files
+                            && self.matches_pattern(&full_path)
+                            && self.depth_yields(depth)
+                            && self.size_within_limit(self.fs, &full_path).await
+                        {
                             results.push(full_path);
                         }
                         continue;
@@ -338,12 +371,19 @@ impl<'a, F: WalkerFs> FileWalker<'a, F> {
                     }
 
                     // Yield directory if wanted
-                    if self.options.entry_types.dirs && self.matches_pattern(&full_path) {
+                    if self.options.entry_types.dirs
+                        && self.matches_pattern(&full_path)
+                        && self.depth_yields(depth)
+                    {
                         results.push(full_path);
                     }
                 } else {
                     // Yield file if wanted
-                    if self.options.entry_types.files && self.matches_pattern(&full_path) {
+                    if self.options.entry_types.files
+                        && self.matches_pattern(&full_path)
+                        && self.depth_yields(depth)
+                        && self.size_within_limit(self.fs, &full_path).await
+                    {
                         results.push(full_path);
                     }
                 }
@@ -371,6 +411,28 @@ impl<'a, F: WalkerFs> FileWalker<'a, F> {
                 let relative = self.relative_path(path);
                 pattern.matches(&relative)
             }
+            None => true,
+        }
+    }
+
+    /// Whether an entry at the given containing-directory depth should be
+    /// yielded under the current `min_depth` setting.
+    fn depth_yields(&self, depth: usize) -> bool {
+        match self.options.min_depth {
+            None | Some(0) => true,
+            Some(min) => depth >= min,
+        }
+    }
+
+    /// Whether a file at `path` is within the configured `max_filesize`.
+    /// Files whose size cannot be determined (`file_size` returns `None`)
+    /// are always considered within the limit.
+    async fn size_within_limit(&self, fs: &F, path: &Path) -> bool {
+        let Some(limit) = self.options.max_filesize else {
+            return true;
+        };
+        match fs.file_size(path).await {
+            Some(size) => size <= limit,
             None => true,
         }
     }
@@ -732,6 +794,164 @@ mod tests {
 
         assert!(!files.iter().any(|p| p.ends_with("ignored.log")));
         assert!(!files.iter().any(|p| p.ends_with("local_ignore.txt")));
+    }
+
+    /// FS that reports a stub file size for every file.
+    /// Used for max_filesize tests.
+    struct SizedFs {
+        inner: MemoryFs,
+        sizes: HashMap<PathBuf, u64>,
+    }
+
+    #[async_trait::async_trait]
+    impl WalkerFs for SizedFs {
+        type DirEntry = MemEntry;
+        async fn list_dir(&self, path: &Path) -> Result<Vec<MemEntry>, WalkerError> {
+            self.inner.list_dir(path).await
+        }
+        async fn read_file(&self, path: &Path) -> Result<Vec<u8>, WalkerError> {
+            self.inner.read_file(path).await
+        }
+        async fn is_dir(&self, path: &Path) -> bool { self.inner.is_dir(path).await }
+        async fn exists(&self, path: &Path) -> bool { self.inner.exists(path).await }
+        async fn file_size(&self, path: &Path) -> Option<u64> {
+            self.sizes.get(path).copied()
+        }
+    }
+
+    #[tokio::test]
+    async fn test_walk_max_filesize_skips_large_files() {
+        let inner = MemoryFs::new();
+        inner.add_file("/small.txt", b"tiny").await;
+        inner.add_file("/big.bin", b"larger payload").await;
+        let mut sizes = HashMap::new();
+        sizes.insert(PathBuf::from("/small.txt"), 1_024); // 1 KB
+        sizes.insert(PathBuf::from("/big.bin"), 2 * 1_048_576); // 2 MB
+        let fs = SizedFs { inner, sizes };
+
+        let walker = FileWalker::new(&fs, "/").with_options(WalkOptions {
+            respect_gitignore: false,
+            max_filesize: Some(1_048_576), // 1 MB cap
+            ..Default::default()
+        });
+
+        let files = walker.collect().await.unwrap();
+
+        assert!(files.iter().any(|p| p.ends_with("small.txt")));
+        assert!(!files.iter().any(|p| p.ends_with("big.bin")));
+    }
+
+    #[tokio::test]
+    async fn test_walk_max_filesize_unknown_size_yields() {
+        // file_size returning None means "unknown" — must NOT be skipped.
+        let fs = MemoryFs::new();
+        fs.add_file("/unknown.txt", b"x").await;
+
+        let walker = FileWalker::new(&fs, "/").with_options(WalkOptions {
+            respect_gitignore: false,
+            max_filesize: Some(0), // even with zero cap, unknown sizes pass
+            ..Default::default()
+        });
+
+        let files = walker.collect().await.unwrap();
+        assert!(files.iter().any(|p| p.ends_with("unknown.txt")));
+    }
+
+    #[tokio::test]
+    async fn test_walk_min_depth_skips_root_files() {
+        let fs = MemoryFs::new();
+        fs.add_file("/at_root.txt", b"r").await;
+        fs.add_dir("/sub").await;
+        fs.add_file("/sub/nested.txt", b"n").await;
+        fs.add_dir("/sub/deeper").await;
+        fs.add_file("/sub/deeper/deep.txt", b"d").await;
+
+        let walker = FileWalker::new(&fs, "/").with_options(WalkOptions {
+            respect_gitignore: false,
+            min_depth: Some(1), // skip yields when containing dir is at depth < 1
+            ..Default::default()
+        });
+
+        let files = walker.collect().await.unwrap();
+
+        // /at_root.txt is at depth 0 (containing dir = root, depth 0) — skipped.
+        assert!(!files.iter().any(|p| p.ends_with("at_root.txt")));
+        // /sub/nested.txt is at depth 1 — yielded.
+        assert!(files.iter().any(|p| p.ends_with("nested.txt")));
+        // /sub/deeper/deep.txt is at depth 2 — yielded.
+        assert!(files.iter().any(|p| p.ends_with("deep.txt")));
+    }
+
+    #[tokio::test]
+    async fn test_walk_types_select_only_rust() {
+        let fs = MemoryFs::new();
+        fs.add_file("/src/main.rs", b"r").await;
+        fs.add_file("/src/main.py", b"p").await;
+        fs.add_file("/src/main.js", b"j").await;
+        fs.add_file("/README.md", b"m").await;
+
+        let mut tb = ignore::types::TypesBuilder::new();
+        tb.add_defaults();
+        tb.select("rust");
+        let types = std::sync::Arc::new(tb.build().expect("types build"));
+
+        let walker = FileWalker::new(&fs, "/").with_options(WalkOptions {
+            respect_gitignore: false,
+            types: Some(types),
+            ..Default::default()
+        });
+
+        let files = walker.collect().await.unwrap();
+
+        assert!(files.iter().any(|p| p.ends_with("main.rs")));
+        assert!(!files.iter().any(|p| p.ends_with("main.py")));
+        assert!(!files.iter().any(|p| p.ends_with("main.js")));
+        assert!(!files.iter().any(|p| p.ends_with("README.md")));
+    }
+
+    #[tokio::test]
+    async fn test_walk_types_negate_excludes() {
+        let fs = MemoryFs::new();
+        fs.add_file("/src/main.rs", b"r").await;
+        fs.add_file("/src/main.py", b"p").await;
+        fs.add_file("/README.md", b"m").await;
+
+        let mut tb = ignore::types::TypesBuilder::new();
+        tb.add_defaults();
+        tb.negate("rust");
+        let types = std::sync::Arc::new(tb.build().expect("types build"));
+
+        let walker = FileWalker::new(&fs, "/").with_options(WalkOptions {
+            respect_gitignore: false,
+            types: Some(types),
+            ..Default::default()
+        });
+
+        let files = walker.collect().await.unwrap();
+
+        // Rust files excluded.
+        assert!(!files.iter().any(|p| p.ends_with("main.rs")));
+        // Other files yielded.
+        assert!(files.iter().any(|p| p.ends_with("main.py")));
+        assert!(files.iter().any(|p| p.ends_with("README.md")));
+    }
+
+    #[tokio::test]
+    async fn test_walk_min_depth_still_descends() {
+        // min_depth must NOT prevent descent — only suppress yields above the threshold.
+        let fs = MemoryFs::new();
+        fs.add_dir("/level1").await;
+        fs.add_dir("/level1/level2").await;
+        fs.add_file("/level1/level2/found.txt", b"f").await;
+
+        let walker = FileWalker::new(&fs, "/").with_options(WalkOptions {
+            respect_gitignore: false,
+            min_depth: Some(2),
+            ..Default::default()
+        });
+
+        let files = walker.collect().await.unwrap();
+        assert!(files.iter().any(|p| p.ends_with("found.txt")));
     }
 
     #[tokio::test]

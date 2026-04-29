@@ -15,6 +15,10 @@ readme = "../../README.md"
 [dependencies]
 async-trait = { workspace = true }
 thiserror = { workspace = true }
+# `Types`/`TypesBuilder` for the `-tjs`-style filename filter, plus
+# gitignore parsing for the global / parent-walk-up paths. Pure
+# path-name matching is used here; no real-FS calls.
+ignore = { workspace = true }
 
 [dev-dependencies]
 tokio = { workspace = true }
