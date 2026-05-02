@@ -185,6 +185,15 @@ pub struct KernelConfig {
     /// This allows nonces issued in one MCP `execute()` call to be validated
     /// in a subsequent call. When `None` (default), a fresh store is created.
     pub nonce_store: Option<crate::nonce::NonceStore>,
+
+    /// Variables to populate the root scope with at construction, all marked
+    /// for export to child processes.
+    ///
+    /// The kernel itself is hermetic — it never reads `std::env::vars()` —
+    /// so frontends that want OS-env passthrough (REPL, MCP) populate this
+    /// from `std::env::vars()`. Embedders that want isolation pass nothing
+    /// (or only the keys they curate).
+    pub initial_vars: HashMap<String, Value>,
 }
 
 /// Get the default sandbox root ($HOME).
@@ -212,6 +221,7 @@ impl Default for KernelConfig {
                 latch_enabled: std::env::var("KAISH_LATCH").is_ok_and(|v| v == "1"),
                 trash_enabled: std::env::var("KAISH_TRASH").is_ok_and(|v| v == "1"),
                 nonce_store: None,
+                initial_vars: HashMap::new(),
             }
         }
         #[cfg(not(feature = "native"))]
@@ -228,6 +238,7 @@ impl Default for KernelConfig {
                 latch_enabled: false,
                 trash_enabled: false,
                 nonce_store: None,
+                initial_vars: HashMap::new(),
             }
         }
     }
@@ -250,6 +261,7 @@ impl KernelConfig {
             latch_enabled: false,
             trash_enabled: false,
             nonce_store: None,
+            initial_vars: HashMap::new(),
         }
     }
 
@@ -275,6 +287,7 @@ impl KernelConfig {
             latch_enabled: false,
             trash_enabled: false,
             nonce_store: None,
+            initial_vars: HashMap::new(),
         }
     }
 
@@ -306,6 +319,7 @@ impl KernelConfig {
             latch_enabled: std::env::var("KAISH_LATCH").is_ok_and(|v| v == "1"),
             trash_enabled: std::env::var("KAISH_TRASH").is_ok_and(|v| v == "1"),
             nonce_store: None,
+            initial_vars: HashMap::new(),
         }
     }
 
@@ -330,6 +344,7 @@ impl KernelConfig {
             latch_enabled: std::env::var("KAISH_LATCH").is_ok_and(|v| v == "1"),
             trash_enabled: std::env::var("KAISH_TRASH").is_ok_and(|v| v == "1"),
             nonce_store: None,
+            initial_vars: HashMap::new(),
         }
     }
 
@@ -350,6 +365,7 @@ impl KernelConfig {
             latch_enabled: std::env::var("KAISH_LATCH").is_ok_and(|v| v == "1"),
             trash_enabled: std::env::var("KAISH_TRASH").is_ok_and(|v| v == "1"),
             nonce_store: None,
+            initial_vars: HashMap::new(),
         }
     }
 
@@ -370,6 +386,7 @@ impl KernelConfig {
             latch_enabled: false,
             trash_enabled: false,
             nonce_store: None,
+            initial_vars: HashMap::new(),
         }
     }
 
@@ -437,6 +454,26 @@ impl KernelConfig {
     /// issued in one MCP `execute()` call can be validated in subsequent calls.
     pub fn with_nonce_store(mut self, store: crate::nonce::NonceStore) -> Self {
         self.nonce_store = Some(store);
+        self
+    }
+
+    /// Add a single initial variable; marked exported when the kernel boots.
+    ///
+    /// Repeated calls add (last write wins on key collision).
+    pub fn with_var(mut self, name: impl Into<String>, value: Value) -> Self {
+        self.initial_vars.insert(name.into(), value);
+        self
+    }
+
+    /// Replace the entire initial-vars map. All entries are marked exported.
+    pub fn with_initial_vars(mut self, vars: HashMap<String, Value>) -> Self {
+        self.initial_vars = vars;
+        self
+    }
+
+    /// Extend the initial-vars map with the given entries (last write wins).
+    pub fn with_vars(mut self, vars: HashMap<String, Value>) -> Self {
+        self.initial_vars.extend(vars);
         self
     }
 }
@@ -635,7 +672,7 @@ impl Kernel {
         configure_tools: impl FnOnce(&mut ToolRegistry),
         make_ctx: impl FnOnce(&Arc<VfsRouter>, &Arc<ToolRegistry>) -> ExecContext,
     ) -> Result<Self> {
-        let KernelConfig { name, cwd, skip_validation, interactive, ignore_config, output_limit, allow_external_commands, latch_enabled, trash_enabled, nonce_store, .. } = config;
+        let KernelConfig { name, cwd, skip_validation, interactive, ignore_config, output_limit, allow_external_commands, latch_enabled, trash_enabled, nonce_store, initial_vars, .. } = config;
 
         let mut tools = ToolRegistry::new();
         register_builtins(&mut tools);
@@ -673,6 +710,13 @@ impl Kernel {
                 scope.set_pid(KERNEL_COUNTER.fetch_add(1, Ordering::Relaxed));
                 if let Ok(home) = std::env::var("HOME") {
                     scope.set("HOME", Value::String(home));
+                }
+                // Apply caller-supplied initial variables, all marked exported.
+                // Frontends (REPL, MCP) populate this from std::env::vars()
+                // for shell-like UX; embedders that want hermetic behavior
+                // simply leave it empty.
+                for (name, value) in initial_vars {
+                    scope.set_exported(name, value);
                 }
                 scope.set_latch_enabled(latch_enabled);
                 scope.set_trash_enabled(trash_enabled);
@@ -869,6 +913,55 @@ impl Kernel {
     /// Returns the result of the last statement executed.
     pub async fn execute(&self, input: &str) -> Result<ExecResult> {
         self.execute_streaming(input, &mut |_| {}).await
+    }
+
+    /// Execute kaish source code with a transient overlay of exported variables.
+    ///
+    /// The overlay vars live for the duration of this call only:
+    /// - A new scope frame is pushed; each var is set on it and marked exported.
+    /// - The script (and any external commands it spawns) sees the overlay vars.
+    /// - On return, the frame is popped and any names that were not previously
+    ///   exported are removed from the export set.
+    ///
+    /// Bash function-local semantics: if the script does `FOO=...`, that
+    /// modifies the transient frame and the value is gone after this call.
+    ///
+    /// If a name in `vars` was already exported in an outer frame, the outer
+    /// value reappears on return; the export bit is preserved.
+    ///
+    /// **Panic safety:** if `execute()` panics, the transient frame is not
+    /// popped. This matches every other `push_frame` call site in the
+    /// kernel — the kernel makes no panic-safety guarantees today.
+    pub async fn execute_with_vars(
+        &self,
+        input: &str,
+        vars: HashMap<String, Value>,
+    ) -> Result<ExecResult> {
+        // Push frame + apply vars + remember which names we newly exported.
+        let newly_exported: Vec<String> = {
+            let mut scope = self.scope.write().await;
+            scope.push_frame();
+            let mut newly = Vec::with_capacity(vars.len());
+            for (name, value) in vars {
+                if !scope.is_exported(&name) {
+                    newly.push(name.clone());
+                }
+                scope.set_exported(name, value);
+            }
+            newly
+        };
+
+        let result = self.execute(input).await;
+
+        {
+            let mut scope = self.scope.write().await;
+            scope.pop_frame();
+            for name in newly_exported {
+                scope.unexport(&name);
+            }
+        }
+
+        result
     }
 
     /// Execute kaish source code with a per-statement callback.
@@ -2985,6 +3078,17 @@ impl Kernel {
         let mut cmd = Command::new(&executable);
         cmd.args(&argv);
         cmd.current_dir(&real_cwd);
+
+        // Hermetic env: child sees only kaish's exported vars, not the kaish
+        // process's OS env. Frontends that want OS-env passthrough (REPL, MCP)
+        // populate it via KernelConfig::initial_vars at construction.
+        cmd.env_clear();
+        {
+            let scope = self.scope.read().await;
+            for (var_name, value) in scope.exported_vars() {
+                cmd.env(var_name, value_to_string(&value));
+            }
+        }
 
         // Handle stdin
         cmd.stdin(if stdin_data.is_some() {
@@ -5555,5 +5659,189 @@ AFTER="yes"'"#)
             }
             other => panic!("expected Json(Array(...)), got {other:?}"),
         }
+    }
+
+    // ── initial_vars + execute_with_vars + hermetic env ───────────────────
+
+    #[tokio::test]
+    async fn test_initial_vars_set_and_exported() {
+        let config = KernelConfig::transient()
+            .with_var("INIT_FOO", Value::String("bar".into()));
+        let kernel = Kernel::new(config).expect("failed to create kernel");
+
+        assert_eq!(
+            kernel.get_var("INIT_FOO").await,
+            Some(Value::String("bar".into()))
+        );
+        assert!(
+            kernel.scope.read().await.is_exported("INIT_FOO"),
+            "initial_vars entries must be marked exported"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_execute_with_vars_overlay_visible() {
+        let kernel = Kernel::transient().expect("failed to create kernel");
+        let mut overlay = HashMap::new();
+        overlay.insert("OVERLAY_X".to_string(), Value::String("yes".into()));
+
+        let result = kernel
+            .execute_with_vars(r#"echo "${OVERLAY_X}""#, overlay)
+            .await
+            .expect("execute_with_vars failed");
+
+        assert!(result.ok());
+        assert_eq!(result.text_out().trim(), "yes");
+    }
+
+    #[tokio::test]
+    async fn test_execute_with_vars_overlay_cleanup() {
+        let kernel = Kernel::transient().expect("failed to create kernel");
+        let mut overlay = HashMap::new();
+        overlay.insert("EPHEMERAL".to_string(), Value::String("transient".into()));
+
+        kernel
+            .execute_with_vars("echo ignored", overlay)
+            .await
+            .expect("execute_with_vars failed");
+
+        assert_eq!(kernel.get_var("EPHEMERAL").await, None);
+        assert!(
+            !kernel.scope.read().await.is_exported("EPHEMERAL"),
+            "overlay-only export must be cleared on return"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_execute_with_vars_does_not_clobber_existing_export() {
+        let kernel = Kernel::transient().expect("failed to create kernel");
+        kernel
+            .execute("export OUTER=outer")
+            .await
+            .expect("export failed");
+
+        let mut overlay = HashMap::new();
+        overlay.insert("OUTER".to_string(), Value::String("inner".into()));
+        let result = kernel
+            .execute_with_vars(r#"echo "${OUTER}""#, overlay)
+            .await
+            .expect("execute_with_vars failed");
+        assert_eq!(result.text_out().trim(), "inner");
+
+        assert_eq!(
+            kernel.get_var("OUTER").await,
+            Some(Value::String("outer".into())),
+            "outer value must reappear after pop"
+        );
+        assert!(
+            kernel.scope.read().await.is_exported("OUTER"),
+            "outer export must survive overlay"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_execute_with_vars_inner_assignment_is_local() {
+        let kernel = Kernel::transient().expect("failed to create kernel");
+        let mut overlay = HashMap::new();
+        overlay.insert("LOCAL_FOO".to_string(), Value::String("from-overlay".into()));
+
+        // Variable assignment inside a single statement uses set() (innermost
+        // frame), not set_global() — this matches bash function-local semantics.
+        // We explicitly use `local FOO=...` style by relying on the pushed
+        // frame; the assignment in the script body modifies the same frame.
+        let result = kernel
+            .execute_with_vars(
+                r#"LOCAL_FOO="reassigned"; echo "${LOCAL_FOO}""#,
+                overlay,
+            )
+            .await
+            .expect("execute_with_vars failed");
+        assert!(result.ok());
+
+        // After the call the frame is popped, so LOCAL_FOO is gone regardless
+        // of how the script reassigned it.
+        assert_eq!(kernel.get_var("LOCAL_FOO").await, None);
+    }
+
+    #[tokio::test]
+    async fn test_external_command_sees_exported_var() {
+        let kernel = Kernel::transient().expect("failed to create kernel");
+        let result = kernel
+            .execute("export EXT_FOO=bar; printenv EXT_FOO")
+            .await
+            .expect("execute failed");
+
+        assert!(result.ok(), "printenv should succeed: stderr={}", result.err);
+        assert_eq!(result.text_out().trim(), "bar");
+    }
+
+    #[tokio::test]
+    async fn test_external_command_does_not_see_unexported_var() {
+        let kernel = Kernel::transient().expect("failed to create kernel");
+
+        // Set without exporting; printenv must not see it (exit code != 0,
+        // empty stdout per printenv semantics).
+        let result = kernel
+            .execute("EXT_BAR=hidden; printenv EXT_BAR")
+            .await
+            .expect("execute failed");
+
+        assert!(!result.ok(), "printenv should fail when var is unexported");
+        assert!(
+            result.text_out().trim().is_empty(),
+            "no stdout when var is missing, got: {}",
+            result.text_out()
+        );
+    }
+
+    #[tokio::test]
+    async fn test_external_command_does_not_see_os_env() {
+        // The kernel is hermetic: it never reads std::env::vars() and only
+        // exports what it has been told to export. Cargo always sets PATH for
+        // tests, so PATH is reliably present in the OS env — but a transient
+        // kernel doesn't seed it into initial_vars, so `printenv PATH` from
+        // inside the kernel must fail.
+        assert!(
+            std::env::var_os("PATH").is_some(),
+            "test precondition: cargo should set PATH"
+        );
+
+        let kernel = Kernel::transient().expect("failed to create kernel");
+        let result = kernel
+            .execute("printenv PATH")
+            .await
+            .expect("execute failed");
+
+        assert!(
+            !result.ok(),
+            "printenv PATH must fail in hermetic kernel, got stdout={:?}",
+            result.text_out()
+        );
+        assert!(
+            result.text_out().trim().is_empty(),
+            "no PATH in subprocess env, got stdout={:?}",
+            result.text_out()
+        );
+    }
+
+    #[tokio::test]
+    async fn test_execute_with_vars_overlay_reaches_subprocess() {
+        let kernel = Kernel::transient().expect("failed to create kernel");
+        let mut overlay = HashMap::new();
+        overlay.insert("SUB_FOO".to_string(), Value::String("subproc".into()));
+
+        let result = kernel
+            .execute_with_vars("printenv SUB_FOO", overlay)
+            .await
+            .expect("execute_with_vars failed");
+
+        assert!(
+            result.ok(),
+            "printenv should succeed: code={} stdout={:?} stderr={:?}",
+            result.code,
+            result.text_out(),
+            result.err
+        );
+        assert_eq!(result.text_out().trim(), "subproc");
     }
 }

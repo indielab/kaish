@@ -505,6 +505,28 @@ date +%Y-%m-%d                     # formatted date
 - No PTY/TTY support — interactive tools like `vim` won't work
 - Output is captured (not streamed) — large outputs may be truncated
 
+**Subprocess environment (hermetic by default):**
+
+External commands receive **only the variables kaish has marked as exported**.
+The kernel does not pass through the host process's OS environment — even
+`PATH` is not implicitly inherited. `export` (and the equivalent
+`KernelConfig::initial_vars` on the embedder side) is the *only* way variables
+reach external commands.
+
+```bash
+FOO="hello"                         # local to kaish
+printenv FOO                        # → exit 1; child env has no FOO
+
+export FOO                          # mark exported
+printenv FOO                        # → "hello"
+```
+
+The bundled `kaish-repl` binary populates `initial_vars` from your shell
+environment at startup, so `cargo`/`git`/`echo $PATH` work as expected
+interactively. The `kaish-mcp` server does the same plus layers per-request
+`env` on top. Embedders that want isolated execution simply leave
+`initial_vars` empty — see `docs/EMBEDDING.md` for the API.
+
 ### Scope Summary
 
 | Method | Scope | Can modify parent vars? |

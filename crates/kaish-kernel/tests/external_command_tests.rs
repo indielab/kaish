@@ -208,17 +208,42 @@ async fn pipeline_builtin_to_builtin() {
 // ============================================================================
 
 #[tokio::test]
-async fn external_command_inherits_env() {
+async fn external_command_is_hermetic_by_default() {
+    // The kernel does not inherit OS env — `KernelConfig::repl()` alone does
+    // not seed PATH. Frontends (the REPL binary, the MCP server) populate
+    // `initial_vars` from `std::env::vars()`; embedders that don't populate
+    // get a hermetic child env.
     let kernel = repl_kernel();
-    // Test that external commands can see process environment
-    // PATH is always set on any Unix system
-    let result = kernel.execute("printenv PATH").await.unwrap();
-    assert!(result.ok(), "printenv should succeed: {:?}", result);
     assert!(
-        !result.text_out().trim().is_empty(),
-        "Should see PATH: {}",
-        result.text_out()
+        std::env::var_os("PATH").is_some(),
+        "test precondition: PATH must be set for cargo test"
     );
+    let result = kernel.execute("printenv PATH").await.unwrap();
+    assert!(
+        !result.ok(),
+        "printenv PATH must fail in hermetic kernel: {:?}",
+        result
+    );
+}
+
+#[tokio::test]
+async fn external_command_sees_initial_vars() {
+    // When a frontend populates `initial_vars`, those names are exported and
+    // reach subprocesses. This is the path REPL/MCP take to mirror the host
+    // env to children.
+    use kaish_kernel::ast::Value;
+    use std::collections::HashMap;
+
+    let mut vars = HashMap::new();
+    vars.insert("PATH".to_string(), Value::String("/usr/bin:/bin".into()));
+    vars.insert("MY_PROBE".to_string(), Value::String("seeded".into()));
+
+    let kernel = Kernel::new(KernelConfig::repl().with_initial_vars(vars))
+        .expect("Failed to create kernel");
+
+    let result = kernel.execute("printenv MY_PROBE").await.unwrap();
+    assert!(result.ok(), "printenv MY_PROBE should succeed: {:?}", result);
+    assert_eq!(result.text_out().trim(), "seeded");
 }
 
 // ============================================================================

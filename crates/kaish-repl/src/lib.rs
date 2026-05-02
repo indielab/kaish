@@ -25,8 +25,21 @@ use rustyline::validate::{ValidationContext, ValidationResult, Validator};
 use rustyline::{Editor, Helper};
 use tokio::runtime::Runtime;
 
+use kaish_kernel::ast::Value;
 use kaish_kernel::interpreter::ExecResult;
 use kaish_kernel::{Kernel, KernelConfig};
+
+/// Snapshot the OS environment as a map of `String` → `Value::String`.
+///
+/// The kernel itself is hermetic — it never reads `std::env::vars()`. The REPL
+/// (and other shell-like frontends) call this and pass the result via
+/// `KernelConfig::with_initial_vars` so users get their normal `PATH`, `HOME`,
+/// `EDITOR`, etc. propagated to subprocesses.
+pub fn os_env_vars() -> std::collections::HashMap<String, Value> {
+    std::env::vars()
+        .map(|(k, v)| (k, Value::String(v)))
+        .collect()
+}
 
 // ── Process result ──────────────────────────────────────────────────
 
@@ -413,7 +426,9 @@ pub struct Repl {
 impl Repl {
     /// Create a new REPL instance with passthrough filesystem access.
     pub fn new() -> Result<Self> {
-        let config = KernelConfig::repl().with_interactive(true);
+        let config = KernelConfig::repl()
+            .with_interactive(true)
+            .with_initial_vars(os_env_vars());
         let mut kernel = Kernel::new(config).context("Failed to create kernel")?;
         let runtime = Runtime::new().context("Failed to create tokio runtime")?;
 
@@ -448,7 +463,9 @@ impl Repl {
 
     /// Create a new REPL rooted at the given path.
     pub fn with_root(root: PathBuf) -> Result<Self> {
-        let config = KernelConfig::repl().with_cwd(root);
+        let config = KernelConfig::repl()
+            .with_cwd(root)
+            .with_initial_vars(os_env_vars());
         Self::with_config(config)
     }
 

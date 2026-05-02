@@ -318,6 +318,86 @@ let config = KernelConfig::named("my-kernel")
     .with_skip_validation(false);
 ```
 
+## Initial Variables and Hermetic Subprocess Env
+
+The kernel is **hermetic by default** — it never reads `std::env::vars()`, and
+external commands launched from inside the kernel see only the variables kaish
+has marked as exported. Frontends that want shell-like UX (the bundled REPL,
+the MCP server) opt in to OS-env passthrough by populating `initial_vars`:
+
+```rust
+use kaish_kernel::ast::Value;
+use std::collections::HashMap;
+
+// Bare embedder kernel: hermetic. Subprocesses see no PATH, HOME, etc.
+let kernel = Kernel::new(KernelConfig::named("isolated"))?;
+
+// Embedder that wants its own curated env:
+let mut vars = HashMap::new();
+vars.insert("PATH".to_string(), Value::String("/usr/bin:/bin".into()));
+vars.insert("LANG".to_string(), Value::String("C.UTF-8".into()));
+let kernel = Kernel::new(
+    KernelConfig::named("curated").with_initial_vars(vars),
+)?;
+
+// Shell-like passthrough (what kaish-repl does):
+let env: HashMap<String, Value> = std::env::vars()
+    .map(|(k, v)| (k, Value::String(v)))
+    .collect();
+let kernel = Kernel::new(KernelConfig::repl().with_initial_vars(env))?;
+```
+
+Builders:
+
+- `with_var(name, value)` — add a single entry
+- `with_vars(map)` — extend the existing map (last write wins)
+- `with_initial_vars(map)` — replace the entire map
+
+All entries are marked exported when the kernel boots, so they reach external
+subprocesses (`printenv`, `cargo`, `git`, …) directly.
+
+## Per-Invocation Variable Overlay (`execute_with_vars`)
+
+Use `Kernel::execute_with_vars(script, vars)` (or
+`KernelClient::execute_with_vars`) when you want variables to be visible to a
+single script invocation only — without polluting the persistent kernel state.
+This matches bash function-local semantics:
+
+- A new scope frame is pushed; each var is set on it and marked exported.
+- The script (and any external commands it spawns) sees the overlay vars.
+- On return, the frame is popped and any names that weren't already exported
+  are removed from the export set.
+- Inner assignments (`FOO=...` inside the script) modify the transient frame
+  and are also gone on return.
+- If a name in `vars` was already exported in an outer frame, the outer value
+  reappears on return; the export bit is preserved.
+
+```rust
+use kaish_kernel::ast::Value;
+use std::collections::HashMap;
+
+let kernel = Kernel::new(KernelConfig::named("worker"))?;
+
+let mut request_vars = HashMap::new();
+request_vars.insert("REQUEST_ID".to_string(), Value::String("abc123".into()));
+request_vars.insert("USER_TIER".to_string(), Value::String("premium".into()));
+
+let result = kernel
+    .execute_with_vars(
+        r#"echo "[$REQUEST_ID] tier=$USER_TIER"; my-tool"#,
+        request_vars,
+    )
+    .await?;
+
+// REQUEST_ID and USER_TIER are gone here — they did not pollute the kernel.
+assert!(kernel.get_var("REQUEST_ID").await.is_none());
+```
+
+**Panic safety:** if `execute()` panics inside `execute_with_vars`, the
+transient frame is not popped. This matches every other `push_frame` call site
+in the kernel — kaish makes no panic-safety guarantees today. Errors returned
+as `Err(...)` always trigger cleanup.
+
 ## Job Output Capture
 
 kaish provides bounded streams for capturing command output without OOM risk.

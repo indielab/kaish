@@ -1,5 +1,7 @@
 //! Common trait for kernel clients.
 
+use std::collections::HashMap;
+
 use async_trait::async_trait;
 use thiserror::Error;
 
@@ -47,6 +49,17 @@ pub trait KernelClient {
     ///
     /// Returns the result of the last statement executed.
     async fn execute(&self, input: &str) -> ClientResult<ExecResult>;
+
+    /// Execute kaish source code with a transient overlay of exported variables.
+    ///
+    /// The overlay vars are visible (and exported to subprocesses) for the
+    /// duration of this call only, then removed. Names already exported in
+    /// the persistent state retain their outer value on return.
+    async fn execute_with_vars(
+        &self,
+        input: &str,
+        vars: HashMap<String, Value>,
+    ) -> ClientResult<ExecResult>;
 
     /// Get a variable value.
     async fn get_var(&self, name: &str) -> ClientResult<Option<Value>>;

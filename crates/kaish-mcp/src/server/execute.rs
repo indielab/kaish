@@ -203,16 +203,23 @@ pub async fn execute(
                     }
                 }
 
-                let kernel = Kernel::new(config).context("Failed to create kernel")?.into_arc();
-
-                // Set environment variables as shell variables
+                // Build the initial-vars map: OS env first (so PATH/HOME/etc.
+                // reach subprocesses — the kernel itself is hermetic and won't
+                // read std::env::vars()), then per-request env overlaid on top
+                // (per-request entries win on key collision). All entries are
+                // marked exported by the kernel.
+                let mut initial_vars: HashMap<String, kaish_kernel::ast::Value> =
+                    std::env::vars()
+                        .map(|(k, v)| (k, kaish_kernel::ast::Value::String(v)))
+                        .collect();
                 if let Some(env) = params.env {
-                    for (key, value) in env {
-                        kernel
-                            .set_var(&key, kaish_kernel::ast::Value::String(value))
-                            .await;
+                    for (k, v) in env {
+                        initial_vars.insert(k, kaish_kernel::ast::Value::String(v));
                     }
                 }
+                config = config.with_initial_vars(initial_vars);
+
+                let kernel = Kernel::new(config).context("Failed to create kernel")?.into_arc();
 
                 // Execute with timeout (full_script = init scripts + user script)
                 let result = tokio::time::timeout(timeout, kernel.execute(&full_script)).await;

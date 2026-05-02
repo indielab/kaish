@@ -108,7 +108,7 @@ fn run_script(path: &str) -> Result<ExitCode> {
 
     // Non-interactive: pipe stdout so command substitution captures output.
     // The streaming callback below still prints output for the user.
-    let config = KernelConfig::repl();
+    let config = KernelConfig::repl().with_initial_vars(kaish_repl::os_env_vars());
     let kernel = Kernel::new(config)
         .context("Failed to create kernel")?;
 
@@ -141,7 +141,7 @@ fn run_command(cmd: &str) -> Result<ExitCode> {
 
     // Non-interactive: pipe stdout so command substitution captures output.
     // The streaming callback below still prints output for the user.
-    let config = KernelConfig::repl();
+    let config = KernelConfig::repl().with_initial_vars(kaish_repl::os_env_vars());
     let kernel = Kernel::new(config)
         .context("Failed to create kernel")?;
 

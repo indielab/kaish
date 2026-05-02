@@ -198,6 +198,14 @@ impl BackendDispatcher {
         cmd.args(&argv);
         cmd.current_dir(&real_cwd);
 
+        // Hermetic env: child sees only kaish's exported vars, not the kaish
+        // process's OS env. Frontends that want OS-env passthrough (REPL, MCP)
+        // populate it via KernelConfig::initial_vars at construction.
+        cmd.env_clear();
+        for (var_name, value) in ctx.scope.exported_vars() {
+            cmd.env(var_name, crate::interpreter::value_to_string(&value));
+        }
+
         // Stdin: pipe_stdin or buffered string or inherit (interactive) or null
         cmd.stdin(if has_pipe_stdin || has_buffered_stdin {
             std::process::Stdio::piped()

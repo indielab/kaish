@@ -7,6 +7,7 @@
 //! - Unit testing
 //! - Single-process use cases
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -104,6 +105,17 @@ impl KernelClient for EmbeddedClient {
     async fn execute(&self, input: &str) -> ClientResult<ExecResult> {
         self.kernel
             .execute(input)
+            .await
+            .map_err(|e| ClientError::Execution(e.to_string()))
+    }
+
+    async fn execute_with_vars(
+        &self,
+        input: &str,
+        vars: HashMap<String, Value>,
+    ) -> ClientResult<ExecResult> {
+        self.kernel
+            .execute_with_vars(input, vars)
             .await
             .map_err(|e| ClientError::Execution(e.to_string()))
     }
