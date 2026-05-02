@@ -504,7 +504,12 @@ mod tests {
     #[test]
     fn resolve_last_result_data_field() {
         let mut scope = Scope::new();
-        scope.set_last_result(ExecResult::success(r#"{"count": 5}"#));
+        // .data is only set when a tool/builtin opts in — wire it explicitly,
+        // mirroring how `seq`/`jq`/`cut` etc. populate it.
+        scope.set_last_result(ExecResult::success_with_data(
+            r#"{"count": 5}"#,
+            Value::Json(serde_json::json!({"count": 5})),
+        ));
 
         // ${?.data} - only single-level field access is supported on $?
         let path = VarPath {
@@ -513,7 +518,6 @@ mod tests {
                 VarSegment::Field("data".into()),
             ],
         };
-        // data is now a Value::Json for structured data
         let result = scope.resolve_path(&path);
         assert!(result.is_some());
         if let Some(Value::Json(json)) = result {

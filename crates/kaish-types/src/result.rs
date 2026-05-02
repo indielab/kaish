@@ -15,7 +15,9 @@ use crate::value::Value;
 /// - `ok` — true if code == 0
 /// - `err` — error message if failed
 /// - `out` — raw stdout as string
-/// - `data` — parsed JSON from stdout (if valid JSON)
+/// - `data` — structured data; only set by builtins/tools that opt in
+///   (e.g. `seq`, `jq`, `cut`, `find`, `glob`, `split`). External commands
+///   never populate this — pipe their stdout through `jq` to get it.
 #[derive(Debug, Clone, Default, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct ExecResult {
     /// Exit code. 0 means success.
@@ -24,7 +26,8 @@ pub struct ExecResult {
     out: String,
     /// Raw standard error as a string.
     pub err: String,
-    /// Parsed JSON data from stdout, if stdout was valid JSON.
+    /// Structured data — only populated when a builtin/tool sets it explicitly.
+    /// Stdout is *never* sniffed; this stays `None` for external commands.
     pub data: Option<Value>,
     /// Structured output data for rendering.
     output: Option<OutputData>,
@@ -49,13 +52,11 @@ pub struct ExecResult {
 impl ExecResult {
     /// Create a successful result with output.
     pub fn success(out: impl Into<String>) -> Self {
-        let out = out.into();
-        let data = Self::try_parse_json(&out);
         Self {
             code: 0,
-            out,
+            out: out.into(),
             err: String::new(),
-            data,
+            data: None,
             output: None,
             did_spill: false,
             original_code: None,
@@ -68,9 +69,6 @@ impl ExecResult {
     ///
     /// The `OutputData` is the source of truth. Text is materialized lazily
     /// via `text_out()` when needed (pipes, redirects, command substitution).
-    ///
-    /// For text-type output, JSON auto-detection still runs so that
-    /// `echo '{"key":1}'` populates `data` for command substitution.
     pub fn with_output(output: OutputData) -> Self {
         // Simple text: move string into .out directly for efficient Cow::Borrowed.
         // Structured output: store in .output, materialize lazily.
@@ -145,24 +143,15 @@ impl ExecResult {
 
     /// Create a result from raw output streams.
     ///
-    /// **JSON auto-detection**: On success (code 0), stdout is checked for valid
-    /// JSON. If it parses, the result is stored in `.data` as structured data.
-    /// This enables `for i in $(external-command)` to iterate over JSON arrays
-    /// returned by MCP tools and external commands. This is intentional — external
-    /// tools communicate structured data via JSON stdout, and kaish makes it
-    /// available for iteration without requiring manual `jq` parsing.
+    /// `data` is left empty — kaish does not sniff stdout for JSON. To get
+    /// structured iteration from an external command, pipe through `jq`:
+    /// `for i in $(curl ... | jq .); do ...`.
     pub fn from_output(code: i64, stdout: impl Into<String>, stderr: impl Into<String>) -> Self {
-        let out = stdout.into();
-        let data = if code == 0 {
-            Self::try_parse_json(&out)
-        } else {
-            None
-        };
         Self {
             code,
-            out,
+            out: stdout.into(),
             err: stderr.into(),
-            data,
+            data: None,
             output: None,
             did_spill: false,
             original_code: None,
@@ -176,13 +165,11 @@ impl ExecResult {
     /// Use this when a builtin needs custom text formatting that differs from
     /// the canonical `OutputData::to_canonical_string()` representation.
     pub fn with_output_and_text(output: OutputData, text: impl Into<String>) -> Self {
-        let out = text.into();
-        let data = Self::try_parse_json(&out);
         Self {
             code: 0,
-            out,
+            out: text.into(),
             err: String::new(),
-            data,
+            data: None,
             output: Some(output),
             did_spill: false,
             original_code: None,
@@ -315,16 +302,6 @@ impl ExecResult {
         self
     }
 
-    /// Try to parse a string as JSON, returning a Value if successful.
-    pub(crate) fn try_parse_json(s: &str) -> Option<Value> {
-        let trimmed = s.trim();
-        if trimmed.is_empty() {
-            return None;
-        }
-        serde_json::from_str::<serde_json::Value>(trimmed)
-            .ok()
-            .map(json_to_value)
-    }
 }
 
 /// Convert serde_json::Value to our AST Value.
@@ -400,15 +377,19 @@ mod tests {
     }
 
     #[test]
-    fn json_stdout_is_parsed() {
+    fn success_does_not_sniff_json_stdout() {
+        // External-command stdout is never sniffed for JSON. Tools that want
+        // structured data must call success_with_data() / success_data().
         let result = ExecResult::success(r#"{"count": 42, "items": ["a", "b"]}"#);
-        assert!(result.data.is_some());
-        let data = result.data.unwrap();
-        assert!(matches!(data, Value::Json(_)));
-        if let Value::Json(json) = data {
-            assert_eq!(json.get("count"), Some(&serde_json::json!(42)));
-            assert_eq!(json.get("items"), Some(&serde_json::json!(["a", "b"])));
-        }
+        assert!(result.data.is_none());
+        assert_eq!(result.out, r#"{"count": 42, "items": ["a", "b"]}"#);
+    }
+
+    #[test]
+    fn from_output_does_not_sniff_json_stdout() {
+        let result = ExecResult::from_output(0, r#"[1, 2, 3]"#, "");
+        assert!(result.data.is_none());
+        assert_eq!(result.out, "[1, 2, 3]");
     }
 
     #[test]
@@ -440,7 +421,9 @@ mod tests {
 
     #[test]
     fn get_field_data() {
-        let result = ExecResult::success(r#"{"key": "value"}"#);
+        // .data is only populated by tools that opt in — wire it explicitly here.
+        let value = Value::Json(serde_json::json!({"key": "value"}));
+        let result = ExecResult::success_data(value);
         let data = result.get_field("data");
         assert!(data.is_some());
     }
@@ -599,9 +582,9 @@ mod tests {
         // Simple text should go to .out, not .output
         assert!(!result.has_output());
         assert_eq!(&*result.text_out(), "hello");
-        // Should detect JSON in simple text
+        // Even JSON-shaped text is NOT auto-parsed — .data stays None.
         let json_result = ExecResult::with_output(OutputData::text(r#"{"key": 1}"#));
-        assert!(json_result.data.is_some());
+        assert!(json_result.data.is_none());
     }
 
     #[test]

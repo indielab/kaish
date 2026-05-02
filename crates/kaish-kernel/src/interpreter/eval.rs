@@ -512,6 +512,28 @@ impl<'a, E: Executor> Evaluator<'a, E> {
 }
 
 /// Convert a Value to its string representation for interpolation.
+/// Coerce a Value into an exit code (i64) for `return`/`exit`.
+///
+/// Bash semantics: `return $(echo 42)` works because the captured text "42"
+/// is parsed as an integer. Non-numeric strings, `Null`, `Json`, and `Blob`
+/// are an error — silently coercing to 0 would mask real bugs.
+pub fn value_to_exit_code(value: &Value) -> anyhow::Result<i64> {
+    match value {
+        Value::Int(n) => Ok(*n),
+        Value::Bool(b) => Ok(if *b { 0 } else { 1 }),
+        Value::Float(f) => Ok(*f as i64),
+        Value::String(s) => {
+            let trimmed = s.trim();
+            trimmed.parse::<i64>().map_err(|_| {
+                anyhow::anyhow!("numeric argument required: {:?}", s)
+            })
+        }
+        Value::Null | Value::Json(_) | Value::Blob(_) => {
+            anyhow::bail!("numeric argument required (got {:?})", value)
+        }
+    }
+}
+
 pub fn value_to_string(value: &Value) -> String {
     match value {
         Value::Null => "null".to_string(),

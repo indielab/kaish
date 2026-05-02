@@ -1422,12 +1422,8 @@ impl Kernel {
                 // Shell semantics: return sets exit code, doesn't produce output
                 let result = if let Some(e) = expr {
                     let val = self.eval_expr_async(e).await?;
-                    // Convert value to exit code
-                    let code = match val {
-                        Value::Int(n) => n,
-                        Value::Bool(b) => if b { 0 } else { 1 },
-                        _ => 0,
-                    };
+                    let code = crate::interpreter::value_to_exit_code(&val)
+                        .map_err(|e| anyhow::anyhow!("return: {}", e))?;
                     ExecResult::from_parts(code, String::new(), String::new(), None)
                 } else {
                     ExecResult::success("")
@@ -1437,10 +1433,8 @@ impl Kernel {
             Stmt::Exit(expr) => {
                 let code = if let Some(e) = expr {
                     let val = self.eval_expr_async(e).await?;
-                    match val {
-                        Value::Int(n) => n,
-                        _ => 0,
-                    }
+                    crate::interpreter::value_to_exit_code(&val)
+                        .map_err(|e| anyhow::anyhow!("exit: {}", e))?
                 } else {
                     0
                 };

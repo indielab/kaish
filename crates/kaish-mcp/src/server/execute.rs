@@ -38,7 +38,9 @@ pub struct ExecuteParams {
 /// - `output`: structured output model for rendering. Present for builtins, None for
 ///   external commands and `--json` results (cleared by the sentinel pattern in
 ///   `apply_output_format`).
-/// - `data`: auto-parsed JSON from stdout. Present when stdout is valid JSON.
+/// - `data`: structured data set by the executed tool. Only present when a builtin
+///   opts in (e.g. `seq`, `jq`, `cut`, `find`, `glob`) or `--json` was used. kaish
+///   never sniffs external-command stdout for JSON — pipe through `jq` to opt in.
 /// - When `--json` is used, `output` is None and the JSON is in `stdout`/`data`.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct ExecuteResult {
@@ -52,7 +54,9 @@ pub struct ExecuteResult {
     /// Standard error.
     pub stderr: String,
 
-    /// Parsed JSON data from stdout, if valid JSON.
+    /// Structured data set by the tool/builtin. Never inferred from stdout —
+    /// external commands always have this as None unless their output is piped
+    /// through a builtin that populates it (e.g. `jq`).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub data: Option<serde_json::Value>,
 
@@ -73,12 +77,11 @@ pub struct ExecuteResult {
 impl ExecuteResult {
     /// Create a success result.
     pub fn success(stdout: String) -> Self {
-        let data = serde_json::from_str(&stdout).ok();
         Self {
             code: 0,
             stdout,
             stderr: String::new(),
-            data,
+            data: None,
             ok: true,
             output: None,
             content_type: None,
@@ -299,7 +302,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_execute_json_output() {
+    async fn test_execute_echo_json_does_not_auto_parse() {
+        // External-command stdout that happens to be JSON is NOT sniffed.
+        // To get `.data`, the user must opt in (e.g. by piping through `jq`).
         let params = ExecuteParams {
             script: r#"echo "{\"count\": 42}""#.to_string(),
             cwd: None,
@@ -309,9 +314,31 @@ mod tests {
 
         let result = execute(params, 30_000, None, &[]).await.expect("execute failed");
         assert!(result.ok);
-        assert!(result.data.is_some());
+        assert!(
+            result.data.is_none(),
+            "stdout must not be auto-parsed; got data = {:?}",
+            result.data
+        );
+        assert!(result.stdout.contains(r#"{"count": 42}"#));
+    }
 
-        let data = result.data.expect("expected data");
+    #[tokio::test]
+    async fn test_execute_jq_populates_data() {
+        // Piping through `jq` is the explicit opt-in for structured `.data`.
+        let params = ExecuteParams {
+            script: r#"echo '{"count": 42}' | jq '.'"#.to_string(),
+            cwd: None,
+            env: None,
+            timeout_ms: None,
+        };
+
+        let result = execute(params, 30_000, None, &[]).await.expect("execute failed");
+        assert!(
+            result.ok,
+            "script failed: code={} stderr={:?} stdout={:?}",
+            result.code, result.stderr, result.stdout,
+        );
+        let data = result.data.expect("jq must populate .data");
         assert_eq!(data.get("count"), Some(&serde_json::json!(42)));
     }
 

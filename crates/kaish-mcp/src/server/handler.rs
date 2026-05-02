@@ -280,8 +280,8 @@ impl KaishServerHandler {
             // 1. `output` with headers/multiple nodes → tabular/list data
             //    (builtins like wc, ls, ps). stdout is just text_out() of it.
             //    Simple text output (echo) keeps stdout for easy client access.
-            // 2. `data` matches stdout → --json results or auto-detected JSON
-            //    where data is the parsed form of exactly what's in stdout.
+            // 2. `data` matches stdout → --json results, where data is the
+            //    parsed form of exactly what's in stdout.
             //
             // In both cases, stdout in structured_content is redundant noise.
             // The text is still available in the Content blocks for display.

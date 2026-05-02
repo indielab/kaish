@@ -531,11 +531,11 @@ pub fn apply_output_format(mut result: ExecResult, format: OutputFormat) -> Exec
                     .unwrap_or_else(|_| "null".to_string()));
                 result.data = Some(crate::result::json_to_value(json_value));
             } else {
-                // Text-only: wrap as JSON string, try parse for data
+                // Text-only: wrap as JSON string. .data mirrors the same string.
                 let text = result.text_out().into_owned();
                 let json_out = serde_json::to_string(&text)
                     .unwrap_or_else(|_| "null".to_string());
-                result.data = ExecResult::try_parse_json(&json_out);
+                result.data = Some(crate::value::Value::String(text));
                 result.set_out(json_out);
             }
             // Clear sentinel — format already applied, prevents double-encoding
