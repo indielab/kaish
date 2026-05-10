@@ -27,7 +27,7 @@ impl Tool for Sleep {
             .example("Sleep for half a second", "sleep 0.5")
     }
 
-    async fn execute(&self, args: ToolArgs, _ctx: &mut ExecContext) -> ExecResult {
+    async fn execute(&self, args: ToolArgs, ctx: &mut ExecContext) -> ExecResult {
         let seconds = match args.get_positional(0) {
             Some(Value::Int(i)) => *i as f64,
             Some(Value::Float(f)) => *f,
@@ -43,9 +43,13 @@ impl Tool for Sleep {
         }
 
         let duration = Duration::from_secs_f64(seconds);
-        tokio::time::sleep(duration).await;
-
-        ExecResult::success("")
+        // Honor ctx.cancel so request_timeout / Kernel::cancel() interrupt
+        // a long sleep at sub-statement granularity. Returning 130 matches
+        // the convention used by the kernel's own cancellation checkpoints.
+        tokio::select! {
+            _ = tokio::time::sleep(duration) => ExecResult::success(""),
+            _ = ctx.cancel.cancelled() => ExecResult::failure(130, "sleep: interrupted"),
+        }
     }
 }
 
