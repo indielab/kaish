@@ -236,6 +236,8 @@ impl BackendDispatcher {
             Ok(c) => c,
             Err(e) => return Some(ExecResult::failure(127, format!("{}: {}", name, e))),
         };
+        // Open a pidfd (Linux) for race-free direct-child kill via wait_or_kill.
+        let kill_target = crate::pidfd::KillTarget::from_child(&child);
 
         // Stream stdin: copy pipe_stdin → child stdin in chunks (bounded memory)
         let stdin_task: Option<tokio::task::JoinHandle<()>> = if let Some(mut pipe_in) = ctx.pipe_stdin.take() {
@@ -322,6 +324,7 @@ impl BackendDispatcher {
             let cancel = ctx.cancel.clone();
             let status = crate::kernel::wait_or_kill(
                 &mut child,
+                kill_target.as_ref(),
                 &cancel,
                 std::time::Duration::from_secs(2),
             ).await;
@@ -355,6 +358,7 @@ impl BackendDispatcher {
             let cancel = ctx.cancel.clone();
             let status = crate::kernel::wait_or_kill(
                 &mut child,
+                kill_target.as_ref(),
                 &cancel,
                 std::time::Duration::from_secs(2),
             ).await;

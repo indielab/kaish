@@ -3466,7 +3466,10 @@ impl Kernel {
             cmd.kill_on_drop(true);
         }
 
-        // Spawn the process
+        // Spawn the process. Capture a `KillTarget` immediately so cancel/
+        // timeout paths can deliver signals via pidfd (Linux ≥ 5.3) — bound
+        // to this process's generation, immune to PID reuse if the OS reaps
+        // the child before our kill syscalls fire.
         let mut child = match cmd.spawn() {
             Ok(child) => child,
             Err(e) => {
@@ -3476,6 +3479,7 @@ impl Kernel {
                 )));
             }
         };
+        let kill_target = crate::pidfd::KillTarget::from_child(&child);
 
         // Write stdin if present
         if let Some(data) = stdin_data
@@ -3528,18 +3532,49 @@ impl Kernel {
                 let cancel_watcher = {
                     let cancel = cancel.clone();
                     let wc = wait_complete.clone();
+                    // Ownership transfer: the JC path's sync wait inside
+                    // block_in_place owns the child's reaping, so the
+                    // cancel_watcher drives the kill side via KillTarget
+                    // (pidfd-bound on Linux). When kill_target is None
+                    // (older kernel + open failure, or non-Linux), falls
+                    // through to the older PID-based path the closure
+                    // captures from `pid`.
+                    let target = kill_target.as_ref().map(|t| {
+                        // Re-borrow the components we need into Owned-ish form
+                        // so the spawned task is 'static. We can't move
+                        // KillTarget directly because try_execute_external
+                        // still uses it after the spawn — but on the JC path
+                        // there is no further use after the watcher spawn,
+                        // so a clone-of-pid + owned None pidfd is safe.
+                        // Simpler: signal via the existing target by cloning
+                        // a fresh pidfd; the original keeps its handle.
+                        // Pidfd is just an OwnedFd — not Clone — so do it
+                        // by re-opening from the pid. Fall back if reopen
+                        // fails (race already reaped → best-effort kill).
+                        crate::pidfd::KillTarget::from_pid(t.pid())
+                    });
                     tokio::spawn(async move {
                         cancel.cancelled().await;
                         if wc.load(std::sync::atomic::Ordering::SeqCst) { return; }
-                        use nix::sys::signal::{kill, killpg, Signal};
-                        let _ = kill(pid, Signal::SIGTERM);
-                        let _ = killpg(pid, Signal::SIGTERM);
+                        use nix::sys::signal::Signal;
+                        if let Some(t) = &target {
+                            t.signal(Signal::SIGTERM);
+                            t.signal_pg(Signal::SIGTERM);
+                        } else {
+                            let _ = nix::sys::signal::kill(pid, Signal::SIGTERM);
+                            let _ = nix::sys::signal::killpg(pid, Signal::SIGTERM);
+                        }
                         if kill_grace > Duration::ZERO {
                             tokio::time::sleep(kill_grace).await;
                             if wc.load(std::sync::atomic::Ordering::SeqCst) { return; }
                         }
-                        let _ = kill(pid, Signal::SIGKILL);
-                        let _ = killpg(pid, Signal::SIGKILL);
+                        if let Some(t) = &target {
+                            t.signal(Signal::SIGKILL);
+                            t.signal_pg(Signal::SIGKILL);
+                        } else {
+                            let _ = nix::sys::signal::kill(pid, Signal::SIGKILL);
+                            let _ = nix::sys::signal::killpg(pid, Signal::SIGKILL);
+                        }
                     })
                 };
                 struct AbortOnDrop(tokio::task::JoinHandle<()>);
@@ -3582,7 +3617,7 @@ impl Kernel {
             }
 
             // Non-job-control path with inherited stdio.
-            let status = match wait_or_kill(&mut child, &cancel, kill_grace).await {
+            let status = match wait_or_kill(&mut child, kill_target.as_ref(), &cancel, kill_grace).await {
                 Ok(s) => s,
                 Err(e) => {
                     return Ok(Some(ExecResult::failure(
@@ -3630,7 +3665,7 @@ impl Kernel {
             });
 
             let cancelled_before_wait = cancel.is_cancelled();
-            let status = match wait_or_kill(&mut child, &cancel, kill_grace).await {
+            let status = match wait_or_kill(&mut child, kill_target.as_ref(), &cancel, kill_grace).await {
                 Ok(s) => s,
                 Err(e) => {
                     if let Some(task) = stdout_task { task.abort(); let _ = task.await; }
@@ -3947,57 +3982,64 @@ fn apply_tilde_expansion(value: Value) -> Value {
 
 /// Wait for a child to exit, killing it if `cancel` fires first.
 ///
-/// On cancel: `kill_with_grace` sends SIGTERM, waits up to `grace`, then
-/// SIGKILL. Returns the child's final exit status (which will reflect
-/// whatever signal actually killed it).
-#[cfg(feature = "native")]
+/// `target` carries a Linux pidfd (when available) for race-free direct-child
+/// kill; fall-through to PID-based kill otherwise. On non-unix targets the
+/// parameter is ignored and we use tokio's cross-platform `start_kill`.
+#[cfg(all(unix, feature = "native"))]
 pub(crate) async fn wait_or_kill(
     child: &mut tokio::process::Child,
+    target: Option<&crate::pidfd::KillTarget>,
     cancel: &tokio_util::sync::CancellationToken,
     grace: Duration,
 ) -> std::io::Result<std::process::ExitStatus> {
     tokio::select! {
         biased;
         status = child.wait() => status,
-        _ = cancel.cancelled() => kill_with_grace(child, grace).await,
+        _ = cancel.cancelled() => kill_with_grace(child, target, grace).await,
+    }
+}
+
+#[cfg(all(not(unix), feature = "native"))]
+pub(crate) async fn wait_or_kill(
+    child: &mut tokio::process::Child,
+    _target: Option<&()>,
+    cancel: &tokio_util::sync::CancellationToken,
+    _grace: Duration,
+) -> std::io::Result<std::process::ExitStatus> {
+    tokio::select! {
+        biased;
+        status = child.wait() => status,
+        _ = cancel.cancelled() => {
+            let _ = child.start_kill();
+            child.wait().await
+        }
     }
 }
 
 /// Send SIGTERM to the child and its process group; wait `grace`; then SIGKILL.
 ///
-/// Belt-and-braces: signals both the PID and the PGID. The PID-direct kill
-/// guards against the race where `setpgid` in the child's `pre_exec` hasn't
-/// completed yet — in that case `killpg` would target the parent's group.
+/// Direct-child kill goes through `target.signal()`, which on Linux uses a
+/// pidfd (immune to PID reuse). Process-group kill uses `killpg` — there is
+/// no PGID-equivalent of pidfd, so grandchildren retain a small reuse window.
 #[cfg(all(unix, feature = "native"))]
 pub(crate) async fn kill_with_grace(
     child: &mut tokio::process::Child,
+    target: Option<&crate::pidfd::KillTarget>,
     grace: Duration,
 ) -> std::io::Result<std::process::ExitStatus> {
-    use nix::sys::signal::{kill, killpg, Signal};
-    use nix::unistd::Pid;
+    use nix::sys::signal::Signal;
 
-    if let Some(pid) = child.id() {
-        let p = Pid::from_raw(pid as i32);
-        let _ = kill(p, Signal::SIGTERM);
-        let _ = killpg(p, Signal::SIGTERM);
+    if let Some(t) = target {
+        t.signal(Signal::SIGTERM);
+        t.signal_pg(Signal::SIGTERM);
         if grace > Duration::ZERO
             && let Ok(status) = tokio::time::timeout(grace, child.wait()).await
         {
             return status;
         }
-        let _ = kill(p, Signal::SIGKILL);
-        let _ = killpg(p, Signal::SIGKILL);
+        t.signal(Signal::SIGKILL);
+        t.signal_pg(Signal::SIGKILL);
     }
-    child.wait().await
-}
-
-/// Non-Unix fallback: best-effort kill via tokio's cross-platform `start_kill`.
-#[cfg(all(not(unix), feature = "native"))]
-pub(crate) async fn kill_with_grace(
-    child: &mut tokio::process::Child,
-    _grace: Duration,
-) -> std::io::Result<std::process::ExitStatus> {
-    let _ = child.start_kill();
     child.wait().await
 }
 

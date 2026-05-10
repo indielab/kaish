@@ -26,6 +26,8 @@ pub mod lexer;
 pub mod nonce;
 pub mod parser;
 pub mod paths;
+#[cfg(all(unix, feature = "native"))]
+pub mod pidfd;
 pub mod scheduler;
 pub mod tools;
 pub mod trash;

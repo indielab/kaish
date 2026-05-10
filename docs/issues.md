@@ -116,17 +116,23 @@ roots. Tests pass because the unit tests pass raw glob strings to
 
 ## P3 — Scheduler and infra
 
-### PID-reuse race in `kill_with_grace` and JC cancel watcher
-`kernel.rs::kill_with_grace` and the JC-path side-task watcher send
-SIGTERM/SIGKILL to PID + PGID. If the OS reaps the child and reuses the
-PID for another process before our `kill()` syscalls fire, we'd signal
-the wrong process. The JC watcher narrows the window with a
-`wait_complete` flag check before each kill, but it's an atomic check
-not atomic with the syscall itself. The non-JC path uses
-`tokio::process::Child` which fundamentally has the same issue. Fully
-fixing requires holding a `pidfd` (Linux ≥ 5.3) or a `procfd` to bind
-kills to a specific process generation. Defer until OS-API support
-makes it cheap.
+### Process-group kill still has a (small) PID-reuse window
+The direct-child kill path now uses `pidfd_send_signal` on Linux (see
+`crates/kaish-kernel/src/pidfd.rs`), so the bound generation immunises
+us from PID reuse for the spawned child itself. **But** the PG-wide kill
+that catches grandchildren still goes through `killpg(pgid, sig)` —
+there is no PGID equivalent of pidfd. If the leader is reaped and its
+PID/PGID is reused before our `killpg` fires, grandchildren of an
+unrelated process group could be signalled. Mitigations: cgroup v2
+`cgroup.kill` (Linux ≥ 5.14) for atomic tree kill, or
+`PR_SET_CHILD_SUBREAPER` to enumerate descendants and pidfd each. Both
+are significant complexity; defer until we see a real failure.
+
+### Non-Linux unix targets (macOS, BSD) keep PID-based kill
+`pidfd` is Linux-only. On other unix targets we still send `kill(pid,
+sig)` and accept the PID-reuse race for the direct child. macOS has no
+direct equivalent (FreeBSD has `procctl`/`pdfork` but the model differs).
+Acceptable today since kaish runs predominantly on Linux.
 
 ### `dispatch_command` cancel sync is one-way (in only)
 `ec.cancel = ctx.cancel` is synced INTO `self.exec_ctx` at the start of
