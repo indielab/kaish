@@ -18,7 +18,7 @@ use async_trait::async_trait;
 use kaish_kernel::ast::Value;
 use kaish_kernel::interpreter::ExecResult;
 use kaish_kernel::vfs::Filesystem;
-use kaish_kernel::{Kernel, KernelConfig};
+use kaish_kernel::{ExecuteOptions, Kernel, KernelConfig};
 
 use crate::traits::{ClientError, ClientResult, KernelClient};
 
@@ -94,7 +94,22 @@ impl EmbeddedClient {
         on_output: &mut (dyn FnMut(&ExecResult) + Send),
     ) -> ClientResult<ExecResult> {
         self.kernel
-            .execute_streaming(input, on_output)
+            .execute_with_options(input, ExecuteOptions::default(), Some(on_output))
+            .await
+            .map_err(|e| ClientError::Execution(e.to_string()))
+    }
+
+    /// Execute with full per-call options (timeout, cancel token, vars overlay).
+    ///
+    /// Forwards directly to `Kernel::execute_with_options`.
+    pub async fn execute_with_options(
+        &self,
+        input: &str,
+        opts: ExecuteOptions,
+        on_output: Option<&mut (dyn FnMut(&ExecResult) + Send)>,
+    ) -> ClientResult<ExecResult> {
+        self.kernel
+            .execute_with_options(input, opts, on_output)
             .await
             .map_err(|e| ClientError::Execution(e.to_string()))
     }
@@ -115,7 +130,7 @@ impl KernelClient for EmbeddedClient {
         vars: HashMap<String, Value>,
     ) -> ClientResult<ExecResult> {
         self.kernel
-            .execute_with_vars(input, vars)
+            .execute_with_options(input, ExecuteOptions::new().with_vars(vars), None)
             .await
             .map_err(|e| ClientError::Execution(e.to_string()))
     }

@@ -9,7 +9,7 @@ use std::time::Duration;
 use anyhow::{Context, Result};
 use kaish_kernel::interpreter::{value_to_json, OutputData};
 use kaish_kernel::nonce::NonceStore;
-use kaish_kernel::{Kernel, KernelConfig};
+use kaish_kernel::{ExecuteOptions, Kernel, KernelConfig};
 use rmcp::schemars::{self, JsonSchema};
 use serde::{Deserialize, Serialize};
 
@@ -224,16 +224,20 @@ pub async fn execute(
 
                 let kernel = Kernel::new(config).context("Failed to create kernel")?.into_arc();
 
-                // Execute with timeout (full_script = init scripts + user script)
-                let result = tokio::time::timeout(timeout, kernel.execute(&full_script)).await;
+                // Execute with timeout. The kernel handles cancellation and
+                // child-process kill via SIGTERM/grace/SIGKILL on elapsed,
+                // returning exit 124 — no need for an outer tokio::time::timeout.
+                let result = kernel
+                    .execute_with_options(
+                        &full_script,
+                        ExecuteOptions::new().with_timeout(timeout),
+                        None,
+                    )
+                    .await;
 
                 let exec_result = match result {
-                    Ok(Ok(exec_result)) => ExecuteResult::from_exec_result(&exec_result),
-                    Ok(Err(e)) => ExecuteResult::failure(1, e.to_string()),
-                    Err(_) => ExecuteResult::failure(
-                        124, // Standard timeout exit code
-                        format!("Execution timed out after {}ms", timeout_ms),
-                    ),
+                    Ok(exec_result) => ExecuteResult::from_exec_result(&exec_result),
+                    Err(e) => ExecuteResult::failure(1, e.to_string()),
                 };
                 Ok(exec_result)
             });

@@ -116,9 +116,47 @@ roots. Tests pass because the unit tests pass raw glob strings to
 
 ## P3 — Scheduler and infra
 
-### Scatter / gather has no timeout
-A hung worker stalls remaining results forever. No `--timeout`
-parameter on `scatter` / `gather`. Add a per-worker timeout knob.
+### PID-reuse race in `kill_with_grace` and JC cancel watcher
+`kernel.rs::kill_with_grace` and the JC-path side-task watcher send
+SIGTERM/SIGKILL to PID + PGID. If the OS reaps the child and reuses the
+PID for another process before our `kill()` syscalls fire, we'd signal
+the wrong process. The JC watcher narrows the window with a
+`wait_complete` flag check before each kill, but it's an atomic check
+not atomic with the syscall itself. The non-JC path uses
+`tokio::process::Child` which fundamentally has the same issue. Fully
+fixing requires holding a `pidfd` (Linux ≥ 5.3) or a `procfd` to bind
+kills to a specific process generation. Defer until OS-API support
+makes it cheap.
+
+### `dispatch_command` cancel sync is one-way (in only)
+`ec.cancel = ctx.cancel` is synced INTO `self.exec_ctx` at the start of
+each dispatch, but there's no `ctx.cancel = ec.cancel` reverse sync at
+the end. Today this is fine because the only known mutators of
+`ctx.cancel` (the `timeout` builtin) save and restore the original token
+themselves. If we add another builtin that wants to propagate a token
+swap *outward* through dispatch_command, it would need either explicit
+restoration or a reverse sync added.
+
+### Test gaps around kill discipline
+- No test for `kill_grace = Duration::ZERO` (immediate SIGKILL).
+- No test that a user-defined tool (`tool name { ... }`) inside a
+  scatter worker dispatches correctly under cancellation — current
+  scatter test uses an external `bash -c "sleep 60"`.
+- No test for the JC inherit-output path being killed via cancel —
+  that path requires a real TTY which is awkward in test infra.
+
+### `ExecuteOptions` callback type is awkward
+`Option<&mut (dyn FnMut(&ExecResult) + Send)>` is hard to call. A
+trait-object alias or a dedicated `Callback` trait would smooth the
+ergonomics. Not blocking; do it once we see real downstream pain.
+
+### Builtin `sleep` does not honor cancellation
+`tools/builtin/sleep.rs` is `tokio::time::sleep(d).await` and does not
+check `ctx.cancel`. A `timeout 1 sleep 60` works for *external* `sleep`
+because we kill the OS process, but for the builtin it sleeps the full
+60s. Make builtins that block on time/IO race their work against
+`ctx.cancel.cancelled()`. Same applies to other long-blocking builtins
+that hold a future without yielding through cancellation.
 
 ### Job output files in `/tmp/kaish/jobs/` persist indefinitely
 `JobManager` only cleans up on explicit `cleanup()` / `remove()`. No

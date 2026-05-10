@@ -3,14 +3,14 @@
 ## Syntax
 
 ```
-input | scatter [as=VAR] [limit=N] | command | gather [first=N] [format=lines|json]
+input | scatter [as=VAR] [limit=N] [timeout=DUR] | command | gather [first=N] [format=lines|json]
 ```
 
 ## Parameters
 
-**scatter:** `as=VAR` (default: `ITEM`) — variable name per item. `limit=N` (default: 8, clamped to 1..=10000) — max concurrent workers. Requests above 10000 are clamped and emit a `tracing::warn` on the `kaish::scatter` target.
+**scatter:** `as=VAR` (default: `ITEM`) — variable name per item. `limit=N` (default: 8, clamped to 1..=10000) — max concurrent workers. Requests above 10000 are clamped and emit a `tracing::warn` on the `kaish::scatter` target. `timeout=DUR` (default: none) — per-worker timeout (`30`, `5s`, `500ms`, `2m`, `1h`); cancels the worker and kills its external children with the kernel's `kill_grace`. Workers that hit the timeout are tagged `"timed_out": true` in `gather format=json` output.
 
-**gather:** `first=N` (default: 0/all) — take first N results. `format=lines|json` (default: `lines`) — output format.
+**gather:** `first=N` (default: 0/all) — take first N results. `format=lines|json` (default: `lines`) — output format. JSON output includes per-worker `timed_out` flag.
 
 ## Example
 
@@ -31,3 +31,4 @@ glob "*.json" | scatter as=FILE limit=4 | jq ".name" $FILE | gather
 - Failed workers: error collected, other workers continue
 - `set -e` before scatter stops on first error
 - **Workers run in a forked kernel.** Each parallel worker gets its own kernel instance with snapshotted session state (scope, cwd, aliases, user tools). This means workers can run the **full dispatch chain**: user-defined functions (`tool name { ... }`), `.kai` scripts, and command substitution in arguments all work correctly inside scatter workers. Mutations within a worker (e.g. changing a variable) stay within that worker and do not leak back to the parent or other workers.
+- **Cancellation cascades.** Workers fork with `fork_attached`, so their cancellation tokens are children of the parent kernel's. A parent timeout, `Kernel::cancel`, or REPL Ctrl-C propagates into every running worker and kills its external children via SIGTERM → `kill_grace` → SIGKILL.

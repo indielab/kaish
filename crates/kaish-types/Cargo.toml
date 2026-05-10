@@ -17,6 +17,7 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
 schemars = { version = "1", optional = true }
+tokio-util = { workspace = true }
 
 [features]
 schema = ["dep:schemars"]

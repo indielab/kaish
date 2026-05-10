@@ -15,6 +15,7 @@ use crate::scheduler::{JobManager, PipeReader, PipeWriter, StderrStream};
 use crate::tools::ToolRegistry;
 use crate::trash::TrashBackend;
 use crate::vfs::VfsRouter;
+use tokio_util::sync::CancellationToken;
 
 use super::traits::ToolSchema;
 
@@ -112,6 +113,16 @@ pub struct ExecContext {
     ///
     /// `None` when the Kernel was not wrapped via `into_arc()`.
     pub dispatcher: Option<Arc<dyn crate::dispatch::CommandDispatcher>>,
+    /// Cancellation token for this execution path.
+    ///
+    /// Populated by the kernel at execute entry, then propagated through pipeline
+    /// stages, foreground forks (scatter workers, concurrent pipeline stages,
+    /// `$(...)` cmdsubs), and into spawned external children. When the token
+    /// fires, externals receive SIGTERM/SIGKILL via the `wait_or_kill` helper.
+    ///
+    /// Default for stand-alone `ExecContext` constructors is a fresh, never-fired
+    /// token so non-kernel test contexts behave as before.
+    pub cancel: CancellationToken,
 }
 
 impl ExecContext {
@@ -144,6 +155,7 @@ impl ExecContext {
             #[cfg(all(unix, feature = "native"))]
             terminal_state: None,
             dispatcher: None,
+            cancel: CancellationToken::new(),
         }
     }
 
@@ -176,6 +188,7 @@ impl ExecContext {
             #[cfg(all(unix, feature = "native"))]
             terminal_state: None,
             dispatcher: None,
+            cancel: CancellationToken::new(),
         }
     }
 
@@ -205,6 +218,7 @@ impl ExecContext {
             #[cfg(all(unix, feature = "native"))]
             terminal_state: None,
             dispatcher: None,
+            cancel: CancellationToken::new(),
         }
     }
 
@@ -234,6 +248,7 @@ impl ExecContext {
             #[cfg(all(unix, feature = "native"))]
             terminal_state: None,
             dispatcher: None,
+            cancel: CancellationToken::new(),
         }
     }
 
@@ -266,6 +281,7 @@ impl ExecContext {
             #[cfg(all(unix, feature = "native"))]
             terminal_state: None,
             dispatcher: None,
+            cancel: CancellationToken::new(),
         }
     }
 
@@ -295,6 +311,7 @@ impl ExecContext {
             #[cfg(all(unix, feature = "native"))]
             terminal_state: None,
             dispatcher: None,
+            cancel: CancellationToken::new(),
         }
     }
 
@@ -412,6 +429,7 @@ impl ExecContext {
             #[cfg(all(unix, feature = "native"))]
             terminal_state: self.terminal_state.clone(),
             dispatcher: self.dispatcher.clone(),
+            cancel: self.cancel.clone(),
         }
     }
 

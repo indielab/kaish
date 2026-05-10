@@ -26,6 +26,7 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::Duration;
 
 use anyhow::{Context, Result};
 use tokio::sync::RwLock;
@@ -46,6 +47,7 @@ static KERNEL_COUNTER: AtomicU64 = AtomicU64::new(1);
 use async_trait::async_trait;
 
 use crate::ast::{Arg, Command, Expr, FileTestOp, Stmt, StringPart, TestExpr, ToolDef, Value, BinaryOp};
+pub use kaish_types::ExecuteOptions;
 use crate::backend::{BackendError, KernelBackend};
 use kaish_glob::glob_match;
 use crate::dispatch::{CommandDispatcher, PipelinePosition};
@@ -194,6 +196,21 @@ pub struct KernelConfig {
     /// from `std::env::vars()`. Embedders that want isolation pass nothing
     /// (or only the keys they curate).
     pub initial_vars: HashMap<String, Value>,
+
+    /// Default per-request timeout. When `Some`, every `execute_with_options`
+    /// call without an explicit `ExecuteOptions::timeout` uses this duration.
+    /// When elapsed, the kernel cancels the request, kills any external
+    /// children with the configured grace, and returns exit code 124.
+    ///
+    /// `None` means no default timeout — only explicit per-call timeouts apply.
+    pub request_timeout: Option<Duration>,
+
+    /// Grace period between SIGTERM and SIGKILL when killing an external
+    /// child on cancellation or timeout.
+    ///
+    /// Defaults to 2 seconds. Set to `Duration::ZERO` to escalate immediately
+    /// to SIGKILL. Long-shutdown processes (databases, etc.) may need more.
+    pub kill_grace: Duration,
 }
 
 /// Get the default sandbox root ($HOME).
@@ -222,6 +239,8 @@ impl Default for KernelConfig {
                 trash_enabled: std::env::var("KAISH_TRASH").is_ok_and(|v| v == "1"),
                 nonce_store: None,
                 initial_vars: HashMap::new(),
+                request_timeout: None,
+                kill_grace: Duration::from_secs(2),
             }
         }
         #[cfg(not(feature = "native"))]
@@ -239,6 +258,8 @@ impl Default for KernelConfig {
                 trash_enabled: false,
                 nonce_store: None,
                 initial_vars: HashMap::new(),
+                request_timeout: None,
+                kill_grace: Duration::from_secs(2),
             }
         }
     }
@@ -262,6 +283,8 @@ impl KernelConfig {
             trash_enabled: false,
             nonce_store: None,
             initial_vars: HashMap::new(),
+            request_timeout: None,
+            kill_grace: Duration::from_secs(2),
         }
     }
 
@@ -288,6 +311,8 @@ impl KernelConfig {
             trash_enabled: false,
             nonce_store: None,
             initial_vars: HashMap::new(),
+            request_timeout: None,
+            kill_grace: Duration::from_secs(2),
         }
     }
 
@@ -320,6 +345,8 @@ impl KernelConfig {
             trash_enabled: std::env::var("KAISH_TRASH").is_ok_and(|v| v == "1"),
             nonce_store: None,
             initial_vars: HashMap::new(),
+            request_timeout: None,
+            kill_grace: Duration::from_secs(2),
         }
     }
 
@@ -345,6 +372,8 @@ impl KernelConfig {
             trash_enabled: std::env::var("KAISH_TRASH").is_ok_and(|v| v == "1"),
             nonce_store: None,
             initial_vars: HashMap::new(),
+            request_timeout: None,
+            kill_grace: Duration::from_secs(2),
         }
     }
 
@@ -366,6 +395,8 @@ impl KernelConfig {
             trash_enabled: std::env::var("KAISH_TRASH").is_ok_and(|v| v == "1"),
             nonce_store: None,
             initial_vars: HashMap::new(),
+            request_timeout: None,
+            kill_grace: Duration::from_secs(2),
         }
     }
 
@@ -387,6 +418,8 @@ impl KernelConfig {
             trash_enabled: false,
             nonce_store: None,
             initial_vars: HashMap::new(),
+            request_timeout: None,
+            kill_grace: Duration::from_secs(2),
         }
     }
 
@@ -476,6 +509,21 @@ impl KernelConfig {
         self.initial_vars.extend(vars);
         self
     }
+
+    /// Set the default per-request timeout (kernel-wide).
+    ///
+    /// Each `execute_with_options` call without an explicit timeout uses
+    /// this. On elapsed, the kernel cancels and returns exit code 124.
+    pub fn with_request_timeout(mut self, timeout: Duration) -> Self {
+        self.request_timeout = Some(timeout);
+        self
+    }
+
+    /// Set the SIGTERM-to-SIGKILL grace period for child kills.
+    pub fn with_kill_grace(mut self, grace: Duration) -> Self {
+        self.kill_grace = grace;
+        self
+    }
 }
 
 /// The Kernel (核) — executes kaish code.
@@ -505,6 +553,10 @@ pub struct Kernel {
     interactive: bool,
     /// Whether external command execution is allowed.
     allow_external_commands: bool,
+    /// Default per-request timeout (None = no default).
+    request_timeout: Option<Duration>,
+    /// SIGTERM-to-SIGKILL grace period for child kills.
+    kill_grace: Duration,
     /// Receiver for the kernel stderr stream.
     ///
     /// Pipeline stages write to the corresponding `StderrStream` (set on ExecContext).
@@ -672,7 +724,7 @@ impl Kernel {
         configure_tools: impl FnOnce(&mut ToolRegistry),
         make_ctx: impl FnOnce(&Arc<VfsRouter>, &Arc<ToolRegistry>) -> ExecContext,
     ) -> Result<Self> {
-        let KernelConfig { name, cwd, skip_validation, interactive, ignore_config, output_limit, allow_external_commands, latch_enabled, trash_enabled, nonce_store, initial_vars, .. } = config;
+        let KernelConfig { name, cwd, skip_validation, interactive, ignore_config, output_limit, allow_external_commands, latch_enabled, trash_enabled, nonce_store, initial_vars, request_timeout, kill_grace, .. } = config;
 
         let mut tools = ToolRegistry::new();
         register_builtins(&mut tools);
@@ -731,6 +783,8 @@ impl Kernel {
             skip_validation,
             interactive,
             allow_external_commands,
+            request_timeout,
+            kill_grace,
             stderr_receiver: tokio::sync::Mutex::new(stderr_receiver),
             cancel_token: std::sync::Mutex::new(tokio_util::sync::CancellationToken::new()),
             #[cfg(all(unix, feature = "native"))]
@@ -777,16 +831,42 @@ impl Kernel {
     /// routes through the fork itself, not the parent — which is essential
     /// for concurrency safety.
     ///
-    /// Use this to replace the old "background job runs against the parent
-    /// kernel" pattern. Background jobs, scatter parallel workers, and
-    /// concurrent pipeline stages should all fork rather than share.
+    /// Use this for **detached** background concurrency where the fork should
+    /// survive parent cancellation: the `&` background-job operator and any
+    /// other "fire and forget" worker. The fork gets a fresh, independent
+    /// cancellation token.
+    ///
+    /// For foreground concurrency (scatter workers, concurrent pipeline
+    /// stages, `$(...)` cmdsubs) where parent timeout/cancel must cascade
+    /// into the fork's external children, use [`Self::fork_attached`].
     pub async fn fork(&self) -> Arc<Self> {
+        self.fork_inner(tokio_util::sync::CancellationToken::new()).await
+    }
+
+    /// Fork attached to the parent's cancellation.
+    ///
+    /// Same as [`Self::fork`] but the fork's `cancel_token` is a child of
+    /// the parent's. When the parent cancels (request timeout, embedder
+    /// `Kernel::cancel`, etc.), the fork's token also cancels, which in
+    /// turn kills any external children spawned in the fork via the
+    /// `wait_or_kill` / SIGTERM-grace-SIGKILL path.
+    pub async fn fork_attached(&self) -> Arc<Self> {
+        let child_token = {
+            #[allow(clippy::expect_used)]
+            let parent = self.cancel_token.lock().expect("cancel_token poisoned");
+            parent.child_token()
+        };
+        self.fork_inner(child_token).await
+    }
+
+    /// Shared fork implementation. Caller decides the cancellation token.
+    async fn fork_inner(&self, cancel: tokio_util::sync::CancellationToken) -> Arc<Self> {
         let scope_snapshot = self.scope.read().await.clone();
         let user_tools_snapshot = self.user_tools.read().await.clone();
 
         // Snapshot exec_ctx by cloning the cloneable fields, then override
         // the ones that should not carry over (stderr channel, dispatcher,
-        // interactive flag, terminal state).
+        // interactive flag, terminal state, cancel — set from `cancel` arg).
         let mut fork_ctx = {
             let parent_ctx = self.exec_ctx.read().await;
             parent_ctx.child_for_pipeline()
@@ -797,6 +877,7 @@ impl Kernel {
         // the fork on the first dispatch call.
         fork_ctx.dispatcher = None;
         fork_ctx.interactive = false;
+        fork_ctx.cancel = cancel.clone();
         #[cfg(all(unix, feature = "native"))]
         {
             fork_ctx.terminal_state = None;
@@ -815,8 +896,10 @@ impl Kernel {
             // Forks are never the TTY owner — they run in the background.
             interactive: false,
             allow_external_commands: self.allow_external_commands,
+            request_timeout: self.request_timeout,
+            kill_grace: self.kill_grace,
             stderr_receiver: tokio::sync::Mutex::new(stderr_receiver),
-            cancel_token: std::sync::Mutex::new(tokio_util::sync::CancellationToken::new()),
+            cancel_token: std::sync::Mutex::new(cancel),
             #[cfg(all(unix, feature = "native"))]
             terminal_state: None,
             self_weak: std::sync::OnceLock::new(),
@@ -908,81 +991,232 @@ impl Kernel {
         }
     }
 
-    /// Execute kaish source code.
+    /// Execute kaish source code with default options.
     ///
+    /// Equivalent to `execute_with_options(input, ExecuteOptions::default(), None)`.
     /// Returns the result of the last statement executed.
     pub async fn execute(&self, input: &str) -> Result<ExecResult> {
-        self.execute_streaming(input, &mut |_| {}).await
+        self.execute_with_options(input, ExecuteOptions::default(), None).await
     }
 
     /// Execute kaish source code with a transient overlay of exported variables.
     ///
-    /// The overlay vars live for the duration of this call only:
-    /// - A new scope frame is pushed; each var is set on it and marked exported.
-    /// - The script (and any external commands it spawns) sees the overlay vars.
-    /// - On return, the frame is popped and any names that were not previously
-    ///   exported are removed from the export set.
-    ///
-    /// Bash function-local semantics: if the script does `FOO=...`, that
-    /// modifies the transient frame and the value is gone after this call.
-    ///
-    /// If a name in `vars` was already exported in an outer frame, the outer
-    /// value reappears on return; the export bit is preserved.
-    ///
-    /// **Panic safety:** if `execute()` panics, the transient frame is not
-    /// popped. This matches every other `push_frame` call site in the
-    /// kernel — the kernel makes no panic-safety guarantees today.
+    /// Deprecated thin wrapper over [`Self::execute_with_options`]. New code
+    /// should use that method directly:
+    /// `execute_with_options(input, ExecuteOptions::new().with_vars(vars), None)`.
+    #[deprecated(note = "use Kernel::execute_with_options with ExecuteOptions::with_vars")]
     pub async fn execute_with_vars(
         &self,
         input: &str,
         vars: HashMap<String, Value>,
     ) -> Result<ExecResult> {
-        // Push frame + apply vars + remember which names we newly exported.
-        let newly_exported: Vec<String> = {
-            let mut scope = self.scope.write().await;
-            scope.push_frame();
-            let mut newly = Vec::with_capacity(vars.len());
-            for (name, value) in vars {
-                if !scope.is_exported(&name) {
-                    newly.push(name.clone());
-                }
-                scope.set_exported(name, value);
-            }
-            newly
-        };
-
-        let result = self.execute(input).await;
-
-        {
-            let mut scope = self.scope.write().await;
-            scope.pop_frame();
-            for name in newly_exported {
-                scope.unexport(&name);
-            }
-        }
-
-        result
+        self.execute_with_options(input, ExecuteOptions::new().with_vars(vars), None).await
     }
 
     /// Execute kaish source code with a per-statement callback.
     ///
-    /// Each statement's result is passed to `on_output` as it completes,
-    /// allowing callers to flush output incrementally (e.g., print builtin
-    /// output immediately rather than buffering until the script finishes).
-    ///
-    /// External commands in interactive mode already stream to the terminal
-    /// via `Stdio::inherit()`, so the callback mainly handles builtins.
-    ///
-    /// Concurrent callers on the same Kernel serialize on [`Self::execute_lock`].
-    /// If you want true parallelism, call [`Kernel::fork`] per task.
-    #[tracing::instrument(level = "info", skip(self, on_output), fields(input_len = input.len()))]
+    /// Deprecated thin wrapper over [`Self::execute_with_options`]. New code
+    /// should pass `Some(on_output)` directly.
+    #[deprecated(note = "use Kernel::execute_with_options with the on_output parameter")]
     pub async fn execute_streaming(
         &self,
         input: &str,
         on_output: &mut (dyn FnMut(&ExecResult) + Send),
     ) -> Result<ExecResult> {
+        self.execute_with_options(input, ExecuteOptions::default(), Some(on_output)).await
+    }
+
+    /// Execute kaish source code with full per-call control.
+    ///
+    /// This is the primary entry point for embedders. `opts` carries the
+    /// per-call timeout, transient variable overlay, and optional embedder-
+    /// owned cancellation token. `on_output`, if provided, fires after each
+    /// top-level statement so the caller can flush output incrementally
+    /// (REPL, MCP streaming).
+    ///
+    /// **Cancellation:** the kernel installs a cancel token for this call.
+    /// If `opts.cancel_token` is `Some`, that token replaces the kernel's
+    /// internal token (so external cancellation cascades into spawned
+    /// children); otherwise the kernel uses its own per-call token.
+    ///
+    /// **Timeout:** `opts.timeout` overrides `KernelConfig::request_timeout`.
+    /// On elapsed: cancels the token (which kills external children with the
+    /// configured grace), then returns exit code 124 with a "timed out"
+    /// message in stderr. `Some(Duration::ZERO)` returns 124 immediately
+    /// without spawning anything.
+    ///
+    /// **Vars overlay:** `opts.vars` are pushed in a new scope frame and
+    /// marked exported for this call only. Same semantics as the old
+    /// `execute_with_vars`.
+    ///
+    /// Concurrent callers on the same Kernel serialize on [`Self::execute_lock`].
+    /// For true parallelism, call [`Kernel::fork`] (detached) or
+    /// [`Kernel::fork_attached`] (cancellation cascades from this kernel).
+    #[tracing::instrument(level = "info", skip(self, opts, on_output), fields(input_len = input.len()))]
+    pub async fn execute_with_options(
+        &self,
+        input: &str,
+        opts: ExecuteOptions,
+        on_output: Option<&mut (dyn FnMut(&ExecResult) + Send)>,
+    ) -> Result<ExecResult> {
         let _guard = self.acquire_execute_lock().await;
-        self.execute_streaming_inner(input, on_output).await
+
+        // Always reset to a fresh internal token; this is the kernel's own
+        // cancel surface for embedders calling `Kernel::cancel()`. The
+        // embedder-supplied `opts.cancel_token` is a *read-only input* — it
+        // is NOT written into `self.cancel_token`, because doing so would
+        // (a) leak the embedder's token past this call's lifetime,
+        // (b) re-route a later `Kernel::cancel()` into the embedder's token,
+        // (c) extend the token's lifetime via the kernel's strong clone.
+        let internal = self.reset_cancel();
+        // Race the embedder token against the kernel's internal token via a
+        // tracked watcher task. We hold the JoinHandle so we can abort the
+        // task at function exit — otherwise it would wait forever for either
+        // token to fire and leak per call.
+        let (effective_cancel, watcher_handle): (
+            tokio_util::sync::CancellationToken,
+            Option<tokio::task::JoinHandle<()>>,
+        ) = if let Some(ext) = opts.cancel_token {
+            let combined = tokio_util::sync::CancellationToken::new();
+            let combined_writer = combined.clone();
+            let i = internal.clone();
+            let handle = tokio::spawn(async move {
+                tokio::select! {
+                    _ = i.cancelled() => combined_writer.cancel(),
+                    _ = ext.cancelled() => combined_writer.cancel(),
+                }
+            });
+            (combined, Some(handle))
+        } else {
+            (internal, None)
+        };
+
+        // Effective timeout: per-call wins over kernel-config default.
+        let timeout = opts.timeout.or(self.request_timeout);
+
+        // ZERO timeout: return 124 immediately without spawning anything.
+        if timeout == Some(Duration::ZERO) {
+            if let Some(h) = watcher_handle {
+                h.abort();
+            }
+            return Ok(ExecResult::failure(124, "timeout: timed out after 0s".to_string()));
+        }
+
+        // Apply per-call vars overlay (push frame + set_exported), wrapped in
+        // an RAII guard so a panic inside `execute_streaming_inner` still
+        // pops the frame and unexports the temporarily-exported names.
+        struct VarsFrameGuard<'a> {
+            kernel: &'a Kernel,
+            newly_exported: Vec<String>,
+        }
+        impl Drop for VarsFrameGuard<'_> {
+            fn drop(&mut self) {
+                // Best-effort cleanup using try_write. The execute_lock held
+                // throughout execute_with_options means there is no concurrent
+                // foreground caller; forks have their own scope and won't
+                // block this. blocking_write would deadlock the runtime when
+                // called from a tokio worker thread, so we explicitly do NOT
+                // fall back to it — if try_write fails (which we've never
+                // seen in practice), log loudly and accept the leak rather
+                // than deadlock the entire kernel.
+                let Ok(mut scope) = self.kernel.scope.try_write() else {
+                    tracing::error!(
+                        "vars frame guard: scope lock unexpectedly busy; \
+                         skipping pop_frame to avoid runtime deadlock — \
+                         transient vars may leak"
+                    );
+                    return;
+                };
+                scope.pop_frame();
+                for name in self.newly_exported.drain(..) {
+                    scope.unexport(&name);
+                }
+            }
+        }
+
+        let _vars_guard: Option<VarsFrameGuard<'_>> = if !opts.vars.is_empty() {
+            let mut scope = self.scope.write().await;
+            scope.push_frame();
+            let mut newly = Vec::with_capacity(opts.vars.len());
+            for (name, value) in opts.vars {
+                if !scope.is_exported(&name) {
+                    newly.push(name.clone());
+                }
+                scope.set_exported(name, value);
+            }
+            drop(scope);
+            Some(VarsFrameGuard { kernel: self, newly_exported: newly })
+        } else {
+            None
+        };
+
+        // Sync the effective cancel into self.exec_ctx so try_execute_external
+        // (which reads via self.cancel_token) sees cancellation. We also need
+        // builtins to see it via ctx.cancel — handled in execute_command.
+        // For simplicity here we mirror effective_cancel into self.cancel_token
+        // for the duration of this call, then restore the internal token at
+        // the end (so a later Kernel::cancel still hits our internal surface).
+        {
+            #[allow(clippy::expect_used)]
+            let mut cur = self.cancel_token.lock().expect("cancel_token poisoned");
+            *cur = effective_cancel.clone();
+        }
+
+        // Run inner with optional timeout. The timer task cancels our token
+        // on elapsed; the cascade fires SIGTERM/SIGKILL on any external
+        // children via the wait_or_kill discipline in try_execute_external.
+        let mut noop_cb: Box<dyn FnMut(&ExecResult) + Send> = Box::new(|_| {});
+        let cb_ref: &mut (dyn FnMut(&ExecResult) + Send) = match on_output {
+            Some(cb) => cb,
+            None => &mut *noop_cb,
+        };
+
+        let result = if let Some(d) = timeout {
+            let elapsed = Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let elapsed_writer = elapsed.clone();
+            let timer_token = effective_cancel.clone();
+            let timer = tokio::spawn(async move {
+                tokio::time::sleep(d).await;
+                elapsed_writer.store(true, std::sync::atomic::Ordering::SeqCst);
+                timer_token.cancel();
+            });
+            let r = self.execute_streaming_inner(input, cb_ref).await;
+            timer.abort();
+            match r {
+                Ok(mut res) => {
+                    if elapsed.load(std::sync::atomic::Ordering::SeqCst) {
+                        res.code = 124;
+                        if res.err.is_empty() {
+                            res.err = format!("timeout: timed out after {:?}", d);
+                        }
+                    }
+                    Ok(res)
+                }
+                Err(e) => Err(e),
+            }
+        } else {
+            self.execute_streaming_inner(input, cb_ref).await
+        };
+
+        // Restore self.cancel_token to a fresh, uncancelled token so the
+        // embedder's view of `Kernel::cancel()` stays predictable on the
+        // next call (it cancels the kernel's own token, not whatever was
+        // left over from this call's combined token).
+        {
+            #[allow(clippy::expect_used)]
+            let mut cur = self.cancel_token.lock().expect("cancel_token poisoned");
+            *cur = tokio_util::sync::CancellationToken::new();
+        }
+
+        // Tear down the embedder-token race watcher (if any). Leaving it
+        // alive would idle forever waiting for tokens that may never fire.
+        if let Some(h) = watcher_handle {
+            h.abort();
+        }
+
+        // VarsFrameGuard drops here on the success path and on early-return
+        // paths above (error path included). Panic safety preserved.
+        result
     }
 
     /// The actual body of `execute_streaming`, run while holding the execute lock.
@@ -1588,6 +1822,11 @@ impl Kernel {
                 #[cfg(all(unix, feature = "native"))]
                 terminal_state: ec.terminal_state.clone(),
                 dispatcher: self.dispatcher(),
+                cancel: {
+                    #[allow(clippy::expect_used)]
+                    let token = self.cancel_token.lock().expect("cancel_token poisoned");
+                    token.clone()
+                },
             }
         }; // locks released
 
@@ -1886,19 +2125,77 @@ impl Kernel {
             return Ok(ExecResult::with_output(crate::interpreter::OutputData::text(content)));
         }
 
-        // Execute
-        let mut ctx = self.exec_ctx.write().await;
-        {
+        // Snapshot exec_ctx into a local context and release the write lock
+        // before calling tool.execute. Holding the write across tool execution
+        // would deadlock any builtin that re-dispatches through ctx.dispatcher
+        // (timeout, scatter) — the inner dispatch_command needs its own
+        // exec_ctx.write() and would block forever.
+        let mut ctx = {
+            let ec = self.exec_ctx.write().await;
             let scope = self.scope.read().await;
-            ctx.scope = scope.clone();
+            ExecContext {
+                backend: ec.backend.clone(),
+                scope: scope.clone(),
+                cwd: ec.cwd.clone(),
+                prev_cwd: ec.prev_cwd.clone(),
+                stdin: ec.stdin.clone(),
+                stdin_data: ec.stdin_data.clone(),
+                pipe_stdin: None, // streaming pipes are per-pipeline; not snapshotted
+                pipe_stdout: None,
+                stderr: ec.stderr.clone(),
+                tool_schemas: ec.tool_schemas.clone(),
+                tools: ec.tools.clone(),
+                job_manager: ec.job_manager.clone(),
+                pipeline_position: ec.pipeline_position,
+                interactive: self.interactive,
+                aliases: ec.aliases.clone(),
+                ignore_config: ec.ignore_config.clone(),
+                output_limit: ec.output_limit.clone(),
+                allow_external_commands: self.allow_external_commands,
+                nonce_store: ec.nonce_store.clone(),
+                trash_backend: ec.trash_backend.clone(),
+                #[cfg(all(unix, feature = "native"))]
+                terminal_state: ec.terminal_state.clone(),
+                dispatcher: self.dispatcher(),
+                // Use ec.cancel (set by dispatch_command from the runner's
+                // ctx.cancel) so any builtin-swapped child token (e.g. timeout's
+                // child token) reaches the spawned external via wait_or_kill.
+                // Falls back to the kernel's own token when ec.cancel is the
+                // default fresh token from a non-dispatch path.
+                cancel: ec.cancel.clone(),
+            }
+        }; // both locks released — tool.execute can re-dispatch safely
+
+        // Move stdin out of self.exec_ctx into the snapshot (consumed-by-tool
+        // semantics): take() so a later dispatch doesn't see stale stdin.
+        // Done after the snapshot above so we hold the write briefly.
+        {
+            let mut ec = self.exec_ctx.write().await;
+            ctx.stdin = ec.stdin.take();
+            ctx.stdin_data = ec.stdin_data.take();
+            ctx.pipe_stdin = ec.pipe_stdin.take();
+            ctx.pipe_stdout = ec.pipe_stdout.take();
         }
 
         let result = tool.execute(tool_args, &mut ctx).await;
 
-        // Sync scope changes back (e.g., from cd)
+        // Sync mutations back. Tools may have changed scope (set/cd),
+        // cwd/prev_cwd (cd), and aliases (alias). Also return any unused pipe
+        // endpoints to self.exec_ctx so dispatch_command's post-execute sync
+        // hands them back to the pipeline runner — the runner uses
+        // stage_ctx.pipe_stdout to write the result to the next stage when
+        // the tool itself didn't take and write to it.
         {
             let mut scope = self.scope.write().await;
             *scope = ctx.scope.clone();
+        }
+        {
+            let mut ec = self.exec_ctx.write().await;
+            ec.cwd = ctx.cwd;
+            ec.prev_cwd = ctx.prev_cwd;
+            ec.aliases = ctx.aliases;
+            ec.pipe_stdin = ctx.pipe_stdin.take();
+            ec.pipe_stdout = ctx.pipe_stdout.take();
         }
 
         let result = match output_format {
@@ -2989,6 +3286,16 @@ impl Kernel {
     #[cfg(feature = "native")]
     #[tracing::instrument(level = "debug", skip(self, args), fields(command = %name))]
     async fn try_execute_external(&self, name: &str, args: &[Arg]) -> Result<Option<ExecResult>> {
+        // Read the cancel token from `self.exec_ctx`, which `dispatch_command`
+        // populates from the inbound ctx.cancel on every dispatch. This is
+        // what makes the `timeout` builtin's swapped child token reach the
+        // wait_or_kill discipline below — reading `self.cancel_token` would
+        // give the kernel-wide token and miss the timeout's child cascade.
+        let cancel = {
+            let ec = self.exec_ctx.read().await;
+            ec.cancel.clone()
+        };
+        let kill_grace = self.kill_grace;
         if !self.allow_external_commands {
             return Ok(None);
         }
@@ -3111,37 +3418,52 @@ impl Kernel {
             cmd.stderr(std::process::Stdio::piped());
         }
 
-        // On Unix with job control, put child in its own process group
-        // and restore default signal handlers (shell ignores SIGTSTP etc.
-        // but children should respond to them normally).
+        // On Unix, always put the child in its own process group so cancellation
+        // can `killpg` the whole tree (the child plus any grandchildren).
+        // Restoring default tty-related signal handlers stays gated on
+        // job-control mode — those only matter when the child has a controlling
+        // terminal.
         #[cfg(unix)]
-        if self.terminal_state.is_some() && inherit_output {
+        {
+            let restore_jc_signals = self.terminal_state.is_some() && inherit_output;
             // SAFETY: setpgid and sigaction(SIG_DFL) are async-signal-safe per POSIX
             #[allow(unsafe_code)]
             unsafe {
-                cmd.pre_exec(|| {
-                    // Own process group
+                cmd.pre_exec(move || {
+                    // Own process group — for kill scope.
                     nix::unistd::setpgid(nix::unistd::Pid::from_raw(0), nix::unistd::Pid::from_raw(0))
                         .map_err(|e| std::io::Error::from_raw_os_error(e as i32))?;
-                    // Restore default signal handlers for job control signals
-                    use nix::libc::{sigaction, SIGTSTP, SIGTTOU, SIGTTIN, SIGINT, SIG_DFL};
-                    let mut sa: nix::libc::sigaction = std::mem::zeroed();
-                    sa.sa_sigaction = SIG_DFL;
-                    if sigaction(SIGTSTP, &sa, std::ptr::null_mut()) != 0 {
-                        return Err(std::io::Error::last_os_error());
-                    }
-                    if sigaction(SIGTTOU, &sa, std::ptr::null_mut()) != 0 {
-                        return Err(std::io::Error::last_os_error());
-                    }
-                    if sigaction(SIGTTIN, &sa, std::ptr::null_mut()) != 0 {
-                        return Err(std::io::Error::last_os_error());
-                    }
-                    if sigaction(SIGINT, &sa, std::ptr::null_mut()) != 0 {
-                        return Err(std::io::Error::last_os_error());
+                    if restore_jc_signals {
+                        use nix::libc::{sigaction, SIGTSTP, SIGTTOU, SIGTTIN, SIGINT, SIG_DFL};
+                        let mut sa: nix::libc::sigaction = std::mem::zeroed();
+                        sa.sa_sigaction = SIG_DFL;
+                        if sigaction(SIGTSTP, &sa, std::ptr::null_mut()) != 0 {
+                            return Err(std::io::Error::last_os_error());
+                        }
+                        if sigaction(SIGTTOU, &sa, std::ptr::null_mut()) != 0 {
+                            return Err(std::io::Error::last_os_error());
+                        }
+                        if sigaction(SIGTTIN, &sa, std::ptr::null_mut()) != 0 {
+                            return Err(std::io::Error::last_os_error());
+                        }
+                        if sigaction(SIGINT, &sa, std::ptr::null_mut()) != 0 {
+                            return Err(std::io::Error::last_os_error());
+                        }
                     }
                     Ok(())
                 });
             }
+        }
+
+        // Backstop for kill on drop in case our explicit kill path is bypassed
+        // (panic, early return, etc) on the **capture** wait path. We do NOT
+        // set this on the JC inherit path: that uses sync `waitpid` outside
+        // tokio's view of the child, so on drop tokio would try to kill an
+        // already-reaped (possibly-reused) PID. The JC path has its own
+        // cancel handling via the side-task watcher.
+        let in_jc_inherit_path = inherit_output && self.terminal_state.is_some();
+        if !in_jc_inherit_path {
+            cmd.kill_on_drop(true);
         }
 
         // Spawn the process
@@ -3187,8 +3509,52 @@ impl Kernel {
                 let cmd_display = format!("{} {}", name, argv.join(" "));
                 let jobs = self.jobs.clone();
 
+                // Side task that watches for cancellation while the blocking
+                // waitpid runs. On cancel, it SIGTERMs the process group, waits
+                // the grace period, then SIGKILLs. The blocking waitpid returns
+                // when the child dies. AbortOnDrop guard cancels the watcher
+                // on the success path so it doesn't keep running after wait
+                // returns naturally.
+                //
+                // `wait_complete` shrinks the PID-reuse race: the watcher
+                // checks it before each kill syscall and bails out if
+                // wait_for_foreground has already reaped the child. This
+                // doesn't fully eliminate the race (atomic load + kill is
+                // not atomic with the OS reap+reuse), but narrows the window
+                // to nanoseconds — enough to be ignorable in practice.
+                let wait_complete = std::sync::Arc::new(
+                    std::sync::atomic::AtomicBool::new(false)
+                );
+                let cancel_watcher = {
+                    let cancel = cancel.clone();
+                    let wc = wait_complete.clone();
+                    tokio::spawn(async move {
+                        cancel.cancelled().await;
+                        if wc.load(std::sync::atomic::Ordering::SeqCst) { return; }
+                        use nix::sys::signal::{kill, killpg, Signal};
+                        let _ = kill(pid, Signal::SIGTERM);
+                        let _ = killpg(pid, Signal::SIGTERM);
+                        if kill_grace > Duration::ZERO {
+                            tokio::time::sleep(kill_grace).await;
+                            if wc.load(std::sync::atomic::Ordering::SeqCst) { return; }
+                        }
+                        let _ = kill(pid, Signal::SIGKILL);
+                        let _ = killpg(pid, Signal::SIGKILL);
+                    })
+                };
+                struct AbortOnDrop(tokio::task::JoinHandle<()>);
+                impl Drop for AbortOnDrop {
+                    fn drop(&mut self) {
+                        self.0.abort();
+                    }
+                }
+                let _watcher_guard = AbortOnDrop(cancel_watcher);
+
+                let wait_complete_setter = wait_complete.clone();
                 let code = tokio::task::block_in_place(move || {
                     let result = term_clone.wait_for_foreground(pid);
+                    // Mark wait done before the watcher might fire.
+                    wait_complete_setter.store(true, std::sync::atomic::Ordering::SeqCst);
 
                     // Always reclaim the terminal
                     if let Err(e) = term_clone.reclaim_terminal() {
@@ -3215,8 +3581,8 @@ impl Kernel {
                 return Ok(Some(ExecResult::from_output(code, String::new(), String::new())));
             }
 
-            // Non-job-control path: simple wait
-            let status = match child.wait().await {
+            // Non-job-control path with inherited stdio.
+            let status = match wait_or_kill(&mut child, &cancel, kill_grace).await {
                 Ok(s) => s,
                 Err(e) => {
                     return Ok(Some(ExecResult::failure(
@@ -3263,9 +3629,12 @@ impl Kernel {
                 })
             });
 
-            let status = match child.wait().await {
+            let cancelled_before_wait = cancel.is_cancelled();
+            let status = match wait_or_kill(&mut child, &cancel, kill_grace).await {
                 Ok(s) => s,
                 Err(e) => {
+                    if let Some(task) = stdout_task { task.abort(); let _ = task.await; }
+                    if let Some(task) = stderr_task { task.abort(); let _ = task.await; }
                     return Ok(Some(ExecResult::failure(
                         1,
                         format!("{}: failed to wait: {}", name, e),
@@ -3273,12 +3642,20 @@ impl Kernel {
                 }
             };
 
-            if let Some(task) = stdout_task {
-                // Ignore join error — the drain task logs its own errors
-                let _ = task.await;
-            }
-            if let Some(task) = stderr_task {
-                let _ = task.await;
+            // On cancel, abort the drain tasks (the child's pipes are gone;
+            // late output is lost but predictable death beats partial capture).
+            // On normal exit, await drains so we don't lose buffered output.
+            if cancelled_before_wait || cancel.is_cancelled() {
+                if let Some(task) = stdout_task { task.abort(); let _ = task.await; }
+                if let Some(task) = stderr_task { task.abort(); let _ = task.await; }
+            } else {
+                if let Some(task) = stdout_task {
+                    // Ignore join error — the drain task logs its own errors
+                    let _ = task.await;
+                }
+                if let Some(task) = stderr_task {
+                    let _ = task.await;
+                }
             }
 
             let code = status.code().unwrap_or_else(|| {
@@ -3449,6 +3826,11 @@ impl Kernel {
             ec.ignore_config = ctx.ignore_config.clone();
             ec.output_limit = ctx.output_limit.clone();
             ec.pipeline_position = ctx.pipeline_position;
+            // Sync the cancel token from ctx → ec. Builtins like `timeout`
+            // swap ctx.cancel to a derived child token before re-dispatching;
+            // execute_command's snapshot reads ec.cancel (kept aligned by
+            // this sync), so try_execute_external sees the right token.
+            ec.cancel = ctx.cancel.clone();
         }
 
         // 2. Execute via the full dispatch chain
@@ -3489,13 +3871,19 @@ impl CommandDispatcher for Kernel {
         self.dispatch_command(cmd, ctx).await
     }
 
-    /// Produce a forked dispatcher with independent mutable state.
+    /// Produce a forked dispatcher with independent mutable state (detached).
     ///
     /// Calls the inherent `Kernel::fork` method (note the UFCS to avoid
     /// recursing into the trait method we're defining) and coerces the
     /// returned `Arc<Kernel>` to `Arc<dyn CommandDispatcher>`.
     async fn fork(&self) -> Arc<dyn CommandDispatcher> {
         let fork: Arc<Kernel> = Kernel::fork(self).await;
+        fork
+    }
+
+    /// Produce a forked dispatcher with cancellation cascading from this kernel.
+    async fn fork_attached(&self) -> Arc<dyn CommandDispatcher> {
+        let fork: Arc<Kernel> = Kernel::fork_attached(self).await;
         fork
     }
 }
@@ -3555,6 +3943,62 @@ fn apply_tilde_expansion(value: Value) -> Value {
         Value::String(s) if s.starts_with('~') => Value::String(expand_tilde(&s)),
         _ => value,
     }
+}
+
+/// Wait for a child to exit, killing it if `cancel` fires first.
+///
+/// On cancel: `kill_with_grace` sends SIGTERM, waits up to `grace`, then
+/// SIGKILL. Returns the child's final exit status (which will reflect
+/// whatever signal actually killed it).
+#[cfg(feature = "native")]
+pub(crate) async fn wait_or_kill(
+    child: &mut tokio::process::Child,
+    cancel: &tokio_util::sync::CancellationToken,
+    grace: Duration,
+) -> std::io::Result<std::process::ExitStatus> {
+    tokio::select! {
+        biased;
+        status = child.wait() => status,
+        _ = cancel.cancelled() => kill_with_grace(child, grace).await,
+    }
+}
+
+/// Send SIGTERM to the child and its process group; wait `grace`; then SIGKILL.
+///
+/// Belt-and-braces: signals both the PID and the PGID. The PID-direct kill
+/// guards against the race where `setpgid` in the child's `pre_exec` hasn't
+/// completed yet — in that case `killpg` would target the parent's group.
+#[cfg(all(unix, feature = "native"))]
+pub(crate) async fn kill_with_grace(
+    child: &mut tokio::process::Child,
+    grace: Duration,
+) -> std::io::Result<std::process::ExitStatus> {
+    use nix::sys::signal::{kill, killpg, Signal};
+    use nix::unistd::Pid;
+
+    if let Some(pid) = child.id() {
+        let p = Pid::from_raw(pid as i32);
+        let _ = kill(p, Signal::SIGTERM);
+        let _ = killpg(p, Signal::SIGTERM);
+        if grace > Duration::ZERO
+            && let Ok(status) = tokio::time::timeout(grace, child.wait()).await
+        {
+            return status;
+        }
+        let _ = kill(p, Signal::SIGKILL);
+        let _ = killpg(p, Signal::SIGKILL);
+    }
+    child.wait().await
+}
+
+/// Non-Unix fallback: best-effort kill via tokio's cross-platform `start_kill`.
+#[cfg(all(not(unix), feature = "native"))]
+pub(crate) async fn kill_with_grace(
+    child: &mut tokio::process::Child,
+    _grace: Duration,
+) -> std::io::Result<std::process::ExitStatus> {
+    let _ = child.start_kill();
+    child.wait().await
 }
 
 #[cfg(all(test, feature = "native"))]

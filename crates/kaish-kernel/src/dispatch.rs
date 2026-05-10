@@ -77,16 +77,30 @@ pub trait CommandDispatcher: Send + Sync {
     /// output format extraction internally.
     async fn dispatch(&self, cmd: &Command, ctx: &mut ExecContext) -> Result<ExecResult>;
 
-    /// Fork the dispatcher for concurrent execution.
+    /// Fork the dispatcher for concurrent execution (detached).
     ///
     /// Returns a subsidiary dispatcher with independent mutable state, safe
     /// to run concurrently with the parent and other forks without data
-    /// races on shared scope/cwd/aliases. Used by scatter parallel workers,
-    /// concurrent pipeline stages, and background jobs.
+    /// races on shared scope/cwd/aliases. Used by background `&` jobs,
+    /// where the fork must survive parent cancellation.
     ///
     /// For stateful dispatchers (e.g. Kernel) this snapshots per-session
     /// state into a fresh instance. Stateless dispatchers may clone.
     async fn fork(&self) -> Arc<dyn CommandDispatcher>;
+
+    /// Fork the dispatcher for concurrent execution (attached to parent cancel).
+    ///
+    /// Like [`Self::fork`] but the fork's cancellation token is a *child* of
+    /// the parent's. Cancelling the parent (timeout, Ctrl-C, embedder
+    /// `Kernel::cancel`) cascades into the fork, which then kills its own
+    /// external children via the usual SIGTERM/SIGKILL discipline.
+    ///
+    /// Used for foreground concurrency: scatter workers, concurrent pipeline
+    /// stages, command substitution. Default implementation delegates to
+    /// [`Self::fork`] for stateless dispatchers that don't track cancellation.
+    async fn fork_attached(&self) -> Arc<dyn CommandDispatcher> {
+        self.fork().await
+    }
 }
 
 /// Minimal stateless dispatcher used by pipeline/runner unit tests.
@@ -197,6 +211,7 @@ impl BackendDispatcher {
         let mut cmd = Command::new(&executable);
         cmd.args(&argv);
         cmd.current_dir(&real_cwd);
+        cmd.kill_on_drop(true);
 
         // Hermetic env: child sees only kaish's exported vars, not the kaish
         // process's OS env. Frontends that want OS-env passthrough (REPL, MCP)
@@ -304,9 +319,15 @@ impl BackendDispatcher {
             }
             let _ = pipe_out.shutdown().await;
             drop(pipe_out);
-            let status = child.wait().await;
-            // Abort stdin copier if child exited (it may be blocked on pipe_in.read)
+            let cancel = ctx.cancel.clone();
+            let status = crate::kernel::wait_or_kill(
+                &mut child,
+                &cancel,
+                std::time::Duration::from_secs(2),
+            ).await;
+            // Child has exited (naturally or via kill). Abort stdin/stderr drain tasks.
             if let Some(task) = stdin_task { task.abort(); }
+            stderr_task.abort();
             let stderr = stderr_task.await.unwrap_or_default();
             let code = status.map(|s| s.code().unwrap_or(1) as i64).unwrap_or(1);
             // Output was streamed to pipe, so result.out is empty
@@ -331,7 +352,12 @@ impl BackendDispatcher {
                 &ctx.output_limit,
             ).await;
 
-            let status = child.wait().await;
+            let cancel = ctx.cancel.clone();
+            let status = crate::kernel::wait_or_kill(
+                &mut child,
+                &cancel,
+                std::time::Duration::from_secs(2),
+            ).await;
             if let Some(task) = stdin_task { task.abort(); }
             let code = status.map(|s| s.code().unwrap_or(1) as i64).unwrap_or(1);
             let mut result = ExecResult::from_output(code, stdout, stderr);

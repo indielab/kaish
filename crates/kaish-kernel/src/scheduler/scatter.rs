@@ -13,12 +13,15 @@
 //! then collects all results.
 
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::Duration;
 
 use tokio::sync::Semaphore;
 use tracing::Instrument;
 
 use crate::ast::{Command, Value};
 use crate::dispatch::CommandDispatcher;
+use crate::duration::parse_duration;
 use crate::interpreter::ExecResult;
 use crate::tools::{ExecContext, ToolRegistry};
 
@@ -31,15 +34,10 @@ pub struct ScatterOptions {
     pub var_name: String,
     /// Maximum parallelism (default: 8).
     pub limit: usize,
-}
-
-impl Default for ScatterOptions {
-    fn default() -> Self {
-        Self {
-            var_name: "ITEM".to_string(),
-            limit: 8,
-        }
-    }
+    /// Per-worker timeout. When `Some`, each worker is cancelled after this
+    /// duration; the worker's external children get SIGTERM/SIGKILL and the
+    /// `ScatterResult.timed_out` flag is set.
+    pub timeout: Option<Duration>,
 }
 
 /// Options for gather operation.
@@ -51,6 +49,16 @@ pub struct GatherOptions {
     pub first: usize,
     /// Output format: "json" or "lines".
     pub format: String,
+}
+
+impl Default for ScatterOptions {
+    fn default() -> Self {
+        Self {
+            var_name: "ITEM".to_string(),
+            limit: 8,
+            timeout: None,
+        }
+    }
 }
 
 impl Default for GatherOptions {
@@ -70,6 +78,8 @@ pub struct ScatterResult {
     pub item: String,
     /// The execution result.
     pub result: ExecResult,
+    /// Whether the worker was cancelled by the per-worker `--timeout`.
+    pub timed_out: bool,
 }
 
 /// Runs scatter/gather pipelines.
@@ -186,14 +196,35 @@ impl ScatterGatherRunner {
         for item in items.iter().cloned() {
             let permit = semaphore.clone().acquire_owned().await;
             let tools = tools.clone();
-            // Fork a fresh dispatcher per worker so parallel workers can
-            // mutate scope/cwd/aliases independently without racing.
-            let worker_dispatcher = self.sequential_dispatcher.fork().await;
+            // Fork attached: the worker's cancel token is a child of the
+            // parent kernel's, so a parent cancel (request timeout, embedder
+            // Kernel::cancel) cascades into the worker and kills its
+            // external children via the wait_or_kill discipline.
+            let worker_dispatcher = self.sequential_dispatcher.fork_attached().await;
             let commands = commands.to_vec();
             let var_name = var_name.clone();
             let base_scope = base_ctx.scope.clone();
             let backend = base_ctx.backend.clone();
             let cwd = base_ctx.cwd.clone();
+            let parent_token = base_ctx.cancel.clone();
+            let worker_token = parent_token.child_token();
+
+            // Per-worker timeout: spawn a delay task that cancels the worker's
+            // child token after `opts.timeout`. The cancel cascades into the
+            // worker's externals via the fork's cancel link. `timed_out_flag`
+            // distinguishes timeout from explicit parent cancellation when
+            // tagging ScatterResult.
+            let timed_out_flag = Arc::new(AtomicBool::new(false));
+            let timer_handle: Option<tokio::task::JoinHandle<()>> = opts.timeout.map(|d| {
+                let cancel = worker_token.clone();
+                let flag = timed_out_flag.clone();
+                tokio::spawn(async move {
+                    tokio::time::sleep(d).await;
+                    flag.store(true, Ordering::SeqCst);
+                    cancel.cancel();
+                })
+            });
+            let timed_out_check = timed_out_flag.clone();
 
             let item_label = if item.len() > 64 {
                 format!("{}...", &item[..64])
@@ -210,13 +241,21 @@ impl ScatterGatherRunner {
 
                 let mut ctx = ExecContext::with_backend_and_scope(backend, scope);
                 ctx.set_cwd(cwd);
+                ctx.cancel = worker_token;
 
                 // Run through PipelineRunner + dispatcher (full resolution chain).
                 // Uses run_sequential to avoid async recursion and infinite future size.
                 let runner = PipelineRunner::new(tools);
                 let result = runner.run_sequential(&commands, &mut ctx, &*worker_dispatcher).await;
 
-                ScatterResult { item, result }
+                // Worker finished — abort the timer if still pending so it
+                // doesn't fire a now-pointless cancel and idle resources.
+                if let Some(h) = timer_handle {
+                    h.abort();
+                }
+
+                let timed_out = timed_out_check.load(Ordering::SeqCst);
+                ScatterResult { item, result, timed_out }
             }.instrument(worker_span));
 
             handles.push(handle);
@@ -231,6 +270,7 @@ impl ScatterGatherRunner {
                     results.push(ScatterResult {
                         item: String::new(),
                         result: ExecResult::failure(1, format!("Task panicked: {}", e)),
+                        timed_out: false,
                     });
                 }
             }
@@ -287,6 +327,7 @@ fn gather_results(results: &[ScatterResult], opts: &GatherOptions) -> String {
                     "code": r.result.code,
                     "out": r.result.text_out().trim(),
                     "err": r.result.err.trim(),
+                    "timed_out": r.timed_out,
                 })
             })
             .collect();
@@ -324,6 +365,24 @@ pub fn parse_scatter_options(args: &crate::tools::ToolArgs) -> ScatterOptions {
             );
         }
         opts.limit = clamped as usize;
+    }
+
+    // --timeout DURATION: per-worker timeout. Accepts the same forms as the
+    // `timeout` builtin (30, 5s, 500ms, 2m, 1h). Invalid input is ignored
+    // with a warn so a typo doesn't silently disable cancellation.
+    if let Some(Value::String(s)) = args.named.get("timeout") {
+        match parse_duration(s) {
+            Some(d) => opts.timeout = Some(d),
+            None => tracing::warn!(
+                target: "kaish::scatter",
+                value = %s,
+                "scatter --timeout: invalid duration (try: 30, 5s, 500ms, 2m, 1h)"
+            ),
+        }
+    } else if let Some(Value::Int(n)) = args.named.get("timeout") {
+        if *n >= 0 {
+            opts.timeout = Some(Duration::from_secs(*n as u64));
+        }
     }
 
     opts
@@ -411,10 +470,12 @@ mod tests {
             ScatterResult {
                 item: "a".to_string(),
                 result: ExecResult::success("result_a"),
+                timed_out: false,
             },
             ScatterResult {
                 item: "b".to_string(),
                 result: ExecResult::success("result_b"),
+                timed_out: false,
             },
         ];
 
@@ -428,6 +489,7 @@ mod tests {
         let results = vec![ScatterResult {
             item: "test".to_string(),
             result: ExecResult::success("output"),
+            timed_out: false,
         }];
 
         let opts = GatherOptions {
@@ -445,14 +507,17 @@ mod tests {
             ScatterResult {
                 item: "a".to_string(),
                 result: ExecResult::success("1"),
+                timed_out: false,
             },
             ScatterResult {
                 item: "b".to_string(),
                 result: ExecResult::success("2"),
+                timed_out: false,
             },
             ScatterResult {
                 item: "c".to_string(),
                 result: ExecResult::success("3"),
+                timed_out: false,
             },
         ];
 

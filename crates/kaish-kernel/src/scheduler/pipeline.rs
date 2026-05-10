@@ -268,16 +268,11 @@ impl PipelineRunner {
         let scatter_opts = parse_scatter_options(&build_tool_args(&scatter_cmd.args, ctx, scatter_schema.as_ref()));
         let gather_opts = parse_gather_options(&build_tool_args(&gather_cmd.args, ctx, gather_schema.as_ref()));
 
-        // We need an `Arc<dyn CommandDispatcher>` to hand to `ScatterGatherRunner`
-        // (which holds it for the duration of the scatter pipeline and also
-        // forks it per parallel worker). The runner's `dispatcher` parameter
-        // is borrowed, so we materialize an owned Arc by calling `fork()` —
-        // which for `Kernel` snapshots per-session state into a fresh subkernel.
-        //
-        // Using fork here instead of requiring ctx.dispatcher means scatter
-        // works with any dispatcher passed to `run` — including test-only
-        // stateless dispatchers that never populate ctx.dispatcher.
-        let sequential_dispatcher: Arc<dyn CommandDispatcher> = dispatcher.fork().await;
+        // We need an `Arc<dyn CommandDispatcher>` to hand to `ScatterGatherRunner`.
+        // `fork_attached` produces a subkernel whose cancellation token is a
+        // child of the parent's, so a parent timeout/cancel cascades into
+        // the scatter pipeline (and into worker children via further forks).
+        let sequential_dispatcher: Arc<dyn CommandDispatcher> = dispatcher.fork_attached().await;
 
         let runner = ScatterGatherRunner::new(self.tools.clone(), sequential_dispatcher);
         runner
@@ -370,11 +365,11 @@ impl PipelineRunner {
             let mut stage_ctx = ctx.child_for_pipeline();
             let cmd = cmd.clone();
 
-            // Fork a fresh dispatcher for this stage. Each concurrent stage
-            // needs independent mutable state — a single shared fork would
-            // reintroduce the scope/cwd clobber we're avoiding. Forking is
-            // cheap (Scope is COW, plus a few Arc bumps).
-            let task_dispatcher: Arc<dyn CommandDispatcher> = dispatcher.fork().await;
+            // Fork attached: each concurrent pipeline stage needs independent
+            // mutable state, but cancellation should still cascade from the
+            // parent (so a request timeout kills externals running in any
+            // stage, not just the foreground one).
+            let task_dispatcher: Arc<dyn CommandDispatcher> = dispatcher.fork_attached().await;
 
             // Set up stdin from redirects on the child context
             setup_stdin_redirects(&cmd, &mut stage_ctx);

@@ -16,6 +16,7 @@ pub mod ast;
 pub mod backend;
 pub(crate) mod backend_walker_fs;
 pub mod dispatch;
+pub mod duration;
 pub mod help;
 pub mod ignore_config;
 pub mod interpreter;
@@ -58,7 +59,7 @@ pub use backend::{
 };
 pub use dispatch::{CommandDispatcher, PipelinePosition};
 pub use ignore_config::{IgnoreConfig, IgnoreScope};
-pub use kernel::{Kernel, KernelConfig, VfsMountMode};
+pub use kernel::{ExecuteOptions, Kernel, KernelConfig, VfsMountMode};
 pub use output_limit::OutputLimitConfig;
 
 // ═══════════════════════════════════════════════════════════════════════════

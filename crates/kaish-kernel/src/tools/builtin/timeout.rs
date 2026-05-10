@@ -1,13 +1,17 @@
-//! timeout — Run a command with a time limit.
+//! timeout — Run a command with a time limit (kills the child on elapsed).
 //!
-//! Dispatches the inner command through the full resolution chain via
-//! `ctx.dispatcher` (user tools → builtins → .kai scripts → external commands).
-//! Returns exit code 124 on timeout (matching coreutils convention).
+//! Derives a child cancellation token from `ctx.cancel`, spawns a delay task
+//! that cancels it after `duration`, runs the inner command under the child
+//! token, and overrides the exit code to 124 (coreutils convention) when the
+//! timer fired. The kernel's `try_execute_external` honors the cancelled
+//! token by killing the child process group with SIGTERM/grace/SIGKILL.
 
 use async_trait::async_trait;
-use std::time::Duration;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use crate::ast::{Arg, Command, Expr, Value};
+use crate::duration::parse_duration;
 use crate::interpreter::ExecResult;
 use crate::tools::{ExecContext, ParamSchema, Tool, ToolArgs, ToolSchema};
 
@@ -21,24 +25,26 @@ impl Tool for Timeout {
     }
 
     fn schema(&self) -> ToolSchema {
-        ToolSchema::new("timeout", "Run a command with a time limit")
-            .param(ParamSchema::required(
-                "duration",
-                "string",
-                "Time limit: 30 (seconds), 30s, 500ms, 5m, 1h",
-            ))
-            .param(ParamSchema::required(
-                "command",
-                "string",
-                "Command to run",
-            ))
-            .example("With seconds", "timeout 5 sleep 10")
-            .example("With duration suffix", "timeout 500ms curl example.com")
-            .example("Minutes", "timeout 2m cargo build")
+        ToolSchema::new(
+            "timeout",
+            "Run a command with a time limit; kills the child on elapsed",
+        )
+        .param(ParamSchema::required(
+            "duration",
+            "string",
+            "Time limit: 30 (seconds), 30s, 500ms, 5m, 1h",
+        ))
+        .param(ParamSchema::required(
+            "command",
+            "string",
+            "Command to run",
+        ))
+        .example("With seconds", "timeout 5 sleep 10")
+        .example("With duration suffix", "timeout 500ms curl example.com")
+        .example("Minutes", "timeout 2m cargo build")
     }
 
     async fn execute(&self, args: ToolArgs, ctx: &mut ExecContext) -> ExecResult {
-        // Need at least duration + command
         if args.positional.len() < 2 {
             return ExecResult::failure(
                 1,
@@ -46,7 +52,6 @@ impl Tool for Timeout {
             );
         }
 
-        // Parse duration from first positional
         let duration_str = match &args.positional[0] {
             Value::String(s) => s.clone(),
             Value::Int(i) => i.to_string(),
@@ -64,12 +69,14 @@ impl Tool for Timeout {
             None => {
                 return ExecResult::failure(
                     1,
-                    format!("timeout: invalid duration '{}' (try: 30, 5s, 500ms, 2m, 1h)", duration_str),
+                    format!(
+                        "timeout: invalid duration '{}' (try: 30, 5s, 500ms, 2m, 1h)",
+                        duration_str
+                    ),
                 )
             }
         };
 
-        // Command name from second positional
         let cmd_name = match &args.positional[1] {
             Value::String(s) => s.clone(),
             other => {
@@ -80,8 +87,6 @@ impl Tool for Timeout {
             }
         };
 
-        // Build an AST Command for the inner command so we can dispatch it
-        // through the full resolution chain.
         let inner_args: Vec<Arg> = args.positional[2..]
             .iter()
             .map(|v| Arg::Positional(Expr::Literal(v.clone())))
@@ -93,71 +98,53 @@ impl Tool for Timeout {
             redirects: vec![],
         };
 
-        // Dispatch through the full chain via ctx.dispatcher
         let Some(dispatcher) = ctx.dispatcher.clone() else {
-            return ExecResult::failure(1,
-                "timeout: no dispatcher available (Kernel must be created via into_arc())");
+            return ExecResult::failure(
+                1,
+                "timeout: no dispatcher available (Kernel must be created via into_arc())",
+            );
         };
 
-        match tokio::time::timeout(duration, dispatcher.dispatch(&inner_cmd, ctx)).await {
-            Ok(Ok(result)) => result,
-            Ok(Err(e)) => ExecResult::failure(1, format!("timeout: {}", e)),
-            Err(_elapsed) => {
-                ExecResult::failure(124, format!("timeout: timed out after {}", duration_str))
+        // Derive a child cancel token from the current ctx token. The timer
+        // task cancels it on elapsed; the cascade fires SIGTERM/SIGKILL on
+        // any external children via wait_or_kill. Swap the child token onto
+        // ctx for the duration of the inner dispatch so cancellation
+        // propagates naturally.
+        let parent_token = ctx.cancel.clone();
+        let child_token = parent_token.child_token();
+
+        let elapsed = Arc::new(AtomicBool::new(false));
+        let elapsed_writer = elapsed.clone();
+        let timer_token = child_token.clone();
+        let timer = tokio::spawn(async move {
+            tokio::time::sleep(duration).await;
+            elapsed_writer.store(true, Ordering::SeqCst);
+            timer_token.cancel();
+        });
+
+        let saved = std::mem::replace(&mut ctx.cancel, child_token);
+        let dispatch_result = dispatcher.dispatch(&inner_cmd, ctx).await;
+        ctx.cancel = saved;
+        timer.abort();
+
+        match dispatch_result {
+            Ok(mut result) => {
+                if elapsed.load(Ordering::SeqCst) {
+                    result.code = 124;
+                    if result.err.is_empty() {
+                        result.err =
+                            format!("timeout: timed out after {}", duration_str);
+                    }
+                }
+                result
             }
+            Err(e) => ExecResult::failure(1, format!("timeout: {}", e)),
         }
     }
 }
 
-/// Parse a duration string: "30" (seconds), "30s", "500ms", "5m", "1h"
-fn parse_duration(s: &str) -> Option<Duration> {
-    let s = s.trim();
-
-    // Try pure number (seconds)
-    if let Ok(secs) = s.parse::<f64>() {
-        return if secs >= 0.0 {
-            Some(Duration::from_secs_f64(secs))
-        } else {
-            None
-        };
-    }
-
-    // Try with suffix
-    if let Some(num) = s.strip_suffix("ms") {
-        let ms: u64 = num.trim().parse().ok()?;
-        return Some(Duration::from_millis(ms));
-    }
-    if let Some(num) = s.strip_suffix('s') {
-        let secs: f64 = num.trim().parse().ok()?;
-        return if secs >= 0.0 {
-            Some(Duration::from_secs_f64(secs))
-        } else {
-            None
-        };
-    }
-    if let Some(num) = s.strip_suffix('m') {
-        let mins: f64 = num.trim().parse().ok()?;
-        return if mins >= 0.0 {
-            Some(Duration::from_secs_f64(mins * 60.0))
-        } else {
-            None
-        };
-    }
-    if let Some(num) = s.strip_suffix('h') {
-        let hours: f64 = num.trim().parse().ok()?;
-        return if hours >= 0.0 {
-            Some(Duration::from_secs_f64(hours * 3600.0))
-        } else {
-            None
-        };
-    }
-
-    None
-}
-
 #[cfg(test)]
 mod tests {
-    use super::*;
     use crate::kernel::{Kernel, KernelConfig};
 
     /// Create a Kernel wrapped in Arc for tests that need full dispatch.
@@ -166,33 +153,6 @@ mod tests {
             .unwrap()
             .into_arc()
     }
-
-    // --- Duration parsing tests ---
-
-    #[test]
-    fn test_parse_duration_seconds() {
-        assert_eq!(parse_duration("30"), Some(Duration::from_secs(30)));
-        assert_eq!(parse_duration("0"), Some(Duration::from_secs(0)));
-        assert_eq!(parse_duration("1.5"), Some(Duration::from_secs_f64(1.5)));
-    }
-
-    #[test]
-    fn test_parse_duration_suffix() {
-        assert_eq!(parse_duration("500ms"), Some(Duration::from_millis(500)));
-        assert_eq!(parse_duration("5s"), Some(Duration::from_secs(5)));
-        assert_eq!(parse_duration("2m"), Some(Duration::from_secs(120)));
-        assert_eq!(parse_duration("1h"), Some(Duration::from_secs(3600)));
-    }
-
-    #[test]
-    fn test_parse_duration_invalid() {
-        assert_eq!(parse_duration("abc"), None);
-        assert_eq!(parse_duration(""), None);
-        assert_eq!(parse_duration("-5"), None);
-        assert_eq!(parse_duration("5x"), None);
-    }
-
-    // --- Integration tests via Kernel::execute ---
 
     #[tokio::test]
     async fn test_timeout_missing_args() {
@@ -211,8 +171,21 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore = "lexer rejects numeric-prefix identifiers like `5s`; see issues.md"]
-    async fn test_timeout_builtin_succeeds() {
+    async fn test_timeout_numeric_duration_succeeds() {
+        let kernel = make_kernel().await;
+        let result = kernel.execute("timeout 5 echo works").await.unwrap();
+        assert!(
+            result.ok(),
+            "expected ok, got code={} err={:?}",
+            result.code,
+            result.err
+        );
+        assert!(result.text_out().contains("works"));
+    }
+
+    #[tokio::test]
+    #[ignore = "lexer rejects numeric-prefix identifiers like `5s`; tracked in docs/issues.md"]
+    async fn test_timeout_suffix_duration_succeeds() {
         let kernel = make_kernel().await;
         let result = kernel.execute("timeout 5s echo hello").await.unwrap();
         assert!(result.ok());
@@ -220,7 +193,7 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore = "lexer rejects numeric-prefix identifiers like `100ms`; see issues.md"]
+    #[ignore = "lexer rejects numeric-prefix identifiers like `100ms`; tracked in docs/issues.md"]
     async fn test_timeout_builtin_times_out() {
         let kernel = make_kernel().await;
         let result = kernel.execute("timeout 100ms sleep 10").await.unwrap();
@@ -229,23 +202,14 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore = "lexer rejects numeric-prefix identifiers like `5s`; see issues.md"]
+    #[ignore = "lexer rejects numeric-prefix identifiers like `5s`; tracked in docs/issues.md"]
     async fn test_timeout_command_not_found() {
         let kernel = make_kernel().await;
-        let result = kernel.execute("timeout 5s not_a_command_xyz_123").await.unwrap();
+        let result = kernel
+            .execute("timeout 5s not_a_command_xyz_123")
+            .await
+            .unwrap();
         assert!(!result.ok());
         assert_eq!(result.code, 127);
-    }
-
-    #[tokio::test]
-    #[ignore = "dispatcher re-entrancy: execute_command holds self.exec_ctx.write() during \
-                tool.execute, and Kernel::fork() needs self.exec_ctx.read() — the re-dispatch \
-                deadlocks. Needs execute_command restructured so the write guard drops before \
-                tool execution. See issues.md."]
-    async fn test_timeout_numeric_duration() {
-        let kernel = make_kernel().await;
-        let result = kernel.execute("timeout 5 echo works").await.unwrap();
-        assert!(result.ok());
-        assert!(result.text_out().contains("works"));
     }
 }

@@ -7,6 +7,7 @@
 pub mod backend;
 pub mod dir_entry;
 pub mod job;
+pub mod kernel;
 pub mod output;
 pub mod result;
 pub mod tool;
@@ -16,6 +17,7 @@ pub mod value;
 pub use backend::*;
 pub use dir_entry::*;
 pub use job::*;
+pub use kernel::*;
 pub use output::*;
 pub use result::*;
 pub use tool::*;

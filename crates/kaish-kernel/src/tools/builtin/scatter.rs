@@ -44,8 +44,15 @@ impl Tool for Scatter {
                 Value::Int(8),
                 "Maximum parallelism (concurrent workers)",
             ))
+            .param(ParamSchema::optional(
+                "timeout",
+                "string",
+                Value::Null,
+                "Per-worker timeout (30, 5s, 500ms, 2m, 1h). Cancels the worker and kills its external children.",
+            ))
             .example("Parallel processing", "seq 1 10 | scatter | echo ${ITEM} | gather")
             .example("Custom variable name", "split \"a,b,c\" \",\" | scatter as=X | echo ${X} | gather")
+            .example("Per-worker timeout", "seq 1 5 | scatter timeout=2s | sleep 60 | gather")
     }
 
     async fn execute(&self, args: ToolArgs, ctx: &mut ExecContext) -> ExecResult {

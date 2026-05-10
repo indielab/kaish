@@ -558,6 +558,23 @@ scripts, and command substitutions in their arguments. Each worker gets its
 own snapshotted scope/cwd/aliases, ensuring they don't race against each
 other or the parent.
 
+## Cancellation and Timeouts
+
+Kaish has a single, uniform cancellation discipline that reaches every spawned external child:
+
+- **`timeout DURATION COMMAND`** (builtin) — runs `COMMAND` with a deadline. On elapsed, the child's process group receives **SIGTERM**, then after `kill_grace` (default 2s) **SIGKILL**, then `timeout` returns exit code **124** (coreutils convention).
+- **`scatter ... timeout=DUR ...`** — per-worker timeout. Hung workers are cancelled and their externals killed; the result is tagged `"timed_out": true` in `gather format=json`.
+- **`Kernel::cancel()`** (embedder API) — fires the kernel's cancellation token; running externals get SIGTERM/SIGKILL via the same path. The REPL wires this to Ctrl-C.
+- **`KernelConfig::request_timeout`** (embedder default) and **`ExecuteOptions::timeout`** (per-call) — apply at the kernel-call boundary; same kill behaviour, return code 124.
+- **`ExecuteOptions::cancel_token`** (per-call) — embedders can pass an externally-owned `tokio_util::sync::CancellationToken` that's *raced* against the kernel's internal token. The kernel does not retain it past the call.
+
+Cascade rules:
+
+- **Foreground forks** (concurrent pipeline stages, scatter workers, `$(...)` cmdsubs) inherit the parent kernel's cancellation via `fork_attached`. A parent timeout/cancel kills externals running in any stage.
+- **Background `&` jobs** are *detached* — they survive parent cancellation. Kill them explicitly with `kill %N` (sends SIGTERM to the job's process group).
+
+The kill always targets the spawned child's **process group**, so shell wrappers like `bash -c '...'` do not protect their grandchildren. SIGTERM-trapping processes are escalated to SIGKILL after `kill_grace`.
+
 ## Virtual Filesystem
 
 VFS mounts provide unified resource access:
