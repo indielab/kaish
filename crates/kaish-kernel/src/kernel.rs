@@ -993,67 +993,83 @@ impl Kernel {
 
     /// Execute kaish source code with default options.
     ///
-    /// Equivalent to `execute_with_options(input, ExecuteOptions::default(), None)`.
+    /// Equivalent to `execute_with_options(input, ExecuteOptions::default())`.
     /// Returns the result of the last statement executed.
     pub async fn execute(&self, input: &str) -> Result<ExecResult> {
-        self.execute_with_options(input, ExecuteOptions::default(), None).await
+        self.execute_with_options_inner(input, ExecuteOptions::default(), None).await
+    }
+
+    /// Execute with per-call options. The primary entry point for embedders
+    /// that don't need per-statement output streaming.
+    ///
+    /// `opts` carries timeout, transient vars overlay, optional cwd override,
+    /// and optional embedder-owned cancellation token. See [`ExecuteOptions`]
+    /// for semantics. For streaming, use [`Self::execute_with_options_streaming`].
+    ///
+    /// **Cancellation:** if `opts.cancel_token` is `Some`, it is *raced*
+    /// against the kernel's internal token. Either firing cancels and kills
+    /// external children. The embedder's token is read-only — kernel
+    /// timeouts do NOT propagate into it. Distinguish via the returned
+    /// `code`: 124 = timeout, 130 = cancellation.
+    ///
+    /// **Timeout:** `opts.timeout` overrides `KernelConfig::request_timeout`.
+    /// `Some(Duration::ZERO)` returns 124 immediately without spawning.
+    ///
+    /// Concurrent callers on the same Kernel serialize on the kernel-wide
+    /// execute lock. For true parallelism, call [`Kernel::fork`] (detached)
+    /// or [`Kernel::fork_attached`] (cancellation cascades from this kernel).
+    pub async fn execute_with_options(
+        &self,
+        input: &str,
+        opts: ExecuteOptions,
+    ) -> Result<ExecResult> {
+        self.execute_with_options_inner(input, opts, None).await
+    }
+
+    /// Same as [`Self::execute_with_options`] but with a per-statement output
+    /// callback. The callback fires after each top-level statement so the
+    /// embedder (REPL, MCP streaming) can flush output incrementally.
+    pub async fn execute_with_options_streaming(
+        &self,
+        input: &str,
+        opts: ExecuteOptions,
+        on_output: &mut (dyn FnMut(&ExecResult) + Send),
+    ) -> Result<ExecResult> {
+        self.execute_with_options_inner(input, opts, Some(on_output)).await
     }
 
     /// Execute kaish source code with a transient overlay of exported variables.
     ///
     /// Deprecated thin wrapper over [`Self::execute_with_options`]. New code
     /// should use that method directly:
-    /// `execute_with_options(input, ExecuteOptions::new().with_vars(vars), None)`.
+    /// `execute_with_options(input, ExecuteOptions::new().with_vars(vars))`.
     #[deprecated(note = "use Kernel::execute_with_options with ExecuteOptions::with_vars")]
     pub async fn execute_with_vars(
         &self,
         input: &str,
         vars: HashMap<String, Value>,
     ) -> Result<ExecResult> {
-        self.execute_with_options(input, ExecuteOptions::new().with_vars(vars), None).await
+        self.execute_with_options_inner(input, ExecuteOptions::new().with_vars(vars), None).await
     }
 
     /// Execute kaish source code with a per-statement callback.
     ///
-    /// Deprecated thin wrapper over [`Self::execute_with_options`]. New code
-    /// should pass `Some(on_output)` directly.
-    #[deprecated(note = "use Kernel::execute_with_options with the on_output parameter")]
+    /// Deprecated thin wrapper. New code should use
+    /// [`Self::execute_with_options_streaming`].
+    #[deprecated(note = "use Kernel::execute_with_options_streaming")]
     pub async fn execute_streaming(
         &self,
         input: &str,
         on_output: &mut (dyn FnMut(&ExecResult) + Send),
     ) -> Result<ExecResult> {
-        self.execute_with_options(input, ExecuteOptions::default(), Some(on_output)).await
+        self.execute_with_options_inner(input, ExecuteOptions::default(), Some(on_output)).await
     }
 
-    /// Execute kaish source code with full per-call control.
-    ///
-    /// This is the primary entry point for embedders. `opts` carries the
-    /// per-call timeout, transient variable overlay, and optional embedder-
-    /// owned cancellation token. `on_output`, if provided, fires after each
-    /// top-level statement so the caller can flush output incrementally
-    /// (REPL, MCP streaming).
-    ///
-    /// **Cancellation:** the kernel installs a cancel token for this call.
-    /// If `opts.cancel_token` is `Some`, that token replaces the kernel's
-    /// internal token (so external cancellation cascades into spawned
-    /// children); otherwise the kernel uses its own per-call token.
-    ///
-    /// **Timeout:** `opts.timeout` overrides `KernelConfig::request_timeout`.
-    /// On elapsed: cancels the token (which kills external children with the
-    /// configured grace), then returns exit code 124 with a "timed out"
-    /// message in stderr. `Some(Duration::ZERO)` returns 124 immediately
-    /// without spawning anything.
-    ///
-    /// **Vars overlay:** `opts.vars` are pushed in a new scope frame and
-    /// marked exported for this call only. Same semantics as the old
-    /// `execute_with_vars`.
-    ///
-    /// Concurrent callers on the same Kernel serialize on [`Self::execute_lock`].
-    /// For true parallelism, call [`Kernel::fork`] (detached) or
-    /// [`Kernel::fork_attached`] (cancellation cascades from this kernel).
+    /// Shared body for `execute`, `execute_with_options(_streaming)`, and
+    /// the deprecated wrappers. Owns the per-call cancel token, vars overlay,
+    /// cwd override, and timeout race.
     #[tracing::instrument(level = "info", skip(self, opts, on_output), fields(input_len = input.len()))]
-    pub async fn execute_with_options(
+    async fn execute_with_options_inner(
         &self,
         input: &str,
         opts: ExecuteOptions,
@@ -1133,6 +1149,34 @@ impl Kernel {
                 }
             }
         }
+
+        // Per-call cwd override: save current cwd, set the new one, restore
+        // on Drop so the kernel's persistent cwd doesn't leak between calls.
+        // Same RAII pattern as VarsFrameGuard, same blocking_write trade-off.
+        struct CwdGuard<'a> {
+            kernel: &'a Kernel,
+            saved: PathBuf,
+        }
+        impl Drop for CwdGuard<'_> {
+            fn drop(&mut self) {
+                let Ok(mut ec) = self.kernel.exec_ctx.try_write() else {
+                    tracing::error!(
+                        "cwd guard: exec_ctx lock unexpectedly busy; \
+                         skipping cwd restore — kernel cwd may be wrong for next call"
+                    );
+                    return;
+                };
+                ec.cwd = std::mem::take(&mut self.saved);
+            }
+        }
+        let _cwd_guard: Option<CwdGuard<'_>> = if let Some(new_cwd) = opts.cwd {
+            let mut ec = self.exec_ctx.write().await;
+            let saved = std::mem::replace(&mut ec.cwd, new_cwd);
+            drop(ec);
+            Some(CwdGuard { kernel: self, saved })
+        } else {
+            None
+        };
 
         let _vars_guard: Option<VarsFrameGuard<'_>> = if !opts.vars.is_empty() {
             let mut scope = self.scope.write().await;

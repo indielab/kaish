@@ -34,18 +34,22 @@ impl Pidfd {
         // SAFETY: pidfd_open(pid, flags) is a well-defined syscall that
         // returns a new fd or -1/errno. We pass flags = 0 (no PIDFD_NONBLOCK)
         // and a positive PID. The returned fd is exclusively ours.
+        // libc::syscall is variadic — pass each arg as c_long so the C
+        // variadic ABI promotes consistently across architectures.
         #[allow(unsafe_code)]
         let res = unsafe {
             nix::libc::syscall(
                 nix::libc::SYS_pidfd_open,
-                pid as nix::libc::c_int,
-                0_u32,
+                pid as nix::libc::c_long,
+                0 as nix::libc::c_long,
             )
         };
         if res < 0 {
             return Err(std::io::Error::last_os_error());
         }
-        // SAFETY: positive res is a fresh fd owned by this process.
+        // FDs fit in c_int (~10^6 max on Linux), so the i32 cast is safe.
+        // SAFETY: a non-negative syscall return is a fresh fd this process
+        // owns. From_raw_fd takes ownership; OwnedFd will close on drop.
         #[allow(unsafe_code)]
         let fd = unsafe { OwnedFd::from_raw_fd(res as i32) };
         Ok(Self(fd))
@@ -54,7 +58,8 @@ impl Pidfd {
     fn send_signal(&self, sig: Signal) -> std::io::Result<()> {
         // SAFETY: pidfd_send_signal(fd, sig, info=NULL, flags=0) is a
         // well-defined syscall; passing NULL info synthesises a default
-        // siginfo_t. The fd outlives the call (held in &self).
+        // siginfo_t. The fd outlives the call (held in &self). All
+        // variadic args passed as c_long for portable ABI.
         #[allow(unsafe_code)]
         let res = unsafe {
             nix::libc::syscall(
@@ -62,7 +67,7 @@ impl Pidfd {
                 self.0.as_raw_fd() as nix::libc::c_long,
                 sig as nix::libc::c_int as nix::libc::c_long,
                 std::ptr::null::<nix::libc::siginfo_t>(),
-                0_u32,
+                0 as nix::libc::c_long,
             )
         };
         if res < 0 {

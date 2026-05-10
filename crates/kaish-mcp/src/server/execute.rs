@@ -231,7 +231,6 @@ pub async fn execute(
                     .execute_with_options(
                         &full_script,
                         ExecuteOptions::new().with_timeout(timeout),
-                        None,
                     )
                     .await;
 

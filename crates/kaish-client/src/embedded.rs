@@ -94,22 +94,34 @@ impl EmbeddedClient {
         on_output: &mut (dyn FnMut(&ExecResult) + Send),
     ) -> ClientResult<ExecResult> {
         self.kernel
-            .execute_with_options(input, ExecuteOptions::default(), Some(on_output))
+            .execute_with_options_streaming(input, ExecuteOptions::default(), on_output)
             .await
             .map_err(|e| ClientError::Execution(e.to_string()))
     }
 
-    /// Execute with full per-call options (timeout, cancel token, vars overlay).
-    ///
-    /// Forwards directly to `Kernel::execute_with_options`.
+    /// Execute with full per-call options (timeout, cancel token, vars overlay,
+    /// cwd override). Use [`Self::execute_with_options_streaming`] for the
+    /// per-statement callback variant.
     pub async fn execute_with_options(
         &self,
         input: &str,
         opts: ExecuteOptions,
-        on_output: Option<&mut (dyn FnMut(&ExecResult) + Send)>,
     ) -> ClientResult<ExecResult> {
         self.kernel
-            .execute_with_options(input, opts, on_output)
+            .execute_with_options(input, opts)
+            .await
+            .map_err(|e| ClientError::Execution(e.to_string()))
+    }
+
+    /// Execute with options + per-statement output callback.
+    pub async fn execute_with_options_streaming(
+        &self,
+        input: &str,
+        opts: ExecuteOptions,
+        on_output: &mut (dyn FnMut(&ExecResult) + Send),
+    ) -> ClientResult<ExecResult> {
+        self.kernel
+            .execute_with_options_streaming(input, opts, on_output)
             .await
             .map_err(|e| ClientError::Execution(e.to_string()))
     }
@@ -130,7 +142,7 @@ impl KernelClient for EmbeddedClient {
         vars: HashMap<String, Value>,
     ) -> ClientResult<ExecResult> {
         self.kernel
-            .execute_with_options(input, ExecuteOptions::new().with_vars(vars), None)
+            .execute_with_options(input, ExecuteOptions::new().with_vars(vars))
             .await
             .map_err(|e| ClientError::Execution(e.to_string()))
     }

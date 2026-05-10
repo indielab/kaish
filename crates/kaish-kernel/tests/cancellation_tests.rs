@@ -99,9 +99,7 @@ async fn request_timeout_kills_external_child() {
     let result = kernel
         .execute_with_options(
             &format!("bash {}", script.display()),
-            ExecuteOptions::new().with_timeout(Duration::from_millis(150)),
-            None,
-        )
+            ExecuteOptions::new().with_timeout(Duration::from_millis(150)))
         .await
         .expect("execute");
 
@@ -138,9 +136,7 @@ async fn per_call_timeout_overrides_config_default() {
     let result = kernel
         .execute_with_options(
             &format!("bash {}", script.display()),
-            ExecuteOptions::new().with_timeout(Duration::from_millis(150)),
-            None,
-        )
+            ExecuteOptions::new().with_timeout(Duration::from_millis(150)))
         .await
         .expect("execute");
 
@@ -167,9 +163,7 @@ async fn zero_duration_timeout_returns_124_without_spawn() {
     let result = kernel
         .execute_with_options(
             &format!("bash {}", script.display()),
-            ExecuteOptions::new().with_timeout(Duration::ZERO),
-            None,
-        )
+            ExecuteOptions::new().with_timeout(Duration::ZERO))
         .await
         .expect("execute");
 
@@ -259,9 +253,7 @@ async fn pipeline_cascade_kills_both_stages() {
     let result = kernel
         .execute_with_options(
             &format!("bash {} | bash {}", s1.display(), s2.display()),
-            ExecuteOptions::new().with_timeout(Duration::from_millis(200)),
-            None,
-        )
+            ExecuteOptions::new().with_timeout(Duration::from_millis(200)))
         .await
         .expect("execute");
 
@@ -295,9 +287,7 @@ async fn grace_escalation_sigkills_term_trapping_child() {
     let result = kernel
         .execute_with_options(
             &format!("bash {}", script.display()),
-            ExecuteOptions::new().with_timeout(Duration::from_millis(100)),
-            None,
-        )
+            ExecuteOptions::new().with_timeout(Duration::from_millis(100)))
         .await
         .expect("execute");
     let elapsed = started.elapsed();
@@ -380,9 +370,7 @@ async fn embedder_cancel_token_does_not_leak_into_kernel_state() {
     let result = kernel
         .execute_with_options(
             &format!("bash {}", script.display()),
-            ExecuteOptions::new().with_cancel_token(embedder_token.clone()),
-            None,
-        )
+            ExecuteOptions::new().with_cancel_token(embedder_token.clone()))
         .await
         .expect("execute");
 
@@ -418,11 +406,7 @@ async fn vars_overlay_visible_during_call_and_cleaned_up_after() {
     vars.insert("OVERLAY_X".to_string(), Value::String("hello".to_string()));
 
     let result = kernel
-        .execute_with_options(
-            r#"echo "${OVERLAY_X}""#,
-            ExecuteOptions::new().with_vars(vars),
-            None,
-        )
+        .execute_with_options(r#"echo "${OVERLAY_X}""#, ExecuteOptions::new().with_vars(vars))
         .await
         .expect("execute");
 
@@ -431,11 +415,7 @@ async fn vars_overlay_visible_during_call_and_cleaned_up_after() {
 
     // Second call without overlay: var should be unset.
     let after = kernel
-        .execute_with_options(
-            r#"echo "${OVERLAY_X:-unset}""#,
-            ExecuteOptions::default(),
-            None,
-        )
+        .execute_with_options(r#"echo "${OVERLAY_X:-unset}""#, ExecuteOptions::default())
         .await
         .expect("execute");
     assert_eq!(after.text_out().trim(), "unset", "vars overlay leaked between calls");
@@ -473,9 +453,7 @@ async fn vars_plus_timeout_combo_kills_child_with_vars_visible() {
             &format!("bash {}", inner_path.display()),
             ExecuteOptions::new()
                 .with_vars(vars)
-                .with_timeout(Duration::from_millis(200)),
-            None,
-        )
+                .with_timeout(Duration::from_millis(200)))
         .await
         .expect("execute");
 
@@ -522,9 +500,7 @@ async fn cancel_token_plus_vars_combo() {
             &format!("bash {}", script.display()),
             ExecuteOptions::new()
                 .with_vars(vars)
-                .with_cancel_token(token),
-            None,
-        )
+                .with_cancel_token(token))
         .await
         .expect("execute");
 
@@ -575,29 +551,58 @@ async fn on_output_callback_fires_per_statement() {
         count += 1;
     };
     let _ = kernel
-        .execute_with_options(
-            "echo a\necho b\necho c",
-            ExecuteOptions::default(),
-            Some(&mut cb),
-        )
+        .execute_with_options_streaming("echo a\necho b\necho c", ExecuteOptions::default(), &mut cb)
         .await
         .expect("execute");
     assert!(count >= 3, "callback fired {} times for 3 statements", count);
 }
 
 // ════════════════════════════════════════════════════════════════════════════
-// 15. Successful command under a timeout that doesn't fire
+// 15. Per-call cwd override pushes for the call and restores on return
+// ════════════════════════════════════════════════════════════════════════════
+
+#[tokio::test]
+async fn per_call_cwd_overrides_and_restores() {
+    let kernel = kernel_for_test();
+    let original_cwd = kernel.cwd().await;
+
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let scratch = tmp.path().to_path_buf();
+
+    let result = kernel
+        .execute_with_options("pwd", ExecuteOptions::new().with_cwd(scratch.clone()))
+        .await
+        .expect("execute");
+    assert!(result.ok(), "pwd failed: {}", result.err);
+    let printed = result.text_out().trim().to_string();
+    let canonical_scratch = scratch.canonicalize().unwrap_or(scratch.clone());
+    let canonical_printed = std::path::PathBuf::from(&printed)
+        .canonicalize()
+        .unwrap_or_else(|_| std::path::PathBuf::from(&printed));
+    assert_eq!(
+        canonical_printed, canonical_scratch,
+        "expected pwd inside the per-call cwd, got {}",
+        printed,
+    );
+
+    // After the call, the kernel's persistent cwd is restored.
+    let restored = kernel.cwd().await;
+    assert_eq!(
+        restored, original_cwd,
+        "kernel cwd should be restored after per-call override; was {:?}",
+        restored,
+    );
+}
+
+// ════════════════════════════════════════════════════════════════════════════
+// 16. Successful command under a timeout that doesn't fire
 // ════════════════════════════════════════════════════════════════════════════
 
 #[tokio::test]
 async fn timeout_does_not_fire_when_command_finishes_first() {
     let kernel = kernel_for_test();
     let result = kernel
-        .execute_with_options(
-            "echo done",
-            ExecuteOptions::new().with_timeout(Duration::from_secs(30)),
-            None,
-        )
+        .execute_with_options("echo done", ExecuteOptions::new().with_timeout(Duration::from_secs(30)))
         .await
         .expect("execute");
     assert!(result.ok(), "expected ok, got {}", result.code);
