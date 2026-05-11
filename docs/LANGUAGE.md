@@ -215,9 +215,12 @@ echo "Current time: $NOW"
 RESULT=$(cat file.json | jq ".name")
 ```
 
-### Structured Data from Command Substitution
+### Structured Data and Newline Splitting in Command Substitution
 
-Unlike traditional shells, kaish does **not** perform implicit word splitting on command substitution results. Instead, commands can return structured data (JSON arrays) that iterate properly in for loops:
+Unlike traditional shells, kaish does **not** perform implicit *word* splitting on command substitution results — `$VAR` and `$(cmd)` carry whole strings, spaces and all. In `for`-loop iteration position, two narrower rules take over:
+
+1. **Structured data wins.** Builtins that emit list-shaped output (`seq`, `find`, `glob`, `jq`, `cut`, …) populate `$?.data` with a JSON array; for-loops iterate over the array elements directly.
+2. **Otherwise, split on newlines.** When `$(cmd)` returns a plain string with `\n` in it, the for-loop iterates per line. Whitespace within a line is never split.
 
 ```bash
 # seq returns a JSON array — iterates over numbers
@@ -230,28 +233,43 @@ for f in *.rs; do
     echo "File: $f"
 done
 
-# echo returns a string — iterates ONCE (no splitting!)
+# Multi-line stdout iterates per line:
+for line in $(cat hosts.txt); do echo "host: $line"; done
+for hash in $(git log --format=%H | head); do git show $hash; done
+
+# echo with no newline iterates ONCE — whitespace within a line never splits:
 for x in $(echo "a b c"); do
-    echo "Item: $x"  # prints "Item: a b c" once
+    echo "Item: $x"            # prints "Item: a b c" once
 done
 
-# Use split for explicit word splitting
+# Use split for whitespace/delimiter/regex splitting:
 for x in $(split "a b c"); do
-    echo "Item: $x"  # prints a, b, c separately
+    echo "Item: $x"            # prints a, b, c separately
 done
 
-# jq, cut, seq, find, glob — all expose their output stream as
-# structured data, so for-loops iterate per element rather than
-# binding the whole stdout as one string.
+# jq, cut, seq, find, glob — structured data path, one iteration per element:
 for name in $(echo '["alice","bob","carol"]' | jq -r '.[]'); do
-    echo "Hello $name"      # 3 iterations
+    echo "Hello $name"         # 3 iterations
 done
 for first in $(printf 'a,1\nb,2\n' | cut -d ',' -f 1); do
-    echo "Col1: $first"     # 2 iterations
+    echo "Col1: $first"        # 2 iterations
+done
+
+# Quoting suppresses the newline split — same as bash's IFS= discipline:
+for x in "$(printf 'a\nb\nc')"; do
+    echo "$x"                  # one iteration, newlines preserved
 done
 ```
 
-**Why?** Implicit word splitting is a major source of shell bugs. By requiring explicit `split`, kaish makes the intent clear and avoids surprises with variables containing spaces. Builtins with unambiguous list structure (`seq`, `find`, `glob`, `jq`, `cut`, …) populate `$?.data` with a JSON array so iteration works without manually piping through `jq -r`; everything else stays as one string — use `split` when you want whitespace- or line-based iteration.
+The newline-split rule only fires in for-loop iteration position. Assignment, argv, and string interpolation always keep `$(cmd)` whole:
+
+```bash
+RESULT=$(printf 'a\nb')                 # RESULT is "a\nb" (one string)
+echo "captured: $(printf 'x\ny')"       # one echo, newline preserved inline
+other_cmd $(printf 'a\nb')              # one argv slot, not two
+```
+
+**Why?** Implicit *word* splitting is a major source of shell bugs and fails `shellcheck --enable=all` (SC2086/SC2046). The newline-split-in-for rule captures bash's most common line-iteration intent — `for line in $(cat file)` — without resurrecting whitespace-splitting footguns. The "$VAR with spaces just works" promise holds everywhere; line-iteration just works in the one position where it makes sense.
 
 ## String Splitting
 
@@ -284,11 +302,15 @@ done
 If you're porting scripts that rely on word splitting:
 
 ```bash
-# Old (implicit split in bash)
-for i in $ITEMS; do echo $i; done
-
-# New (explicit split in kaish)
+# Old: bareword splitting of a whitespace-separated variable
+for i in $ITEMS; do echo $i; done                # bash: splits on IFS
+# New: explicit split — kaish flags the bareword version (E012)
 for i in $(split "$ITEMS"); do echo $i; done
+
+# Old: line iteration over command output
+for line in $(cat file); do echo $line; done     # bash: splits on IFS
+# New: works as-is in kaish — for-loop $(cmd) splits on newlines
+for line in $(cat file); do echo $line; done
 ```
 
 ## Arithmetic
@@ -607,8 +629,8 @@ Features that ShellCheck warns about (word splitting, backticks) don't exist in 
 | SC Code | Warning | Kaish Approach |
 |---------|---------|----------------|
 | SC2006 | Use `$()` instead of backticks | Backticks don't exist |
-| SC2086 | Double quote to prevent word splitting | No implicit word splitting — use `split` explicitly |
-| SC2046 | Quote this to prevent word splitting | `$(cmd)` returns structured data or single string |
+| SC2086 | Double quote to prevent word splitting | No implicit word splitting on whitespace; `$VAR` is always one value |
+| SC2046 | Quote this to prevent word splitting | `$(cmd)` is one value in argv/assignment/interp; for-loop iteration splits on newlines only |
 | SC2035 | Use `./*` so globs don't expand | Bare globs expand; use `set +o glob` to disable |
 | SC2039 | Use `[[ ]]` in POSIX sh | Only `[[ ]]` exists |
 | SC1083 | Escape literal braces | No shell-level brace expansion |

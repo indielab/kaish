@@ -1510,22 +1510,44 @@ impl Kernel {
                             continue;
                         }
                     }
+                    // Track whether this item came from $(cmd); that's the
+                    // only position where multi-line stdout auto-splits per
+                    // line. Arrays still spread element-by-element; bare
+                    // $VAR is rejected upstream by validator E012. See
+                    // docs/plan-for-loop-newline-split.md.
+                    let from_command_subst = matches!(item_expr, Expr::CommandSubst(_));
                     let item = self.eval_expr_async(item_expr).await?;
-                    // NO implicit word splitting - arrays iterate, strings stay whole
-                    match &item {
-                        // JSON arrays iterate over elements
+                    match item {
+                        // JSON arrays iterate over elements (preferred path
+                        // when builtins emit .data — seq, jq, cut, find, …)
                         Value::Json(serde_json::Value::Array(arr)) => {
                             for elem in arr {
-                                items.push(json_to_value(elem.clone()));
+                                items.push(json_to_value(elem));
                             }
                         }
-                        // Strings are ONE value - no splitting!
-                        // Use $(split "$VAR") for explicit splitting
-                        Value::String(_) => {
-                            items.push(item);
+                        // Strings from $(cmd): empty → 0 iterations,
+                        // multi-line → split per line (trimming trailing
+                        // newlines and per-line trailing \r), single-line
+                        // → one iteration. Whitespace within a line is
+                        // NOT split — the "$VAR with spaces just works"
+                        // promise is preserved because this only fires
+                        // in CommandSubst position.
+                        Value::String(s) if from_command_subst => {
+                            let trimmed = s.trim_end_matches(['\n', '\r']);
+                            if trimmed.is_empty() {
+                                continue;
+                            }
+                            if trimmed.contains('\n') {
+                                for line in trimmed.split('\n') {
+                                    let line = line.trim_end_matches('\r');
+                                    items.push(Value::String(line.to_string()));
+                                }
+                            } else {
+                                items.push(Value::String(trimmed.to_string()));
+                            }
                         }
-                        // Other values as-is
-                        _ => items.push(item),
+                        // Strings not from $(cmd) stay as one value.
+                        other => items.push(other),
                     }
                 }
 

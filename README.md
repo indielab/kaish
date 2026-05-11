@@ -24,7 +24,8 @@ commonly-used parts of sh while eliminating entire classes of bugs at the langua
 - **No implicit word splitting** — `$VAR` is always one value, never split on spaces
 - **Bare glob expansion** — `ls *.txt` works; opt out with `set +o glob`
 - **Structured iteration** — `for i in $(seq 1 5)` works via structured data, not word splitting
-- **Explicit splitting** — use `split "$VAR"` when you actually need word splitting
+- **Line iteration in for-loops** — `for line in $(cat file)` splits on `\n` only; whitespace within a line is never split
+- **Explicit splitting** — use `split "$VAR"` for whitespace/delimiter/regex splitting
 - **No backticks** — only `$(cmd)` substitution
 - **Strict booleans** — `TRUE` and `yes` are errors, not truthy
 - **Pre-validation** — catch errors before execution, not at runtime
@@ -45,13 +46,17 @@ if [[ -f config.json ]]; then
     echo "Config found"
 fi
 
-# For loops - no implicit word splitting!
+# For loops - no implicit *word* splitting
 for item in one two three; do      # literal items
     echo "Processing: $item"
 done
 
 for i in $(seq 1 3); do            # structured data iteration
     echo "Count: $i"
+done
+
+for line in $(cat hosts.txt); do   # multi-line stdout splits on \n
+    echo "host: $line"
 done
 
 for file in *.txt; do              # bare glob expansion

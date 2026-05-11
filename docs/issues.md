@@ -243,10 +243,13 @@ highlighter and hinter are currently no-ops; multi-line paste
 re-validates on each keystroke.
 
 ### Bash-prior "did-you-mean" validator pass
-Agents will write `[ -z "$VAR" ]` (single bracket) or `for i in $LIST`
-(no split — silently iterates once). A shellcheck-style actionable
-warning without rejection would steer without frustrating. Optional
-but high-leverage.
+Agents will write `[ -z "$VAR" ]` (single bracket) when `[[ ]]` is
+preferred. The biggest historical bash-prior trap — `for i in $LIST`
+silently iterating once — is now caught: bare `$VAR` in for-position
+is E012 hard error, and `$(cmd)` in for-position splits on `\n`. What
+remains is "soft" guidance for less-common ports; a shellcheck-style
+actionable warning without rejection would steer without frustrating.
+Optional but moderate leverage now that the loud cases are handled.
 
 ### `EmbeddedClient::shutdown()` is a no-op
 Intentional (embedder owns lifecycle) but worth one doc line in

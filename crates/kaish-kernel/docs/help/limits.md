@@ -8,7 +8,7 @@
 | Process substitution `<(cmd)` | `cmd > /tmp/t.txt; cmd2 /tmp/t.txt` |
 | Backticks `` `cmd` `` | `$(cmd)` |
 | `eval` | Write explicit code |
-| Implicit word splitting | `split "$VAR"` |
+| Implicit word splitting on whitespace | `split "$VAR"` (for-loop `$(cmd)` does split on newlines — see Bash vs kaish below) |
 
 `[ ]` is supported as a builtin but `[[ ]]` is preferred.
 
@@ -55,7 +55,9 @@
 
 | Bash | kaish |
 |------|-------|
-| `for i in $VAR` splits on IFS | No splitting; iterates once |
+| `for i in $VAR` splits on IFS | E012 validator error; use `$(split "$VAR")` |
+| `for i in $(cmd)` splits on IFS (default: any whitespace) | Splits on `\n` only — `for line in $(cat file)` iterates per line; `for x in $(echo "a b c")` iterates once |
+| `for i in "$(cmd)"` iterates once | Same — quoted substitution suppresses the per-line split |
 | `*.txt` expands at shell | Bare globs expand (disable with `set +o glob`) |
 | Regex in `=~` is unquoted | Quotes allowed: `=~ "\.rs$"` |
 | `printf "a"; printf "b"` → `ab` | → `a\nb` (line-separated, intentional) |

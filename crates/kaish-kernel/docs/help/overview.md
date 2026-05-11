@@ -44,9 +44,10 @@ seq 1 100 | scatter as=N limit=4 | process $N | gather
 
 ## Key Differences from Bash
 
-- `$VAR` is always one value — no implicit word splitting (use `split` when needed)
+- `$VAR` is always one value — no implicit word splitting (use `split` for whitespace/delimiter splitting)
 - `*.txt` expands to matching files — zero matches is an error, not a silent pass-through
 - No backticks — `$(cmd)` only
 - `$(cmd)` returns structured data — `for i in $(seq 1 5)` iterates 5 values, not split text
+- `for x in $(cmd)` splits on newlines — multi-line stdout iterates per line; whitespace within a line is never split
 - ERE regex everywhere — no BRE quirks
 - `true`/`false` only — `TRUE`, `yes`, `Yes` are errors

@@ -115,9 +115,20 @@ break; continue; return [N]; exit [N]
 
 ```bash
 NOW=$(date)
-# No implicit word splitting — $(echo "a b c") iterates once
-# Use split for explicit splitting:
+
+# In for-loops, $(cmd) splits on newlines (only):
+for line in $(cat file); do echo $line; done   # per-line iteration
+for x in $(echo "a b c"); do echo $x; done     # one iteration (no \n)
+
+# Whitespace splitting needs explicit split:
 for x in $(split "a b c"); do echo $x; done
+
+# Builtins that emit .data (seq, jq, cut, find, glob) iterate per element:
+for i in $(seq 1 5); do echo $i; done
+
+# Outside for-loops, $(cmd) is one value:
+R=$(printf 'a\nb')                # R is "a\nb"
+echo "got: $(printf 'x\ny')"      # one echo, newline preserved
 ```
 
 ## Arithmetic
