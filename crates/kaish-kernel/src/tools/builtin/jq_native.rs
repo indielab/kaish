@@ -476,7 +476,7 @@ fn value_as_string(v: &serde_json::Value) -> Option<String> {
 /// into `.data` so for-loop command substitution can iterate per-value.
 ///
 /// - 0 values → empty text, no `.data`.
-/// - 1 value → render normally; promote the value to `.data` so `${?.data}`
+/// - 1 value → render normally; promote the value to `.data` so `kaish-last`
 ///   and single-value iteration are consistent across `-r` and JSON modes.
 /// - 2+ values → render normally; set `.data = Json(Array([…]))` so the
 ///   CommandSubst arm in the kernel hands a JSON array to the for-loop
@@ -488,7 +488,7 @@ fn build_exec_result(run: JqRun) -> ExecResult {
         return ExecResult::with_output(OutputData::text(text));
     }
     // Single-value output: keep `.data` as the underlying scalar/object so
-    // `jq '.name'` continues to expose a non-array value to ${?.data}.
+    // `jq '.name'` continues to expose a non-array value via `kaish-last`.
     if values.len() == 1 {
         if let Some(only) = values.pop() {
             return ExecResult::success_with_data(text, json_to_value(only));

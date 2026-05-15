@@ -116,18 +116,20 @@ fn scope_json_as_string() {
 
 #[test]
 fn scope_last_result_propagation() {
+    // $? is the POSIX exit code (int) after the previous command.
     let outputs = run_script(r#"
         echo "first"
-        echo "code was ${?.code}"
+        echo "code was $?"
     "#);
     assert!(outputs_contain(&outputs, &["first", "code was 0"]));
 }
 
 #[test]
-fn scope_last_result_fields() {
+fn scope_last_result_ok_via_test() {
+    // ok/failure is checked via standard POSIX `[[ $? -eq 0 ]]`.
     let outputs = run_script(r#"
         echo "test output"
-        echo "ok=${?.ok}"
+        if [[ $? -eq 0 ]]; then echo "ok=true"; else echo "ok=false"; fi
     "#);
     assert!(outputs_contain(&outputs, &["ok=true"]));
 }

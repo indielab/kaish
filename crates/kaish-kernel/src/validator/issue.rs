@@ -61,6 +61,9 @@ pub enum IssueCode {
     ShellGlobPattern,
     /// scatter without gather — parallel results would be lost.
     ScatterWithoutGather,
+    /// Field access on `$?` (e.g. `${?.data}`, `${?.ok}`) was removed.
+    /// `$?` is the POSIX exit code; use `kaish-last` for structured data.
+    LastResultFieldAccess,
 }
 
 impl IssueCode {
@@ -86,6 +89,7 @@ impl IssueCode {
             IssueCode::ForLoopScalarVar => "E012",
             IssueCode::ShellGlobPattern => "E013",
             IssueCode::ScatterWithoutGather => "E014",
+            IssueCode::LastResultFieldAccess => "E015",
         }
     }
 
@@ -103,7 +107,8 @@ impl IssueCode {
             | IssueCode::DiffNeedsTwoFiles
             | IssueCode::ForLoopScalarVar
             | IssueCode::ShellGlobPattern
-            | IssueCode::ScatterWithoutGather => Severity::Error,
+            | IssueCode::ScatterWithoutGather
+            | IssueCode::LastResultFieldAccess => Severity::Error,
 
             // These are warnings because context matters:
             // - MissingRequiredArg: might be provided by pipeline stdin or environment

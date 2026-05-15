@@ -39,6 +39,32 @@ async fn validation_blocks_break_outside_loop() {
 }
 
 #[tokio::test]
+async fn validation_blocks_dollar_question_field_access() {
+    let kernel = make_kernel().await;
+    let result = kernel.execute(r#"echo "${?.data}""#).await;
+
+    assert!(
+        result.is_err(),
+        "${{?.data}} should fail validation (use kaish-last instead)"
+    );
+    let err = result.unwrap_err().to_string();
+    assert!(
+        err.contains("kaish-last"),
+        "error should suggest kaish-last: {}",
+        err
+    );
+}
+
+#[tokio::test]
+async fn validation_blocks_dollar_question_code_field() {
+    let kernel = make_kernel().await;
+    // Any non-empty field path on $? is removed — including the ones that
+    // used to be valid (.code, .ok). $? alone is still POSIX-shaped.
+    let result = kernel.execute(r#"echo "${?.code}""#).await;
+    assert!(result.is_err(), "${{?.code}} should fail validation");
+}
+
+#[tokio::test]
 async fn validation_blocks_continue_outside_loop() {
     let kernel = make_kernel().await;
     let result = kernel.execute("continue").await;

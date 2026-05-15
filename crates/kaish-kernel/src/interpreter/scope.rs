@@ -2,7 +2,7 @@
 //!
 //! Scopes provide variable bindings with:
 //! - Nested scope frames (push/pop for loops, tool calls)
-//! - The special `$?` variable tracking the last command result
+//! - The special `$?` variable holding the last command's exit code
 //! - Path resolution for nested access (`${VAR.field[0]}`)
 
 use std::collections::{HashMap, HashSet};
@@ -332,10 +332,11 @@ impl Scope {
         names
     }
 
-    /// Resolve a variable path like `${VAR}` or `${?.field}`.
+    /// Resolve a variable path like `${VAR}` or `${VAR.field}`.
     ///
     /// Returns None if the path cannot be resolved.
-    /// Field access is only supported for the special `$?` variable.
+    /// `$?` resolves to the previous command's exit code as an int;
+    /// field access on `$?` is rejected by the validator before reaching here.
     pub fn resolve_path(&self, path: &VarPath) -> Option<Value> {
         if path.segments.is_empty() {
             return None;
@@ -359,24 +360,15 @@ impl Scope {
 
     /// Resolve path segments on the last result ($?).
     ///
-    /// `$?` alone returns the exit code as an integer (0-255).
-    /// `${?.code}`, `${?.ok}`, `${?.out}`, `${?.err}` access specific fields.
+    /// `$?` alone returns the exit code as an integer (POSIX-shaped).
+    /// Field access on `$?` was removed — the validator rejects it with
+    /// a pointer to `kaish-last`, which exposes the previous command's
+    /// structured data (or stdout) as text.
     fn resolve_result_path(&self, segments: &[VarSegment]) -> Option<Value> {
         if segments.is_empty() {
-            // $? alone returns just the exit code as an integer (bash-compatible)
             return Some(Value::Int(self.last_result.code));
         }
-
-        // Allow ${?.code}, ${?.ok}, etc.
-        let VarSegment::Field(field_name) = &segments[0];
-
-        // Only single-level field access on $?
-        if segments.len() > 1 {
-            return None;
-        }
-
-        // Get the field value from the result
-        self.last_result.get_field(field_name)
+        None
     }
 
     /// Check if a variable exists in any frame.
@@ -474,57 +466,34 @@ mod tests {
     }
 
     #[test]
-    fn resolve_last_result_ok() {
-        let mut scope = Scope::new();
-        scope.set_last_result(ExecResult::success("output"));
-
-        let path = VarPath {
-            segments: vec![
-                VarSegment::Field("?".into()),
-                VarSegment::Field("ok".into()),
-            ],
-        };
-        assert_eq!(scope.resolve_path(&path), Some(Value::Bool(true)));
-    }
-
-    #[test]
-    fn resolve_last_result_code() {
+    fn resolve_bare_last_result_returns_exit_code() {
         let mut scope = Scope::new();
         scope.set_last_result(ExecResult::failure(127, "not found"));
 
         let path = VarPath {
-            segments: vec![
-                VarSegment::Field("?".into()),
-                VarSegment::Field("code".into()),
-            ],
+            segments: vec![VarSegment::Field("?".into())],
         };
         assert_eq!(scope.resolve_path(&path), Some(Value::Int(127)));
     }
 
     #[test]
-    fn resolve_last_result_data_field() {
+    fn resolve_last_result_field_access_is_rejected() {
+        // Field access on $? was removed — use `kaish-last` for structured data.
+        // The resolver returns None; the validator catches it earlier with a
+        // specific error code so users see actionable diagnostics.
         let mut scope = Scope::new();
-        // .data is only set when a tool/builtin opts in — wire it explicitly,
-        // mirroring how `seq`/`jq`/`cut` etc. populate it.
         scope.set_last_result(ExecResult::success_with_data(
-            r#"{"count": 5}"#,
+            "1",
             Value::Json(serde_json::json!({"count": 5})),
         ));
 
-        // ${?.data} - only single-level field access is supported on $?
         let path = VarPath {
             segments: vec![
                 VarSegment::Field("?".into()),
                 VarSegment::Field("data".into()),
             ],
         };
-        let result = scope.resolve_path(&path);
-        assert!(result.is_some());
-        if let Some(Value::Json(json)) = result {
-            assert_eq!(json.get("count"), Some(&serde_json::json!(5)));
-        } else {
-            panic!("expected Value::Json, got {:?}", result);
-        }
+        assert_eq!(scope.resolve_path(&path), None);
     }
 
     #[test]

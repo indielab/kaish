@@ -750,8 +750,9 @@ fn type_name(value: &Value) -> &'static str {
 /// Convert an ExecResult to a Value for command substitution return.
 ///
 /// Prefers structured data if available (for iteration in for loops),
-/// otherwise returns stdout (trimmed) as a string.
-/// Access to other result fields (code, err, etc.) is via ${?.field}.
+/// otherwise returns stdout (trimmed) as a string. `$?` exposes the exit
+/// code as an int; `kaish-last` exposes the previous command's structured
+/// data or stdout as text.
 fn result_to_value(result: &ExecResult) -> Value {
     // Prefer structured data if available (enables `for i in $(cmd)` iteration)
     if let Some(data) = &result.data {
@@ -1101,30 +1102,16 @@ mod tests {
     }
 
     #[test]
-    fn eval_last_result_field() {
+    fn eval_last_result_bare() {
+        // Bare $? returns the exit code as an int (POSIX-shaped).
+        // Field access on $? was removed — `kaish-last` covers structured data.
         let mut scope = Scope::new();
         scope.set_last_result(ExecResult::failure(42, "test error"));
 
-        // ${?.code}
         let expr = Expr::VarRef(VarPath {
-            segments: vec![
-                VarSegment::Field("?".into()),
-                VarSegment::Field("code".into()),
-            ],
+            segments: vec![VarSegment::Field("?".into())],
         });
         assert_eq!(eval_expr(&expr, &mut scope), Ok(Value::Int(42)));
-
-        // ${?.err}
-        let expr = Expr::VarRef(VarPath {
-            segments: vec![
-                VarSegment::Field("?".into()),
-                VarSegment::Field("err".into()),
-            ],
-        });
-        assert_eq!(
-            eval_expr(&expr, &mut scope),
-            Ok(Value::String("test error".into()))
-        );
     }
 
     #[test]
@@ -1341,11 +1328,11 @@ mod tests {
     fn eval_format_path_nested() {
         let path = VarPath {
             segments: vec![
-                VarSegment::Field("?".into()),
-                VarSegment::Field("code".into()),
+                VarSegment::Field("X".into()),
+                VarSegment::Field("field".into()),
             ],
         };
-        assert_eq!(format_path(&path), "${?.code}");
+        assert_eq!(format_path(&path), "${X.field}");
     }
 
     #[test]

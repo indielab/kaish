@@ -129,7 +129,7 @@ async fn jq_output_can_feed_next_pipe_stage() {
 }
 
 // ============================================================================
-// Data field contract — readable via ${?.data}
+// Data field contract — exposed via `kaish-last`
 // ============================================================================
 
 // ============================================================================
@@ -154,7 +154,7 @@ async fn for_loop_iterates_cut_output_per_line() {
 
 #[tokio::test]
 async fn data_field_is_array_for_multi_value_output() {
-    // After a multi-value jq, ${?.data} should serialize to a JSON array.
+    // After a multi-value jq, .data on the ExecResult should be a JSON array.
     let k = setup().await;
     let r = k
         .execute(r#"echo '["a","b","c"]' | jq -r '.[]'"#)

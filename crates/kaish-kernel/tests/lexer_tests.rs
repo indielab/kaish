@@ -337,8 +337,6 @@ fn lexer_singlestring_errors(#[case] input: &str) {
 #[case::varref_field("${X.field}", &["VARREF(${X.field})"])]
 #[case::varref_index("${X[0]}", &["VARREF(${X[0]})"])]
 #[case::varref_path("${X.a.b[0].c}", &["VARREF(${X.a.b[0].c})"])]
-#[case::varref_special("${?.ok}", &["VARREF(${?.ok})"])]
-#[case::varref_special_path("${?.data.x}", &["VARREF(${?.data.x})"])]
 fn lexer_braced_varrefs(#[case] input: &str, #[case] expected: &[&str]) {
     run_lexer_test(input, expected);
 }

@@ -129,6 +129,12 @@ for i in $(seq 1 5); do echo $i; done
 # Outside for-loops, $(cmd) is one value:
 R=$(printf 'a\nb')                # R is "a\nb"
 echo "got: $(printf 'x\ny')"      # one echo, newline preserved
+
+# kaish-last prints the previous command's .data (or its stdout) as text:
+seq 1 5
+kaish-last | jq '.[2]'            # → 3
+seq 1 5
+DATA=$(kaish-last)                # capture for later use
 ```
 
 ## Arithmetic

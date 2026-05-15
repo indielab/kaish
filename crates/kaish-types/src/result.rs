@@ -10,9 +10,13 @@ use crate::value::Value;
 
 /// The result of executing a command or pipeline.
 ///
-/// Fields accessible via `${?.field}`:
+/// `$?` in script syntax is the POSIX exit code (an integer). To read the
+/// previous command's structured `.data` (or its captured stdout) from
+/// inside a script, use the `kaish-last` builtin and pipe / capture its
+/// output. Inside Rust callers, read `.data`, `.text_out()`, etc. directly.
+///
+/// Notes on the fields:
 /// - `code` — exit code (0 = success)
-/// - `ok` — true if code == 0
 /// - `err` — error message if failed
 /// - `out` — raw stdout as string
 /// - `data` — structured data; only set by builtins/tools that opt in
@@ -284,18 +288,6 @@ impl ExecResult {
         self.code == 0
     }
 
-    /// Get a field by name, for variable access like `${?.field}`.
-    pub fn get_field(&self, name: &str) -> Option<Value> {
-        match name {
-            "code" => Some(Value::Int(self.code)),
-            "ok" => Some(Value::Bool(self.ok())),
-            "out" => Some(Value::String(self.text_out().into_owned())),
-            "err" => Some(Value::String(self.err.clone())),
-            "data" => self.data.clone(),
-            _ => None,
-        }
-    }
-
     /// Set content type hint, returning self for chaining.
     pub fn with_content_type(mut self, ct: impl Into<String>) -> Self {
         self.content_type = Some(ct.into());
@@ -396,42 +388,6 @@ mod tests {
     fn non_json_stdout_has_no_data() {
         let result = ExecResult::success("just plain text");
         assert!(result.data.is_none());
-    }
-
-    #[test]
-    fn get_field_code() {
-        let result = ExecResult::failure(127, "not found");
-        assert_eq!(result.get_field("code"), Some(Value::Int(127)));
-    }
-
-    #[test]
-    fn get_field_ok() {
-        let success = ExecResult::success("hi");
-        let failure = ExecResult::failure(1, "err");
-        assert_eq!(success.get_field("ok"), Some(Value::Bool(true)));
-        assert_eq!(failure.get_field("ok"), Some(Value::Bool(false)));
-    }
-
-    #[test]
-    fn get_field_out_and_err() {
-        let result = ExecResult::from_output(1, "stdout text", "stderr text");
-        assert_eq!(result.get_field("out"), Some(Value::String("stdout text".into())));
-        assert_eq!(result.get_field("err"), Some(Value::String("stderr text".into())));
-    }
-
-    #[test]
-    fn get_field_data() {
-        // .data is only populated by tools that opt in — wire it explicitly here.
-        let value = Value::Json(serde_json::json!({"key": "value"}));
-        let result = ExecResult::success_data(value);
-        let data = result.get_field("data");
-        assert!(data.is_some());
-    }
-
-    #[test]
-    fn get_field_unknown_returns_none() {
-        let result = ExecResult::success("");
-        assert_eq!(result.get_field("nonexistent"), None);
     }
 
     #[test]

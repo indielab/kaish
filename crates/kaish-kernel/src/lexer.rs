@@ -2177,7 +2177,6 @@ mod tests {
         assert_eq!(lex("${VAR}"), vec![Token::VarRef("${VAR}".to_string())]);
         assert_eq!(lex("${VAR.field}"), vec![Token::VarRef("${VAR.field}".to_string())]);
         assert_eq!(lex("${VAR[0]}"), vec![Token::VarRef("${VAR[0]}".to_string())]);
-        assert_eq!(lex("${?.ok}"), vec![Token::VarRef("${?.ok}".to_string())]);
     }
 
     // ═══════════════════════════════════════════════════════════════════
@@ -2421,10 +2420,6 @@ mod tests {
         assert_eq!(
             parse_var_ref("${?}").expect("ok"),
             vec!["?"]
-        );
-        assert_eq!(
-            parse_var_ref("${?.ok}").expect("ok"),
-            vec!["?", "ok"]
         );
     }
 

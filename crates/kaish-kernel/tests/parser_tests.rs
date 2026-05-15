@@ -218,14 +218,14 @@ fn parser_herestring_errors(#[case] input: &str) {
 
 #[test]
 fn parser_if_simple() {
-    // Shell-compatible: compare result reference to true
-    parse_and_snapshot("if_simple", "if [[ ${?.ok} == true ]]; then\n    echo \"yes\"\nfi");
+    // POSIX-shaped: compare $? to 0
+    parse_and_snapshot("if_simple", "if [[ $? -eq 0 ]]; then\n    echo \"yes\"\nfi");
 }
 
 #[test]
 fn parser_if_else() {
-    // Shell-compatible: compare result reference to true
-    parse_and_snapshot("if_else", "if [[ ${?.ok} == true ]]; then\n    echo \"yes\"\nelse\n    echo \"no\"\nfi");
+    // POSIX-shaped: compare $? to 0
+    parse_and_snapshot("if_else", "if [[ $? -eq 0 ]]; then\n    echo \"yes\"\nelse\n    echo \"no\"\nfi");
 }
 
 #[test]

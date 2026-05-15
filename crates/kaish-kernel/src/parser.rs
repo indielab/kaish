@@ -18,7 +18,7 @@ pub type Span = SimpleSpan;
 ///
 /// Handles:
 /// - Special variables: `${?}` → LastExitCode, `${$}` → CurrentPid
-/// - Simple paths: `${VAR}`, `${VAR.field}`, `${VAR[0]}`, `${?.ok}` → VarRef
+/// - Simple paths: `${VAR}`, `${VAR.field}`, `${VAR[0]}` → VarRef
 /// - Default values: `${VAR:-default}` → VarWithDefault (with nested expansion support)
 fn parse_var_expr(raw: &str) -> Expr {
     // Special case: ${?} is the last exit code (same as $?)
@@ -100,7 +100,7 @@ fn find_default_separator_in_content(content: &str) -> Option<usize> {
 
 /// Parse a raw `${...}` string into a VarPath.
 ///
-/// Handles paths like `${VAR}`, `${?.ok}`. Array indexing is not supported.
+/// Handles paths like `${VAR}` and `${VAR.field}`. Array indexing is not supported.
 fn parse_varpath(raw: &str) -> VarPath {
     let segments_strs = lexer::parse_var_ref(raw).unwrap_or_default();
     let segments = segments_strs
@@ -2584,22 +2584,6 @@ mod tests {
     }
 
     #[test]
-    fn value_last_result_ref_preserved() {
-        let result = parse("echo ${?.ok}").unwrap();
-        match &result.statements[0] {
-            Stmt::Command(cmd) => match &cmd.args[0] {
-                Arg::Positional(Expr::VarRef(path)) => {
-                    assert_eq!(path.segments.len(), 2);
-                    let VarSegment::Field(name) = &path.segments[0];
-                    assert_eq!(name, "?");
-                }
-                other => panic!("expected varref, got {:?}", other),
-            },
-            other => panic!("expected command, got {:?}", other),
-        }
-    }
-
-    #[test]
     fn value_named_arg_preserved() {
         let result = parse("cmd count=42").unwrap();
         match &result.statements[0] {
@@ -3259,7 +3243,7 @@ RESULT=$(cat "config.json" | jq query=".servers" | kaish-validate schema="server
 if ping host=${HOST} && [[ ${RESULT} == true ]]; then
     for SERVER in "prod-1 prod-2"; do
         deploy target=${SERVER} port=8080
-        if [[ ${?.code} != 0 ]]; then
+        if [[ $? -ne 0 ]]; then
             notify channel="ops" message="Deploy failed"
         fi
     done

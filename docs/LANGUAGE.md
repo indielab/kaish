@@ -219,7 +219,7 @@ RESULT=$(cat file.json | jq ".name")
 
 Unlike traditional shells, kaish does **not** perform implicit *word* splitting on command substitution results — `$VAR` and `$(cmd)` carry whole strings, spaces and all. In `for`-loop iteration position, two narrower rules take over:
 
-1. **Structured data wins.** Builtins that emit list-shaped output (`seq`, `find`, `glob`, `jq`, `cut`, …) populate `$?.data` with a JSON array; for-loops iterate over the array elements directly.
+1. **Structured data wins.** Builtins that emit list-shaped output (`seq`, `find`, `glob`, `jq`, `cut`, …) carry an internal JSON array on the previous result; for-loops iterate over the array elements directly. (Pipe the data out with `kaish-last` if you need it on stdout.)
 2. **Otherwise, split on newlines.** When `$(cmd)` returns a plain string with `\n` in it, the for-loop iterates per line. Whitespace within a line is never split.
 
 ```bash

@@ -351,10 +351,11 @@ pub enum TestCmpOp {
 // Value and BlobRef live in kaish-types.
 pub use kaish_types::{BlobRef, Value};
 
-/// Variable reference path: `${VAR}` or `${?.field}` for special variables.
+/// Variable reference path: `${VAR}` or `${VAR.field}`.
 ///
-/// Simple variable references support only field access for special variables
-/// like `$?`. Array indexing is not supported - use `jq` for JSON processing.
+/// `$?` resolves to the previous command's exit code as an int. Field access
+/// on `$?` is rejected by the validator (use `kaish-last` for structured data).
+/// Array indexing is not supported — use `jq` for JSON processing.
 #[derive(Debug, Clone, PartialEq)]
 pub struct VarPath {
     pub segments: Vec<VarSegment>,

@@ -403,6 +403,20 @@ impl<'a> Validator<'a> {
     /// Validate a variable reference.
     fn validate_var_ref(&mut self, path: &VarPath) {
         if let Some(VarSegment::Field(name)) = path.segments.first() {
+            // `${?.field}` is removed — $? is the POSIX integer exit code.
+            // Use `kaish-last` to access the previous command's structured data.
+            if name == "?" && path.segments.len() > 1 {
+                self.issues.push(
+                    ValidationIssue::error(
+                        IssueCode::LastResultFieldAccess,
+                        "${?.field} is removed; $? is the POSIX exit code",
+                    )
+                    .with_suggestion(
+                        "use `kaish-last` to read the previous command's data or stdout",
+                    ),
+                );
+                return;
+            }
             self.check_var_defined(name);
         }
     }
