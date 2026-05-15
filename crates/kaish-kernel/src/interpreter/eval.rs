@@ -657,13 +657,16 @@ fn is_truthy(value: &Value) -> bool {
     value_to_bool(value)
 }
 
-/// Check if two values are equal.
+/// Check if two values are equal under `==` (string equality in `[[ ]]`).
 ///
-/// Handles cross-type comparisons for shell compatibility:
-/// - String-to-Int: Try parsing the string as an integer
-/// - String-to-Float: Try parsing the string as a float
-/// - Json: Deep equality comparison
-/// - Blob: Compare by id
+/// Same-type comparisons stay typed: Int↔Int, Float↔Float (with epsilon),
+/// Int↔Float (numeric across the kaish number axis), Json deep equality,
+/// Blob by id. For everything else — including mixed String/Number — we
+/// stringify both sides and compare. That matches bash's "everything is a
+/// string in `[[ a == b ]]`" model and avoids the prior asymmetry where
+/// `[[ "01" == 1 ]]` returned true via parse-as-int while `[[ "01" == "1" ]]`
+/// returned false. Users wanting numeric equality across stringified
+/// numbers should use `-eq`, which coerces via `numeric_compare`.
 fn values_equal(left: &Value, right: &Value) -> bool {
     match (left, right) {
         (Value::Null, Value::Null) => true,
@@ -674,19 +677,11 @@ fn values_equal(left: &Value, right: &Value) -> bool {
             (*a as f64 - b).abs() < f64::EPSILON
         }
         (Value::String(a), Value::String(b)) => a == b,
-        // String-Int comparison: try to parse string as integer
-        (Value::String(s), Value::Int(n)) | (Value::Int(n), Value::String(s)) => {
-            s.parse::<i64>().map(|parsed| parsed == *n).unwrap_or(false)
-        }
-        // String-Float comparison: try to parse string as float
-        (Value::String(s), Value::Float(f)) | (Value::Float(f), Value::String(s)) => {
-            s.parse::<f64>().map(|parsed| (parsed - f).abs() < f64::EPSILON).unwrap_or(false)
-        }
-        // Json deep equality
         (Value::Json(a), Value::Json(b)) => a == b,
-        // Blob equality by id
         (Value::Blob(a), Value::Blob(b)) => a.id == b.id,
-        _ => false,
+        // Mixed types (most commonly String vs Int/Float from a quoted variable
+        // against a numeric literal): fall back to string equality.
+        _ => value_to_string(left) == value_to_string(right),
     }
 }
 

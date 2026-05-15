@@ -342,6 +342,34 @@ shell_compat! {
     eq: "ok",
 }
 
+// `==` does string equality in [[ ]] (bash-compat) and must agree across
+// quoted/unquoted RHS — a leading-zero string is NOT equal to a bare
+// numeric literal. Use `-eq` to compare numerically.
+
+shell_compat! {
+    name: string_eq_leading_zero_vs_int_literal,
+    script: r#"X="01"; [[ "$X" == 1 ]] && echo same || echo diff"#,
+    eq: "diff",
+}
+
+shell_compat! {
+    name: string_eq_leading_zero_vs_quoted,
+    script: r#"X="01"; [[ "$X" == "1" ]] && echo same || echo diff"#,
+    eq: "diff",
+}
+
+shell_compat! {
+    name: string_eq_quoted_vs_int_literal_agree,
+    script: r#"X="1"; [[ "$X" == 1 ]] && [[ "$X" == "1" ]] && echo agree || echo split"#,
+    eq: "agree",
+}
+
+shell_compat! {
+    name: numeric_eq_handles_what_string_eq_does_not,
+    script: r#"X="01"; [[ "$X" -eq 1 ]] && echo numeric || echo lex"#,
+    eq: "numeric",
+}
+
 shell_compat! {
     name: compound_short_circuit_or,
     script: r#"[[ -d / || $(cat /nonexistent_file) == "x" ]] && echo "yes" || echo "no""#,
