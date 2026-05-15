@@ -270,14 +270,6 @@ pub fn format_expr(expr: &Expr) -> String {
             let op_str = match op {
                 BinaryOp::And => "and",
                 BinaryOp::Or => "or",
-                BinaryOp::Eq => "eq",
-                BinaryOp::NotEq => "neq",
-                BinaryOp::Match => "match",
-                BinaryOp::NotMatch => "not-match",
-                BinaryOp::Lt => "<",
-                BinaryOp::Gt => ">",
-                BinaryOp::LtEq => "<=",
-                BinaryOp::GtEq => ">=",
             };
             format!("({} {} {})", op_str, format_expr(left), format_expr(right))
         }

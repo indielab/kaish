@@ -2646,36 +2646,22 @@ impl Kernel {
                     Ok(Value::String(result))
                 }
             }
-            Expr::BinaryOp { left, op, right } => {
-                match op {
-                    BinaryOp::And => {
-                        let left_val = self.eval_expr_async(left).await?;
-                        if !is_truthy(&left_val) {
-                            return Ok(left_val);
-                        }
-                        self.eval_expr_async(right).await
+            Expr::BinaryOp { left, op, right } => match op {
+                BinaryOp::And => {
+                    let left_val = self.eval_expr_async(left).await?;
+                    if !is_truthy(&left_val) {
+                        return Ok(left_val);
                     }
-                    BinaryOp::Or => {
-                        let left_val = self.eval_expr_async(left).await?;
-                        if is_truthy(&left_val) {
-                            return Ok(left_val);
-                        }
-                        self.eval_expr_async(right).await
-                    }
-                    _ => {
-                        // Evaluate operands async (handles $(cmd)), then compare sync
-                        let left_val = self.eval_expr_async(left).await?;
-                        let right_val = self.eval_expr_async(right).await?;
-                        let resolved = Expr::BinaryOp {
-                            left: Box::new(Expr::Literal(left_val)),
-                            op: *op,
-                            right: Box::new(Expr::Literal(right_val)),
-                        };
-                        let mut scope = self.scope.write().await;
-                        eval_expr(&resolved, &mut scope).map_err(|e| anyhow::anyhow!("{}", e))
-                    }
+                    self.eval_expr_async(right).await
                 }
-            }
+                BinaryOp::Or => {
+                    let left_val = self.eval_expr_async(left).await?;
+                    if is_truthy(&left_val) {
+                        return Ok(left_val);
+                    }
+                    self.eval_expr_async(right).await
+                }
+            },
             Expr::CommandSubst(pipeline) => {
                 // Snapshot scope+cwd before running — only output escapes,
                 // not side effects like `cd` or variable assignments.

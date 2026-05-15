@@ -421,29 +421,16 @@ pub enum StringPart {
     CurrentPid,
 }
 
-/// Binary operators.
+/// Binary operators used to chain command/test conditions with `&&` / `||`.
+///
+/// Value-level comparisons (`==`, `-eq`, `-gt`, …) live on
+/// [`TestCmpOp`] inside `[[ ]]` and are not part of this enum.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BinaryOp {
     /// `&&` - logical and (short-circuit)
     And,
     /// `||` - logical or (short-circuit)
     Or,
-    /// `==` - equality
-    Eq,
-    /// `!=` - inequality
-    NotEq,
-    /// `=~` - regex match
-    Match,
-    /// `!~` - regex not match
-    NotMatch,
-    /// `<` - less than
-    Lt,
-    /// `>` - greater than
-    Gt,
-    /// `<=` - less than or equal
-    LtEq,
-    /// `>=` - greater than or equal
-    GtEq,
 }
 
 impl fmt::Display for BinaryOp {
@@ -451,14 +438,6 @@ impl fmt::Display for BinaryOp {
         match self {
             BinaryOp::And => write!(f, "&&"),
             BinaryOp::Or => write!(f, "||"),
-            BinaryOp::Eq => write!(f, "=="),
-            BinaryOp::NotEq => write!(f, "!="),
-            BinaryOp::Match => write!(f, "=~"),
-            BinaryOp::NotMatch => write!(f, "!~"),
-            BinaryOp::Lt => write!(f, "<"),
-            BinaryOp::Gt => write!(f, ">"),
-            BinaryOp::LtEq => write!(f, "<="),
-            BinaryOp::GtEq => write!(f, ">="),
         }
     }
 }

@@ -453,10 +453,11 @@ impl<'a, E: Executor> Evaluator<'a, E> {
             .map_err(|e| EvalError::ArithmeticError(e.to_string()))
     }
 
-    /// Evaluate a binary operation.
+    /// Evaluate a binary operation. The production parser only emits `&&`/`||`
+    /// here; comparisons live on `TestExpr::Comparison` and `BinaryOp` is just
+    /// the short-circuit logical chain inside conditions.
     fn eval_binary_op(&mut self, left: &Expr, op: BinaryOp, right: &Expr) -> EvalResult<Value> {
         match op {
-            // Short-circuit logical operators
             BinaryOp::And => {
                 let left_val = self.eval(left)?;
                 if !is_truthy(&left_val) {
@@ -470,48 +471,6 @@ impl<'a, E: Executor> Evaluator<'a, E> {
                     return Ok(left_val);
                 }
                 self.eval(right)
-            }
-            // Comparison operators
-            BinaryOp::Eq => {
-                let left_val = self.eval(left)?;
-                let right_val = self.eval(right)?;
-                Ok(Value::Bool(values_equal(&left_val, &right_val)))
-            }
-            BinaryOp::NotEq => {
-                let left_val = self.eval(left)?;
-                let right_val = self.eval(right)?;
-                Ok(Value::Bool(!values_equal(&left_val, &right_val)))
-            }
-            BinaryOp::Lt => {
-                let left_val = self.eval(left)?;
-                let right_val = self.eval(right)?;
-                compare_values(&left_val, &right_val).map(|ord| Value::Bool(ord.is_lt()))
-            }
-            BinaryOp::Gt => {
-                let left_val = self.eval(left)?;
-                let right_val = self.eval(right)?;
-                compare_values(&left_val, &right_val).map(|ord| Value::Bool(ord.is_gt()))
-            }
-            BinaryOp::LtEq => {
-                let left_val = self.eval(left)?;
-                let right_val = self.eval(right)?;
-                compare_values(&left_val, &right_val).map(|ord| Value::Bool(ord.is_le()))
-            }
-            BinaryOp::GtEq => {
-                let left_val = self.eval(left)?;
-                let right_val = self.eval(right)?;
-                compare_values(&left_val, &right_val).map(|ord| Value::Bool(ord.is_ge()))
-            }
-            // Regex match operators
-            BinaryOp::Match => {
-                let left_val = self.eval(left)?;
-                let right_val = self.eval(right)?;
-                regex_match(&left_val, &right_val, false)
-            }
-            BinaryOp::NotMatch => {
-                let left_val = self.eval(left)?;
-                let right_val = self.eval(right)?;
-                regex_match(&left_val, &right_val, true)
             }
         }
     }
@@ -1015,128 +974,6 @@ mod tests {
     }
 
     #[test]
-    fn eval_equality() {
-        let mut scope = Scope::new();
-        let expr = Expr::BinaryOp {
-            left: Box::new(Expr::Literal(Value::Int(5))),
-            op: BinaryOp::Eq,
-            right: Box::new(Expr::Literal(Value::Int(5))),
-        };
-        assert_eq!(eval_expr(&expr, &mut scope), Ok(Value::Bool(true)));
-    }
-
-    #[test]
-    fn eval_inequality() {
-        let mut scope = Scope::new();
-        let expr = Expr::BinaryOp {
-            left: Box::new(Expr::Literal(Value::Int(5))),
-            op: BinaryOp::NotEq,
-            right: Box::new(Expr::Literal(Value::Int(3))),
-        };
-        assert_eq!(eval_expr(&expr, &mut scope), Ok(Value::Bool(true)));
-    }
-
-    #[test]
-    fn eval_less_than() {
-        let mut scope = Scope::new();
-        let expr = Expr::BinaryOp {
-            left: Box::new(Expr::Literal(Value::Int(3))),
-            op: BinaryOp::Lt,
-            right: Box::new(Expr::Literal(Value::Int(5))),
-        };
-        assert_eq!(eval_expr(&expr, &mut scope), Ok(Value::Bool(true)));
-    }
-
-    #[test]
-    fn eval_greater_than() {
-        let mut scope = Scope::new();
-        let expr = Expr::BinaryOp {
-            left: Box::new(Expr::Literal(Value::Int(5))),
-            op: BinaryOp::Gt,
-            right: Box::new(Expr::Literal(Value::Int(3))),
-        };
-        assert_eq!(eval_expr(&expr, &mut scope), Ok(Value::Bool(true)));
-    }
-
-    #[test]
-    fn eval_less_than_or_equal() {
-        let mut scope = Scope::new();
-        let eq = Expr::BinaryOp {
-            left: Box::new(Expr::Literal(Value::Int(5))),
-            op: BinaryOp::LtEq,
-            right: Box::new(Expr::Literal(Value::Int(5))),
-        };
-        let lt = Expr::BinaryOp {
-            left: Box::new(Expr::Literal(Value::Int(3))),
-            op: BinaryOp::LtEq,
-            right: Box::new(Expr::Literal(Value::Int(5))),
-        };
-        assert_eq!(eval_expr(&eq, &mut scope), Ok(Value::Bool(true)));
-        assert_eq!(eval_expr(&lt, &mut scope), Ok(Value::Bool(true)));
-    }
-
-    #[test]
-    fn eval_greater_than_or_equal() {
-        let mut scope = Scope::new();
-        let eq = Expr::BinaryOp {
-            left: Box::new(Expr::Literal(Value::Int(5))),
-            op: BinaryOp::GtEq,
-            right: Box::new(Expr::Literal(Value::Int(5))),
-        };
-        let gt = Expr::BinaryOp {
-            left: Box::new(Expr::Literal(Value::Int(7))),
-            op: BinaryOp::GtEq,
-            right: Box::new(Expr::Literal(Value::Int(5))),
-        };
-        assert_eq!(eval_expr(&eq, &mut scope), Ok(Value::Bool(true)));
-        assert_eq!(eval_expr(&gt, &mut scope), Ok(Value::Bool(true)));
-    }
-
-    #[test]
-    fn eval_string_comparison() {
-        let mut scope = Scope::new();
-        let expr = Expr::BinaryOp {
-            left: Box::new(Expr::Literal(Value::String("apple".into()))),
-            op: BinaryOp::Lt,
-            right: Box::new(Expr::Literal(Value::String("banana".into()))),
-        };
-        assert_eq!(eval_expr(&expr, &mut scope), Ok(Value::Bool(true)));
-    }
-
-    #[test]
-    fn eval_mixed_int_float_comparison() {
-        let mut scope = Scope::new();
-        let expr = Expr::BinaryOp {
-            left: Box::new(Expr::Literal(Value::Int(3))),
-            op: BinaryOp::Lt,
-            right: Box::new(Expr::Literal(Value::Float(3.5))),
-        };
-        assert_eq!(eval_expr(&expr, &mut scope), Ok(Value::Bool(true)));
-    }
-
-    #[test]
-    fn eval_int_float_equality() {
-        let mut scope = Scope::new();
-        let expr = Expr::BinaryOp {
-            left: Box::new(Expr::Literal(Value::Int(5))),
-            op: BinaryOp::Eq,
-            right: Box::new(Expr::Literal(Value::Float(5.0))),
-        };
-        assert_eq!(eval_expr(&expr, &mut scope), Ok(Value::Bool(true)));
-    }
-
-    #[test]
-    fn eval_type_mismatch_comparison() {
-        let mut scope = Scope::new();
-        let expr = Expr::BinaryOp {
-            left: Box::new(Expr::Literal(Value::Int(5))),
-            op: BinaryOp::Lt,
-            right: Box::new(Expr::Literal(Value::String("five".into()))),
-        };
-        assert!(matches!(eval_expr(&expr, &mut scope), Err(EvalError::TypeError { .. })));
-    }
-
-    #[test]
     fn is_truthy_values() {
         assert!(!is_truthy(&Value::Null));
         assert!(!is_truthy(&Value::Bool(false)));
@@ -1285,76 +1122,6 @@ mod tests {
             right: Box::new(Expr::Literal(Value::Bool(true))),
         };
         // (true || false) = true, true && true = true
-        assert_eq!(eval_expr(&expr, &mut scope), Ok(Value::Bool(true)));
-    }
-
-    #[test]
-    fn eval_comparison_with_variables() {
-        let mut scope = Scope::new();
-        scope.set("X", Value::Int(10));
-        scope.set("Y", Value::Int(5));
-
-        let expr = Expr::BinaryOp {
-            left: Box::new(var_expr("X")),
-            op: BinaryOp::Gt,
-            right: Box::new(var_expr("Y")),
-        };
-        assert_eq!(eval_expr(&expr, &mut scope), Ok(Value::Bool(true)));
-    }
-
-    #[test]
-    fn eval_string_equality() {
-        let mut scope = Scope::new();
-        let expr = Expr::BinaryOp {
-            left: Box::new(Expr::Literal(Value::String("hello".into()))),
-            op: BinaryOp::Eq,
-            right: Box::new(Expr::Literal(Value::String("hello".into()))),
-        };
-        assert_eq!(eval_expr(&expr, &mut scope), Ok(Value::Bool(true)));
-    }
-
-    #[test]
-    fn eval_string_inequality() {
-        let mut scope = Scope::new();
-        let expr = Expr::BinaryOp {
-            left: Box::new(Expr::Literal(Value::String("hello".into()))),
-            op: BinaryOp::NotEq,
-            right: Box::new(Expr::Literal(Value::String("world".into()))),
-        };
-        assert_eq!(eval_expr(&expr, &mut scope), Ok(Value::Bool(true)));
-    }
-
-    #[test]
-    fn eval_null_equality() {
-        let mut scope = Scope::new();
-        let expr = Expr::BinaryOp {
-            left: Box::new(Expr::Literal(Value::Null)),
-            op: BinaryOp::Eq,
-            right: Box::new(Expr::Literal(Value::Null)),
-        };
-        assert_eq!(eval_expr(&expr, &mut scope), Ok(Value::Bool(true)));
-    }
-
-    #[test]
-    fn eval_null_not_equal_to_int() {
-        let mut scope = Scope::new();
-        let expr = Expr::BinaryOp {
-            left: Box::new(Expr::Literal(Value::Null)),
-            op: BinaryOp::Eq,
-            right: Box::new(Expr::Literal(Value::Int(0))),
-        };
-        assert_eq!(eval_expr(&expr, &mut scope), Ok(Value::Bool(false)));
-    }
-
-    #[test]
-    fn eval_float_comparison_boundary() {
-        let mut scope = Scope::new();
-        // 1.0 == 1.0 (exact)
-        let expr = Expr::BinaryOp {
-            left: Box::new(Expr::Literal(Value::Float(1.0))),
-            op: BinaryOp::Eq,
-            right: Box::new(Expr::Literal(Value::Float(1.0))),
-        };
         assert_eq!(eval_expr(&expr, &mut scope), Ok(Value::Bool(true)));
     }
 
