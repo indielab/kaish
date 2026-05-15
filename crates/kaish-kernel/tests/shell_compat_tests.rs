@@ -290,6 +290,58 @@ shell_compat! {
     eq: "valid",
 }
 
+// Numeric test operators (-eq/-ne/-gt/-lt/-ge/-le) coerce string operands
+// to numbers. The lex-vs-numeric distinction matters once operands have
+// more than one digit — `"15".cmp("2")` is Less, but 15 >= 2 numerically.
+
+shell_compat! {
+    name: numeric_ge_multidigit_unquoted,
+    script: "X=15; [[ $X -ge 2 ]] && echo ok || echo nope",
+    eq: "ok",
+}
+
+shell_compat! {
+    name: numeric_ge_multidigit_quoted,
+    script: r#"X=15; [[ "$X" -ge 2 ]] && echo ok || echo nope"#,
+    eq: "ok",
+}
+
+shell_compat! {
+    name: numeric_ge_string_literals,
+    script: r#"[[ "15" -ge "2" ]] && echo ok || echo nope"#,
+    eq: "ok",
+}
+
+shell_compat! {
+    name: numeric_lt_multidigit_via_cmd_subst,
+    script: r#"COUNT=$(echo 5); [[ "$COUNT" -lt 10 ]] && echo ok || echo nope"#,
+    eq: "ok",
+}
+
+shell_compat! {
+    name: numeric_gt_two_quoted_strings,
+    script: r#"[[ "15" -gt "2" ]] && echo ok || echo nope"#,
+    eq: "ok",
+}
+
+shell_compat! {
+    name: numeric_le_two_quoted_strings,
+    script: r#"[[ "2" -le "15" ]] && echo ok || echo nope"#,
+    eq: "ok",
+}
+
+shell_compat! {
+    name: numeric_eq_leading_zero_string,
+    script: r#"[[ "01" -eq "1" ]] && echo ok || echo nope"#,
+    eq: "ok",
+}
+
+shell_compat! {
+    name: numeric_ne_quoted_strings,
+    script: r#"[[ "2" -ne "15" ]] && echo ok || echo nope"#,
+    eq: "ok",
+}
+
 shell_compat! {
     name: compound_short_circuit_or,
     script: r#"[[ -d / || $(cat /nonexistent_file) == "x" ]] && echo "yes" || echo "no""#,

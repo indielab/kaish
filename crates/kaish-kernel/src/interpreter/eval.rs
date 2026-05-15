@@ -271,14 +271,32 @@ impl<'a, E: Executor> Evaluator<'a, E> {
                         }
                     }
                     TestCmpOp::Gt | TestCmpOp::Lt | TestCmpOp::GtEq | TestCmpOp::LtEq => {
-                        // Ordered comparison (works for strings and numbers)
-                        // Type mismatches are errors - no silent coercion
+                        // String comparison: `>` `<` `>=` `<=` use lexicographic ordering.
                         let ord = compare_values(&left_val, &right_val)?;
                         match op {
                             TestCmpOp::Gt => ord.is_gt(),
                             TestCmpOp::Lt => ord.is_lt(),
                             TestCmpOp::GtEq => ord.is_ge(),
                             TestCmpOp::LtEq => ord.is_le(),
+                            _ => unreachable!(),
+                        }
+                    }
+                    TestCmpOp::NumEq
+                    | TestCmpOp::NumNotEq
+                    | TestCmpOp::NumGt
+                    | TestCmpOp::NumLt
+                    | TestCmpOp::NumGtEq
+                    | TestCmpOp::NumLtEq => {
+                        // Arithmetic comparison: `-eq` `-ne` `-gt` `-lt` `-ge` `-le`
+                        // always coerce operands to numbers. Non-numeric strings error.
+                        let ord = numeric_compare(&left_val, &right_val)?;
+                        match op {
+                            TestCmpOp::NumEq => ord.is_eq(),
+                            TestCmpOp::NumNotEq => !ord.is_eq(),
+                            TestCmpOp::NumGt => ord.is_gt(),
+                            TestCmpOp::NumLt => ord.is_lt(),
+                            TestCmpOp::NumGtEq => ord.is_ge(),
+                            TestCmpOp::NumLtEq => ord.is_le(),
                             _ => unreachable!(),
                         }
                     }
@@ -731,6 +749,58 @@ fn compare_values(left: &Value, right: &Value) -> EvalResult<std::cmp::Ordering>
             expected: "comparable types (numbers or strings)",
             got: format!("{:?} vs {:?}", type_name(left), type_name(right)),
         }),
+    }
+}
+
+/// Coerce a value to a number for arithmetic test ops (`-eq`/`-gt`/…).
+///
+/// `String` operands are parsed as `i64` then `f64` (matching POSIX `[[ ]]`
+/// arithmetic context). Non-numeric strings and non-numeric types error.
+enum Num {
+    Int(i64),
+    Float(f64),
+}
+
+fn value_to_num(value: &Value) -> EvalResult<Num> {
+    match value {
+        Value::Int(n) => Ok(Num::Int(*n)),
+        Value::Float(f) => Ok(Num::Float(*f)),
+        Value::String(s) => {
+            let t = s.trim();
+            if let Ok(n) = t.parse::<i64>() {
+                Ok(Num::Int(n))
+            } else if let Ok(f) = t.parse::<f64>() {
+                Ok(Num::Float(f))
+            } else {
+                Err(EvalError::TypeError {
+                    expected: "numeric operand",
+                    got: format!("non-numeric string {:?}", s),
+                })
+            }
+        }
+        _ => Err(EvalError::TypeError {
+            expected: "numeric operand",
+            got: type_name(value).to_string(),
+        }),
+    }
+}
+
+/// Numeric ordering for `[[ -eq ]]`/`-gt`/`-lt`/`-ge`/`-le`/`-ne`.
+/// Coerces string operands via `value_to_num`.
+fn numeric_compare(left: &Value, right: &Value) -> EvalResult<std::cmp::Ordering> {
+    let l = value_to_num(left)?;
+    let r = value_to_num(right)?;
+    match (l, r) {
+        (Num::Int(a), Num::Int(b)) => Ok(a.cmp(&b)),
+        (Num::Float(a), Num::Float(b)) => a
+            .partial_cmp(&b)
+            .ok_or_else(|| EvalError::ArithmeticError("NaN comparison".into())),
+        (Num::Int(a), Num::Float(b)) => (a as f64)
+            .partial_cmp(&b)
+            .ok_or_else(|| EvalError::ArithmeticError("NaN comparison".into())),
+        (Num::Float(a), Num::Int(b)) => a
+            .partial_cmp(&(b as f64))
+            .ok_or_else(|| EvalError::ArithmeticError("NaN comparison".into())),
     }
 }
 

@@ -328,24 +328,40 @@ pub enum StringTestOp {
 }
 
 /// Comparison operators for `[[ ]]` tests.
+///
+/// Mirrors POSIX `[[ ]]` semantics: `==`/`!=`/`>`/`<`/`>=`/`<=` are string
+/// (lexicographic) comparisons, while `-eq`/`-ne`/`-gt`/`-lt`/`-ge`/`-le`
+/// are arithmetic comparisons that coerce string operands to numbers.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TestCmpOp {
-    /// `==` - string equality
+    /// `==` / `=` — string equality
     Eq,
-    /// `!=` - string inequality
+    /// `!=` — string inequality
     NotEq,
-    /// `=~` - regex match
+    /// `=~` — regex match
     Match,
-    /// `!~` - regex not match
+    /// `!~` — regex not match
     NotMatch,
-    /// `-gt` - greater than (numeric)
+    /// `>` — string greater than (lexicographic)
     Gt,
-    /// `-lt` - less than (numeric)
+    /// `<` — string less than (lexicographic)
     Lt,
-    /// `-ge` - greater than or equal (numeric)
+    /// `>=` — string greater than or equal (lexicographic)
     GtEq,
-    /// `-le` - less than or equal (numeric)
+    /// `<=` — string less than or equal (lexicographic)
     LtEq,
+    /// `-eq` — numeric equality
+    NumEq,
+    /// `-ne` — numeric inequality
+    NumNotEq,
+    /// `-gt` — numeric greater than
+    NumGt,
+    /// `-lt` — numeric less than
+    NumLt,
+    /// `-ge` — numeric greater than or equal
+    NumGtEq,
+    /// `-le` — numeric less than or equal
+    NumLtEq,
 }
 
 // Value and BlobRef live in kaish-types.
@@ -492,10 +508,16 @@ impl fmt::Display for TestCmpOp {
             TestCmpOp::NotEq => write!(f, "!="),
             TestCmpOp::Match => write!(f, "=~"),
             TestCmpOp::NotMatch => write!(f, "!~"),
-            TestCmpOp::Gt => write!(f, "-gt"),
-            TestCmpOp::Lt => write!(f, "-lt"),
-            TestCmpOp::GtEq => write!(f, "-ge"),
-            TestCmpOp::LtEq => write!(f, "-le"),
+            TestCmpOp::Gt => write!(f, ">"),
+            TestCmpOp::Lt => write!(f, "<"),
+            TestCmpOp::GtEq => write!(f, ">="),
+            TestCmpOp::LtEq => write!(f, "<="),
+            TestCmpOp::NumEq => write!(f, "-eq"),
+            TestCmpOp::NumNotEq => write!(f, "-ne"),
+            TestCmpOp::NumGt => write!(f, "-gt"),
+            TestCmpOp::NumLt => write!(f, "-lt"),
+            TestCmpOp::NumGtEq => write!(f, "-ge"),
+            TestCmpOp::NumLtEq => write!(f, "-le"),
         }
     }
 }

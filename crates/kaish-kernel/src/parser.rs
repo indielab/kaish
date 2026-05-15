@@ -1609,12 +1609,12 @@ where
         just(Token::Lt).to(TestCmpOp::Lt),
         just(Token::GtEq).to(TestCmpOp::GtEq),
         just(Token::LtEq).to(TestCmpOp::LtEq),
-        select! { Token::ShortFlag(s) if s == "eq" => TestCmpOp::Eq },
-        select! { Token::ShortFlag(s) if s == "ne" => TestCmpOp::NotEq },
-        select! { Token::ShortFlag(s) if s == "gt" => TestCmpOp::Gt },
-        select! { Token::ShortFlag(s) if s == "lt" => TestCmpOp::Lt },
-        select! { Token::ShortFlag(s) if s == "ge" => TestCmpOp::GtEq },
-        select! { Token::ShortFlag(s) if s == "le" => TestCmpOp::LtEq },
+        select! { Token::ShortFlag(s) if s == "eq" => TestCmpOp::NumEq },
+        select! { Token::ShortFlag(s) if s == "ne" => TestCmpOp::NumNotEq },
+        select! { Token::ShortFlag(s) if s == "gt" => TestCmpOp::NumGt },
+        select! { Token::ShortFlag(s) if s == "lt" => TestCmpOp::NumLt },
+        select! { Token::ShortFlag(s) if s == "ge" => TestCmpOp::NumGtEq },
+        select! { Token::ShortFlag(s) if s == "le" => TestCmpOp::NumLtEq },
     ));
 
     // File test: -f path
@@ -2664,7 +2664,7 @@ mod tests {
         match &result.statements[0] {
             Stmt::If(if_stmt) => match if_stmt.condition.as_ref() {
                 Expr::Test(test) => match test.as_ref() {
-                    TestExpr::Comparison { op, .. } => assert_eq!(*op, TestCmpOp::Lt),
+                    TestExpr::Comparison { op, .. } => assert_eq!(*op, TestCmpOp::NumLt),
                     other => panic!("expected comparison, got {:?}", other),
                 },
                 other => panic!("expected test expr, got {:?}", other),
@@ -2679,7 +2679,7 @@ mod tests {
         match &result.statements[0] {
             Stmt::If(if_stmt) => match if_stmt.condition.as_ref() {
                 Expr::Test(test) => match test.as_ref() {
-                    TestExpr::Comparison { op, .. } => assert_eq!(*op, TestCmpOp::Gt),
+                    TestExpr::Comparison { op, .. } => assert_eq!(*op, TestCmpOp::NumGt),
                     other => panic!("expected comparison, got {:?}", other),
                 },
                 other => panic!("expected test expr, got {:?}", other),
@@ -2694,7 +2694,7 @@ mod tests {
         match &result.statements[0] {
             Stmt::If(if_stmt) => match if_stmt.condition.as_ref() {
                 Expr::Test(test) => match test.as_ref() {
-                    TestExpr::Comparison { op, .. } => assert_eq!(*op, TestCmpOp::LtEq),
+                    TestExpr::Comparison { op, .. } => assert_eq!(*op, TestCmpOp::NumLtEq),
                     other => panic!("expected comparison, got {:?}", other),
                 },
                 other => panic!("expected test expr, got {:?}", other),
@@ -2709,7 +2709,7 @@ mod tests {
         match &result.statements[0] {
             Stmt::If(if_stmt) => match if_stmt.condition.as_ref() {
                 Expr::Test(test) => match test.as_ref() {
-                    TestExpr::Comparison { op, .. } => assert_eq!(*op, TestCmpOp::GtEq),
+                    TestExpr::Comparison { op, .. } => assert_eq!(*op, TestCmpOp::NumGtEq),
                     other => panic!("expected comparison, got {:?}", other),
                 },
                 other => panic!("expected test expr, got {:?}", other),
@@ -3038,7 +3038,7 @@ mod tests {
                     match right.as_ref() {
                         Expr::Test(test) => match test.as_ref() {
                             TestExpr::Comparison { op: right_op, .. } => {
-                                assert_eq!(*right_op, TestCmpOp::Gt);
+                                assert_eq!(*right_op, TestCmpOp::NumGt);
                             }
                             other => panic!("expected comparison, got {:?}", other),
                         },
