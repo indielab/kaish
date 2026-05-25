@@ -4,8 +4,8 @@
   <img src="docs/banner.svg" alt="Kai the hermit crab — kaish mascot — looking at kaish code" width="720">
 </p>
 
-A predictable shell for AI agents. A distilled Bourne-like shell with builtin
-core utilities. Kaish is embeddable with stronger validation ahead of execution.
+Kaish is an embeddable Bourne-like shell with many builtins and a virtual filesystem that can be
+bridged to an underlying system or completely sandboxed.
 
 ## Install
 
@@ -18,8 +18,9 @@ are in future plans when things stabilize a bit more and I have time (or PRs!).
 
 ## Why kaish?
 
-Traditional shells have evolved syntax with many sharp edges. kaish implements the
-commonly-used parts of sh while eliminating entire classes of bugs at the language level:
+Kaish is sh-like but not a full Bourne shell or bash. The idea is to preserve the language
+that's in our muscle/model memory, while providing better pre-execution syntax checking,
+easy embedding, and a VFS abstraction to help with sandboxing.
 
 - **No implicit word splitting** — `$VAR` is always one value, never split on spaces
 - **Bare glob expansion** — `ls *.txt` works; opt out with `set +o glob`
