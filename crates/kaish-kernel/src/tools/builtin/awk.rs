@@ -4,16 +4,42 @@
 //! Uses ERE (extended regex) syntax like egrep, consistent with sed.
 
 use async_trait::async_trait;
+use clap::{CommandFactory, Parser};
 use regex::Regex;
 use std::collections::HashMap;
 use std::path::Path;
 
+#[cfg(test)]
 use crate::ast::Value;
 use crate::interpreter::{ExecResult, OutputData};
-use crate::tools::{ExecContext, ParamSchema, Tool, ToolArgs, ToolSchema};
+use crate::tools::{schema_from_clap, ExecContext, GlobalFlags, Tool, ToolArgs, ToolSchema};
 
 /// Awk tool: pattern-directed scanning and processing.
 pub struct Awk;
+
+/// clap-derived argv layer for awk. See docs/clap-migration.md.
+///
+/// awk's program body is read off `args.positional[0]` directly so the rich
+/// AWK syntax stays out of clap. clap only handles argv-level flags like
+/// `-F` (field separator) and `-v NAME=VALUE`.
+#[derive(Parser, Debug)]
+#[command(name = "awk", about = "Pattern scanning and text processing language")]
+struct AwkArgs {
+    /// Field separator regex (-F).
+    #[arg(short = 'F', long = "field_separator")]
+    field_separator: Option<String>,
+
+    /// Variable assignment (-v NAME=VALUE).
+    #[arg(short = 'v', long = "var")]
+    var: Option<String>,
+
+    #[command(flatten)]
+    global: GlobalFlags,
+
+    /// Sink — program + path live on args.positional.
+    #[arg(hide = true)]
+    rest: Vec<String>,
+}
 
 #[async_trait]
 impl Tool for Awk {
@@ -22,41 +48,32 @@ impl Tool for Awk {
     }
 
     fn schema(&self) -> ToolSchema {
-        ToolSchema::new("awk", "Pattern scanning and text processing language")
-            .param(ParamSchema::required(
-                "program",
-                "string",
-                "AWK program to execute",
-            ))
-            .param(ParamSchema::optional(
-                "path",
-                "string",
-                Value::Null,
-                "File to process (reads stdin if not provided)",
-            ))
-            .param(ParamSchema::optional(
-                "field_separator",
-                "string",
-                Value::Null,
-                "Field separator regex (-F)",
-            ))
-            .param(ParamSchema::optional(
-                "var",
-                "string",
-                Value::Null,
-                "Variable assignment (-v name=value)",
-            ))
-            .example("Print second field", "awk '{print $2}' file.txt")
-            .example("Sum first column", "awk '{sum += $1} END {print sum}' data.txt")
-            .example("Filter by pattern", "awk '/error/ {print $0}' log.txt")
-            .example("Custom separator", "awk -F: '{print $1}' /etc/passwd")
-            .example("Conditional", "awk '$3 > 100 {print $1, $3}' data.txt")
-            .example("BEGIN/END", "awk 'BEGIN {print \"Header\"} {print} END {print \"Footer\"}'")
-            .example("Field count", "awk '{print NF, $0}' file.txt")
-            .example("Line numbers", "awk '{print NR, $0}' file.txt")
+        schema_from_clap(
+            &AwkArgs::command(),
+            "awk",
+            "Pattern scanning and text processing language",
+            [
+                ("Print second field", "awk '{print $2}' file.txt"),
+                ("Sum first column", "awk '{sum += $1} END {print sum}' data.txt"),
+                ("Filter by pattern", "awk '/error/ {print $0}' log.txt"),
+                ("Custom separator", "awk -F: '{print $1}' /etc/passwd"),
+                ("Conditional", "awk '$3 > 100 {print $1, $3}' data.txt"),
+                ("BEGIN/END", "awk 'BEGIN {print \"Header\"} {print} END {print \"Footer\"}'"),
+                ("Field count", "awk '{print NF, $0}' file.txt"),
+                ("Line numbers", "awk '{print NR, $0}' file.txt"),
+            ],
+        )
     }
 
     async fn execute(&self, args: ToolArgs, ctx: &mut ExecContext) -> ExecResult {
+        let parsed = match AwkArgs::try_parse_from(
+            std::iter::once("awk".to_string()).chain(args.to_argv()),
+        ) {
+            Ok(p) => p,
+            Err(e) => return ExecResult::failure(2, format!("awk: {e}")),
+        };
+        parsed.global.apply(ctx);
+
         // Get program (first positional or named)
         let program = match args.get_string("program", 0) {
             Some(p) => p,
@@ -69,9 +86,11 @@ impl Tool for Awk {
             Err(e) => return ExecResult::failure(1, format!("awk: {}", e)),
         };
 
-        // Get field separator
-        let field_sep = args
-            .get_string("field_separator", usize::MAX)
+        // Get field separator (clap value first, then legacy named fallback)
+        let field_sep = parsed
+            .field_separator
+            .clone()
+            .or_else(|| args.get_string("field_separator", usize::MAX))
             .or_else(|| args.get_string("F", usize::MAX));
 
         // Get input
@@ -98,13 +117,12 @@ impl Tool for Awk {
             runtime.set_var("FS", AwkValue::String(fs));
         }
 
-        // Handle -v assignments
-        if let Some(var_assign) = args.get_string("var", usize::MAX)
-            && let Some((name, value)) = var_assign.split_once('=')
-        {
-            runtime.set_var(name.trim(), AwkValue::String(value.to_string()));
-        }
-        if let Some(var_assign) = args.get_string("v", usize::MAX)
+        // Handle -v assignments (clap value first, then legacy named fallback)
+        if let Some(var_assign) = parsed
+            .var
+            .clone()
+            .or_else(|| args.get_string("var", usize::MAX))
+            .or_else(|| args.get_string("v", usize::MAX))
             && let Some((name, value)) = var_assign.split_once('=')
         {
             runtime.set_var(name.trim(), AwkValue::String(value.to_string()));

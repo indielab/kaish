@@ -22,17 +22,32 @@
 //! ```
 
 use async_trait::async_trait;
+use clap::{CommandFactory, Parser};
 use std::path::Path;
 
 use crate::ast::Value;
-use crate::interpreter::ExecResult;
-use crate::tools::{ExecContext, ParamSchema, Tool, ToolArgs, ToolSchema};
+use crate::interpreter::{ExecResult, OutputFormat};
+use crate::tools::{schema_from_clap, ExecContext, GlobalFlags, Tool, ToolArgs, ToolSchema};
 
 /// Test tool: evaluates conditional expressions.
 pub struct Test;
 
 /// Bracket alias for test: `[`
 pub struct Bracket;
+
+/// clap-derived argv layer for test. See docs/clap-migration.md.
+///
+/// POSIX `test`/`[` predicate syntax (`-e FILE`, `-z STR`, `EXPR1 -a EXPR2`,
+/// …) does not fit clap's option model — `-e` etc. are operators, not flags.
+/// We only declare `GlobalFlags` here so `--json` is reflected into the
+/// schema; the body skips clap parsing entirely and lets the existing
+/// evaluator consume all positionals/flags as POSIX predicate tokens.
+#[derive(Parser, Debug)]
+#[command(name = "test", about = "Evaluate conditional expressions")]
+struct TestArgs {
+    #[command(flatten)]
+    global: GlobalFlags,
+}
 
 #[async_trait]
 impl Tool for Test {
@@ -41,19 +56,20 @@ impl Tool for Test {
     }
 
     fn schema(&self) -> ToolSchema {
-        ToolSchema::new("test", "Evaluate conditional expressions")
-            .param(ParamSchema::optional(
-                "expression",
-                "string",
-                Value::Null,
-                "Conditional expression to evaluate",
-            ))
-            .example("File exists", "test -e file.txt")
-            .example("String equality", "test \"$VAR\" = \"expected\"")
-            .example("Numeric comparison", "test 5 -gt 3")
+        schema_from_clap(
+            &TestArgs::command(),
+            "test",
+            "Evaluate conditional expressions",
+            [
+                ("File exists", "test -e file.txt"),
+                ("String equality", "test \"$VAR\" = \"expected\""),
+                ("Numeric comparison", "test 5 -gt 3"),
+            ],
+        )
     }
 
     async fn execute(&self, args: ToolArgs, ctx: &mut ExecContext) -> ExecResult {
+        apply_json_if_present(&args, ctx);
         evaluate_test(args, ctx, false).await
     }
 }
@@ -65,19 +81,29 @@ impl Tool for Bracket {
     }
 
     fn schema(&self) -> ToolSchema {
-        ToolSchema::new("[", "Evaluate conditional expressions (alternate syntax)")
-            .param(ParamSchema::optional(
-                "expression",
-                "string",
-                Value::Null,
-                "Conditional expression to evaluate (must end with ])",
-            ))
-            .example("Check file type", "[ -f file.txt ]")
-            .example("String test", "[ -n \"$VAR\" ]")
+        schema_from_clap(
+            &TestArgs::command(),
+            "[",
+            "Evaluate conditional expressions (alternate syntax)",
+            [
+                ("Check file type", "[ -f file.txt ]"),
+                ("String test", "[ -n \"$VAR\" ]"),
+            ],
+        )
     }
 
     async fn execute(&self, args: ToolArgs, ctx: &mut ExecContext) -> ExecResult {
+        apply_json_if_present(&args, ctx);
         evaluate_test(args, ctx, true).await
+    }
+}
+
+/// Honor the global `--json` flag without invoking the full clap parser —
+/// `test`'s positional grammar is not clap-shaped, so we just peek at the
+/// already-parsed flags / named map.
+fn apply_json_if_present(args: &ToolArgs, ctx: &mut ExecContext) {
+    if args.has_flag("json") {
+        ctx.output_format = Some(OutputFormat::Json);
     }
 }
 

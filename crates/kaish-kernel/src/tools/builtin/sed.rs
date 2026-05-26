@@ -4,15 +4,39 @@
 //! Uses ERE (extended regex) syntax like egrep, not BRE.
 
 use async_trait::async_trait;
+use clap::{CommandFactory, Parser};
 use regex::{Regex, RegexBuilder};
 use std::path::Path;
 
 use crate::ast::Value;
 use crate::interpreter::{ExecResult, OutputData};
-use crate::tools::{ExecContext, ParamSchema, Tool, ToolArgs, ToolSchema};
+use crate::tools::{schema_from_clap, ExecContext, GlobalFlags, Tool, ToolArgs, ToolSchema};
 
 /// Sed tool: stream editor for text transformations.
 pub struct Sed;
+
+/// clap-derived argv layer for sed. See docs/clap-migration.md.
+///
+/// Sed expression syntax stays hand-rolled — only argv-level flags like
+/// `-n` (quiet) and `-e EXPR` go through clap.
+#[derive(Parser, Debug)]
+#[command(name = "sed", about = "Stream editor for filtering and transforming text")]
+struct SedArgs {
+    /// Suppress automatic printing (-n).
+    #[arg(short = 'n', long = "quiet")]
+    quiet: bool,
+
+    /// Sed expression to execute (-e). Repeatable.
+    #[arg(short = 'e', long = "expression")]
+    expression: Option<String>,
+
+    #[command(flatten)]
+    global: GlobalFlags,
+
+    /// Sink — expression + path live on args.positional.
+    #[arg(hide = true)]
+    rest: Vec<String>,
+}
 
 #[async_trait]
 impl Tool for Sed {
@@ -21,38 +45,34 @@ impl Tool for Sed {
     }
 
     fn schema(&self) -> ToolSchema {
-        ToolSchema::new("sed", "Stream editor for filtering and transforming text")
-            .param(ParamSchema::optional(
-                "expression",
-                "string",
-                Value::Null,
-                "Sed expression to execute (-e)",
-            ))
-            .param(ParamSchema::optional(
-                "path",
-                "string",
-                Value::Null,
-                "File to process (reads stdin if not provided)",
-            ))
-            .param(ParamSchema::optional(
-                "quiet",
-                "bool",
-                Value::Bool(false),
-                "Suppress automatic printing (-n)",
-            ))
-            .example("Basic substitution", "sed 's/old/new/' file.txt")
-            .example("Global substitution", "sed 's/old/new/g' file.txt")
-            .example("Case-insensitive", "sed 's/hello/hi/gi' file.txt")
-            .example("Delete lines matching pattern", "sed '/error/d' log.txt")
-            .example("Print only matching lines", "sed -n '/pattern/p' file.txt")
-            .example("Multiple expressions", "sed -e 's/a/b/' -e 's/c/d/' file.txt")
-            .example("Line range", "sed '2,5d' file.txt")
-            .example("Alternative delimiter", "sed 's|/usr|/opt|g' file.txt")
-            .example("Capture groups", "sed 's/(\\w+) (\\w+)/\\2 \\1/' file.txt")
+        schema_from_clap(
+            &SedArgs::command(),
+            "sed",
+            "Stream editor for filtering and transforming text",
+            [
+                ("Basic substitution", "sed 's/old/new/' file.txt"),
+                ("Global substitution", "sed 's/old/new/g' file.txt"),
+                ("Case-insensitive", "sed 's/hello/hi/gi' file.txt"),
+                ("Delete lines matching pattern", "sed '/error/d' log.txt"),
+                ("Print only matching lines", "sed -n '/pattern/p' file.txt"),
+                ("Multiple expressions", "sed -e 's/a/b/' -e 's/c/d/' file.txt"),
+                ("Line range", "sed '2,5d' file.txt"),
+                ("Alternative delimiter", "sed 's|/usr|/opt|g' file.txt"),
+                ("Capture groups", "sed 's/(\\w+) (\\w+)/\\2 \\1/' file.txt"),
+            ],
+        )
     }
 
     async fn execute(&self, args: ToolArgs, ctx: &mut ExecContext) -> ExecResult {
-        let quiet = args.has_flag("quiet") || args.has_flag("n");
+        let parsed = match SedArgs::try_parse_from(
+            std::iter::once("sed".to_string()).chain(args.to_argv()),
+        ) {
+            Ok(p) => p,
+            Err(e) => return ExecResult::failure(2, format!("sed: {e}")),
+        };
+        parsed.global.apply(ctx);
+
+        let quiet = parsed.quiet || args.has_flag("quiet") || args.has_flag("n");
 
         // Collect expressions: from -e flags or first positional
         let expressions = collect_expressions(&args);

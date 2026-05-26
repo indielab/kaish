@@ -19,15 +19,62 @@
 use std::path::Path;
 
 use async_trait::async_trait;
+use clap::{CommandFactory, Parser};
 use jaq_core::{load, compile, Ctx, RcIter};
 use jaq_json::Val;
 
 use crate::ast::Value;
 use crate::interpreter::{ExecResult, OutputData};
-use crate::tools::{ExecContext, ParamSchema, Tool, ToolArgs, ToolSchema};
+use crate::tools::{schema_from_clap, ExecContext, GlobalFlags, ParamSchema, Tool, ToolArgs, ToolSchema};
 
 /// Native jq tool using jaq (pure Rust jq implementation).
 pub struct JqNative;
+
+/// clap-derived argv layer for jq. See docs/clap-migration.md.
+///
+/// jq's filter syntax stays hand-rolled — only argv-level flags are declared
+/// here. `--arg` / `--argjson` are accept-and-ignore at the clap level; the
+/// body reads them from `args.named` (kernel pre-parses them as
+/// `consumes=2` `Json(Array(Array([NAME, VALUE])))` pairs).
+#[derive(Parser, Debug)]
+#[command(name = "jq", about = "Native JSON query processor")]
+struct JqArgs {
+    /// Raw output mode (-r): output strings without quotes.
+    #[arg(short = 'r', long = "raw")]
+    raw: bool,
+
+    /// Compact output mode (-c): no pretty-printing.
+    #[arg(short = 'c', long = "compact")]
+    compact: bool,
+
+    /// Use null as input instead of reading stdin (-n).
+    #[arg(short = 'n', long = "null-input")]
+    null_input: bool,
+
+    /// Read from VFS file instead of stdin.
+    #[arg(long = "path")]
+    path: Option<String>,
+
+    /// Bind a kaish variable as a jq string: --arg NAME VALUE → $NAME.
+    /// Accept-and-ignore: body reads from args.named (kernel pre-parses both
+    /// tokens together as a 2-value pair via `consumes=2` in the schema).
+    /// At the clap layer we accept a single string because to_argv() joins
+    /// the pair as `--arg=NAME VALUE`.
+    #[arg(id = "arg", long = "arg", action = clap::ArgAction::Append, value_name = "NAME VALUE")]
+    _arg: Vec<String>,
+
+    /// Bind a kaish variable as a jq JSON value: --argjson NAME JSON → $NAME.
+    /// See _arg above for the consumes=2 / clap-layer split.
+    #[arg(id = "argjson", long = "argjson", action = clap::ArgAction::Append, value_name = "NAME JSON")]
+    _argjson: Vec<String>,
+
+    #[command(flatten)]
+    global: GlobalFlags,
+
+    /// Sink — filter + path live on args.positional.
+    #[arg(hide = true)]
+    rest: Vec<String>,
+}
 
 type Filter = jaq_core::Filter<jaq_core::Native<Val>>;
 
@@ -260,74 +307,58 @@ impl Tool for JqNative {
     }
 
     fn schema(&self) -> ToolSchema {
-        ToolSchema::new(
+        // Start from clap reflection, then layer the required `filter`
+        // positional on top — clap doesn't model the schema's
+        // "required positional" concept for our sink. Also override the
+        // `_arg`/`_argjson` params: clap parses them as 1-value (because
+        // to_argv joins NAME+VALUE as a single string after `=`), but the
+        // kernel's pre-parse needs `consumes=2` to grab both POSIX-style
+        // tokens.
+        let mut schema = schema_from_clap(
+            &JqArgs::command(),
             "jq",
             "JSON query processor — built into kaish (native jaq, no external binary). \
              The canonical way to extract fields from JSON: pipe data in, read \
              from a variable via `jq '.field' <<< \"$VAR\"`, or bind kaish \
              variables into the filter with `--arg` / `--argjson` plus `-n`.",
-        )
-            .param(ParamSchema::required(
-                "filter",
-                "string",
-                "jq filter expression",
-            ))
-            .param(ParamSchema::optional(
-                "raw",
-                "bool",
-                Value::Bool(false),
-                "Raw output mode (-r): output strings without quotes",
-            ))
-            .param(ParamSchema::optional(
-                "compact",
-                "bool",
-                Value::Bool(false),
-                "Compact output mode (-c): no pretty-printing",
-            ))
-            .param(ParamSchema::optional(
-                "path",
-                "string",
-                Value::String("".into()),
-                "Read from VFS file instead of stdin",
-            ))
-            .param(
-                ParamSchema::optional(
-                    "arg",
-                    "array",
-                    Value::Null,
-                    "Bind a kaish variable as a jq string: --arg NAME VALUE → $NAME. Repeatable.",
-                )
-                .consumes(2),
-            )
-            .param(
-                ParamSchema::optional(
-                    "argjson",
-                    "array",
-                    Value::Null,
-                    "Bind a kaish variable as a jq JSON value: --argjson NAME JSON → $NAME. Repeatable.",
-                )
-                .consumes(2),
-            )
-            .param(
-                ParamSchema::optional(
-                    "null-input",
-                    "bool",
-                    Value::Bool(false),
-                    "Use null as input instead of reading stdin (-n / --null-input).",
-                )
-                .with_aliases(["-n"]),
-            )
-            .example("Extract a field", "cat data.json | jq '.name'")
-            .example("Raw string output", "cat data.json | jq -r '.version'")
-            .example("Filter an array", "cat items.json | jq '.[] | select(.active)'")
-            .example("Read JSON from a variable", r#"jq -r '.name' <<< "$RESULT""#)
-            .example(
-                "Bind a kaish variable into the filter",
-                r#"R='{"x":42}'; jq -n --argjson r "$R" '$r.x'"#,
-            )
+            [
+                ("Extract a field", "cat data.json | jq '.name'"),
+                ("Raw string output", "cat data.json | jq -r '.version'"),
+                ("Filter an array", "cat items.json | jq '.[] | select(.active)'"),
+                ("Read JSON from a variable", r#"jq -r '.name' <<< "$RESULT""#),
+                (
+                    "Bind a kaish variable into the filter",
+                    r#"R='{"x":42}'; jq -n --argjson r "$R" '$r.x'"#,
+                ),
+            ],
+        );
+        // Bump consumes=2 for arg/argjson: clap layer parses them as
+        // single-value (the kernel joins NAME+VALUE as `--arg=NAME VALUE`
+        // before clap sees it), but the kernel's POSIX-style pre-parse
+        // needs to grab both tokens.
+        for p in schema.params.iter_mut() {
+            if matches!(p.name.as_str(), "arg" | "argjson") {
+                p.consumes = 2;
+            }
+        }
+        // Re-insert the required `filter` positional that clap can't model.
+        schema = schema.param(ParamSchema::required(
+            "filter",
+            "string",
+            "jq filter expression",
+        ));
+        schema
     }
 
     async fn execute(&self, args: ToolArgs, ctx: &mut ExecContext) -> ExecResult {
+        let parsed = match JqArgs::try_parse_from(
+            std::iter::once("jq".to_string()).chain(args.to_argv()),
+        ) {
+            Ok(p) => p,
+            Err(e) => return ExecResult::failure(2, format!("jq: {e}")),
+        };
+        parsed.global.apply(ctx);
+
         // Get filter (required, positional 0)
         let filter_str = match args.get_string("filter", 0) {
             Some(f) => f,
@@ -348,9 +379,10 @@ impl Tool for JqNative {
             Err(e) => return ExecResult::failure(1, e),
         };
 
-        let raw_output = args.has_flag("raw") || args.has_flag("r");
-        let _compact = args.has_flag("compact") || args.has_flag("c");
-        let null_input = args.has_flag("null-input") || args.has_flag("n");
+        let raw_output = parsed.raw || args.has_flag("raw") || args.has_flag("r");
+        let _compact = parsed.compact || args.has_flag("compact") || args.has_flag("c");
+        let null_input =
+            parsed.null_input || args.has_flag("null-input") || args.has_flag("n");
 
         // Get input JSON. `-n` / `--null-input` skips stdin entirely and feeds
         // `null` to the filter — same as real jq. Otherwise: fast path through

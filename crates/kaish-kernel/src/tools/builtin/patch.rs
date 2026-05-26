@@ -11,15 +11,44 @@
 //! ```
 
 use async_trait::async_trait;
+use clap::{CommandFactory, Parser};
 use std::path::Path;
 
 use crate::ast::Value;
 use crate::backend::PatchOp;
 use crate::interpreter::{ExecResult, OutputData};
-use crate::tools::{ExecContext, ParamSchema, Tool, ToolArgs, ToolSchema};
+use crate::tools::{schema_from_clap, ExecContext, GlobalFlags, Tool, ToolArgs, ToolSchema};
 
 /// Patch tool: applies unified diffs to files.
 pub struct Patch;
+
+/// clap-derived argv layer for patch. See docs/clap-migration.md.
+#[derive(Parser, Debug)]
+#[command(name = "patch", about = "Apply unified diff to files")]
+struct PatchArgs {
+    /// Strip N leading path components (-p).
+    #[arg(short = 'p')]
+    p: Option<i64>,
+
+    /// Reverse the patch (swap + and -).
+    #[arg(short = 'R', long = "reverse")]
+    reverse: bool,
+
+    /// Show what would change without applying.
+    #[arg(long = "dry-run")]
+    dry_run: bool,
+
+    /// Target file (overrides patch header).
+    #[arg(long = "file")]
+    file: Option<String>,
+
+    #[command(flatten)]
+    global: GlobalFlags,
+
+    /// Sink — positionals (explicit file) live on args.positional.
+    #[arg(hide = true)]
+    rest: Vec<String>,
+}
 
 #[async_trait]
 impl Tool for Patch {
@@ -28,37 +57,33 @@ impl Tool for Patch {
     }
 
     fn schema(&self) -> ToolSchema {
-        ToolSchema::new("patch", "Apply unified diff to files")
-            .param(ParamSchema::optional(
-                "file",
-                "string",
-                Value::Null,
-                "Target file (overrides patch header)",
-            ))
-            .param(ParamSchema::optional(
-                "p",
-                "int",
-                Value::Int(0),
-                "Strip N leading path components",
-            ))
-            .param(ParamSchema::optional(
-                "R",
-                "bool",
-                Value::Bool(false),
-                "Reverse the patch (swap + and -)",
-            ))
-            .param(ParamSchema::optional(
-                "dry-run",
-                "bool",
-                Value::Bool(false),
-                "Show what would change without applying",
-            ))
-            .example("Apply a patch", "patch < changes.patch")
-            .example("Dry run", "patch --dry-run < changes.patch")
-            .example("Strip path prefix", "patch -p1 < changes.patch")
+        schema_from_clap(
+            &PatchArgs::command(),
+            "patch",
+            "Apply unified diff to files",
+            [
+                ("Apply a patch", "patch < changes.patch"),
+                ("Dry run", "patch --dry-run < changes.patch"),
+                ("Strip path prefix", "patch -p1 < changes.patch"),
+            ],
+        )
     }
 
-    async fn execute(&self, args: ToolArgs, ctx: &mut ExecContext) -> ExecResult {
+    async fn execute(&self, mut args: ToolArgs, ctx: &mut ExecContext) -> ExecResult {
+        // Tests poke args.flags.insert("dry-run") and args.named.insert("p", Int(1)).
+        // `-R` flag and `--dry-run` flag work directly. The `p=1` form lands as
+        // a single-char named entry which to_argv renders as `-p=1`; clap's
+        // `Option<i64>` with short='p' handles that natively.
+        flagify_bool_named(&mut args);
+
+        let parsed = match PatchArgs::try_parse_from(
+            std::iter::once("patch".to_string()).chain(args.to_argv()),
+        ) {
+            Ok(p) => p,
+            Err(e) => return ExecResult::failure(2, format!("patch: {e}")),
+        };
+        parsed.global.apply(ctx);
+
         // Read patch content from stdin
         let patch_content = ctx.stdin.take().unwrap_or_default();
         if patch_content.is_empty() {
@@ -66,18 +91,21 @@ impl Tool for Patch {
         }
 
         // Parse options
-        let strip_level = args
-            .get_named("p")
-            .and_then(|v| match v {
-                Value::Int(i) => Some(*i as usize),
-                Value::String(s) => s.parse().ok(),
-                _ => None,
+        let strip_level = parsed
+            .p
+            .map(|i| i as usize)
+            .or_else(|| {
+                args.get_named("p").and_then(|v| match v {
+                    Value::Int(i) => Some(*i as usize),
+                    Value::String(s) => s.parse().ok(),
+                    _ => None,
+                })
             })
             .unwrap_or(0);
 
-        let reverse = args.has_flag("R");
-        let dry_run = args.has_flag("dry-run");
-        let explicit_file = args.get_string("file", 0);
+        let reverse = parsed.reverse || args.has_flag("R");
+        let dry_run = parsed.dry_run || args.has_flag("dry-run");
+        let explicit_file = parsed.file.clone().or_else(|| args.get_string("file", 0));
 
         // Parse the unified diff
         let hunks = match parse_unified_diff(&patch_content) {
@@ -152,6 +180,22 @@ impl Tool for Patch {
         }
 
         ExecResult::with_output(OutputData::text(output.trim_end()))
+    }
+}
+
+/// Promote `Value::Bool(true)` entries from `args.named` to flag-form so
+/// clap doesn't reject `--R=true` for a bool field. See xxd.rs/grep.rs.
+fn flagify_bool_named(args: &mut ToolArgs) {
+    let bool_keys: Vec<String> = args
+        .named
+        .iter()
+        .filter(|(_, v)| matches!(v, Value::Bool(_)))
+        .map(|(k, _)| k.clone())
+        .collect();
+    for k in bool_keys {
+        if let Some(Value::Bool(true)) = args.named.remove(&k) {
+            args.flags.insert(k);
+        }
     }
 }
 
