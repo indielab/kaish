@@ -1,12 +1,25 @@
 //! kaish-clear — Reset kernel session state.
 
 use async_trait::async_trait;
+use clap::{CommandFactory, Parser};
 
 use crate::interpreter::{ExecResult, OutputData, Scope};
-use crate::tools::{ExecContext, Tool, ToolArgs, ToolSchema};
+use crate::tools::{schema_from_clap, ExecContext, GlobalFlags, Tool, ToolArgs, ToolSchema};
 
 /// kaish-clear: reset session state (variables, cwd).
 pub struct KaishClear;
+
+/// clap-derived argv layer for kaish-clear. See docs/clap-migration.md.
+#[derive(Parser, Debug)]
+#[command(name = "kaish-clear", about = "Clear session state (variables, cwd)")]
+struct KaishClearArgs {
+    #[command(flatten)]
+    global: GlobalFlags,
+
+    /// Sink — to_argv() always emits `--` before positionals.
+    #[arg(hide = true)]
+    rest: Vec<String>,
+}
 
 #[async_trait]
 impl Tool for KaishClear {
@@ -15,11 +28,23 @@ impl Tool for KaishClear {
     }
 
     fn schema(&self) -> ToolSchema {
-        ToolSchema::new("kaish-clear", "Clear session state (variables, cwd)")
-            .example("Reset session", "kaish-clear")
+        schema_from_clap(
+            &KaishClearArgs::command(),
+            "kaish-clear",
+            "Clear session state (variables, cwd)",
+            [("Reset session", "kaish-clear")],
+        )
     }
 
-    async fn execute(&self, _args: ToolArgs, ctx: &mut ExecContext) -> ExecResult {
+    async fn execute(&self, args: ToolArgs, ctx: &mut ExecContext) -> ExecResult {
+        let parsed = match KaishClearArgs::try_parse_from(
+            std::iter::once("kaish-clear".to_string()).chain(args.to_argv()),
+        ) {
+            Ok(p) => p,
+            Err(e) => return ExecResult::failure(2, format!("kaish-clear: {e}")),
+        };
+        parsed.global.apply(ctx);
+
         // Preserve $$ across the reset — the kernel hasn't restarted, just
         // the variables/cwd were cleared. A user comparing $$ before and
         // after kaish-clear would expect the same identifier.

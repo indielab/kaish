@@ -1,14 +1,30 @@
 //! fg — Resume a stopped job in the foreground.
 
 use async_trait::async_trait;
+use clap::{CommandFactory, Parser};
 
+#[cfg(unix)]
 use crate::ast::Value;
 use crate::interpreter::ExecResult;
+#[cfg(unix)]
 use crate::scheduler::JobId;
-use crate::tools::{ExecContext, ParamSchema, Tool, ToolArgs, ToolSchema};
+use crate::tools::{schema_from_clap, ExecContext, GlobalFlags, Tool, ToolArgs, ToolSchema};
 
 /// Fg tool: resume a stopped job in the foreground.
 pub struct Fg;
+
+/// clap-derived argv layer for fg. See docs/clap-migration.md.
+#[derive(Parser, Debug)]
+#[command(name = "fg", about = "Resume a stopped job in the foreground")]
+struct FgArgs {
+    #[command(flatten)]
+    global: GlobalFlags,
+
+    /// Sink — to_argv() always emits `--` before positionals. Read the job
+    /// id off args.positional directly to preserve Int.
+    #[arg(hide = true)]
+    rest: Vec<String>,
+}
 
 #[async_trait]
 impl Tool for Fg {
@@ -17,21 +33,29 @@ impl Tool for Fg {
     }
 
     fn schema(&self) -> ToolSchema {
-        ToolSchema::new("fg", "Resume a stopped job in the foreground")
-            .param(ParamSchema::optional(
-                "job_id",
-                "int",
-                Value::Null,
-                "Job ID to resume (defaults to most recently stopped job)",
-            ))
-            .example("Resume last stopped job", "fg")
-            .example("Resume specific job", "fg 2")
+        schema_from_clap(
+            &FgArgs::command(),
+            "fg",
+            "Resume a stopped job in the foreground",
+            [
+                ("Resume last stopped job", "fg"),
+                ("Resume specific job", "fg 2"),
+            ],
+        )
     }
 
     async fn execute(&self, args: ToolArgs, ctx: &mut ExecContext) -> ExecResult {
+        let parsed = match FgArgs::try_parse_from(
+            std::iter::once("fg".to_string()).chain(args.to_argv()),
+        ) {
+            Ok(p) => p,
+            Err(e) => return ExecResult::failure(2, format!("fg: {e}")),
+        };
+        parsed.global.apply(ctx);
+
         #[cfg(not(unix))]
         {
-            let _ = (args, ctx);
+            let _ = args;
             return ExecResult::failure(1, "fg: job control not supported on this platform");
         }
 

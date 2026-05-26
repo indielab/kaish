@@ -36,15 +36,21 @@ without `visible_alias` gymnastics.
 ## The recipe (per builtin)
 
 ```rust
-use clap::Parser;
+use clap::{CommandFactory, Parser};
+
+use crate::interpreter::{ExecResult, OutputData};
+use crate::tools::{schema_from_clap, ExecContext, GlobalFlags, Tool, ToolArgs, ToolSchema};
 
 /// clap-derived argv layer for foo. See docs/clap-migration.md.
 #[derive(Parser, Debug)]
-#[command(name = "foo")]
+#[command(name = "foo", about = "Short description used in help")]
 struct FooArgs {
     /// Number output lines.
     #[arg(short = 'n', long = "number")]
     number: bool,
+
+    #[command(flatten)]
+    global: GlobalFlags,
 
     /// Sink — to_argv() always emits `--` before positionals, so clap
     /// accepts arbitrary tokens. Read paths off args.positional directly.
@@ -56,7 +62,17 @@ struct FooArgs {
 impl Tool for Foo {
     fn name(&self) -> &str { "foo" }
 
-    fn schema(&self) -> ToolSchema { /* keep hand-written for now */ }
+    fn schema(&self) -> ToolSchema {
+        schema_from_clap(
+            &FooArgs::command(),
+            "foo",
+            "Short description used in help",
+            [
+                ("Example one", "foo --number"),
+                ("Example two", "foo --number file.txt"),
+            ],
+        )
+    }
 
     async fn execute(&self, args: ToolArgs, ctx: &mut ExecContext) -> ExecResult {
         let parsed = match FooArgs::try_parse_from(
@@ -65,6 +81,7 @@ impl Tool for Foo {
             Ok(p) => p,
             Err(e) => return ExecResult::failure(2, format!("foo: {e}")),
         };
+        parsed.global.apply(ctx);
 
         // Use parsed.number for flags.
         // Use args.positional for Value-typed positionals — see below.
@@ -74,15 +91,21 @@ impl Tool for Foo {
 
 ### Conventions
 
-- **`#[command(name = "<tool>")]`** — set explicitly so clap's `--help` output
-  reads naturally. Do **not** set `no_binary_name = true`; we prepend the tool
-  name as the binary slot.
+- **`#[command(name = "<tool>", about = "...")]`** — set both. `name` makes
+  clap's help read naturally; `about` is the short description, hand-fed back
+  into `schema_from_clap` so the dispatcher and `help <tool>` agree. Do **not**
+  set `no_binary_name = true`; we prepend the tool name as the binary slot.
+- **Always `#[command(flatten)] global: GlobalFlags`** for the `--json` flag.
+  Call `parsed.global.apply(ctx)` after the parse so the dispatcher picks up
+  `ctx.output_format`.
+- **Schema via `schema_from_clap`.** Params are derived from the clap struct;
+  description and examples remain hand-written (clap doesn't own those).
+  `params_from_clap` filters out `help`/`version`/`json` and any
+  `#[arg(hide = true)]` sink fields.
 - **Parse failure → exit 2** — POSIX usage convention. `failure(2, format!("<tool>: {e}"))`.
 - **No `trailing_var_arg` / `allow_hyphen_values` needed.** `to_argv()` always
   emits `--` before positionals, so clap natively accepts hyphenated values
   there. Adding the attributes is noise.
-- **Keep `fn schema()` hand-written.** The REPL completer and validator both
-  use it pre-execution. Deriving from clap is a post-pilot decision (see below).
 - **Tests need no changes.** They construct `ToolArgs` directly and call
   `execute()` — the `to_argv()` reconstruction is byte-identical for the cases
   existing tests cover. If a test asserts specific clap-style error text,
@@ -122,7 +145,22 @@ If a builtin renders values type-specifically (e.g. `echo true` should print
   predicates, grep regex flags): stays hand-rolled. clap covers the argv
   layer; what those builtins do with their positionals is not argv parsing.
 
-## Checkpoint questions (deferred to the sweep)
+## Sweep decisions (Amy, 2026-05-26)
+
+1. **Schema source of truth**: derive params from clap. No migration path —
+   delete the hand-written `ParamSchema` declarations as each builtin migrates.
+   `schema_from_clap` keeps description and examples hand-fed since clap doesn't
+   own them.
+2. **`--json` placement**: pushed into clap via `GlobalFlags` flatten. The
+   legacy kernel pre-strip (`extract_output_format`) is kept active during the
+   sweep so un-migrated builtins continue to work; it's removed in the final
+   commit once every builtin is migrated.
+3. **`key=value` argv shorthand**: audit found in-repo usage in
+   `examples/scan.kai` and in `scatter`/`gather` example strings. Sweep
+   converts these callsites to `--key value` form; once converted, the
+   `Arg::Named` parser path is removed.
+
+## Original checkpoint questions (resolved above)
 
 1. **`fn schema()` — derive from clap, or keep hand-written?** The REPL
    completer and pre-execution validator both consume `ToolSchema` today.

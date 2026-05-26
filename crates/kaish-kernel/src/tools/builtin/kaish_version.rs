@@ -1,12 +1,25 @@
 //! kaish-version — Print kaish version.
 
 use async_trait::async_trait;
+use clap::{CommandFactory, Parser};
 
 use crate::interpreter::{ExecResult, OutputData};
-use crate::tools::{ExecContext, Tool, ToolArgs, ToolSchema};
+use crate::tools::{schema_from_clap, ExecContext, GlobalFlags, Tool, ToolArgs, ToolSchema};
 
 /// kaish-version: prints the kaish version string.
 pub struct KaishVersion;
+
+/// clap-derived argv layer for kaish-version. See docs/clap-migration.md.
+#[derive(Parser, Debug)]
+#[command(name = "kaish-version", about = "Print kaish version")]
+struct KaishVersionArgs {
+    #[command(flatten)]
+    global: GlobalFlags,
+
+    /// Sink — to_argv() always emits `--` before positionals.
+    #[arg(hide = true)]
+    rest: Vec<String>,
+}
 
 #[async_trait]
 impl Tool for KaishVersion {
@@ -15,11 +28,23 @@ impl Tool for KaishVersion {
     }
 
     fn schema(&self) -> ToolSchema {
-        ToolSchema::new("kaish-version", "Print kaish version")
-            .example("Show version", "kaish-version")
+        schema_from_clap(
+            &KaishVersionArgs::command(),
+            "kaish-version",
+            "Print kaish version",
+            [("Show version", "kaish-version")],
+        )
     }
 
-    async fn execute(&self, _args: ToolArgs, _ctx: &mut ExecContext) -> ExecResult {
+    async fn execute(&self, args: ToolArgs, ctx: &mut ExecContext) -> ExecResult {
+        let parsed = match KaishVersionArgs::try_parse_from(
+            std::iter::once("kaish-version".to_string()).chain(args.to_argv()),
+        ) {
+            Ok(p) => p,
+            Err(e) => return ExecResult::failure(2, format!("kaish-version: {e}")),
+        };
+        parsed.global.apply(ctx);
+
         let version = env!("CARGO_PKG_VERSION");
         ExecResult::with_output(OutputData::text(format!("kaish {version}\n")))
     }

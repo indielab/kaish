@@ -1,12 +1,25 @@
 //! pwd — Print working directory.
 
 use async_trait::async_trait;
+use clap::{CommandFactory, Parser};
 
 use crate::interpreter::{ExecResult, OutputData};
-use crate::tools::{ExecContext, Tool, ToolArgs, ToolSchema};
+use crate::tools::{schema_from_clap, ExecContext, GlobalFlags, Tool, ToolArgs, ToolSchema};
 
 /// Pwd tool: print current working directory.
 pub struct Pwd;
+
+/// clap-derived argv layer for pwd. See docs/clap-migration.md.
+#[derive(Parser, Debug)]
+#[command(name = "pwd", about = "Print current working directory")]
+struct PwdArgs {
+    #[command(flatten)]
+    global: GlobalFlags,
+
+    /// Sink — to_argv() always emits `--` before positionals.
+    #[arg(hide = true)]
+    rest: Vec<String>,
+}
 
 #[async_trait]
 impl Tool for Pwd {
@@ -15,11 +28,23 @@ impl Tool for Pwd {
     }
 
     fn schema(&self) -> ToolSchema {
-        ToolSchema::new("pwd", "Print current working directory")
-            .example("Show current directory", "pwd")
+        schema_from_clap(
+            &PwdArgs::command(),
+            "pwd",
+            "Print current working directory",
+            [("Show current directory", "pwd")],
+        )
     }
 
-    async fn execute(&self, _args: ToolArgs, ctx: &mut ExecContext) -> ExecResult {
+    async fn execute(&self, args: ToolArgs, ctx: &mut ExecContext) -> ExecResult {
+        let parsed = match PwdArgs::try_parse_from(
+            std::iter::once("pwd".to_string()).chain(args.to_argv()),
+        ) {
+            Ok(p) => p,
+            Err(e) => return ExecResult::failure(2, format!("pwd: {e}")),
+        };
+        parsed.global.apply(ctx);
+
         ExecResult::with_output(OutputData::text(ctx.cwd.to_string_lossy().to_string()))
     }
 }

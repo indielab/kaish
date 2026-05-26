@@ -1,14 +1,29 @@
 //! basename — Strip directory and suffix from filenames.
 
 use async_trait::async_trait;
+use clap::{CommandFactory, Parser};
 use std::path::Path;
 
+#[cfg(test)]
 use crate::ast::Value;
 use crate::interpreter::{ExecResult, OutputData};
-use crate::tools::{ExecContext, ParamSchema, Tool, ToolArgs, ToolSchema};
+use crate::tools::{schema_from_clap, ExecContext, GlobalFlags, Tool, ToolArgs, ToolSchema};
 
 /// Basename tool: extract filename from path.
 pub struct Basename;
+
+/// clap-derived argv layer for basename. See docs/clap-migration.md.
+#[derive(Parser, Debug)]
+#[command(name = "basename", about = "Strip directory and suffix from filenames")]
+struct BasenameArgs {
+    #[command(flatten)]
+    global: GlobalFlags,
+
+    /// Sink — to_argv() always emits `--` before positionals. Read paths and
+    /// suffix off args.positional / args.get_string directly.
+    #[arg(hide = true)]
+    rest: Vec<String>,
+}
 
 #[async_trait]
 impl Tool for Basename {
@@ -17,19 +32,26 @@ impl Tool for Basename {
     }
 
     fn schema(&self) -> ToolSchema {
-        ToolSchema::new("basename", "Strip directory and suffix from filenames")
-            .param(ParamSchema::required("path", "string", "Path to process"))
-            .param(ParamSchema::optional(
-                "suffix",
-                "string",
-                Value::Null,
-                "Suffix to remove from the filename",
-            ))
-            .example("Extract filename", "basename /usr/bin/sort")
-            .example("Remove extension", "basename /path/to/file.txt .txt")
+        schema_from_clap(
+            &BasenameArgs::command(),
+            "basename",
+            "Strip directory and suffix from filenames",
+            [
+                ("Extract filename", "basename /usr/bin/sort"),
+                ("Remove extension", "basename /path/to/file.txt .txt"),
+            ],
+        )
     }
 
-    async fn execute(&self, args: ToolArgs, _ctx: &mut ExecContext) -> ExecResult {
+    async fn execute(&self, args: ToolArgs, ctx: &mut ExecContext) -> ExecResult {
+        let parsed = match BasenameArgs::try_parse_from(
+            std::iter::once("basename".to_string()).chain(args.to_argv()),
+        ) {
+            Ok(p) => p,
+            Err(e) => return ExecResult::failure(2, format!("basename: {e}")),
+        };
+        parsed.global.apply(ctx);
+
         let path_str = match args.get_string("path", 0) {
             Some(p) => p,
             None => return ExecResult::failure(1, "basename: missing path argument"),

@@ -1,13 +1,26 @@
 //! kaish-vars — List all variables in scope.
 
 use async_trait::async_trait;
+use clap::{CommandFactory, Parser};
 
 use crate::ast::Value;
 use crate::interpreter::{ExecResult, OutputData, OutputNode};
-use crate::tools::{ExecContext, Tool, ToolArgs, ToolSchema};
+use crate::tools::{schema_from_clap, ExecContext, GlobalFlags, Tool, ToolArgs, ToolSchema};
 
 /// Vars tool: lists all variables in the current scope.
 pub struct Vars;
+
+/// clap-derived argv layer for kaish-vars. See docs/clap-migration.md.
+#[derive(Parser, Debug)]
+#[command(name = "kaish-vars", about = "List all variables in the current scope")]
+struct VarsArgs {
+    #[command(flatten)]
+    global: GlobalFlags,
+
+    /// Sink — to_argv() always emits `--` before positionals.
+    #[arg(hide = true)]
+    rest: Vec<String>,
+}
 
 #[async_trait]
 impl Tool for Vars {
@@ -16,11 +29,23 @@ impl Tool for Vars {
     }
 
     fn schema(&self) -> ToolSchema {
-        ToolSchema::new("kaish-vars", "List all variables in the current scope")
-            .example("List all variables", "kaish-vars")
+        schema_from_clap(
+            &VarsArgs::command(),
+            "kaish-vars",
+            "List all variables in the current scope",
+            [("List all variables", "kaish-vars")],
+        )
     }
 
-    async fn execute(&self, _args: ToolArgs, ctx: &mut ExecContext) -> ExecResult {
+    async fn execute(&self, args: ToolArgs, ctx: &mut ExecContext) -> ExecResult {
+        let parsed = match VarsArgs::try_parse_from(
+            std::iter::once("kaish-vars".to_string()).chain(args.to_argv()),
+        ) {
+            Ok(p) => p,
+            Err(e) => return ExecResult::failure(2, format!("kaish-vars: {e}")),
+        };
+        parsed.global.apply(ctx);
+
         let vars = ctx.scope.all();
         format_table(&vars)
     }

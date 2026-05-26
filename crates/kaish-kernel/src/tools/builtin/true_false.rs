@@ -7,12 +7,26 @@
 //! Used in conditions like `if true; then` or `while false; do`.
 
 use async_trait::async_trait;
+use clap::{CommandFactory, Parser};
 
 use crate::interpreter::ExecResult;
-use crate::tools::{ExecContext, Tool, ToolArgs, ToolSchema};
+use crate::tools::{schema_from_clap, ExecContext, GlobalFlags, Tool, ToolArgs, ToolSchema};
 
 /// True builtin: always succeeds (exit code 0).
 pub struct True;
+
+/// clap-derived argv layer for true. See docs/clap-migration.md.
+#[derive(Parser, Debug)]
+#[command(name = "true", about = "Exit with success (code 0)")]
+struct TrueArgs {
+    #[command(flatten)]
+    global: GlobalFlags,
+
+    /// Sink — to_argv() always emits `--` before positionals. POSIX true
+    /// ignores any arguments; clap parses them but we never read them.
+    #[arg(hide = true)]
+    rest: Vec<String>,
+}
 
 #[async_trait]
 impl Tool for True {
@@ -21,17 +35,42 @@ impl Tool for True {
     }
 
     fn schema(&self) -> ToolSchema {
-        ToolSchema::new("true", "Exit with success (code 0)")
-            .example("Always succeeds", "true")
+        schema_from_clap(
+            &TrueArgs::command(),
+            "true",
+            "Exit with success (code 0)",
+            [("Always succeeds", "true")],
+        )
     }
 
-    async fn execute(&self, _args: ToolArgs, _ctx: &mut ExecContext) -> ExecResult {
+    async fn execute(&self, args: ToolArgs, ctx: &mut ExecContext) -> ExecResult {
+        let parsed = match TrueArgs::try_parse_from(
+            std::iter::once("true".to_string()).chain(args.to_argv()),
+        ) {
+            Ok(p) => p,
+            Err(e) => return ExecResult::failure(2, format!("true: {e}")),
+        };
+        parsed.global.apply(ctx);
+
         ExecResult::success("")
     }
 }
 
 /// False builtin: always fails (exit code 1).
 pub struct False;
+
+/// clap-derived argv layer for false. See docs/clap-migration.md.
+#[derive(Parser, Debug)]
+#[command(name = "false", about = "Exit with failure (code 1)")]
+struct FalseArgs {
+    #[command(flatten)]
+    global: GlobalFlags,
+
+    /// Sink — to_argv() always emits `--` before positionals. POSIX false
+    /// ignores any arguments; clap parses them but we never read them.
+    #[arg(hide = true)]
+    rest: Vec<String>,
+}
 
 #[async_trait]
 impl Tool for False {
@@ -40,11 +79,23 @@ impl Tool for False {
     }
 
     fn schema(&self) -> ToolSchema {
-        ToolSchema::new("false", "Exit with failure (code 1)")
-            .example("Always fails", "false")
+        schema_from_clap(
+            &FalseArgs::command(),
+            "false",
+            "Exit with failure (code 1)",
+            [("Always fails", "false")],
+        )
     }
 
-    async fn execute(&self, _args: ToolArgs, _ctx: &mut ExecContext) -> ExecResult {
+    async fn execute(&self, args: ToolArgs, ctx: &mut ExecContext) -> ExecResult {
+        let parsed = match FalseArgs::try_parse_from(
+            std::iter::once("false".to_string()).chain(args.to_argv()),
+        ) {
+            Ok(p) => p,
+            Err(e) => return ExecResult::failure(2, format!("false: {e}")),
+        };
+        parsed.global.apply(ctx);
+
         ExecResult::failure(1, "")
     }
 }

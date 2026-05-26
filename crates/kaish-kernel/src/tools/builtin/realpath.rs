@@ -1,13 +1,27 @@
 //! realpath — Print the resolved absolute pathname.
 
 use async_trait::async_trait;
+use clap::{CommandFactory, Parser};
 use std::path::Path;
 
 use crate::interpreter::{ExecResult, OutputData};
-use crate::tools::{ExecContext, ParamSchema, Tool, ToolArgs, ToolSchema};
+use crate::tools::{schema_from_clap, ExecContext, GlobalFlags, Tool, ToolArgs, ToolSchema};
 
 /// Realpath tool: resolve path to absolute, canonical form.
 pub struct Realpath;
+
+/// clap-derived argv layer for realpath. See docs/clap-migration.md.
+#[derive(Parser, Debug)]
+#[command(name = "realpath", about = "Print the resolved absolute pathname")]
+struct RealpathArgs {
+    #[command(flatten)]
+    global: GlobalFlags,
+
+    /// Sink — to_argv() always emits `--` before positionals. Read paths off
+    /// args.positional / args.get_string directly.
+    #[arg(hide = true)]
+    rest: Vec<String>,
+}
 
 #[async_trait]
 impl Tool for Realpath {
@@ -16,13 +30,26 @@ impl Tool for Realpath {
     }
 
     fn schema(&self) -> ToolSchema {
-        ToolSchema::new("realpath", "Print the resolved absolute pathname")
-            .param(ParamSchema::required("path", "string", "Path to resolve"))
-            .example("Resolve a path", "realpath ../lib")
-            .example("Normalize path", "realpath /usr/bin/../lib")
+        schema_from_clap(
+            &RealpathArgs::command(),
+            "realpath",
+            "Print the resolved absolute pathname",
+            [
+                ("Resolve a path", "realpath ../lib"),
+                ("Normalize path", "realpath /usr/bin/../lib"),
+            ],
+        )
     }
 
     async fn execute(&self, args: ToolArgs, ctx: &mut ExecContext) -> ExecResult {
+        let parsed = match RealpathArgs::try_parse_from(
+            std::iter::once("realpath".to_string()).chain(args.to_argv()),
+        ) {
+            Ok(p) => p,
+            Err(e) => return ExecResult::failure(2, format!("realpath: {e}")),
+        };
+        parsed.global.apply(ctx);
+
         let path_str = match args.get_string("path", 0) {
             Some(p) => p,
             None => return ExecResult::failure(1, "realpath: missing path argument"),

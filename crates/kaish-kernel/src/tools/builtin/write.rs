@@ -1,15 +1,37 @@
 //! write — Write content to a file.
 
 use async_trait::async_trait;
+use clap::{CommandFactory, Parser};
 use std::path::Path;
 
 use crate::ast::Value;
 use crate::backend::WriteMode;
 use crate::interpreter::{ExecResult, OutputData};
-use crate::tools::{ExecContext, Tool, ToolArgs, ToolSchema, ParamSchema};
+use crate::tools::{schema_from_clap, ExecContext, GlobalFlags, Tool, ToolArgs, ToolSchema};
 
 /// Write tool: write content to a file.
 pub struct Write;
+
+/// clap-derived argv layer for write. See docs/clap-migration.md.
+#[derive(Parser, Debug)]
+#[command(name = "write", about = "Write content to a file")]
+struct WriteArgs {
+    /// File path to write to (positional or --path).
+    #[arg(long)]
+    path: Option<String>,
+
+    /// Content to write (positional or --content). Falls back to stdin when absent.
+    #[arg(long)]
+    content: Option<String>,
+
+    #[command(flatten)]
+    global: GlobalFlags,
+
+    /// Sink — to_argv() always emits `--` before positionals. Path and content
+    /// are read off args.positional / args.named directly to preserve Value typing.
+    #[arg(hide = true)]
+    rest: Vec<String>,
+}
 
 #[async_trait]
 impl Tool for Write {
@@ -18,14 +40,26 @@ impl Tool for Write {
     }
 
     fn schema(&self) -> ToolSchema {
-        ToolSchema::new("write", "Write content to a file")
-            .param(ParamSchema::required("path", "string", "File path to write"))
-            .param(ParamSchema::required("content", "string", "Content to write"))
-            .example("Write to a file", "write output.txt \"hello world\"")
-            .example("Pipe into write", "echo content | write file.txt")
+        schema_from_clap(
+            &WriteArgs::command(),
+            "write",
+            "Write content to a file",
+            [
+                ("Write to a file", "write output.txt \"hello world\""),
+                ("Pipe into write", "echo content | write file.txt"),
+            ],
+        )
     }
 
     async fn execute(&self, args: ToolArgs, ctx: &mut ExecContext) -> ExecResult {
+        let parsed = match WriteArgs::try_parse_from(
+            std::iter::once("write".to_string()).chain(args.to_argv()),
+        ) {
+            Ok(p) => p,
+            Err(e) => return ExecResult::failure(2, format!("write: {e}")),
+        };
+        parsed.global.apply(ctx);
+
         let path = match args.get_string("path", 0) {
             Some(p) => p,
             None => return ExecResult::failure(1, "write: missing path argument"),

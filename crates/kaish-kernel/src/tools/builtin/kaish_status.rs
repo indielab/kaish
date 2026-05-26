@@ -1,12 +1,25 @@
 //! kaish-status — Show kernel session status.
 
 use async_trait::async_trait;
+use clap::{CommandFactory, Parser};
 
 use crate::interpreter::{ExecResult, OutputData, OutputNode};
-use crate::tools::{ExecContext, Tool, ToolArgs, ToolSchema};
+use crate::tools::{schema_from_clap, ExecContext, GlobalFlags, Tool, ToolArgs, ToolSchema};
 
 /// kaish-status: display kernel name, variable count, and job count.
 pub struct KaishStatus;
+
+/// clap-derived argv layer for kaish-status. See docs/clap-migration.md.
+#[derive(Parser, Debug)]
+#[command(name = "kaish-status", about = "Show kernel session status")]
+struct KaishStatusArgs {
+    #[command(flatten)]
+    global: GlobalFlags,
+
+    /// Sink — to_argv() always emits `--` before positionals.
+    #[arg(hide = true)]
+    rest: Vec<String>,
+}
 
 #[async_trait]
 impl Tool for KaishStatus {
@@ -15,11 +28,23 @@ impl Tool for KaishStatus {
     }
 
     fn schema(&self) -> ToolSchema {
-        ToolSchema::new("kaish-status", "Show kernel session status")
-            .example("Check session status", "kaish-status")
+        schema_from_clap(
+            &KaishStatusArgs::command(),
+            "kaish-status",
+            "Show kernel session status",
+            [("Check session status", "kaish-status")],
+        )
     }
 
-    async fn execute(&self, _args: ToolArgs, ctx: &mut ExecContext) -> ExecResult {
+    async fn execute(&self, args: ToolArgs, ctx: &mut ExecContext) -> ExecResult {
+        let parsed = match KaishStatusArgs::try_parse_from(
+            std::iter::once("kaish-status".to_string()).chain(args.to_argv()),
+        ) {
+            Ok(p) => p,
+            Err(e) => return ExecResult::failure(2, format!("kaish-status: {e}")),
+        };
+        parsed.global.apply(ctx);
+
         let var_count = ctx.scope.all_names().len();
         let job_count = match ctx.job_manager.as_ref() {
             Some(jm) => jm.list().await.len(),

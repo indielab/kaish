@@ -1,14 +1,28 @@
 //! touch — Change file timestamps or create empty files.
 
 use async_trait::async_trait;
+use clap::{CommandFactory, Parser};
 use std::path::Path;
 
 use crate::backend::WriteMode;
 use crate::interpreter::ExecResult;
-use crate::tools::{ExecContext, ParamSchema, Tool, ToolArgs, ToolSchema};
+use crate::tools::{schema_from_clap, ExecContext, GlobalFlags, Tool, ToolArgs, ToolSchema};
 
 /// Touch tool: change file timestamps or create files.
 pub struct Touch;
+
+/// clap-derived argv layer for touch. See docs/clap-migration.md.
+#[derive(Parser, Debug)]
+#[command(name = "touch", about = "Change file timestamps or create empty files")]
+struct TouchArgs {
+    #[command(flatten)]
+    global: GlobalFlags,
+
+    /// Sink — to_argv() always emits `--` before positionals. Read paths off
+    /// args.positional / args.get_string directly.
+    #[arg(hide = true)]
+    rest: Vec<String>,
+}
 
 #[async_trait]
 impl Tool for Touch {
@@ -17,13 +31,26 @@ impl Tool for Touch {
     }
 
     fn schema(&self) -> ToolSchema {
-        ToolSchema::new("touch", "Change file timestamps or create empty files")
-            .param(ParamSchema::required("path", "string", "File to touch"))
-            .example("Create empty file", "touch newfile.txt")
-            .example("Update timestamp", "touch existing.txt")
+        schema_from_clap(
+            &TouchArgs::command(),
+            "touch",
+            "Change file timestamps or create empty files",
+            [
+                ("Create empty file", "touch newfile.txt"),
+                ("Update timestamp", "touch existing.txt"),
+            ],
+        )
     }
 
     async fn execute(&self, args: ToolArgs, ctx: &mut ExecContext) -> ExecResult {
+        let parsed = match TouchArgs::try_parse_from(
+            std::iter::once("touch".to_string()).chain(args.to_argv()),
+        ) {
+            Ok(p) => p,
+            Err(e) => return ExecResult::failure(2, format!("touch: {e}")),
+        };
+        parsed.global.apply(ctx);
+
         let path_str = match args.get_string("path", 0) {
             Some(p) => p,
             None => return ExecResult::failure(1, "touch: missing path argument"),

@@ -7,14 +7,27 @@
 //! ```
 
 use async_trait::async_trait;
+use clap::{CommandFactory, Parser};
 
 use crate::interpreter::{ExecResult, OutputData};
-use crate::tools::{ExecContext, Tool, ToolArgs, ToolSchema};
+use crate::tools::{schema_from_clap, ExecContext, GlobalFlags, Tool, ToolArgs, ToolSchema};
 
 use super::uname::read_hostname;
 
 /// Hostname tool: print the system hostname.
 pub struct Hostname;
+
+/// clap-derived argv layer for hostname. See docs/clap-migration.md.
+#[derive(Parser, Debug)]
+#[command(name = "hostname", about = "Print the system hostname")]
+struct HostnameArgs {
+    #[command(flatten)]
+    global: GlobalFlags,
+
+    /// Sink — to_argv() always emits `--` before positionals.
+    #[arg(hide = true)]
+    rest: Vec<String>,
+}
 
 #[async_trait]
 impl Tool for Hostname {
@@ -23,11 +36,23 @@ impl Tool for Hostname {
     }
 
     fn schema(&self) -> ToolSchema {
-        ToolSchema::new("hostname", "Print the system hostname")
-            .example("Print hostname", "hostname")
+        schema_from_clap(
+            &HostnameArgs::command(),
+            "hostname",
+            "Print the system hostname",
+            [("Print hostname", "hostname")],
+        )
     }
 
-    async fn execute(&self, _args: ToolArgs, _ctx: &mut ExecContext) -> ExecResult {
+    async fn execute(&self, args: ToolArgs, ctx: &mut ExecContext) -> ExecResult {
+        let parsed = match HostnameArgs::try_parse_from(
+            std::iter::once("hostname".to_string()).chain(args.to_argv()),
+        ) {
+            Ok(p) => p,
+            Err(e) => return ExecResult::failure(2, format!("hostname: {e}")),
+        };
+        parsed.global.apply(ctx);
+
         ExecResult::with_output(OutputData::text(read_hostname()))
     }
 }

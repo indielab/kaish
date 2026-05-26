@@ -1,13 +1,27 @@
 //! dirname — Strip last component from filename.
 
 use async_trait::async_trait;
+use clap::{CommandFactory, Parser};
 use std::path::Path;
 
 use crate::interpreter::{ExecResult, OutputData};
-use crate::tools::{ExecContext, ParamSchema, Tool, ToolArgs, ToolSchema};
+use crate::tools::{schema_from_clap, ExecContext, GlobalFlags, Tool, ToolArgs, ToolSchema};
 
 /// Dirname tool: extract directory from path.
 pub struct Dirname;
+
+/// clap-derived argv layer for dirname. See docs/clap-migration.md.
+#[derive(Parser, Debug)]
+#[command(name = "dirname", about = "Strip last component from filename")]
+struct DirnameArgs {
+    #[command(flatten)]
+    global: GlobalFlags,
+
+    /// Sink — to_argv() always emits `--` before positionals. Read paths off
+    /// args.positional directly.
+    #[arg(hide = true)]
+    rest: Vec<String>,
+}
 
 #[async_trait]
 impl Tool for Dirname {
@@ -16,13 +30,26 @@ impl Tool for Dirname {
     }
 
     fn schema(&self) -> ToolSchema {
-        ToolSchema::new("dirname", "Strip last component from filename")
-            .param(ParamSchema::required("path", "string", "Path to process"))
-            .example("Get directory part", "dirname /usr/bin/sort")
-            .example("Relative path", "dirname path/to/file.txt")
+        schema_from_clap(
+            &DirnameArgs::command(),
+            "dirname",
+            "Strip last component from filename",
+            [
+                ("Get directory part", "dirname /usr/bin/sort"),
+                ("Relative path", "dirname path/to/file.txt"),
+            ],
+        )
     }
 
-    async fn execute(&self, args: ToolArgs, _ctx: &mut ExecContext) -> ExecResult {
+    async fn execute(&self, args: ToolArgs, ctx: &mut ExecContext) -> ExecResult {
+        let parsed = match DirnameArgs::try_parse_from(
+            std::iter::once("dirname".to_string()).chain(args.to_argv()),
+        ) {
+            Ok(p) => p,
+            Err(e) => return ExecResult::failure(2, format!("dirname: {e}")),
+        };
+        parsed.global.apply(ctx);
+
         let path_str = match args.get_string("path", 0) {
             Some(p) => p,
             None => return ExecResult::failure(1, "dirname: missing path argument"),

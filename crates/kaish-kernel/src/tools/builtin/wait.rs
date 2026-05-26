@@ -1,14 +1,28 @@
 //! wait — Wait for background jobs to complete.
 
 use async_trait::async_trait;
+use clap::{CommandFactory, Parser};
 
 use crate::ast::Value;
 use crate::interpreter::{ExecResult, OutputData};
 use crate::scheduler::JobId;
-use crate::tools::{ExecContext, ParamSchema, Tool, ToolArgs, ToolSchema};
+use crate::tools::{schema_from_clap, ExecContext, GlobalFlags, Tool, ToolArgs, ToolSchema};
 
 /// Wait tool: wait for background jobs.
 pub struct Wait;
+
+/// clap-derived argv layer for wait. See docs/clap-migration.md.
+#[derive(Parser, Debug)]
+#[command(name = "wait", about = "Wait for background jobs to complete")]
+struct WaitArgs {
+    #[command(flatten)]
+    global: GlobalFlags,
+
+    /// Sink — to_argv() always emits `--` before positionals. Read the
+    /// job id off args.positional directly to preserve Int.
+    #[arg(hide = true)]
+    rest: Vec<String>,
+}
 
 #[async_trait]
 impl Tool for Wait {
@@ -17,18 +31,26 @@ impl Tool for Wait {
     }
 
     fn schema(&self) -> ToolSchema {
-        ToolSchema::new("wait", "Wait for background jobs to complete")
-            .param(ParamSchema::optional(
-                "job_id",
-                "int",
-                Value::Null,
-                "Specific job ID to wait for (waits for all if not specified)",
-            ))
-            .example("Wait for all jobs", "wait")
-            .example("Wait for specific job", "wait 1")
+        schema_from_clap(
+            &WaitArgs::command(),
+            "wait",
+            "Wait for background jobs to complete",
+            [
+                ("Wait for all jobs", "wait"),
+                ("Wait for specific job", "wait 1"),
+            ],
+        )
     }
 
     async fn execute(&self, args: ToolArgs, ctx: &mut ExecContext) -> ExecResult {
+        let parsed = match WaitArgs::try_parse_from(
+            std::iter::once("wait".to_string()).chain(args.to_argv()),
+        ) {
+            Ok(p) => p,
+            Err(e) => return ExecResult::failure(2, format!("wait: {e}")),
+        };
+        parsed.global.apply(ctx);
+
         let manager = match &ctx.job_manager {
             Some(m) => m.clone(),
             None => return ExecResult::with_output(OutputData::text("(no job manager)\n")),

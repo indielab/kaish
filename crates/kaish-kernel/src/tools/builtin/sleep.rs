@@ -1,14 +1,28 @@
 //! sleep — Delay for a specified time.
 
 use async_trait::async_trait;
+use clap::{CommandFactory, Parser};
 use std::time::Duration;
 
 use crate::ast::Value;
 use crate::interpreter::ExecResult;
-use crate::tools::{ExecContext, ParamSchema, Tool, ToolArgs, ToolSchema};
+use crate::tools::{schema_from_clap, ExecContext, GlobalFlags, Tool, ToolArgs, ToolSchema};
 
 /// Sleep tool: pause execution for a specified duration.
 pub struct Sleep;
+
+/// clap-derived argv layer for sleep. See docs/clap-migration.md.
+#[derive(Parser, Debug)]
+#[command(name = "sleep", about = "Delay for a specified time")]
+struct SleepArgs {
+    #[command(flatten)]
+    global: GlobalFlags,
+
+    /// Sink — to_argv() always emits `--` before positionals. Read the
+    /// duration off args.positional directly to preserve Int/Float.
+    #[arg(hide = true)]
+    rest: Vec<String>,
+}
 
 #[async_trait]
 impl Tool for Sleep {
@@ -17,17 +31,26 @@ impl Tool for Sleep {
     }
 
     fn schema(&self) -> ToolSchema {
-        ToolSchema::new("sleep", "Delay for a specified time")
-            .param(ParamSchema::required(
-                "seconds",
-                "number",
-                "Number of seconds to sleep (supports decimals)",
-            ))
-            .example("Sleep for 1 second", "sleep 1")
-            .example("Sleep for half a second", "sleep 0.5")
+        schema_from_clap(
+            &SleepArgs::command(),
+            "sleep",
+            "Delay for a specified time",
+            [
+                ("Sleep for 1 second", "sleep 1"),
+                ("Sleep for half a second", "sleep 0.5"),
+            ],
+        )
     }
 
     async fn execute(&self, args: ToolArgs, ctx: &mut ExecContext) -> ExecResult {
+        let parsed = match SleepArgs::try_parse_from(
+            std::iter::once("sleep".to_string()).chain(args.to_argv()),
+        ) {
+            Ok(p) => p,
+            Err(e) => return ExecResult::failure(2, format!("sleep: {e}")),
+        };
+        parsed.global.apply(ctx);
+
         let seconds = match args.get_positional(0) {
             Some(Value::Int(i)) => *i as f64,
             Some(Value::Float(f)) => *f,

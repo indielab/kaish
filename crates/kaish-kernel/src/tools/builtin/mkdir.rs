@@ -1,13 +1,27 @@
 //! mkdir — Create directories.
 
 use async_trait::async_trait;
+use clap::{CommandFactory, Parser};
 use std::path::Path;
 
 use crate::interpreter::ExecResult;
-use crate::tools::{ExecContext, Tool, ToolArgs, ToolSchema, ParamSchema};
+use crate::tools::{schema_from_clap, ExecContext, GlobalFlags, Tool, ToolArgs, ToolSchema};
 
 /// Mkdir tool: create directories.
 pub struct Mkdir;
+
+/// clap-derived argv layer for mkdir. See docs/clap-migration.md.
+#[derive(Parser, Debug)]
+#[command(name = "mkdir", about = "Create directories")]
+struct MkdirArgs {
+    #[command(flatten)]
+    global: GlobalFlags,
+
+    /// Sink — to_argv() always emits `--` before positionals. Read paths off
+    /// args.positional / args.get_string directly.
+    #[arg(hide = true)]
+    rest: Vec<String>,
+}
 
 #[async_trait]
 impl Tool for Mkdir {
@@ -16,13 +30,26 @@ impl Tool for Mkdir {
     }
 
     fn schema(&self) -> ToolSchema {
-        ToolSchema::new("mkdir", "Create directories")
-            .param(ParamSchema::required("path", "string", "Directory path to create"))
-            .example("Create a directory", "mkdir output")
-            .example("Create nested directories", "mkdir -p src/utils/helpers")
+        schema_from_clap(
+            &MkdirArgs::command(),
+            "mkdir",
+            "Create directories",
+            [
+                ("Create a directory", "mkdir output"),
+                ("Create nested directories", "mkdir -p src/utils/helpers"),
+            ],
+        )
     }
 
     async fn execute(&self, args: ToolArgs, ctx: &mut ExecContext) -> ExecResult {
+        let parsed = match MkdirArgs::try_parse_from(
+            std::iter::once("mkdir".to_string()).chain(args.to_argv()),
+        ) {
+            Ok(p) => p,
+            Err(e) => return ExecResult::failure(2, format!("mkdir: {e}")),
+        };
+        parsed.global.apply(ctx);
+
         let path = match args.get_string("path", 0) {
             Some(p) => p,
             None => return ExecResult::failure(1, "mkdir: missing path argument"),

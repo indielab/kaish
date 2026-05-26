@@ -12,13 +12,29 @@
 //! pipe (`kaish-last | jq`) is the intended use case and stays allowed.
 
 use async_trait::async_trait;
+use clap::{CommandFactory, Parser};
 
 use crate::dispatch::PipelinePosition;
 use crate::interpreter::{ExecResult, OutputData};
-use crate::tools::{ExecContext, Tool, ToolArgs, ToolSchema};
+use crate::tools::{schema_from_clap, ExecContext, GlobalFlags, Tool, ToolArgs, ToolSchema};
 use kaish_types::value_to_json;
 
 pub struct KaishLast;
+
+/// clap-derived argv layer for kaish-last. See docs/clap-migration.md.
+#[derive(Parser, Debug)]
+#[command(
+    name = "kaish-last",
+    about = "Dump the previous command's structured data (or stdout) as text"
+)]
+struct KaishLastArgs {
+    #[command(flatten)]
+    global: GlobalFlags,
+
+    /// Sink — to_argv() always emits `--` before positionals.
+    #[arg(hide = true)]
+    rest: Vec<String>,
+}
 
 #[async_trait]
 impl Tool for KaishLast {
@@ -27,15 +43,26 @@ impl Tool for KaishLast {
     }
 
     fn schema(&self) -> ToolSchema {
-        ToolSchema::new(
+        schema_from_clap(
+            &KaishLastArgs::command(),
             "kaish-last",
             "Dump the previous command's structured data (or stdout) as text",
+            [
+                ("Pipe structured data through jq", "seq 1 5\nkaish-last | jq '.[2]'"),
+                ("Capture for later use", "seq 1 5\nDATA=$(kaish-last)"),
+            ],
         )
-        .example("Pipe structured data through jq", "seq 1 5\nkaish-last | jq '.[2]'")
-        .example("Capture for later use", "seq 1 5\nDATA=$(kaish-last)")
     }
 
-    async fn execute(&self, _args: ToolArgs, ctx: &mut ExecContext) -> ExecResult {
+    async fn execute(&self, args: ToolArgs, ctx: &mut ExecContext) -> ExecResult {
+        let parsed = match KaishLastArgs::try_parse_from(
+            std::iter::once("kaish-last".to_string()).chain(args.to_argv()),
+        ) {
+            Ok(p) => p,
+            Err(e) => return ExecResult::failure(2, format!("kaish-last: {e}")),
+        };
+        parsed.global.apply(ctx);
+
         // Receiving piped stdin would mean reading the kernel's pre-pipeline
         // last_result, not the previous stage's — silently wrong. Refuse.
         // Producing into a pipe (First/Only) is fine.
