@@ -2017,6 +2017,9 @@ impl Kernel {
                             parts.push(self.format_expr(expr));
                         }
                         Arg::Named { key, value } => {
+                            parts.push(format!("--{}={}", key, self.format_expr(value)));
+                        }
+                        Arg::WordAssign { key, value } => {
                             parts.push(format!("{}={}", key, self.format_expr(value)));
                         }
                         Arg::ShortFlag(name) => {
@@ -2363,6 +2366,9 @@ impl Kernel {
     async fn build_args_async(&self, args: &[Arg], schema: Option<&crate::tools::ToolSchema>) -> Result<ToolArgs> {
         let mut tool_args = ToolArgs::new();
         let param_lookup = schema.map(schema_param_lookup).unwrap_or_default();
+        let accepts_word_assign = schema
+            .map(|s| crate::tools::accepts_word_assign(s.name.as_str()))
+            .unwrap_or(false);
 
         // Track which positional indices have been consumed as flag values
         let mut consumed: std::collections::HashSet<usize> = std::collections::HashSet::new();
@@ -2421,6 +2427,18 @@ impl Kernel {
                     let val = self.eval_expr_async(value).await?;
                     let val = apply_tilde_expansion(val);
                     tool_args.named.insert(key.clone(), val);
+                }
+                Arg::WordAssign { key, value } => {
+                    let val = self.eval_expr_async(value).await?;
+                    let val = apply_tilde_expansion(val);
+                    if accepts_word_assign {
+                        tool_args.named.insert(key.clone(), val);
+                    } else {
+                        // Stringify "key=value" and pass as a positional.
+                        // Matches bash: `cat foo=bar` opens a file named `foo=bar`.
+                        let val_str = crate::interpreter::value_to_string(&val);
+                        tool_args.positional.push(Value::String(format!("{key}={val_str}")));
+                    }
                 }
                 Arg::ShortFlag(name) => {
                     if past_double_dash {
@@ -2597,6 +2615,11 @@ impl Kernel {
                     argv.push(value_to_string(&value));
                 }
                 Arg::Named { key, value } => {
+                    let val = self.eval_expr_async(value).await?;
+                    let val = apply_tilde_expansion(val);
+                    argv.push(format!("--{}={}", key, value_to_string(&val)));
+                }
+                Arg::WordAssign { key, value } => {
                     let val = self.eval_expr_async(value).await?;
                     let val = apply_tilde_expansion(val);
                     argv.push(format!("{}={}", key, value_to_string(&val)));

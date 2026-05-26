@@ -2,4 +2,4 @@
 source: crates/kaish-kernel/tests/parser_tests.rs
 expression: sexpr
 ---
-(cmd fetch (named count (int 10)))
+(cmd fetch (wordassign count (int 10)))

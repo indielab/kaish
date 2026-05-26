@@ -2,4 +2,4 @@
 source: crates/kaish-kernel/tests/parser_tests.rs
 expression: sexpr
 ---
-(cmd grep (pos (string "pattern")) (named path (string "/src")) (named context (int 3)))
+(cmd grep (pos (string "pattern")) (wordassign path (string "/src")) (wordassign context (int 3)))

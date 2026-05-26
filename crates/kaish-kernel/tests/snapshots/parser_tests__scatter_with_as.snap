@@ -2,4 +2,4 @@
 source: crates/kaish-kernel/tests/parser_tests.rs
 expression: sexpr
 ---
-(pipeline (cmd cat (pos (string "input"))) (cmd scatter (named as (string "ITEM"))) (cmd process (pos (varref ITEM))) (cmd gather))
+(pipeline (cmd cat (pos (string "input"))) (cmd scatter (wordassign as (string "ITEM"))) (cmd process (pos (varref ITEM))) (cmd gather))

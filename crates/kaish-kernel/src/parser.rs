@@ -1431,8 +1431,11 @@ where
         Token::ShortFlag(name) => Arg::ShortFlag(name),
     };
 
-    // Named argument: name=value (must not have spaces around =)
-    // We use map_with to capture spans and validate adjacency
+    // Shell assignment in argv position: name=value (must not have spaces around =).
+    // Produces Arg::WordAssign; the kernel routes it through tool_args.named
+    // only for shell-assignment-accepting builtins (export, alias). For every
+    // other command it materialises as a `"name=value"` positional, matching
+    // bash semantics (`cat foo=bar` opens a file named `foo=bar`).
     let named = select! {
         Token::Ident(s) => s,
     }
@@ -1444,10 +1447,10 @@ where
         if key_span.end != eq_span.start || eq_span.end != value_span.start {
             Err(Rich::custom(
                 span,
-                "named argument must not have spaces around '=' (use 'key=value' not 'key = value')",
+                "shell assignment must not have spaces around '=' (use 'key=value' not 'key = value')",
             ))
         } else {
-            Ok(Arg::Named { key, value })
+            Ok(Arg::WordAssign { key, value })
         }
     });
 
@@ -1892,11 +1895,11 @@ where
         Token::ShortFlag(name) => Arg::ShortFlag(name),
     };
 
-    // Named argument: name=value
+    // Shell assignment in argv position: name=value (see arg_before_double_dash_parser).
     let named = ident_parser()
         .then_ignore(just(Token::Eq))
         .then(expr.clone())
-        .map(|(key, value)| Arg::Named { key, value });
+        .map(|(key, value)| Arg::WordAssign { key, value });
 
     // Positional argument
     let positional = expr.map(Arg::Positional);
@@ -2172,13 +2175,16 @@ mod tests {
 
     #[test]
     fn parse_named_arg() {
+        // Bareword key=value parses as WordAssign — the kernel decides per
+        // command whether to route it to tool_args.named (export/alias) or
+        // stringify to a positional (every other builtin).
         let result = parse("cmd foo=5");
         assert!(result.is_ok());
         let program = result.expect("ok");
         match &program.statements[0] {
             Stmt::Command(cmd) => {
                 assert_eq!(cmd.args.len(), 1);
-                assert!(matches!(&cmd.args[0], Arg::Named { .. }));
+                assert!(matches!(&cmd.args[0], Arg::WordAssign { .. }));
             }
             _ => panic!("expected Command"),
         }
@@ -2585,19 +2591,22 @@ mod tests {
 
     #[test]
     fn value_named_arg_preserved() {
+        // Bareword key=value parses as WordAssign — the kernel decides per
+        // command whether to route into args.named (export/alias) or
+        // stringify as a positional.
         let result = parse("cmd count=42").unwrap();
         match &result.statements[0] {
             Stmt::Command(cmd) => {
                 assert_eq!(cmd.name, "cmd");
                 match &cmd.args[0] {
-                    Arg::Named { key, value } => {
+                    Arg::WordAssign { key, value } => {
                         assert_eq!(key, "count");
                         match value {
                             Expr::Literal(Value::Int(n)) => assert_eq!(*n, 42),
                             other => panic!("expected int, got {:?}", other),
                         }
                     }
-                    other => panic!("expected named arg, got {:?}", other),
+                    other => panic!("expected WordAssign arg, got {:?}", other),
                 }
             }
             other => panic!("expected command, got {:?}", other),
@@ -2875,8 +2884,8 @@ mod tests {
                     assert_eq!(pipeline.commands[0].name, "fetch");
                     assert_eq!(pipeline.commands[0].args.len(), 1);
                     match &pipeline.commands[0].args[0] {
-                        Arg::Named { key, .. } => assert_eq!(key, "url"),
-                        other => panic!("expected named arg, got {:?}", other),
+                        Arg::WordAssign { key, .. } => assert_eq!(key, "url"),
+                        other => panic!("expected WordAssign arg, got {:?}", other),
                     }
                 }
                 other => panic!("expected command subst, got {:?}", other),

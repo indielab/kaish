@@ -136,6 +136,7 @@ impl<'a> Validator<'a> {
         match arg {
             Arg::Positional(expr) => self.validate_expr(expr),
             Arg::Named { value, .. } => self.validate_expr(value),
+            Arg::WordAssign { value, .. } => self.validate_expr(value),
             Arg::ShortFlag(_) | Arg::LongFlag(_) | Arg::DoubleDash => {}
         }
     }
@@ -520,6 +521,12 @@ pub fn build_tool_args_for_validation(args: &[Arg]) -> ToolArgs {
                 tool_args.positional.push(expr_to_placeholder(expr));
             }
             Arg::Named { key, value } => {
+                tool_args.named.insert(key.clone(), expr_to_placeholder(value));
+            }
+            Arg::WordAssign { key, value } => {
+                // Validation walker doesn't know which command is receiving;
+                // route into named like the legacy behavior so checks stay
+                // consistent with previous validator output.
                 tool_args.named.insert(key.clone(), expr_to_placeholder(value));
             }
             Arg::ShortFlag(flag) => {

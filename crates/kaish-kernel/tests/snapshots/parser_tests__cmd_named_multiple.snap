@@ -2,4 +2,4 @@
 source: crates/kaish-kernel/tests/parser_tests.rs
 expression: sexpr
 ---
-(cmd api (named endpoint (string "/users")) (named limit (int 50)) (named verbose (bool true)))
+(cmd api (wordassign endpoint (string "/users")) (wordassign limit (int 50)) (wordassign verbose (bool true)))

@@ -100,7 +100,7 @@ async fn external_command_short_flags() {
 async fn external_command_long_flags() {
     let kernel = repl_kernel();
     // Test long flags with external command via spawn (uname is now a builtin)
-    let result = kernel.execute("spawn command=uname argv='--kernel-name'").await.unwrap();
+    let result = kernel.execute("spawn --command uname --argv '--kernel-name'").await.unwrap();
     assert!(result.ok(), "spawn uname --kernel-name should succeed: {:?}", result);
     assert!(
         result.text_out().contains("Linux"),
@@ -196,7 +196,7 @@ async fn pipeline_builtin_to_builtin() {
     let kernel = repl_kernel();
     // seq | head (both builtins, tests pipeline)
     // Using lines=3 named arg since -n 3 requires schema-aware parsing
-    let result = kernel.execute("seq 1 10 | head lines=3").await.unwrap();
+    let result = kernel.execute("seq 1 10 | head -n 3").await.unwrap();
     assert!(result.ok(), "pipeline should succeed: {:?}", result);
     let text = result.text_out();
     let lines: Vec<&str> = text.trim().lines().collect();

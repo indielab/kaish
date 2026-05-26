@@ -2,4 +2,4 @@
 source: crates/kaish-kernel/tests/parser_tests.rs
 expression: sexpr
 ---
-(pipeline (cmd ls (named path (string "/src"))) (cmd grep (named pattern (string "\.rs$"))) (cmd wc))
+(pipeline (cmd ls (wordassign path (string "/src"))) (cmd grep (wordassign pattern (string "\.rs$"))) (cmd wc))

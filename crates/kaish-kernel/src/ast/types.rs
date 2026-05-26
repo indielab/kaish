@@ -173,8 +173,16 @@ pub enum ParamType {
 pub enum Arg {
     /// Positional argument: `value`
     Positional(Expr),
-    /// Named argument: `key=value`
+    /// Long flag with attached value: `--key=value`. Always routes through
+    /// `tool_args.named` regardless of the receiving command.
     Named { key: String, value: Expr },
+    /// Bareword shell-assignment in argv position: `key=value`.
+    ///
+    /// Only commands on the kernel's shell-assignment allowlist (`export`,
+    /// `alias`) consume this as a named arg; for every other command it's
+    /// stringified to a positional `"key=value"`. This matches bash:
+    /// `cat foo=bar` opens a file named `foo=bar`, not a magical key=value.
+    WordAssign { key: String, value: Expr },
     /// Short flag: `-l`, `-v` (boolean flag)
     ShortFlag(String),
     /// Long flag: `--force`, `--verbose` (boolean flag)

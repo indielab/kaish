@@ -192,6 +192,10 @@ impl BackendDispatcher {
                 Arg::ShortFlag(f) => Some(format!("-{f}")),
                 Arg::LongFlag(f) => Some(format!("--{f}")),
                 Arg::Named { key, value } => match value {
+                    Expr::Literal(Value::String(s)) => Some(format!("--{key}={s}")),
+                    _ => Some(format!("--{key}=")),
+                },
+                Arg::WordAssign { key, value } => match value {
                     Expr::Literal(Value::String(s)) => Some(format!("{key}={s}")),
                     _ => Some(format!("{key}=")),
                 },

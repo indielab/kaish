@@ -2,4 +2,4 @@
 source: crates/kaish-kernel/tests/parser_tests.rs
 expression: sexpr
 ---
-(cmd cmd (named file (glob "*.txt")))
+(cmd cmd (wordassign file (glob "*.txt")))

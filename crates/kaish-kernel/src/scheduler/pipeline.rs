@@ -538,6 +538,9 @@ pub fn is_bool_type(param_type: &str) -> bool {
 pub fn build_tool_args(args: &[Arg], ctx: &ExecContext, schema: Option<&ToolSchema>) -> ToolArgs {
     let mut tool_args = ToolArgs::new();
     let param_lookup = schema.map(schema_param_lookup).unwrap_or_default();
+    let accepts_word_assign = schema
+        .map(|s| crate::tools::accepts_word_assign(s.name.as_str()))
+        .unwrap_or(false);
 
     // Track which positional indices have been consumed as flag values
     let mut consumed_positionals: std::collections::HashSet<usize> = std::collections::HashSet::new();
@@ -571,6 +574,16 @@ pub fn build_tool_args(args: &[Arg], ctx: &ExecContext, schema: Option<&ToolSche
             Arg::Named { key, value } => {
                 if let Some(val) = eval_simple_expr(value, ctx) {
                     tool_args.named.insert(key.clone(), val);
+                }
+            }
+            Arg::WordAssign { key, value } => {
+                if let Some(val) = eval_simple_expr(value, ctx) {
+                    if accepts_word_assign {
+                        tool_args.named.insert(key.clone(), val);
+                    } else {
+                        let val_str = crate::interpreter::value_to_string(&val);
+                        tool_args.positional.push(Value::String(format!("{key}={val_str}")));
+                    }
                 }
             }
             Arg::ShortFlag(name) => {

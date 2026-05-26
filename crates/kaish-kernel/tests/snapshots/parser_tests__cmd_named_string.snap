@@ -2,4 +2,4 @@
 source: crates/kaish-kernel/tests/parser_tests.rs
 expression: sexpr
 ---
-(cmd search (named query (string "rust")))
+(cmd search (wordassign query (string "rust")))

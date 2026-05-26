@@ -66,8 +66,11 @@ git push --force                # long flag
 curl --header "Content-Type: json"  # long flag with value
 curl --header="Content-Type: json"  # long flag with value (equals form)
 
-# Bareword key=value — accepted for POSIX compat (`export FOO=bar`,
-# `alias greet='echo hi'`). Builtins should prefer `--key value`.
+# Bareword key=value — accepted only by shell-assignment builtins
+# (`export FOO=bar`, `alias greet='echo hi'`, `unalias`). For every
+# other command, `key=value` is a regular positional bareword:
+#   cat foo=bar    # opens a file named `foo=bar`, matches bash
+# Use --key value for normal flag passing.
 export FOO=bar
 alias greet='echo hello'
 ```

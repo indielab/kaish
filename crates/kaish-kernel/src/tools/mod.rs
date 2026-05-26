@@ -27,3 +27,18 @@ pub use context::{ExecContext, OutputContext};
 pub use global_flags::GlobalFlags;
 pub use registry::ToolRegistry;
 pub use traits::{is_global_output_flag, validate_against_schema, Tool, ToolArgs, ToolSchema, ParamSchema};
+
+/// Commands that consume bareword `key=value` argv (Arg::WordAssign) as
+/// shell-assignment pairs and route them through `tool_args.named`. For every
+/// other command, `key=value` lands as a positional `"key=value"` string —
+/// matching bash (`cat foo=bar` opens a file named `foo=bar`).
+///
+/// Add to this list only for builtins that have a documented shell-assignment
+/// argv contract (`export FOO=bar`, `alias greet='echo hi'`). Long-flag
+/// `--key=value` is a separate AST node (`Arg::Named`) and always routes
+/// through `tool_args.named` regardless.
+pub const WORD_ASSIGN_BUILTINS: &[&str] = &["export", "alias", "unalias"];
+
+pub fn accepts_word_assign(name: &str) -> bool {
+    WORD_ASSIGN_BUILTINS.contains(&name)
+}
