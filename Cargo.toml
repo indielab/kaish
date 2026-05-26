@@ -49,6 +49,9 @@ logos = "0.16"
 chumsky = "1.0.0-alpha.8"
 ariadne = "0.6"
 
+# CLI arg parsing (used inside builtins via the clap-migration recipe)
+clap = { version = "4", features = ["derive"] }
+
 # REPL (L4)
 rustyline = "17"
 

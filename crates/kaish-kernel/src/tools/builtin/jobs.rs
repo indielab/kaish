@@ -1,6 +1,7 @@
 //! jobs — List and manage background jobs.
 
 use async_trait::async_trait;
+use clap::Parser;
 
 use crate::ast::Value;
 use crate::interpreter::{ExecResult, OutputData, OutputNode};
@@ -8,6 +9,15 @@ use crate::tools::{ExecContext, ParamSchema, Tool, ToolArgs, ToolSchema};
 
 /// Jobs tool: list and manage background jobs.
 pub struct Jobs;
+
+/// clap-derived argv layer for jobs. See docs/clap-migration.md.
+#[derive(Parser, Debug)]
+#[command(name = "jobs")]
+struct JobsArgs {
+    /// Remove completed jobs from tracking.
+    #[arg(long = "cleanup")]
+    cleanup: bool,
+}
 
 #[async_trait]
 impl Tool for Jobs {
@@ -28,13 +38,19 @@ impl Tool for Jobs {
     }
 
     async fn execute(&self, args: ToolArgs, ctx: &mut ExecContext) -> ExecResult {
+        let parsed = match JobsArgs::try_parse_from(
+            std::iter::once("jobs".to_string()).chain(args.to_argv()),
+        ) {
+            Ok(p) => p,
+            Err(e) => return ExecResult::failure(2, format!("jobs: {e}")),
+        };
+
         let manager = match &ctx.job_manager {
             Some(m) => m,
             None => return ExecResult::with_output(OutputData::text("(no job manager)")),
         };
 
-        // Handle --cleanup flag
-        if args.has_flag("cleanup") {
+        if parsed.cleanup {
             let before = manager.list().await.len();
             manager.cleanup().await;
             let after = manager.list().await.len();

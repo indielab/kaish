@@ -226,4 +226,166 @@ impl ToolArgs {
             _ => true,
         })
     }
+
+    /// Reconstruct a clap-friendly argv vector from already-parsed ToolArgs.
+    ///
+    /// kaish has already done shell parsing (variables expanded, globs expanded,
+    /// `$(...)` substituted, schema-driven flag/value splitting). `to_argv`
+    /// rebuilds a flat token stream suitable for `Parser::parse_from(std::iter::once("<tool>").chain(args.to_argv()))`.
+    ///
+    /// Layout: flags first (as `--<name>`), then named values (as
+    /// `--<name>=<value>`), then positionals — separated from earlier sections
+    /// by `--` so trailing-passthrough builtins still see them as positionals
+    /// even if a value happens to begin with `-`.
+    ///
+    /// See docs/clap-migration.md for the full recipe.
+    pub fn to_argv(&self) -> Vec<String> {
+        let mut argv = Vec::with_capacity(
+            self.flags.len() + self.named.len() * 2 + self.positional.len() + 1,
+        );
+
+        // Flags are unordered (HashSet); sort for deterministic argv so tests
+        // and snapshots stay stable. Single-char keys emit short form (`-n`)
+        // so clap's natural `#[arg(short = 'n', long = "no_newline")]` derive
+        // accepts them without needing visible_alias gymnastics.
+        let mut flags: Vec<&String> = self.flags.iter().collect();
+        flags.sort();
+        for flag in flags {
+            argv.push(flag_token(flag));
+        }
+
+        // Named values: emit `-k=value` for single-char keys and `--key=value`
+        // for multi-char keys. `=` form keeps parsing unambiguous when the
+        // value begins with `-`. Multi-value (`consumes > 1`) params are
+        // stored as Value::Json(Array(Array(...))) — one entry per occurrence.
+        for (key, value) in &self.named {
+            for rendered in render_named_value(value) {
+                argv.push(format!("{}={}", flag_token(key), rendered));
+            }
+        }
+
+        // `--` terminator so clap treats positionals as positionals even if
+        // they begin with `-` (e.g. `echo -- -n` should print `-n`).
+        if !self.positional.is_empty() {
+            argv.push("--".to_string());
+            for value in &self.positional {
+                argv.push(value_to_argv_token(value));
+            }
+        }
+
+        argv
+    }
+}
+
+fn flag_token(name: &str) -> String {
+    if name.chars().count() == 1 {
+        format!("-{name}")
+    } else {
+        format!("--{name}")
+    }
+}
+
+fn render_named_value(value: &Value) -> Vec<String> {
+    match value {
+        // `consumes > 1` lands as Json(Array(Array(...))) — one inner array per
+        // occurrence. Flatten each inner array into space-joined tokens; clap
+        // can split on `=` further if needed.
+        Value::Json(serde_json::Value::Array(outer)) if outer.iter().all(|v| v.is_array()) => {
+            outer
+                .iter()
+                .map(|inner| {
+                    inner
+                        .as_array()
+                        .map(|a| a.iter().map(json_value_to_token).collect::<Vec<_>>().join(" "))
+                        .unwrap_or_default()
+                })
+                .collect()
+        }
+        _ => vec![value_to_argv_token(value)],
+    }
+}
+
+fn value_to_argv_token(value: &Value) -> String {
+    match value {
+        Value::Null => String::new(),
+        Value::Bool(b) => b.to_string(),
+        Value::Int(i) => i.to_string(),
+        Value::Float(f) => f.to_string(),
+        Value::String(s) => s.clone(),
+        Value::Json(j) => j.to_string(),
+        Value::Blob(b) => format!("[blob: {} {}]", b.formatted_size(), b.content_type),
+    }
+}
+
+fn json_value_to_token(value: &serde_json::Value) -> String {
+    match value {
+        serde_json::Value::Null => String::new(),
+        serde_json::Value::Bool(b) => b.to_string(),
+        serde_json::Value::Number(n) => n.to_string(),
+        serde_json::Value::String(s) => s.clone(),
+        other => other.to_string(),
+    }
+}
+
+#[cfg(test)]
+mod to_argv_tests {
+    use super::*;
+
+    #[test]
+    fn empty_args_produce_empty_argv() {
+        assert!(ToolArgs::new().to_argv().is_empty());
+    }
+
+    #[test]
+    fn positionals_emitted_after_double_dash() {
+        let mut args = ToolArgs::new();
+        args.positional.push(Value::String("hello".into()));
+        args.positional.push(Value::String("world".into()));
+        assert_eq!(args.to_argv(), vec!["--", "hello", "world"]);
+    }
+
+    #[test]
+    fn single_char_flags_emit_short_form() {
+        let mut args = ToolArgs::new();
+        args.flags.insert("n".into());
+        args.flags.insert("verbose".into());
+        // Sorted: "n" then "verbose"
+        assert_eq!(args.to_argv(), vec!["-n", "--verbose"]);
+    }
+
+    #[test]
+    fn named_values_use_equals_form() {
+        let mut args = ToolArgs::new();
+        args.named.insert("count".into(), Value::Int(5));
+        args.named.insert("name".into(), Value::String("foo".into()));
+        // BTreeMap iterates in key order, so "count" before "name"
+        assert_eq!(args.to_argv(), vec!["--count=5", "--name=foo"]);
+    }
+
+    #[test]
+    fn single_char_named_emits_short_equals() {
+        let mut args = ToolArgs::new();
+        args.named.insert("n".into(), Value::Int(5));
+        assert_eq!(args.to_argv(), vec!["-n=5"]);
+    }
+
+    #[test]
+    fn positional_with_leading_dash_survives_double_dash() {
+        let mut args = ToolArgs::new();
+        args.positional.push(Value::String("-n".into()));
+        // `echo -- -n` should round-trip as `-- -n`, not be reparsed as a flag.
+        assert_eq!(args.to_argv(), vec!["--", "-n"]);
+    }
+
+    #[test]
+    fn mixed_flags_named_positionals() {
+        let mut args = ToolArgs::new();
+        args.flags.insert("verbose".into());
+        args.named.insert("limit".into(), Value::Int(10));
+        args.positional.push(Value::String("file.txt".into()));
+        assert_eq!(
+            args.to_argv(),
+            vec!["--verbose", "--limit=10", "--", "file.txt"]
+        );
+    }
 }

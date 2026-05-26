@@ -1,14 +1,29 @@
 //! cat — Read and output file contents.
 
 use async_trait::async_trait;
+use clap::Parser;
 use std::path::Path;
 
 use crate::ast::Value;
 use crate::interpreter::{ExecResult, OutputData};
-use crate::tools::{ExecContext, Tool, ToolArgs, ToolSchema, ParamSchema};
+use crate::tools::{ExecContext, ParamSchema, Tool, ToolArgs, ToolSchema};
 
 /// Cat tool: read and output file contents.
 pub struct Cat;
+
+/// clap-derived argv layer for cat. See docs/clap-migration.md.
+#[derive(Parser, Debug)]
+#[command(name = "cat")]
+struct CatArgs {
+    /// Number output lines.
+    #[arg(short = 'n', long = "number")]
+    number: bool,
+
+    /// Sink — to_argv() always emits `--` before positionals. Read paths
+    /// off args.positional directly (kernel already glob-expanded them).
+    #[arg(hide = true)]
+    paths: Vec<String>,
+}
 
 #[async_trait]
 impl Tool for Cat {
@@ -31,7 +46,13 @@ impl Tool for Cat {
     }
 
     async fn execute(&self, args: ToolArgs, ctx: &mut ExecContext) -> ExecResult {
-        let number_lines = args.has_flag("number") || args.has_flag("n");
+        let parsed = match CatArgs::try_parse_from(
+            std::iter::once("cat".to_string()).chain(args.to_argv()),
+        ) {
+            Ok(p) => p,
+            Err(e) => return ExecResult::failure(2, format!("cat: {e}")),
+        };
+        let number_lines = parsed.number;
 
         // If no files specified, read from stdin (like POSIX cat)
         if args.positional.is_empty() {

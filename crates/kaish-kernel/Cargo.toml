@@ -41,6 +41,9 @@ logos = { workspace = true }
 chumsky = { workspace = true }
 ariadne = { workspace = true }
 
+# CLI parsing inside builtins — see docs/clap-migration.md
+clap = { workspace = true }
+
 # Builtins (pure-Rust, always available)
 base64 = { workspace = true }
 digest = { workspace = true }

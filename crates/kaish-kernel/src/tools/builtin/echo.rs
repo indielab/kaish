@@ -1,13 +1,29 @@
 //! echo — Print arguments to stdout.
 
 use async_trait::async_trait;
+use clap::Parser;
 
 use crate::ast::Value;
 use crate::interpreter::{ExecResult, OutputData};
-use crate::tools::{ExecContext, Tool, ToolArgs, ToolSchema, ParamSchema};
+use crate::tools::{ExecContext, ParamSchema, Tool, ToolArgs, ToolSchema};
 
 /// Echo tool: prints arguments to stdout.
 pub struct Echo;
+
+/// clap-derived argv layer for echo. See docs/clap-migration.md.
+#[derive(Parser, Debug)]
+#[command(name = "echo")]
+struct EchoArgs {
+    /// Do not output trailing newline.
+    #[arg(short = 'n', long = "no_newline")]
+    no_newline: bool,
+
+    /// Sink — to_argv() always emits `--` before positionals, so clap accepts
+    /// arbitrary tokens here. Read the Value-typed positionals off
+    /// args.positional directly to preserve Int/Bool/Float rendering.
+    #[arg(hide = true)]
+    words: Vec<String>,
+}
 
 #[async_trait]
 impl Tool for Echo {
@@ -34,23 +50,23 @@ impl Tool for Echo {
     }
 
     async fn execute(&self, args: ToolArgs, _ctx: &mut ExecContext) -> ExecResult {
-        let no_newline = args.has_flag("no_newline") || args.has_flag("n");
+        // Preserve the original Value rendering (true/false/3.14/etc.) before
+        // collapsing through to_argv()'s string layer — echo formats numerics
+        // specially and we don't want clap to re-stringify them.
+        let words: Vec<String> = args.positional.iter().map(value_to_string).collect();
 
-        let parts: Vec<String> = args
-            .positional
-            .iter()
-            .map(value_to_string)
-            .collect();
+        let parsed = match EchoArgs::try_parse_from(
+            std::iter::once("echo".to_string()).chain(args.to_argv()),
+        ) {
+            Ok(p) => p,
+            Err(e) => return ExecResult::failure(2, format!("echo: {e}")),
+        };
 
-        let mut output = parts.join(" ");
-
-        // By default, echo adds a trailing newline (like Unix echo)
-        // Use -n to suppress it
-        if !no_newline && !output.is_empty() {
+        let mut output = words.join(" ");
+        if !parsed.no_newline && !output.is_empty() {
             output.push('\n');
         }
 
-        // Use the new OutputData model for structured output
         ExecResult::with_output(OutputData::text(output))
     }
 }
