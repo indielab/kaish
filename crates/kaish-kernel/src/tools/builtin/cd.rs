@@ -1,14 +1,27 @@
 //! cd — Change working directory.
 
 use async_trait::async_trait;
+use clap::{CommandFactory, Parser};
 use std::path::{Path, PathBuf};
 
 use crate::ast::Value;
 use crate::interpreter::{ExecResult, OutputData};
-use crate::tools::{ExecContext, Tool, ToolArgs, ToolSchema, ParamSchema};
+use crate::tools::{schema_from_clap, ExecContext, GlobalFlags, Tool, ToolArgs, ToolSchema};
 
 /// Cd tool: change current working directory.
 pub struct Cd;
+
+/// clap-derived argv layer for cd. See docs/clap-migration.md.
+#[derive(Parser, Debug)]
+#[command(name = "cd", about = "Change current working directory")]
+struct CdArgs {
+    #[command(flatten)]
+    global: GlobalFlags,
+
+    /// Sink — path read off args.positional to preserve Value typing.
+    #[arg(hide = true)]
+    rest: Vec<String>,
+}
 
 #[async_trait]
 impl Tool for Cd {
@@ -17,19 +30,27 @@ impl Tool for Cd {
     }
 
     fn schema(&self) -> ToolSchema {
-        ToolSchema::new("cd", "Change current working directory")
-            .param(ParamSchema::optional(
-                "path",
-                "string",
-                Value::String("~".into()),
-                "Directory to change to (use - for previous directory)",
-            ))
-            .example("Go home", "cd")
-            .example("Change directory", "cd /tmp")
-            .example("Previous directory", "cd -")
+        schema_from_clap(
+            &CdArgs::command(),
+            "cd",
+            "Change current working directory",
+            [
+                ("Go home", "cd"),
+                ("Change directory", "cd /tmp"),
+                ("Previous directory", "cd -"),
+            ],
+        )
     }
 
     async fn execute(&self, args: ToolArgs, ctx: &mut ExecContext) -> ExecResult {
+        let parsed = match CdArgs::try_parse_from(
+            std::iter::once("cd".to_string()).chain(args.to_argv()),
+        ) {
+            Ok(p) => p,
+            Err(e) => return ExecResult::failure(2, format!("cd: {e}")),
+        };
+        parsed.global.apply(ctx);
+
         let path_arg = args.get_string("path", 0).unwrap_or_else(|| {
             // Check shell scope first, then process env, then fall back to /
             ctx.scope

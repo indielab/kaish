@@ -9,14 +9,31 @@
 //! ```
 
 use async_trait::async_trait;
+use clap::{CommandFactory, Parser};
 use std::path::Path;
 
 use crate::ast::Value;
 use crate::interpreter::{ExecResult, OutputData};
-use crate::tools::{ExecContext, ParamSchema, Tool, ToolArgs, ToolSchema};
+use crate::tools::{schema_from_clap, ExecContext, GlobalFlags, Tool, ToolArgs, ToolSchema};
 
 /// Which tool: locates commands in PATH.
 pub struct Which;
+
+/// clap-derived argv layer for which. See docs/clap-migration.md.
+#[derive(Parser, Debug)]
+#[command(name = "which", about = "Locate a command in PATH")]
+struct WhichArgs {
+    /// Print all matches, not just the first (-a)
+    #[arg(short = 'a', long = "a")]
+    all: bool,
+
+    #[command(flatten)]
+    global: GlobalFlags,
+
+    /// Sink — command names read off args.positional.
+    #[arg(hide = true)]
+    rest: Vec<String>,
+}
 
 #[async_trait]
 impl Tool for Which {
@@ -25,28 +42,31 @@ impl Tool for Which {
     }
 
     fn schema(&self) -> ToolSchema {
-        ToolSchema::new("which", "Locate a command in PATH")
-            .param(ParamSchema::required(
-                "command",
-                "string",
-                "Command name(s) to find",
-            ))
-            .param(ParamSchema::optional(
-                "a",
-                "bool",
-                Value::Bool(false),
-                "Print all matches, not just the first (-a)",
-            ))
-            .example("Find a command", "which cargo")
-            .example("Show all matches", "which -a python")
+        schema_from_clap(
+            &WhichArgs::command(),
+            "which",
+            "Locate a command in PATH",
+            [
+                ("Find a command", "which cargo"),
+                ("Show all matches", "which -a python"),
+            ],
+        )
     }
 
     async fn execute(&self, args: ToolArgs, ctx: &mut ExecContext) -> ExecResult {
+        let parsed = match WhichArgs::try_parse_from(
+            std::iter::once("which".to_string()).chain(args.to_argv()),
+        ) {
+            Ok(p) => p,
+            Err(e) => return ExecResult::failure(2, format!("which: {e}")),
+        };
+        parsed.global.apply(ctx);
+
         if args.positional.is_empty() {
             return ExecResult::failure(1, "which: missing command name");
         }
 
-        let all_matches = args.has_flag("a");
+        let all_matches = parsed.all;
 
         // Get PATH from scope or environment
         let path_var = ctx

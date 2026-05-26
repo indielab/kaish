@@ -4,14 +4,30 @@
 //! With -f, canonicalizes the path (resolves symlinks and normalizes).
 
 use async_trait::async_trait;
+use clap::{CommandFactory, Parser};
 use std::path::Path;
 
-use crate::ast::Value;
 use crate::interpreter::{ExecResult, OutputData};
-use crate::tools::{ExecContext, ParamSchema, Tool, ToolArgs, ToolSchema};
+use crate::tools::{schema_from_clap, ExecContext, GlobalFlags, Tool, ToolArgs, ToolSchema};
 
 /// Readlink tool: read symlink target or canonicalize a path.
 pub struct Readlink;
+
+/// clap-derived argv layer for readlink. See docs/clap-migration.md.
+#[derive(Parser, Debug)]
+#[command(name = "readlink", about = "Print symlink target or resolved path")]
+struct ReadlinkArgs {
+    /// Resolve to canonical absolute path (-f)
+    #[arg(short = 'f', long = "canonicalize")]
+    canonicalize: bool,
+
+    #[command(flatten)]
+    global: GlobalFlags,
+
+    /// Sink — path read off args.positional to preserve Value typing.
+    #[arg(hide = true)]
+    rest: Vec<String>,
+}
 
 #[async_trait]
 impl Tool for Readlink {
@@ -20,25 +36,32 @@ impl Tool for Readlink {
     }
 
     fn schema(&self) -> ToolSchema {
-        ToolSchema::new("readlink", "Print symlink target or resolved path")
-            .param(ParamSchema::required("path", "string", "Path to read or resolve"))
-            .param(ParamSchema::optional(
-                "canonicalize",
-                "bool",
-                Value::Bool(false),
-                "Resolve to canonical absolute path (-f)",
-            ))
-            .example("Read symlink target", "readlink link.txt")
-            .example("Canonicalize path", "readlink -f ../some/./path")
+        schema_from_clap(
+            &ReadlinkArgs::command(),
+            "readlink",
+            "Print symlink target or resolved path",
+            [
+                ("Read symlink target", "readlink link.txt"),
+                ("Canonicalize path", "readlink -f ../some/./path"),
+            ],
+        )
     }
 
     async fn execute(&self, args: ToolArgs, ctx: &mut ExecContext) -> ExecResult {
+        let parsed = match ReadlinkArgs::try_parse_from(
+            std::iter::once("readlink".to_string()).chain(args.to_argv()),
+        ) {
+            Ok(p) => p,
+            Err(e) => return ExecResult::failure(2, format!("readlink: {e}")),
+        };
+        parsed.global.apply(ctx);
+
         let path_str = match args.get_string("path", 0) {
             Some(p) => p,
             None => return ExecResult::failure(1, "readlink: missing path argument"),
         };
 
-        let canonicalize = args.has_flag("canonicalize") || args.has_flag("f");
+        let canonicalize = parsed.canonicalize;
         let resolved = ctx.resolve_path(&path_str);
 
         if canonicalize {
@@ -109,6 +132,7 @@ fn normalize_path(path: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ast::Value;
     use crate::vfs::{MemoryFs, VfsRouter};
     use std::sync::Arc;
 

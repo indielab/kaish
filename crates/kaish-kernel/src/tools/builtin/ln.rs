@@ -4,14 +4,34 @@
 //! Only symbolic links (-s) are implemented.
 
 use async_trait::async_trait;
+use clap::{CommandFactory, Parser};
 use std::path::Path;
 
-use crate::ast::Value;
 use crate::interpreter::ExecResult;
-use crate::tools::{ExecContext, ParamSchema, Tool, ToolArgs, ToolSchema};
+use crate::tools::{schema_from_clap, ExecContext, GlobalFlags, Tool, ToolArgs, ToolSchema};
 
 /// Ln tool: create symbolic links.
 pub struct Ln;
+
+/// clap-derived argv layer for ln. See docs/clap-migration.md.
+#[derive(Parser, Debug)]
+#[command(name = "ln", about = "Create symbolic links")]
+struct LnArgs {
+    /// Create symbolic link (-s) (required, hard links not supported)
+    #[arg(short = 's', long = "symbolic")]
+    symbolic: bool,
+
+    /// Remove existing destination files (-f)
+    #[arg(short = 'f', long = "force")]
+    force: bool,
+
+    #[command(flatten)]
+    global: GlobalFlags,
+
+    /// Sink — target/link_name read off args.positional to preserve Value typing.
+    #[arg(hide = true)]
+    rest: Vec<String>,
+}
 
 #[async_trait]
 impl Tool for Ln {
@@ -20,26 +40,26 @@ impl Tool for Ln {
     }
 
     fn schema(&self) -> ToolSchema {
-        ToolSchema::new("ln", "Create symbolic links")
-            .param(ParamSchema::required("target", "string", "Target path (what the link points to)"))
-            .param(ParamSchema::required("link_name", "string", "Name of the symbolic link to create"))
-            .param(ParamSchema::optional(
-                "symbolic",
-                "bool",
-                Value::Bool(false),
-                "Create symbolic link (-s) (required, hard links not supported)",
-            ).with_aliases(["-s"]))
-            .param(ParamSchema::optional(
-                "force",
-                "bool",
-                Value::Bool(false),
-                "Remove existing destination files (-f)",
-            ).with_aliases(["-f"]))
-            .example("Create symlink", "ln -s /path/to/target link_name")
-            .example("Create with force", "ln -sf target.txt link.txt")
+        schema_from_clap(
+            &LnArgs::command(),
+            "ln",
+            "Create symbolic links",
+            [
+                ("Create symlink", "ln -s /path/to/target link_name"),
+                ("Create with force", "ln -sf target.txt link.txt"),
+            ],
+        )
     }
 
     async fn execute(&self, args: ToolArgs, ctx: &mut ExecContext) -> ExecResult {
+        let parsed = match LnArgs::try_parse_from(
+            std::iter::once("ln".to_string()).chain(args.to_argv()),
+        ) {
+            Ok(p) => p,
+            Err(e) => return ExecResult::failure(2, format!("ln: {e}")),
+        };
+        parsed.global.apply(ctx);
+
         let target = match args.get_string("target", 0) {
             Some(t) => t,
             None => return ExecResult::failure(1, "ln: missing target argument"),
@@ -50,8 +70,8 @@ impl Tool for Ln {
             None => return ExecResult::failure(1, "ln: missing link_name argument"),
         };
 
-        let symbolic = args.has_flag("symbolic") || args.has_flag("s");
-        let force = args.has_flag("force") || args.has_flag("f");
+        let symbolic = parsed.symbolic;
+        let force = parsed.force;
 
         // Hard links are not supported
         if !symbolic {
@@ -78,6 +98,7 @@ impl Tool for Ln {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ast::Value;
     use crate::vfs::{Filesystem, MemoryFs, VfsRouter};
     use std::sync::Arc;
 

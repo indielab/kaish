@@ -1,10 +1,11 @@
 //! alias / unalias — Manage command aliases.
 
 use async_trait::async_trait;
+use clap::{CommandFactory, Parser};
 
 use crate::ast::Value;
 use crate::interpreter::{ExecResult, OutputData, OutputNode};
-use crate::tools::{ExecContext, ParamSchema, Tool, ToolArgs, ToolSchema};
+use crate::tools::{schema_from_clap, ExecContext, GlobalFlags, Tool, ToolArgs, ToolSchema};
 
 /// Alias tool: define, list, or show command aliases.
 ///
@@ -13,6 +14,18 @@ use crate::tools::{ExecContext, ParamSchema, Tool, ToolArgs, ToolSchema};
 /// - `alias name` — show one alias
 pub struct Alias;
 
+/// clap-derived argv layer for alias. See docs/clap-migration.md.
+#[derive(Parser, Debug)]
+#[command(name = "alias", about = "Define or display command aliases")]
+struct AliasArgs {
+    #[command(flatten)]
+    global: GlobalFlags,
+
+    /// Sink — read args off args.positional / args.named directly.
+    #[arg(hide = true)]
+    rest: Vec<String>,
+}
+
 #[async_trait]
 impl Tool for Alias {
     fn name(&self) -> &str {
@@ -20,19 +33,41 @@ impl Tool for Alias {
     }
 
     fn schema(&self) -> ToolSchema {
-        ToolSchema::new("alias", "Define or display command aliases")
-            .param(ParamSchema::optional(
-                "args",
-                "any",
-                Value::Null,
-                "Alias definitions (name=value) or names to display",
-            ))
-            .example("List all aliases", "alias")
-            .example("Define an alias", "alias ll='ls -la'")
-            .example("Show one alias", "alias ll")
+        schema_from_clap(
+            &AliasArgs::command(),
+            "alias",
+            "Define or display command aliases",
+            [
+                ("List all aliases", "alias"),
+                ("Define an alias", "alias ll='ls -la'"),
+                ("Show one alias", "alias ll"),
+            ],
+        )
     }
 
     async fn execute(&self, args: ToolArgs, ctx: &mut ExecContext) -> ExecResult {
+        // For alias, args.named carries user-defined name=value pairs that
+        // clap can't know about. Synthesise an argv with just flags so clap
+        // sees only the global --json; we read name=value off args.named below.
+        let mut clap_argv: Vec<String> = Vec::new();
+        let mut sorted_flags: Vec<&String> = args.flags.iter().collect();
+        sorted_flags.sort();
+        for flag in sorted_flags {
+            clap_argv.push(if flag.chars().count() == 1 {
+                format!("-{flag}")
+            } else {
+                format!("--{flag}")
+            });
+        }
+        let parsed = match AliasArgs::try_parse_from(
+            std::iter::once("alias".to_string()).chain(clap_argv),
+        ) {
+            Ok(p) => p,
+            Err(e) => return ExecResult::failure(2, format!("alias: {e}")),
+        };
+        parsed.global.apply(ctx);
+
+
         if args.positional.is_empty() && args.named.is_empty() {
             // List all aliases
             return list_aliases(ctx);
@@ -92,6 +127,18 @@ fn list_aliases(ctx: &ExecContext) -> ExecResult {
 /// Unalias tool: remove command aliases.
 pub struct Unalias;
 
+/// clap-derived argv layer for unalias. See docs/clap-migration.md.
+#[derive(Parser, Debug)]
+#[command(name = "unalias", about = "Remove command aliases")]
+struct UnaliasArgs {
+    #[command(flatten)]
+    global: GlobalFlags,
+
+    /// Sink — names read off args.positional to preserve Value typing.
+    #[arg(hide = true)]
+    rest: Vec<String>,
+}
+
 #[async_trait]
 impl Tool for Unalias {
     fn name(&self) -> &str {
@@ -99,12 +146,23 @@ impl Tool for Unalias {
     }
 
     fn schema(&self) -> ToolSchema {
-        ToolSchema::new("unalias", "Remove command aliases")
-            .param(ParamSchema::required("names", "array", "Alias names to remove"))
-            .example("Remove an alias", "unalias ll")
+        schema_from_clap(
+            &UnaliasArgs::command(),
+            "unalias",
+            "Remove command aliases",
+            [("Remove an alias", "unalias ll")],
+        )
     }
 
     async fn execute(&self, args: ToolArgs, ctx: &mut ExecContext) -> ExecResult {
+        let parsed = match UnaliasArgs::try_parse_from(
+            std::iter::once("unalias".to_string()).chain(args.to_argv()),
+        ) {
+            Ok(p) => p,
+            Err(e) => return ExecResult::failure(2, format!("unalias: {e}")),
+        };
+        parsed.global.apply(ctx);
+
         if args.positional.is_empty() {
             return ExecResult::failure(1, "unalias: missing alias name");
         }

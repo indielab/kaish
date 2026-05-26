@@ -1,15 +1,32 @@
 //! kill — Send signals to processes or jobs.
 
 use async_trait::async_trait;
+use clap::{CommandFactory, Parser};
 
 use crate::ast::Value;
 use crate::interpreter::ExecResult;
 #[cfg(all(unix, feature = "native"))]
 use crate::scheduler::JobId;
-use crate::tools::{ExecContext, ParamSchema, Tool, ToolArgs, ToolSchema};
+use crate::tools::{schema_from_clap, ExecContext, GlobalFlags, Tool, ToolArgs, ToolSchema};
 
 /// Kill tool: send signals to processes or jobs.
 pub struct Kill;
+
+/// clap-derived argv layer for kill. See docs/clap-migration.md.
+#[derive(Parser, Debug)]
+#[command(name = "kill", about = "Send a signal to a process or job")]
+struct KillArgs {
+    /// Signal name or number: TERM, KILL, STOP, CONT, INT, HUP, USR1, USR2, QUIT (--signal or -s)
+    #[arg(short = 's', long, default_value_t = String::from("TERM"))]
+    signal: String,
+
+    #[command(flatten)]
+    global: GlobalFlags,
+
+    /// Sink — read target from args.positional to preserve Value typing.
+    #[arg(hide = true)]
+    rest: Vec<String>,
+}
 
 #[async_trait]
 impl Tool for Kill {
@@ -18,20 +35,15 @@ impl Tool for Kill {
     }
 
     fn schema(&self) -> ToolSchema {
-        ToolSchema::new("kill", "Send a signal to a process or job")
-            .param(ParamSchema::optional(
-                "signal",
-                "string",
-                Value::String("TERM".to_string()),
-                "Signal name or number: TERM, KILL, STOP, CONT, INT, HUP, USR1, USR2, QUIT (--signal or -s)",
-            ))
-            .param(ParamSchema::required(
-                "target",
-                "string",
-                "Process ID or %N for job reference",
-            ))
-            .example("Terminate a job", "kill %1")
-            .example("Kill a process by PID", "kill --signal KILL 1234")
+        schema_from_clap(
+            &KillArgs::command(),
+            "kill",
+            "Send a signal to a process or job",
+            [
+                ("Terminate a job", "kill %1"),
+                ("Kill a process by PID", "kill --signal KILL 1234"),
+            ],
+        )
     }
 
     async fn execute(&self, args: ToolArgs, ctx: &mut ExecContext) -> ExecResult {
@@ -43,14 +55,25 @@ impl Tool for Kill {
 
         #[cfg(all(unix, feature = "native"))]
         {
-            // Get signal from --signal / -s named param, or default to TERM
-            let signal_name = args.named.get("signal")
+            let parsed = match KillArgs::try_parse_from(
+                std::iter::once("kill".to_string()).chain(args.to_argv()),
+            ) {
+                Ok(p) => p,
+                Err(e) => return ExecResult::failure(2, format!("kill: {e}")),
+            };
+            parsed.global.apply(ctx);
+
+            // Get signal from --signal / -s named param, or default to TERM.
+            // Prefer args.named (preserves Value typing for Int signals).
+            let signal_name = args
+                .named
+                .get("signal")
                 .map(|v| match v {
                     Value::String(s) => s.clone(),
                     Value::Int(i) => i.to_string(),
                     other => crate::interpreter::value_to_string(other),
                 })
-                .unwrap_or_else(|| "TERM".to_string());
+                .unwrap_or(parsed.signal);
 
             // Get target from first positional
             let target_str = match args.get_positional(0) {

@@ -2,13 +2,41 @@
 
 use async_trait::async_trait;
 use chrono::{Local, Utc};
+use clap::{CommandFactory, Parser};
 
-use crate::ast::Value;
 use crate::interpreter::{ExecResult, OutputData};
-use crate::tools::{ExecContext, ParamSchema, Tool, ToolArgs, ToolSchema};
+use crate::tools::{schema_from_clap, ExecContext, GlobalFlags, Tool, ToolArgs, ToolSchema};
 
 /// Date tool: display current date/time.
 pub struct Date;
+
+/// clap-derived argv layer for date. See docs/clap-migration.md.
+#[derive(Parser, Debug)]
+#[command(name = "date", about = "Display current date and time")]
+struct DateArgs {
+    /// Use UTC instead of local time (-u)
+    #[arg(short = 'u', long = "utc")]
+    utc: bool,
+
+    /// Output in ISO 8601 format
+    #[arg(long)]
+    iso: bool,
+
+    /// Output Unix timestamp (seconds since epoch)
+    #[arg(long)]
+    unix: bool,
+
+    /// strftime format string (positional)
+    #[arg(long)]
+    format: Option<String>,
+
+    #[command(flatten)]
+    global: GlobalFlags,
+
+    /// Sink — format read off args.positional to preserve Value typing.
+    #[arg(hide = true)]
+    rest: Vec<String>,
+}
 
 #[async_trait]
 impl Tool for Date {
@@ -17,40 +45,30 @@ impl Tool for Date {
     }
 
     fn schema(&self) -> ToolSchema {
-        ToolSchema::new("date", "Display current date and time")
-            .param(ParamSchema::optional(
-                "format",
-                "string",
-                Value::String("%Y-%m-%d %H:%M:%S".into()),
-                "strftime format string",
-            ))
-            .param(ParamSchema::optional(
-                "utc",
-                "bool",
-                Value::Bool(false),
-                "Use UTC instead of local time (-u)",
-            ))
-            .param(ParamSchema::optional(
-                "iso",
-                "bool",
-                Value::Bool(false),
-                "Output in ISO 8601 format",
-            ))
-            .param(ParamSchema::optional(
-                "unix",
-                "bool",
-                Value::Bool(false),
-                "Output Unix timestamp (seconds since epoch)",
-            ))
-            .example("Current date and time", "date")
-            .example("ISO 8601 format", "date --iso")
-            .example("Unix timestamp", "date --unix")
+        schema_from_clap(
+            &DateArgs::command(),
+            "date",
+            "Display current date and time",
+            [
+                ("Current date and time", "date"),
+                ("ISO 8601 format", "date --iso"),
+                ("Unix timestamp", "date --unix"),
+            ],
+        )
     }
 
-    async fn execute(&self, args: ToolArgs, _ctx: &mut ExecContext) -> ExecResult {
-        let use_utc = args.has_flag("utc") || args.has_flag("u");
-        let use_iso = args.has_flag("iso");
-        let use_unix = args.has_flag("unix");
+    async fn execute(&self, args: ToolArgs, ctx: &mut ExecContext) -> ExecResult {
+        let parsed = match DateArgs::try_parse_from(
+            std::iter::once("date".to_string()).chain(args.to_argv()),
+        ) {
+            Ok(p) => p,
+            Err(e) => return ExecResult::failure(2, format!("date: {e}")),
+        };
+        parsed.global.apply(ctx);
+
+        let use_utc = parsed.utc;
+        let use_iso = parsed.iso;
+        let use_unix = parsed.unix;
 
         let output = if use_unix {
             // Unix timestamp
@@ -88,6 +106,7 @@ impl Tool for Date {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ast::Value;
     use crate::vfs::{MemoryFs, VfsRouter};
     use std::sync::Arc;
 

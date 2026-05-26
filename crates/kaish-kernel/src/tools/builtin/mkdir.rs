@@ -14,6 +14,11 @@ pub struct Mkdir;
 #[derive(Parser, Debug)]
 #[command(name = "mkdir", about = "Create directories")]
 struct MkdirArgs {
+    /// Create parent directories as needed. Accepted for POSIX compatibility;
+    /// the backend always creates parent directories.
+    #[arg(short = 'p', long = "parents")]
+    _parents: bool,
+
     #[command(flatten)]
     global: GlobalFlags,
 

@@ -1,13 +1,26 @@
 //! unset — Remove variables from scope.
 
 use async_trait::async_trait;
+use clap::{CommandFactory, Parser};
 
 use crate::ast::Value;
 use crate::interpreter::{ExecResult, OutputData};
-use crate::tools::{ExecContext, ParamSchema, Tool, ToolArgs, ToolSchema};
+use crate::tools::{schema_from_clap, ExecContext, GlobalFlags, Tool, ToolArgs, ToolSchema};
 
 /// Unset tool: removes variables from the current scope.
 pub struct Unset;
+
+/// clap-derived argv layer for unset. See docs/clap-migration.md.
+#[derive(Parser, Debug)]
+#[command(name = "unset", about = "Remove variables from scope")]
+struct UnsetArgs {
+    #[command(flatten)]
+    global: GlobalFlags,
+
+    /// Sink — names read off args.positional to preserve Value typing.
+    #[arg(hide = true)]
+    rest: Vec<String>,
+}
 
 #[async_trait]
 impl Tool for Unset {
@@ -16,17 +29,26 @@ impl Tool for Unset {
     }
 
     fn schema(&self) -> ToolSchema {
-        ToolSchema::new("unset", "Remove variables from scope")
-            .param(ParamSchema::required(
-                "names",
-                "array",
-                "Variable names to unset",
-            ))
-            .example("Remove a variable", "unset MY_VAR")
-            .example("Remove multiple", "unset A B C")
+        schema_from_clap(
+            &UnsetArgs::command(),
+            "unset",
+            "Remove variables from scope",
+            [
+                ("Remove a variable", "unset MY_VAR"),
+                ("Remove multiple", "unset A B C"),
+            ],
+        )
     }
 
     async fn execute(&self, args: ToolArgs, ctx: &mut ExecContext) -> ExecResult {
+        let parsed = match UnsetArgs::try_parse_from(
+            std::iter::once("unset".to_string()).chain(args.to_argv()),
+        ) {
+            Ok(p) => p,
+            Err(e) => return ExecResult::failure(2, format!("unset: {e}")),
+        };
+        parsed.global.apply(ctx);
+
         if args.positional.is_empty() {
             return ExecResult::failure(1, "unset: missing variable name");
         }

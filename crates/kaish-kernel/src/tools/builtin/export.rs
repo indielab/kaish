@@ -10,10 +10,11 @@
 //! ```
 
 use async_trait::async_trait;
+use clap::{CommandFactory, Parser};
 
 use crate::ast::Value;
 use crate::interpreter::{ExecResult, OutputData};
-use crate::tools::{ExecContext, ParamSchema, Tool, ToolArgs, ToolSchema};
+use crate::tools::{schema_from_clap, ExecContext, GlobalFlags, Tool, ToolArgs, ToolSchema};
 
 /// Export tool: marks variables for export to child processes.
 ///
@@ -23,6 +24,22 @@ use crate::tools::{ExecContext, ParamSchema, Tool, ToolArgs, ToolSchema};
 /// - `export -p` - print all exported variables
 pub struct Export;
 
+/// clap-derived argv layer for export. See docs/clap-migration.md.
+#[derive(Parser, Debug)]
+#[command(name = "export", about = "Mark variables for export to child processes")]
+struct ExportArgs {
+    /// Print all exported variables (-p)
+    #[arg(short = 'p', long = "p")]
+    print: bool,
+
+    #[command(flatten)]
+    global: GlobalFlags,
+
+    /// Sink — names read off args.positional / args.named to preserve Value typing.
+    #[arg(hide = true)]
+    rest: Vec<String>,
+}
+
 #[async_trait]
 impl Tool for Export {
     fn name(&self) -> &str {
@@ -30,27 +47,43 @@ impl Tool for Export {
     }
 
     fn schema(&self) -> ToolSchema {
-        ToolSchema::new("export", "Mark variables for export to child processes")
-            .param(ParamSchema::optional(
-                "names",
-                "array",
-                Value::Null,
-                "Variable names or NAME=value pairs to export",
-            ))
-            .param(ParamSchema::optional(
-                "p",
-                "bool",
-                Value::Bool(false),
-                "Print all exported variables (-p)",
-            ))
-            .example("Set and export", "export MY_VAR=value")
-            .example("Export existing variable", "export PATH")
-            .example("List exports", "export -p")
+        schema_from_clap(
+            &ExportArgs::command(),
+            "export",
+            "Mark variables for export to child processes",
+            [
+                ("Set and export", "export MY_VAR=value"),
+                ("Export existing variable", "export PATH"),
+                ("List exports", "export -p"),
+            ],
+        )
     }
 
     async fn execute(&self, args: ToolArgs, ctx: &mut ExecContext) -> ExecResult {
+        // For export, args.named carries user-defined VAR=value pairs that
+        // clap can't know about. Synthesise an argv with just flags so clap
+        // parses `-p` / `--json` cleanly; we read VAR=value off args.named
+        // directly below.
+        let mut clap_argv: Vec<String> = Vec::new();
+        let mut sorted_flags: Vec<&String> = args.flags.iter().collect();
+        sorted_flags.sort();
+        for flag in sorted_flags {
+            clap_argv.push(if flag.chars().count() == 1 {
+                format!("-{flag}")
+            } else {
+                format!("--{flag}")
+            });
+        }
+        let parsed = match ExportArgs::try_parse_from(
+            std::iter::once("export".to_string()).chain(clap_argv),
+        ) {
+            Ok(p) => p,
+            Err(e) => return ExecResult::failure(2, format!("export: {e}")),
+        };
+        parsed.global.apply(ctx);
+
         // Handle -p flag: print all exported variables
-        if args.has_flag("p") {
+        if parsed.print {
             return print_exports(ctx);
         }
 

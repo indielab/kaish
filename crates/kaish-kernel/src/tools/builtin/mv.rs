@@ -1,15 +1,31 @@
 //! mv — Move (rename) files and directories.
 
 use async_trait::async_trait;
+use clap::{CommandFactory, Parser};
 use std::path::{Path, PathBuf};
 
-use crate::ast::Value;
 use crate::backend::{BackendError, KernelBackend, WriteMode};
 use crate::interpreter::ExecResult;
-use crate::tools::{ExecContext, ParamSchema, Tool, ToolArgs, ToolSchema};
+use crate::tools::{schema_from_clap, ExecContext, GlobalFlags, Tool, ToolArgs, ToolSchema};
 
 /// Mv tool: move/rename files and directories.
 pub struct Mv;
+
+/// clap-derived argv layer for mv. See docs/clap-migration.md.
+#[derive(Parser, Debug)]
+#[command(name = "mv", about = "Move (rename) files and directories")]
+struct MvArgs {
+    /// Do not overwrite existing files (-n)
+    #[arg(short = 'n', long = "no_clobber")]
+    no_clobber: bool,
+
+    #[command(flatten)]
+    global: GlobalFlags,
+
+    /// Sink — source/dest read off args.positional to preserve Value typing.
+    #[arg(hide = true)]
+    rest: Vec<String>,
+}
 
 #[async_trait]
 impl Tool for Mv {
@@ -18,20 +34,26 @@ impl Tool for Mv {
     }
 
     fn schema(&self) -> ToolSchema {
-        ToolSchema::new("mv", "Move (rename) files and directories")
-            .param(ParamSchema::required("source", "string", "Source path"))
-            .param(ParamSchema::required("dest", "string", "Destination path"))
-            .param(ParamSchema::optional(
-                "no_clobber",
-                "bool",
-                Value::Bool(false),
-                "Do not overwrite existing files (-n)",
-            ))
-            .example("Rename a file", "mv old.txt new.txt")
-            .example("Move into directory", "mv file.txt /archive/")
+        schema_from_clap(
+            &MvArgs::command(),
+            "mv",
+            "Move (rename) files and directories",
+            [
+                ("Rename a file", "mv old.txt new.txt"),
+                ("Move into directory", "mv file.txt /archive/"),
+            ],
+        )
     }
 
     async fn execute(&self, args: ToolArgs, ctx: &mut ExecContext) -> ExecResult {
+        let parsed = match MvArgs::try_parse_from(
+            std::iter::once("mv".to_string()).chain(args.to_argv()),
+        ) {
+            Ok(p) => p,
+            Err(e) => return ExecResult::failure(2, format!("mv: {e}")),
+        };
+        parsed.global.apply(ctx);
+
         let source = match args.get_string("source", 0) {
             Some(s) => s,
             None => return ExecResult::failure(1, "mv: missing source argument"),
@@ -42,7 +64,7 @@ impl Tool for Mv {
             None => return ExecResult::failure(1, "mv: missing destination argument"),
         };
 
-        let no_clobber = args.has_flag("no_clobber") || args.has_flag("n");
+        let no_clobber = parsed.no_clobber;
         let src_path = ctx.resolve_path(&source);
         let dst_path = ctx.resolve_path(&dest);
 

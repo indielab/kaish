@@ -10,20 +10,48 @@
 //! ```
 
 use async_trait::async_trait;
+use clap::{CommandFactory, Parser};
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use crate::ast::Value;
 use crate::backend::WriteMode;
 use crate::interpreter::{ExecResult, OutputData};
-use crate::tools::{ExecContext, ParamSchema, Tool, ToolArgs, ToolSchema};
+use crate::tools::{schema_from_clap, ExecContext, GlobalFlags, Tool, ToolArgs, ToolSchema};
 
 /// Global counter for unique temp file generation.
 static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 /// Mktemp tool: creates temporary files or directories with unique names.
 pub struct Mktemp;
+
+/// clap-derived argv layer for mktemp. See docs/clap-migration.md.
+#[derive(Parser, Debug)]
+#[command(name = "mktemp", about = "Create temporary file or directory with unique name")]
+struct MktempArgs {
+    /// Create a directory instead of a file (-d)
+    #[arg(short = 'd', long = "d")]
+    directory: bool,
+
+    /// Use specified directory instead of /tmp (-p DIR)
+    #[arg(short = 'p', long = "p")]
+    p: Option<String>,
+
+    /// Template for filename (X's replaced with random chars)
+    #[arg(short = 't', long = "t")]
+    t: Option<String>,
+
+    /// Template (positional form / --template)
+    #[arg(long)]
+    template: Option<String>,
+
+    #[command(flatten)]
+    global: GlobalFlags,
+
+    /// Sink — positional template read off args.positional.
+    #[arg(hide = true)]
+    rest: Vec<String>,
+}
 
 #[async_trait]
 impl Tool for Mktemp {
@@ -32,38 +60,28 @@ impl Tool for Mktemp {
     }
 
     fn schema(&self) -> ToolSchema {
-        ToolSchema::new("mktemp", "Create temporary file or directory with unique name")
-            .param(ParamSchema::optional(
-                "d",
-                "bool",
-                Value::Bool(false),
-                "Create a directory instead of a file (-d)",
-            ))
-            .param(ParamSchema::optional(
-                "p",
-                "string",
-                Value::Null,
-                "Use specified directory instead of /tmp (-p DIR)",
-            ))
-            .param(ParamSchema::optional(
-                "t",
-                "string",
-                Value::Null,
-                "Template for filename (X's replaced with random chars)",
-            ))
-            .param(ParamSchema::optional(
-                "template",
-                "string",
-                Value::Null,
-                "Template (positional form)",
-            ))
-            .example("Create temp file", "mktemp")
-            .example("Create temp directory", "mktemp -d")
-            .example("Custom template", "mktemp -t myapp.XXXXXX")
+        schema_from_clap(
+            &MktempArgs::command(),
+            "mktemp",
+            "Create temporary file or directory with unique name",
+            [
+                ("Create temp file", "mktemp"),
+                ("Create temp directory", "mktemp -d"),
+                ("Custom template", "mktemp -t myapp.XXXXXX"),
+            ],
+        )
     }
 
     async fn execute(&self, args: ToolArgs, ctx: &mut ExecContext) -> ExecResult {
-        let is_dir = args.has_flag("d");
+        let parsed = match MktempArgs::try_parse_from(
+            std::iter::once("mktemp".to_string()).chain(args.to_argv()),
+        ) {
+            Ok(p) => p,
+            Err(e) => return ExecResult::failure(2, format!("mktemp: {e}")),
+        };
+        parsed.global.apply(ctx);
+
+        let is_dir = parsed.directory;
 
         // Get parent directory
         let parent_dir = args
@@ -179,6 +197,7 @@ fn get_system_entropy(_len: usize) -> Vec<u8> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ast::Value;
     use crate::vfs::{MemoryFs, VfsRouter};
     use std::sync::Arc;
 

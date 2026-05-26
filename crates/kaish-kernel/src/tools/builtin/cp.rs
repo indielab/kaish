@@ -1,15 +1,39 @@
 //! cp — Copy files and directories.
 
 use async_trait::async_trait;
+use clap::{CommandFactory, Parser};
 use std::path::{Path, PathBuf};
 
-use crate::ast::Value;
 use crate::backend::{BackendError, KernelBackend, WriteMode};
 use crate::interpreter::ExecResult;
-use crate::tools::{ExecContext, ParamSchema, Tool, ToolArgs, ToolSchema};
+use crate::tools::{schema_from_clap, ExecContext, GlobalFlags, Tool, ToolArgs, ToolSchema};
 
 /// Cp tool: copy files and directories.
 pub struct Cp;
+
+/// clap-derived argv layer for cp. See docs/clap-migration.md.
+#[derive(Parser, Debug)]
+#[command(name = "cp", about = "Copy files and directories")]
+struct CpArgs {
+    /// Copy directories recursively (-r)
+    #[arg(short = 'r', long = "recursive")]
+    recursive: bool,
+
+    /// Do not overwrite existing files (-n)
+    #[arg(short = 'n', long = "no_clobber")]
+    no_clobber: bool,
+
+    /// Preserve file attributes (-p)
+    #[arg(short = 'p', long = "preserve")]
+    preserve: bool,
+
+    #[command(flatten)]
+    global: GlobalFlags,
+
+    /// Sink — source/dest read off args.positional to preserve Value typing.
+    #[arg(hide = true)]
+    rest: Vec<String>,
+}
 
 #[async_trait]
 impl Tool for Cp {
@@ -18,32 +42,26 @@ impl Tool for Cp {
     }
 
     fn schema(&self) -> ToolSchema {
-        ToolSchema::new("cp", "Copy files and directories")
-            .param(ParamSchema::required("source", "string", "Source path"))
-            .param(ParamSchema::required("dest", "string", "Destination path"))
-            .param(ParamSchema::optional(
-                "recursive",
-                "bool",
-                Value::Bool(false),
-                "Copy directories recursively (-r)",
-            ).with_aliases(["-r", "-R"]))
-            .param(ParamSchema::optional(
-                "no_clobber",
-                "bool",
-                Value::Bool(false),
-                "Do not overwrite existing files (-n)",
-            ).with_aliases(["-n"]))
-            .param(ParamSchema::optional(
-                "preserve",
-                "bool",
-                Value::Bool(false),
-                "Preserve file attributes (-p)",
-            ).with_aliases(["-p"]))
-            .example("Copy a file", "cp src.txt dest.txt")
-            .example("Copy directory recursively", "cp -r src/ backup/")
+        schema_from_clap(
+            &CpArgs::command(),
+            "cp",
+            "Copy files and directories",
+            [
+                ("Copy a file", "cp src.txt dest.txt"),
+                ("Copy directory recursively", "cp -r src/ backup/"),
+            ],
+        )
     }
 
     async fn execute(&self, args: ToolArgs, ctx: &mut ExecContext) -> ExecResult {
+        let parsed = match CpArgs::try_parse_from(
+            std::iter::once("cp".to_string()).chain(args.to_argv()),
+        ) {
+            Ok(p) => p,
+            Err(e) => return ExecResult::failure(2, format!("cp: {e}")),
+        };
+        parsed.global.apply(ctx);
+
         let source = match args.get_string("source", 0) {
             Some(s) => s,
             None => return ExecResult::failure(1, "cp: missing source argument"),
@@ -54,10 +72,10 @@ impl Tool for Cp {
             None => return ExecResult::failure(1, "cp: missing destination argument"),
         };
 
-        let recursive = args.has_flag("recursive") || args.has_flag("r");
-        let no_clobber = args.has_flag("no_clobber") || args.has_flag("n");
+        let recursive = parsed.recursive;
+        let no_clobber = parsed.no_clobber;
         // preserve flag is recognized but VFS doesn't support attributes
-        let _preserve = args.has_flag("preserve") || args.has_flag("p");
+        let _preserve = parsed.preserve;
 
         let src_path = ctx.resolve_path(&source);
         let dst_path = ctx.resolve_path(&dest);
@@ -146,6 +164,7 @@ fn copy_dir_recursive<'a>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ast::Value;
     use crate::vfs::{Filesystem, MemoryFs, VfsRouter};
     use std::sync::Arc;
 

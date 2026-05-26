@@ -15,15 +15,31 @@
 //! ```
 
 use async_trait::async_trait;
+use clap::{CommandFactory, Parser};
 
 use crate::ast::Value;
 use crate::interpreter::ExecResult;
-use crate::tools::{ExecContext, ParamSchema, Tool, ToolArgs, ToolSchema};
+use crate::tools::{schema_from_clap, ExecContext, GlobalFlags, Tool, ToolArgs, ToolSchema};
 
 use super::spawn::resolve_in_path;
 
 /// Exec tool: replaces the current process (POSIX `exec`).
 pub struct Exec;
+
+/// clap-derived argv layer for exec. See docs/clap-migration.md.
+///
+/// `trailing_var_arg` + `allow_hyphen_values` because exec is a passthrough —
+/// everything after the command name is the child's argv, including flags.
+#[derive(Parser, Debug)]
+#[command(name = "exec", about = "Replace the current process with a command (POSIX exec)")]
+struct ExecArgs {
+    #[command(flatten)]
+    global: GlobalFlags,
+
+    /// Sink — command + argv read from args.positional to preserve Value typing.
+    #[arg(hide = true, trailing_var_arg = true, allow_hyphen_values = true)]
+    rest: Vec<String>,
+}
 
 #[async_trait]
 impl Tool for Exec {
@@ -32,17 +48,26 @@ impl Tool for Exec {
     }
 
     fn schema(&self) -> ToolSchema {
-        ToolSchema::new("exec", "Replace the current process with a command (POSIX exec)")
-            .param(ParamSchema::required(
-                "command",
-                "string",
-                "Command to exec into (name or path)",
-            ))
-            .example("Replace shell with bash", "exec bash")
-            .example("Replace shell with a command", "exec cargo build --release")
+        schema_from_clap(
+            &ExecArgs::command(),
+            "exec",
+            "Replace the current process with a command (POSIX exec)",
+            [
+                ("Replace shell with bash", "exec bash"),
+                ("Replace shell with a command", "exec cargo build --release"),
+            ],
+        )
     }
 
     async fn execute(&self, args: ToolArgs, ctx: &mut ExecContext) -> ExecResult {
+        let parsed = match ExecArgs::try_parse_from(
+            std::iter::once("exec".to_string()).chain(args.to_argv()),
+        ) {
+            Ok(p) => p,
+            Err(e) => return ExecResult::failure(2, format!("exec: {e}")),
+        };
+        parsed.global.apply(ctx);
+
         if !ctx.allow_external_commands {
             return ExecResult::failure(1,
                 "exec: external commands are disabled (allow_external_commands=false)");

@@ -11,13 +11,42 @@
 //! ```
 
 use async_trait::async_trait;
+use clap::{CommandFactory, Parser};
 
 use crate::ast::Value;
 use crate::interpreter::{ExecResult, OutputData};
-use crate::tools::{ExecContext, ParamSchema, Tool, ToolArgs, ToolSchema};
+use crate::tools::{schema_from_clap, ExecContext, GlobalFlags, Tool, ToolArgs, ToolSchema};
 
 /// Env tool: print environment or run command with modified environment.
 pub struct Env;
+
+/// clap-derived argv layer for env. See docs/clap-migration.md.
+///
+/// `args.named` and `args.flags` are read directly for VAR=value & -0/-i/-u
+/// because env's positional layer is (env-overrides, command, child-argv) —
+/// can't be reflected as named clap positionals cleanly.
+#[derive(Parser, Debug)]
+#[command(name = "env", about = "Print environment variables or run command with modified environment")]
+struct EnvArgs {
+    /// Use NUL as separator instead of newline (-0)
+    #[arg(short = '0', long = "0")]
+    nul: bool,
+
+    /// Start with empty environment (-i)
+    #[arg(short = 'i', long = "i")]
+    ignore_environment: bool,
+
+    /// Unset variable from environment (-u VAR)
+    #[arg(short = 'u', long = "u")]
+    u: Option<String>,
+
+    #[command(flatten)]
+    global: GlobalFlags,
+
+    /// Sink — VAR=value pairs and command/argv read off args.positional.
+    #[arg(hide = true)]
+    rest: Vec<String>,
+}
 
 #[async_trait]
 impl Tool for Env {
@@ -26,41 +55,28 @@ impl Tool for Env {
     }
 
     fn schema(&self) -> ToolSchema {
-        ToolSchema::new(
+        schema_from_clap(
+            &EnvArgs::command(),
             "env",
             "Print environment variables or run command with modified environment",
+            [
+                ("Print environment", "env"),
+                ("Run with modified env", "env MY_VAR=hello command"),
+            ],
         )
-        .param(ParamSchema::optional(
-            "args",
-            "array",
-            Value::Null,
-            "VAR=value pairs followed by optional command and arguments",
-        ))
-        .param(ParamSchema::optional(
-            "0",
-            "bool",
-            Value::Bool(false),
-            "Use NUL as separator instead of newline (-0)",
-        ))
-        .param(ParamSchema::optional(
-            "i",
-            "bool",
-            Value::Bool(false),
-            "Start with empty environment (-i)",
-        ))
-        .param(ParamSchema::optional(
-            "u",
-            "string",
-            Value::Null,
-            "Unset variable from environment (-u VAR)",
-        ))
-        .example("Print environment", "env")
-        .example("Run with modified env", "env MY_VAR=hello command")
     }
 
     async fn execute(&self, args: ToolArgs, ctx: &mut ExecContext) -> ExecResult {
-        let null_sep = args.has_flag("0");
-        let clear_env = args.has_flag("i");
+        let parsed = match EnvArgs::try_parse_from(
+            std::iter::once("env".to_string()).chain(args.to_argv()),
+        ) {
+            Ok(p) => p,
+            Err(e) => return ExecResult::failure(2, format!("env: {e}")),
+        };
+        parsed.global.apply(ctx);
+
+        let null_sep = parsed.nul;
+        let clear_env = parsed.ignore_environment;
 
         // Collect -u (unset) value if specified
         let unset_vars: Vec<String> = args

@@ -1,14 +1,30 @@
 //! stat — Display file status.
 
 use async_trait::async_trait;
+use clap::{CommandFactory, Parser};
 use std::path::Path;
 
-use crate::ast::Value;
 use crate::interpreter::{EntryType, ExecResult, OutputData, OutputNode};
-use crate::tools::{ExecContext, ParamSchema, Tool, ToolArgs, ToolSchema};
+use crate::tools::{schema_from_clap, ExecContext, GlobalFlags, Tool, ToolArgs, ToolSchema};
 
 /// Stat tool: display file or filesystem status.
 pub struct Stat;
+
+/// clap-derived argv layer for stat. See docs/clap-migration.md.
+#[derive(Parser, Debug)]
+#[command(name = "stat", about = "Display file status")]
+struct StatArgs {
+    /// Output format (--format). Supports: %n (name), %s (size), %F (type)
+    #[arg(short = 'c', long)]
+    format: Option<String>,
+
+    #[command(flatten)]
+    global: GlobalFlags,
+
+    /// Sink — path read off args.positional to preserve Value typing.
+    #[arg(hide = true)]
+    rest: Vec<String>,
+}
 
 #[async_trait]
 impl Tool for Stat {
@@ -17,19 +33,26 @@ impl Tool for Stat {
     }
 
     fn schema(&self) -> ToolSchema {
-        ToolSchema::new("stat", "Display file status")
-            .param(ParamSchema::required("path", "string", "File to stat"))
-            .param(ParamSchema::optional(
-                "format",
-                "string",
-                Value::Null,
-                "Output format (--format). Supports: %n (name), %s (size), %F (type)",
-            ))
-            .example("Show file info", "stat README.md")
-            .example("Just the size", "stat --format '%s' file.txt")
+        schema_from_clap(
+            &StatArgs::command(),
+            "stat",
+            "Display file status",
+            [
+                ("Show file info", "stat README.md"),
+                ("Just the size", "stat --format '%s' file.txt"),
+            ],
+        )
     }
 
     async fn execute(&self, args: ToolArgs, ctx: &mut ExecContext) -> ExecResult {
+        let parsed = match StatArgs::try_parse_from(
+            std::iter::once("stat".to_string()).chain(args.to_argv()),
+        ) {
+            Ok(p) => p,
+            Err(e) => return ExecResult::failure(2, format!("stat: {e}")),
+        };
+        parsed.global.apply(ctx);
+
         let path_str = match args.get_string("path", 0) {
             Some(p) => p,
             None => return ExecResult::failure(1, "stat: missing path argument"),
@@ -106,6 +129,7 @@ fn format_stat(fmt: &str, name: &str, info: &crate::vfs::DirEntry) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ast::Value;
     use crate::vfs::{Filesystem, MemoryFs, VfsRouter};
     use std::sync::Arc;
 
