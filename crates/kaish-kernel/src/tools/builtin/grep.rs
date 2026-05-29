@@ -337,10 +337,10 @@ impl Tool for Grep {
             .map(crate::interpreter::value_to_string)
             .collect();
         if file_operands.len() > 1 {
-            let root = PathBuf::from(ctx.resolve_path("."));
+            let root = ctx.resolve_path(".");
             let resolved: Vec<PathBuf> = file_operands
                 .iter()
-                .map(|f| PathBuf::from(ctx.resolve_path(f)))
+                .map(|f| ctx.resolve_path(f))
                 .collect();
             return self
                 .grep_multiple_files(
