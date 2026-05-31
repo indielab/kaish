@@ -44,6 +44,10 @@ directories = { workspace = true }
 rstest = { workspace = true }
 insta = { workspace = true }
 tempfile = { workspace = true }
+# Trace-context propagation test: in-memory OTel exporter (`testing`) + the
+# tracing-opentelemetry bridge to assert the kernel span parents onto a
+# traceparent forwarded from the MCP request `_meta`.
+opentelemetry_sdk = { workspace = true, features = ["testing"] }
 
 [lints]
 workspace = true

@@ -56,24 +56,29 @@ tasks in line format; JSON format (`:284-290`) includes them with an
 match JSON behaviour with an explicit failure marker, or fail loudly
 when results are dropped.
 
-### Wire frontends to populate `ExecuteOptions` trace context
-The kernel ingress exists — `ExecuteOptions::{traceparent, tracestate,
-baggage}` parent the execution span onto the embedder's trace via
-`telemetry::extract_parent` + `run_inner`'s `with_context`
-(`trace_context_tests.rs` guards it). What's missing is the frontends
-actually *filling those fields*. The MCP `execute` handler
-(`kaish-mcp/src/server/handler.rs`) logs the call but ignores any
-`traceparent`/`baggage` on the incoming request metadata; it should
-extract them (rmcp request extensions / tool-call metadata) and set
-them on the `ExecuteOptions` it builds, so MCP-client traces span the
-kaish boundary. REPL is lower-value (no upstream trace) but could read
-`TRACEPARENT`/`OTEL_*` env for parity. Egress symmetry — copying OTel
-baggage back onto `ExecResult.baggage` — is a separate decision (the
-field already exists for tool-emitted baggage). Also: the
-`with_context` wrapper only covers the foreground execute future, so
-background jobs / scatter workers spawned via `Kernel::fork` start
-fresh task-locals and currently lose the trace context — propagating it
-into forked tasks is a follow-up if linked job spans are wanted.
+### Trace-context egress — copy OTel baggage onto `ExecResult.baggage`
+Ingress is wired end-to-end: `ExecuteOptions::{traceparent, tracestate,
+baggage}` (kernel), the MCP `execute` handler lifting W3C context from
+the request `_meta` via `trace_from_meta` → `McpTraceContext` →
+`ExecuteOptions`, and `telemetry::bind_current_context` propagating the
+context across `tokio::spawn` so background jobs / scatter workers /
+concurrent pipeline stages stay in the trace (all covered by
+`trace_context_tests.rs` in kaish-kernel and kaish-mcp).
+
+What's left is **egress**: the OTel baggage attached on the way in is
+not copied back onto `ExecResult.baggage` (that field currently only
+carries tool-emitted baggage — see the `traceparent` round-trip test in
+`kaish-types/src/backend.rs`). Deciding the merge semantics — does
+embedder baggage echo back, and does it win over or merge with
+tool-emitted entries — was deliberately deferred. Pick this up when an
+embedder actually needs to read trace identifiers off the result.
+
+Minor remaining: REPL doesn't read `TRACEPARENT`/`OTEL_*` from env for
+parity (low value — no upstream trace in interactive use). And forked
+spans currently parent onto the embedder's remote span (same trace, via
+`Context::current()` at the spawn site) rather than nesting under the
+foreground execute span — a cosmetic depth difference, not a broken
+trace.
 
 ---
 

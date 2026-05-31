@@ -37,7 +37,7 @@ use kaish_kernel::tools::ToolSchema;
 use kaish_kernel::vfs::{LocalFs, MemoryFs, VfsRouter};
 
 use super::config::McpServerConfig;
-use super::execute::{self, ExecuteParams, ExecuteResult};
+use super::execute::{self, ExecuteParams, ExecuteResult, McpTraceContext};
 use super::resources::{self, parse_resource_uri, ResourceContent};
 use super::subscriptions::ResourceWatcher;
 
@@ -208,6 +208,36 @@ pub struct ExecuteInput {
     pub timeout_ms: Option<u64>,
 }
 
+/// Lift W3C trace context out of an MCP request's `_meta`.
+///
+/// Recognised keys: `traceparent` (string) and `tracestate` (string), per W3C
+/// Trace Context, and `baggage` as a JSON object of string→string identifiers
+/// (a nested object rather than the W3C header string, since `_meta` is already
+/// structured JSON). Non-string / wrong-shape values are ignored rather than
+/// erroring — trace context is best-effort and must never fail a tool call.
+fn trace_from_meta(meta: &rmcp::model::Meta) -> McpTraceContext {
+    let get_str = |key: &str| {
+        meta.get(key)
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string())
+    };
+
+    let mut baggage = std::collections::BTreeMap::new();
+    if let Some(obj) = meta.get("baggage").and_then(|v| v.as_object()) {
+        for (key, value) in obj {
+            if let Some(s) = value.as_str() {
+                baggage.insert(key.clone(), s.to_string());
+            }
+        }
+    }
+
+    McpTraceContext {
+        traceparent: get_str("traceparent"),
+        tracestate: get_str("tracestate"),
+        baggage,
+    }
+}
+
 #[tool_router]
 impl KaishServerHandler {
     /// Execute kaish shell scripts.
@@ -215,10 +245,16 @@ impl KaishServerHandler {
     /// Each call runs in a fresh, isolated environment. Supports restricted/modified
     /// Bourne syntax plus kaish extensions (scatter/gather, typed params, MCP tool calls).
     #[tool(description = "Run shell commands with pre-validation — syntax errors are caught before anything executes.\n\nEach call runs in a fresh kernel (variables reset, cwd reset). Confirmation nonces persist across calls.\n\nKey advantages over bash:\n• No word splitting — $VAR with spaces just works, no quoting bugs\n• `for line in $(cmd)` splits on newlines only — line iteration works without IFS dance; whitespace within a line is never split\n• Bare glob expansion — *.txt expands to matching files (disable: set +o glob)\n• All builtins support --json for structured output (ls --json, ps --json, etc.)\n• Destructive commands (rm) can be gated behind confirmation nonces (set -o latch)\n\nBuiltins: grep, jq, git, find, sed, awk, cat, ls, tree, stat, diff, and 50+ more.\nAlso supports: pipes, redirects, here-docs, if/for/while, functions, ${VAR:-default}, $((arithmetic)).\n\nNot supported: process substitution <(), backticks, eval.\n\nPaths: Native paths work within $HOME. /v/ = ephemeral memory.\n\nFirst time? Run: help builtins")]
-    async fn execute(&self, input: Parameters<ExecuteInput>) -> Result<CallToolResult, McpError> {
+    async fn execute(
+        &self,
+        input: Parameters<ExecuteInput>,
+        meta: rmcp::model::Meta,
+    ) -> Result<CallToolResult, McpError> {
+        let trace = trace_from_meta(&meta);
         tracing::info!(
             script_len = input.0.script.len(),
             cwd = ?input.0.cwd,
+            has_traceparent = trace.traceparent.is_some(),
             "mcp.execute"
         );
 
@@ -235,6 +271,7 @@ impl KaishServerHandler {
                 self.config.default_timeout_ms,
                 Some(self.nonce_store.clone()),
                 &self.init_paths,
+                trace,
             )
                 .await
                 .map_err(|e| McpError::internal_error(e.to_string(), None))?;
@@ -766,6 +803,53 @@ mod tests {
         assert_eq!(handler.config.name, "kaish");
     }
 
+    fn meta_from(value: serde_json::Value) -> rmcp::model::Meta {
+        let obj = value.as_object().expect("meta literal must be an object").clone();
+        rmcp::model::Meta(obj)
+    }
+
+    #[test]
+    fn trace_from_meta_extracts_w3c_fields() {
+        let meta = meta_from(serde_json::json!({
+            "traceparent": "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01",
+            "tracestate": "vendor=opaque",
+            "baggage": { "owner": "atobey", "tenant": "acme" },
+        }));
+        let trace = trace_from_meta(&meta);
+
+        assert_eq!(
+            trace.traceparent.as_deref(),
+            Some("00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01"),
+        );
+        assert_eq!(trace.tracestate.as_deref(), Some("vendor=opaque"));
+        assert_eq!(trace.baggage.get("owner").map(String::as_str), Some("atobey"));
+        assert_eq!(trace.baggage.get("tenant").map(String::as_str), Some("acme"));
+    }
+
+    #[test]
+    fn trace_from_meta_empty_when_absent() {
+        // Unrelated meta (e.g. a progressToken) must not produce trace context.
+        let meta = meta_from(serde_json::json!({ "progressToken": "abc" }));
+        let trace = trace_from_meta(&meta);
+        assert!(trace.traceparent.is_none());
+        assert!(trace.tracestate.is_none());
+        assert!(trace.baggage.is_empty());
+    }
+
+    #[test]
+    fn trace_from_meta_ignores_wrong_shapes() {
+        // Non-string traceparent and non-string baggage values are skipped
+        // rather than erroring — trace context is best-effort.
+        let meta = meta_from(serde_json::json!({
+            "traceparent": 1234,
+            "baggage": { "owner": "atobey", "count": 7 },
+        }));
+        let trace = trace_from_meta(&meta);
+        assert!(trace.traceparent.is_none(), "numeric traceparent ignored");
+        assert_eq!(trace.baggage.get("owner").map(String::as_str), Some("atobey"));
+        assert!(!trace.baggage.contains_key("count"), "numeric baggage value skipped");
+    }
+
     #[tokio::test]
     async fn test_get_info() {
         use rmcp::ServerHandler;
@@ -808,7 +892,10 @@ mod tests {
             env: None,
             timeout_ms: None,
         });
-        let result = handler.execute(input).await.expect("execute failed");
+        let result = handler
+            .execute(input, rmcp::model::Meta::default())
+            .await
+            .expect("execute failed");
 
         // content[0] should be plain text (echo is simple text, not TOON-encoded)
         if let RawContent::Text(text) = &result.content[0].raw {
@@ -848,7 +935,10 @@ mod tests {
             env: None,
             timeout_ms: None,
         });
-        let result = handler.execute(input).await.expect("execute failed");
+        let result = handler
+            .execute(input, rmcp::model::Meta::default())
+            .await
+            .expect("execute failed");
 
         // is_error should be true
         assert_eq!(result.is_error, Some(true));
@@ -873,7 +963,10 @@ mod tests {
             env: None,
             timeout_ms: None,
         });
-        let result = handler.execute(input).await.expect("execute failed");
+        let result = handler
+            .execute(input, rmcp::model::Meta::default())
+            .await
+            .expect("execute failed");
 
         // On error, stderr is the first content block (no [stderr] prefix)
         if let RawContent::Text(text) = &result.content[0].raw {
@@ -984,7 +1077,10 @@ mod tests {
             env: None,
             timeout_ms: None,
         });
-        let result = handler.execute(input).await.expect("execute failed");
+        let result = handler
+            .execute(input, rmcp::model::Meta::default())
+            .await
+            .expect("execute failed");
 
         // stdout content should have low priority (structured_content is primary)
         assert_eq!(
@@ -1006,7 +1102,10 @@ mod tests {
             env: None,
             timeout_ms: None,
         });
-        let result = handler.execute(input).await.expect("execute failed");
+        let result = handler
+            .execute(input, rmcp::model::Meta::default())
+            .await
+            .expect("execute failed");
 
         // On error, stderr is the first content block with high priority
         assert_eq!(

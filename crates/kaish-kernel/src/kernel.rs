@@ -2006,8 +2006,9 @@ impl Kernel {
         // through the fork, not the parent.
         bg_ctx.dispatcher = fork.dispatcher();
 
-        // Spawn the background task
-        tokio::spawn(async move {
+        // Spawn the background task. Propagate the embedder's trace context
+        // across the spawn boundary so the job's spans stay in the same trace.
+        tokio::spawn(crate::telemetry::bind_current_context(async move {
             // runner.run needs a &dyn CommandDispatcher; fork.as_ref()
             // gives us that (Kernel implements CommandDispatcher).
             let result = runner.run(&commands, &mut bg_ctx, fork.as_ref()).await;
@@ -2027,7 +2028,7 @@ impl Kernel {
 
             // Send result to JobManager (ignore error if receiver dropped)
             let _ = tx.send(result);
-        });
+        }));
 
         Ok(ExecResult::success(format!("[{}]", job_id)))
     }

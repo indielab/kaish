@@ -232,7 +232,10 @@ impl ScatterGatherRunner {
                 item.clone()
             };
             let worker_span = tracing::debug_span!("scatter_worker", item = %item_label);
-            let handle = tokio::spawn(async move {
+            // Propagate the embedder's trace context across the spawn boundary so
+            // each worker's spans stay in the same trace. `.instrument` below
+            // provides the tracing parent; this provides the OTel parent.
+            let handle = tokio::spawn(crate::telemetry::bind_current_context(async move {
                 let _permit = permit; // Hold permit until done
 
                 // Create context for this worker
@@ -256,7 +259,7 @@ impl ScatterGatherRunner {
 
                 let timed_out = timed_out_check.load(Ordering::SeqCst);
                 ScatterResult { item, result, timed_out }
-            }.instrument(worker_span));
+            }.instrument(worker_span)));
 
             handles.push(handle);
         }

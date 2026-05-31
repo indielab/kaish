@@ -15,8 +15,10 @@
 //! context around the call achieves.
 
 use std::collections::HashMap;
+use std::future::Future;
 
 use opentelemetry::baggage::BaggageExt;
+use opentelemetry::context::{FutureExt, WithContext};
 use opentelemetry::propagation::TextMapPropagator;
 use opentelemetry::{Context, KeyValue};
 use opentelemetry_sdk::propagation::TraceContextPropagator;
@@ -58,6 +60,22 @@ pub(crate) fn extract_parent(opts: &ExecuteOptions) -> Option<Context> {
     }
 
     Some(cx)
+}
+
+/// Re-bind the current OpenTelemetry context onto a future that is about to
+/// cross a `tokio::spawn` boundary.
+///
+/// Spawned tasks start with an empty OTel current-context, so forked work
+/// (background jobs, scatter workers, concurrent pipeline stages) would emit
+/// spans detached from the embedder's trace. Call this at the spawn site — on
+/// the parent task, where `Kernel::run_inner`'s `with_context` has made the
+/// embedder context current — so the spawned future re-attaches that same
+/// context on every poll and its spans stay in the embedder's trace.
+///
+/// `Context::current()` is captured eagerly here (synchronously at the spawn
+/// site), not inside the spawned task where it would already be empty.
+pub(crate) fn bind_current_context<F: Future>(fut: F) -> WithContext<F> {
+    fut.with_context(Context::current())
 }
 
 #[cfg(test)]

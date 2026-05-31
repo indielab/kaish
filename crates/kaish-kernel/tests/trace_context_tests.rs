@@ -1,11 +1,17 @@
-//! End-to-end check that embedder-supplied W3C trace context on
-//! `ExecuteOptions` parents kaish's execution span onto the embedder's trace.
+//! End-to-end checks that embedder-supplied W3C trace context on
+//! `ExecuteOptions` reaches kaish's emitted spans — both the foreground
+//! execution span and spans from forked work (scatter workers).
 //!
-//! This guards the subtle wiring in `Kernel::run_inner`: the extracted OTel
-//! context must be attached as *current* at the instant the `#[instrument]`
-//! execution span is created, because `Span::set_parent` rejects an
-//! already-entered span. If that ordering ever regresses, the execute span
-//! becomes an orphan root with a fresh trace id and these assertions fail.
+//! These guard two pieces of wiring:
+//!   1. `Kernel::run_inner` attaching the extracted OTel context so the
+//!      `#[instrument]` execution span parents onto the embedder's trace
+//!      (`set_parent` would be too late — it rejects an entered span).
+//!   2. `telemetry::bind_current_context` carrying that context across the
+//!      `tokio::spawn` boundary into forked tasks, which otherwise start with
+//!      an empty OTel current-context and would emit orphan-root spans.
+//!
+//! Both tests share one process-global subscriber, so they live in a single
+//! test function (a second `set_global_default` would panic).
 
 use kaish_kernel::Kernel;
 use kaish_types::ExecuteOptions;
@@ -19,8 +25,8 @@ const TRACEPARENT: &str = "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-
 const TRACE_ID: &str = "4bf92f3577b34da6a3ce929d0e0e4736";
 const PARENT_SPAN_ID: &str = "00f067aa0ba902b7";
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
-async fn execute_span_parents_onto_embedder_traceparent() {
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn embedder_trace_context_reaches_foreground_and_forked_spans() {
     // In-memory OTel pipeline: a simple exporter (synchronous on span end) plus
     // the tracing-opentelemetry bridge layer installed as the global subscriber.
     let exporter = InMemorySpanExporter::default();
@@ -33,6 +39,8 @@ async fn execute_span_parents_onto_embedder_traceparent() {
     tracing::subscriber::set_global_default(subscriber).expect("install global subscriber once");
 
     let kernel = Kernel::transient().expect("build transient kernel");
+
+    // 1. Foreground execution span parents onto the embedder's traceparent.
     let opts = ExecuteOptions::new()
         .with_traceparent(TRACEPARENT)
         .with_baggage_entry("owner", "atobey");
@@ -42,14 +50,27 @@ async fn execute_span_parents_onto_embedder_traceparent() {
         .expect("execute should succeed");
     assert_eq!(result.code, 0, "`true` should exit 0");
 
+    // 2. Forked scatter workers stay in the same trace. `gather` blocks until
+    //    every worker finishes, so the worker spans are flushed by the time
+    //    this returns. Each worker runs in its own `tokio::spawn`ed task.
+    let scatter = kernel
+        .execute_with_options(
+            r#"seq 1 3 | scatter | echo "$ITEM" | gather"#,
+            ExecuteOptions::new().with_traceparent(TRACEPARENT),
+        )
+        .await
+        .expect("scatter should succeed");
+    assert_eq!(scatter.code, 0, "scatter/gather should exit 0");
+
     provider.force_flush().expect("flush spans");
     let spans = exporter.get_finished_spans().expect("collect finished spans");
 
+    // Foreground execution span: inherits the embedder's trace and parents
+    // directly onto the embedder's span id.
     let exec = spans
         .iter()
         .find(|s| s.name.as_ref() == "execute_with_options_inner")
         .expect("the kernel execution span should have been exported");
-
     assert_eq!(
         exec.span_context.trace_id().to_string(),
         TRACE_ID,
@@ -60,4 +81,25 @@ async fn execute_span_parents_onto_embedder_traceparent() {
         PARENT_SPAN_ID,
         "execution span must parent directly onto the embedder's span id",
     );
+
+    // Forked worker spans: present, and every one shares the embedder's trace.
+    let worker_spans: Vec<_> = spans
+        .iter()
+        .filter(|s| s.name.as_ref() == "scatter_worker")
+        .collect();
+    assert!(
+        !worker_spans.is_empty(),
+        "expected scatter_worker spans to be exported",
+    );
+    for worker in &worker_spans {
+        assert_eq!(
+            worker.span_context.trace_id().to_string(),
+            TRACE_ID,
+            "forked scatter worker span must stay in the embedder's trace",
+        );
+        assert!(
+            worker.span_context.is_sampled(),
+            "worker span should inherit the sampled decision from the remote parent",
+        );
+    }
 }

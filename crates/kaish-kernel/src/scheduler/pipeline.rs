@@ -405,7 +405,10 @@ impl PipelineRunner {
             let data_sender = if i < last_idx { data_senders[i].take() } else { None };
             let data_receiver = if i > 0 { data_receivers[i - 1].take() } else { None };
 
-            let handle: tokio::task::JoinHandle<(ExecResult, ExecContext)> = tokio::spawn(async move {
+            // Propagate the embedder's trace context across the spawn boundary
+            // so each concurrent stage's spans stay in the same trace.
+            let handle: tokio::task::JoinHandle<(ExecResult, ExecContext)> =
+                tokio::spawn(crate::telemetry::bind_current_context(async move {
                 // Receive structured data from previous stage (non-blocking).
                 // Using try_recv avoids a deadlock: streaming builtins (e.g. grep)
                 // write to their pipe_stdout during dispatch. If we blocked here
@@ -462,7 +465,7 @@ impl PipelineRunner {
                 }
 
                 (result, stage_ctx)
-            });
+            }));
 
             handles.push(handle);
         }

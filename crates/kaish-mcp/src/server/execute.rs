@@ -2,7 +2,7 @@
 //!
 //! The `execute` tool runs kaish scripts in a fresh, isolated kernel.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::PathBuf;
 use std::time::Duration;
 
@@ -12,6 +12,19 @@ use kaish_kernel::nonce::NonceStore;
 use kaish_kernel::{ExecuteOptions, Kernel, KernelConfig};
 use rmcp::schemars::{self, JsonSchema};
 use serde::{Deserialize, Serialize};
+
+/// W3C trace context lifted from the MCP request `_meta`.
+///
+/// This is transport metadata, not tool input — it rides alongside the call the
+/// way `nonce_store` and `init_paths` do, not inside [`ExecuteParams`] (which
+/// mirrors the tool's argument schema). Forwarded to the kernel via
+/// [`ExecuteOptions`] so an MCP client's trace spans the kaish boundary.
+#[derive(Debug, Clone, Default)]
+pub struct McpTraceContext {
+    pub traceparent: Option<String>,
+    pub tracestate: Option<String>,
+    pub baggage: BTreeMap<String, String>,
+}
 
 /// Parameters for the execute tool.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -135,6 +148,7 @@ pub async fn execute(
     default_timeout_ms: u64,
     nonce_store: Option<NonceStore>,
     init_paths: &[PathBuf],
+    trace: McpTraceContext,
 ) -> Result<ExecuteResult> {
     let timeout_ms = params.timeout_ms.unwrap_or(default_timeout_ms);
 
@@ -227,12 +241,20 @@ pub async fn execute(
                 // Execute with timeout. The kernel handles cancellation and
                 // child-process kill via SIGTERM/grace/SIGKILL on elapsed,
                 // returning exit 124 — no need for an outer tokio::time::timeout.
-                let result = kernel
-                    .execute_with_options(
-                        &full_script,
-                        ExecuteOptions::new().with_timeout(timeout),
-                    )
-                    .await;
+                //
+                // Forward the client's W3C trace context so the kernel's
+                // execution span parents onto the client's trace.
+                let mut opts = ExecuteOptions::new().with_timeout(timeout);
+                if let Some(traceparent) = trace.traceparent {
+                    opts = opts.with_traceparent(traceparent);
+                }
+                if let Some(tracestate) = trace.tracestate {
+                    opts = opts.with_tracestate(tracestate);
+                }
+                if !trace.baggage.is_empty() {
+                    opts = opts.with_baggage(trace.baggage);
+                }
+                let result = kernel.execute_with_options(&full_script, opts).await;
 
                 let exec_result = match result {
                     Ok(exec_result) => ExecuteResult::from_exec_result(&exec_result),
@@ -265,7 +287,9 @@ mod tests {
             timeout_ms: None,
         };
 
-        let result = execute(params, 30_000, None, &[]).await.expect("execute failed");
+        let result = execute(params, 30_000, None, &[], McpTraceContext::default())
+            .await
+            .expect("execute failed");
         assert!(result.ok);
         assert_eq!(result.code, 0);
         // Simple text passes through unchanged (no TOON encoding)
@@ -284,7 +308,9 @@ mod tests {
             timeout_ms: None,
         };
 
-        let result = execute(params, 30_000, None, &[]).await.expect("execute failed");
+        let result = execute(params, 30_000, None, &[], McpTraceContext::default())
+            .await
+            .expect("execute failed");
         assert!(result.ok);
         // Simple text passes through unchanged (no TOON encoding)
         assert_eq!(result.stdout.trim(), "hello world");
@@ -299,7 +325,9 @@ mod tests {
             timeout_ms: None,
         };
 
-        let result = execute(params, 30_000, None, &[]).await.expect("execute failed");
+        let result = execute(params, 30_000, None, &[], McpTraceContext::default())
+            .await
+            .expect("execute failed");
         assert!(!result.ok);
         assert_eq!(result.code, 127);
     }
@@ -315,7 +343,9 @@ mod tests {
             timeout_ms: None,
         };
 
-        let result = execute(params, 30_000, None, &[]).await.expect("execute failed");
+        let result = execute(params, 30_000, None, &[], McpTraceContext::default())
+            .await
+            .expect("execute failed");
         assert!(result.ok);
         assert!(
             result.data.is_none(),
@@ -335,7 +365,9 @@ mod tests {
             timeout_ms: None,
         };
 
-        let result = execute(params, 30_000, None, &[]).await.expect("execute failed");
+        let result = execute(params, 30_000, None, &[], McpTraceContext::default())
+            .await
+            .expect("execute failed");
         assert!(
             result.ok,
             "script failed: code={} stderr={:?} stdout={:?}",
@@ -360,7 +392,9 @@ mod tests {
             timeout_ms: Some(10), // Very short timeout
         };
 
-        let result = execute(params, 30_000, None, &[]).await.expect("execute failed");
+        let result = execute(params, 30_000, None, &[], McpTraceContext::default())
+            .await
+            .expect("execute failed");
         assert!(!result.ok);
         assert_eq!(result.code, 124);
         assert!(result.stderr.contains("timed out"));
@@ -409,7 +443,9 @@ mod tests {
             timeout_ms: None,
         };
 
-        let result = execute(params, 30_000, None, &[]).await.expect("execute failed");
+        let result = execute(params, 30_000, None, &[], McpTraceContext::default())
+            .await
+            .expect("execute failed");
         assert!(result.ok);
         // Should be valid JSON, not TOON-wrapped JSON
         let parsed: serde_json::Value = serde_json::from_str(&result.stdout).expect("valid JSON");
@@ -426,7 +462,9 @@ mod tests {
             timeout_ms: None,
         };
 
-        let result = execute(params, 30_000, None, &[]).await.expect("execute failed");
+        let result = execute(params, 30_000, None, &[], McpTraceContext::default())
+            .await
+            .expect("execute failed");
         assert!(result.ok);
         // Canonical text: tab-separated values, one per line
         assert!(result.stdout.contains("/"), "should contain mount paths");
@@ -443,7 +481,9 @@ mod tests {
             timeout_ms: None,
         };
 
-        let result = execute(params, 30_000, None, &[]).await.expect("execute failed");
+        let result = execute(params, 30_000, None, &[], McpTraceContext::default())
+            .await
+            .expect("execute failed");
         assert!(result.ok);
         // Plain text, not TOON-quoted
         assert_eq!(result.stdout.trim(), "hello world");
@@ -461,7 +501,7 @@ mod tests {
             env: None,
             timeout_ms: None,
         };
-        let result = execute(params, 30_000, None, &[init_path])
+        let result = execute(params, 30_000, None, &[init_path], McpTraceContext::default())
             .await
             .expect("execute failed");
         assert!(result.ok);
@@ -482,7 +522,7 @@ mod tests {
             env: None,
             timeout_ms: None,
         };
-        let result = execute(params, 30_000, None, &[init1, init2])
+        let result = execute(params, 30_000, None, &[init1, init2], McpTraceContext::default())
             .await
             .expect("execute failed");
         assert!(result.ok);
@@ -502,6 +542,7 @@ mod tests {
             30_000,
             None,
             &[PathBuf::from("/nonexistent/init.kai")],
+            McpTraceContext::default(),
         )
         .await;
         assert!(result.is_err());
@@ -526,7 +567,13 @@ mod tests {
             env: None,
             timeout_ms: None,
         };
-        let result1 = execute(params.clone(), 30_000, None, &[init_path.clone()])
+        let result1 = execute(
+            params.clone(),
+            30_000,
+            None,
+            &[init_path.clone()],
+            McpTraceContext::default(),
+        )
             .await
             .expect("execute failed");
         assert!(result1.ok);
@@ -534,7 +581,7 @@ mod tests {
 
         // Modify file and run again — should pick up the change
         std::fs::write(&init_path, "GREETING=howdy\n").unwrap();
-        let result2 = execute(params, 30_000, None, &[init_path])
+        let result2 = execute(params, 30_000, None, &[init_path], McpTraceContext::default())
             .await
             .expect("execute failed");
         assert!(result2.ok);
@@ -554,7 +601,7 @@ mod tests {
             env: None,
             timeout_ms: None,
         };
-        let result = execute(params, 30_000, None, &[init_path])
+        let result = execute(params, 30_000, None, &[init_path], McpTraceContext::default())
             .await
             .expect("execute should return Ok with structured failure");
         assert!(!result.ok);

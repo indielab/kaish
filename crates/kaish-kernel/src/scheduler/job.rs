@@ -370,7 +370,9 @@ impl JobManager {
         F: std::future::Future<Output = ExecResult> + Send + 'static,
     {
         let id = JobId(self.next_id.fetch_add(1, Ordering::SeqCst));
-        let handle = tokio::spawn(future);
+        // Propagate the embedder's trace context across the spawn boundary so
+        // background-job spans stay in the same trace (see telemetry module).
+        let handle = tokio::spawn(crate::telemetry::bind_current_context(future));
         let job = Job::new(id, self.session_id, command, handle);
 
         // Spin on try_lock to guarantee the job is in the map on return.
