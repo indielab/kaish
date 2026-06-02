@@ -13,7 +13,6 @@ pub mod format;
 use std::borrow::Cow;
 use std::io::IsTerminal;
 use std::path::PathBuf;
-use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use rustyline::completion::{Completer, FilenameCompleter, Pair};
@@ -25,6 +24,7 @@ use rustyline::validate::{ValidationContext, ValidationResult, Validator};
 use rustyline::{Editor, Helper};
 use tokio::runtime::Runtime;
 
+use kaish_client::{EmbeddedClient, KernelClient};
 use kaish_kernel::ast::Value;
 use kaish_kernel::interpreter::ExecResult;
 use kaish_kernel::{ExecuteOptions, Kernel, KernelConfig};
@@ -118,16 +118,20 @@ pub enum ProcessResult {
 // ── KaishHelper ─────────────────────────────────────────────────────
 
 /// Rustyline helper providing validation, completion, highlighting, and hints.
+///
+/// Holds the kernel as a `KernelClient` trait object so completion is driven
+/// purely through the client abstraction — the same surface any embedder
+/// (including a future remote client) would use.
 struct KaishHelper {
-    kernel: Arc<Kernel>,
+    client: Box<dyn KernelClient>,
     handle: tokio::runtime::Handle,
     path_completer: FilenameCompleter,
 }
 
 impl KaishHelper {
-    fn new(kernel: Arc<Kernel>, handle: tokio::runtime::Handle) -> Self {
+    fn new(client: Box<dyn KernelClient>, handle: tokio::runtime::Handle) -> Self {
         Self {
-            kernel,
+            client,
             handle,
             path_completer: FilenameCompleter::new(),
         }
@@ -377,8 +381,17 @@ impl Completer for KaishHelper {
 
                 let mut candidates = Vec::new();
 
-                // Tool/builtin names
-                for schema in self.kernel.tool_schemas() {
+                // Tool/builtin names, via the client. Completion is a
+                // best-effort affordance: if the client errors, warn and
+                // offer nothing rather than failing the keystroke.
+                let schemas = match self.handle.block_on(self.client.tool_schemas()) {
+                    Ok(schemas) => schemas,
+                    Err(e) => {
+                        tracing::warn!("completion: tool_schemas failed: {e}");
+                        Vec::new()
+                    }
+                };
+                for schema in schemas {
                     if schema.name.starts_with(prefix) {
                         candidates.push(Pair {
                             display: schema.name.clone(),
@@ -405,8 +418,15 @@ impl Completer for KaishHelper {
                     return Ok((pos, vec![]));
                 };
 
-                // list_vars is async, use block_on
-                let vars = self.handle.block_on(self.kernel.list_vars());
+                // list_vars is async, use block_on. Best-effort: on error,
+                // warn and offer no variable candidates.
+                let vars = match self.handle.block_on(self.client.list_vars()) {
+                    Ok(vars) => vars,
+                    Err(e) => {
+                        tracing::warn!("completion: list_vars failed: {e}");
+                        Vec::new()
+                    }
+                };
 
                 let mut candidates: Vec<Pair> = vars
                     .into_iter()
@@ -480,7 +500,7 @@ impl Helper for KaishHelper {}
 
 /// REPL configuration and state.
 pub struct Repl {
-    kernel: Arc<Kernel>,
+    client: EmbeddedClient,
     runtime: Runtime,
 }
 
@@ -493,14 +513,14 @@ impl Repl {
         let mut kernel = Kernel::new(config).context("Failed to create kernel")?;
         let runtime = Runtime::new().context("Failed to create tokio runtime")?;
 
-        // Initialize terminal job control if stdin is a TTY
+        // Initialize terminal job control if stdin is a TTY. See `new()`.
         #[cfg(unix)]
         if std::io::stdin().is_terminal() {
             kernel.init_terminal();
         }
 
         Ok(Self {
-            kernel: kernel.into_arc(),
+            client: EmbeddedClient::new(kernel),
             runtime,
         })
     }
@@ -510,14 +530,16 @@ impl Repl {
         let mut kernel = Kernel::new(config).context("Failed to create kernel")?;
         let runtime = Runtime::new().context("Failed to create tokio runtime")?;
 
-        // Initialize terminal job control if stdin is a TTY
+        // Initialize terminal job control if stdin is a TTY. This needs the
+        // owned kernel (&mut, local-TTY setup), so it stays as pre-wrap
+        // kernel setup rather than a client-trait call.
         #[cfg(unix)]
         if std::io::stdin().is_terminal() {
             kernel.init_terminal();
         }
 
         Ok(Self {
-            kernel: kernel.into_arc(),
+            client: EmbeddedClient::new(kernel),
             runtime,
         })
     }
@@ -544,19 +566,19 @@ impl Repl {
             return ProcessResult::Exit;
         }
 
-        // Execute via kernel with SIGINT handling.
+        // Execute via the client with SIGINT handling.
         // A per-execute signal listener catches Ctrl-C during execution,
         // cancels the kernel, and returns exit code 130.
-        let kernel = self.kernel.clone();
+        let client = self.client.clone();
         let input = trimmed.to_string();
         let result = self.runtime.block_on(async {
             let mut sigint = tokio::signal::unix::signal(
                 tokio::signal::unix::SignalKind::interrupt(),
             )?;
             tokio::select! {
-                result = kernel.execute(&input) => result,
+                result = client.execute(&input) => result,
                 _ = sigint.recv() => {
-                    kernel.cancel();
+                    client.cancel().await?;
                     Ok(ExecResult::failure(130, ""))
                 }
             }
@@ -672,7 +694,7 @@ fn load_rc_file(repl: &Repl) {
     for path in &candidates {
         if path.is_file() {
             let cmd = format!(r#"source "{}""#, path.display());
-            if let Err(e) = repl.runtime.block_on(repl.kernel.execute(&cmd)) {
+            if let Err(e) = repl.runtime.block_on(repl.client.execute(&cmd)) {
                 eprintln!("kaish: warning: error sourcing {}: {}", path.display(), e);
             }
             return;
@@ -682,9 +704,12 @@ fn load_rc_file(repl: &Repl) {
 
 /// Resolve the prompt string: call `kaish_prompt()` if defined, else default.
 fn resolve_prompt(repl: &Repl) -> String {
-    let has_fn = repl.runtime.block_on(repl.kernel.has_function("kaish_prompt"));
+    let has_fn = repl
+        .runtime
+        .block_on(repl.client.has_function("kaish_prompt"))
+        .unwrap_or(false);
     if has_fn {
-        if let Ok(result) = repl.runtime.block_on(repl.kernel.execute("kaish_prompt")) {
+        if let Ok(result) = repl.runtime.block_on(repl.client.execute("kaish_prompt")) {
             if result.ok() {
                 let text = result.text_out().trim_end().to_string();
                 if !text.is_empty() {
@@ -708,8 +733,13 @@ pub fn run() -> Result<()> {
     // Source RC file (interactive only)
     load_rc_file(&repl);
 
-    // Build the helper with a kernel reference and runtime handle
-    let helper = KaishHelper::new(repl.kernel.clone(), repl.runtime.handle().clone());
+    // Build the helper with a client handle (sharing the REPL's kernel) and
+    // a runtime handle. Boxed as a trait object so completion runs purely
+    // through the KernelClient abstraction.
+    let helper = KaishHelper::new(
+        Box::new(repl.client.clone()),
+        repl.runtime.handle().clone(),
+    );
 
     let mut rl: Editor<KaishHelper, DefaultHistory> =
         Editor::new().context("Failed to create editor")?;
@@ -995,11 +1025,50 @@ mod tests {
         assert!(!helper.is_incomplete("echo hello # if we do this"));
     }
 
-    /// Create a test helper (kernel is not used for is_incomplete).
+    /// Create a test helper (the client is not used for is_incomplete).
     fn make_test_helper() -> KaishHelper {
         let config = KernelConfig::transient();
-        let kernel = Kernel::new(config).expect("test kernel").into_arc();
+        let kernel = Kernel::new(config).expect("test kernel");
+        let client = EmbeddedClient::new(kernel);
         let rt = Runtime::new().expect("test runtime");
-        KaishHelper::new(kernel, rt.handle().clone())
+        KaishHelper::new(Box::new(client), rt.handle().clone())
+    }
+
+    // Completion runs through the `Box<dyn KernelClient>` trait object. These
+    // tests prove that path end-to-end: command names come from
+    // `tool_schemas()` and variables from `list_vars()`, both via the client.
+    #[test]
+    fn test_completion_through_client() {
+        let config = KernelConfig::transient();
+        let kernel = Kernel::new(config).expect("test kernel");
+        let client = EmbeddedClient::new(kernel);
+        let rt = Runtime::new().expect("test runtime");
+
+        // Seed a variable on a clone; it shares the kernel with the helper's
+        // client, so the completer sees it.
+        rt.block_on(client.set_var("MYVAR", Value::String("hi".into())))
+            .expect("set_var failed");
+
+        let helper = KaishHelper::new(Box::new(client), rt.handle().clone());
+        let history = DefaultHistory::new();
+        let ctx = rustyline::Context::new(&history);
+
+        // Command completion: "ec" → echo (sourced from tool_schemas()).
+        let (start, candidates) = helper.complete("ec", 2, &ctx).expect("command completion");
+        assert_eq!(start, 0);
+        assert!(
+            candidates.iter().any(|p| p.replacement == "echo"),
+            "expected `echo` among command candidates, got {:?}",
+            candidates.iter().map(|p| &p.replacement).collect::<Vec<_>>()
+        );
+
+        // Variable completion: "$MY" → $MYVAR (sourced from list_vars()).
+        let (start, candidates) = helper.complete("$MY", 3, &ctx).expect("variable completion");
+        assert_eq!(start, 0);
+        assert!(
+            candidates.iter().any(|p| p.replacement == "$MYVAR"),
+            "expected `$MYVAR` among variable candidates, got {:?}",
+            candidates.iter().map(|p| &p.replacement).collect::<Vec<_>>()
+        );
     }
 }

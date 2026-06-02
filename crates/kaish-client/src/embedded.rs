@@ -53,6 +53,7 @@ fn generate_blob_id() -> String {
 /// let value = client.get_var("X").await?;
 /// assert_eq!(value, Some(Value::Int(42)));
 /// ```
+#[derive(Clone)]
 pub struct EmbeddedClient {
     kernel: Arc<Kernel>,
 }
@@ -163,6 +164,15 @@ impl KernelClient for EmbeddedClient {
 
     async fn tool_schemas(&self) -> ClientResult<Vec<ToolSchema>> {
         Ok(self.kernel.tool_schemas())
+    }
+
+    async fn has_function(&self, name: &str) -> ClientResult<bool> {
+        Ok(self.kernel.has_function(name).await)
+    }
+
+    async fn cancel(&self) -> ClientResult<()> {
+        self.kernel.cancel();
+        Ok(())
     }
 
     async fn cwd(&self) -> ClientResult<String> {
@@ -280,6 +290,38 @@ mod tests {
                 .any(|p| p.matches_flag("n") && p.matches_flag("no-newline")),
             "echo schema should expose its -n/--no-newline flag for completion"
         );
+    }
+
+    #[tokio::test]
+    async fn test_embedded_has_function() {
+        let client = EmbeddedClient::transient().expect("failed to create client");
+
+        assert!(
+            !client.has_function("greet").await.expect("has_function failed"),
+            "function should not exist before definition"
+        );
+
+        client
+            .execute("greet() { echo hi; }")
+            .await
+            .expect("defining function failed");
+
+        assert!(
+            client.has_function("greet").await.expect("has_function failed"),
+            "function should exist after definition"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_embedded_cancel_idempotent_when_idle() {
+        // cancel() with nothing in flight must be a harmless no-op, since
+        // frontends fire it from a Ctrl-C handler that may race execution.
+        let client = EmbeddedClient::transient().expect("failed to create client");
+        client.cancel().await.expect("cancel failed");
+        // The kernel remains usable afterward.
+        let result = client.execute("echo ok").await.expect("execute failed");
+        assert!(result.ok());
+        assert_eq!(result.text_out().trim(), "ok");
     }
 
     #[tokio::test]

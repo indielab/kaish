@@ -79,6 +79,20 @@ pub trait KernelClient {
     /// option completion, generate help, or validate arguments client-side.
     async fn tool_schemas(&self) -> ClientResult<Vec<ToolSchema>>;
 
+    /// Report whether a user-defined function with the given name exists.
+    ///
+    /// Lets a frontend probe for optional hooks (e.g. a `kaish_prompt`
+    /// function that customizes the prompt) before invoking them.
+    async fn has_function(&self, name: &str) -> ClientResult<bool>;
+
+    /// Cancel the kernel's in-flight execution.
+    ///
+    /// Signals the kernel's cancellation token, which cascades to any
+    /// attached forks and external child processes. Used by interactive
+    /// frontends to wire Ctrl-C to the running statement. Idempotent and
+    /// safe to call when nothing is executing.
+    async fn cancel(&self) -> ClientResult<()>;
+
     /// Get the current working directory.
     async fn cwd(&self) -> ClientResult<String>;
 
