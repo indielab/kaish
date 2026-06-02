@@ -7,6 +7,7 @@ use thiserror::Error;
 
 use kaish_kernel::ast::Value;
 use kaish_kernel::interpreter::ExecResult;
+use kaish_kernel::tools::ToolSchema;
 
 /// Result type for client operations.
 pub type ClientResult<T> = Result<T, ClientError>;
@@ -69,6 +70,14 @@ pub trait KernelClient {
 
     /// List all variables.
     async fn list_vars(&self) -> ClientResult<Vec<(String, Value)>>;
+
+    /// List the schemas of all available tools (builtins + registered tools).
+    ///
+    /// Each [`ToolSchema`] carries the tool's name, description, parameters
+    /// (flags and positionals, with types/aliases/defaults), and examples.
+    /// This is the introspection surface embedders use to build command and
+    /// option completion, generate help, or validate arguments client-side.
+    async fn tool_schemas(&self) -> ClientResult<Vec<ToolSchema>>;
 
     /// Get the current working directory.
     async fn cwd(&self) -> ClientResult<String>;

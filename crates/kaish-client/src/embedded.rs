@@ -17,6 +17,7 @@ use async_trait::async_trait;
 
 use kaish_kernel::ast::Value;
 use kaish_kernel::interpreter::ExecResult;
+use kaish_kernel::tools::ToolSchema;
 use kaish_kernel::vfs::Filesystem;
 use kaish_kernel::{ExecuteOptions, Kernel, KernelConfig};
 
@@ -160,6 +161,10 @@ impl KernelClient for EmbeddedClient {
         Ok(self.kernel.list_vars().await)
     }
 
+    async fn tool_schemas(&self) -> ClientResult<Vec<ToolSchema>> {
+        Ok(self.kernel.tool_schemas())
+    }
+
     async fn cwd(&self) -> ClientResult<String> {
         Ok(self.kernel.cwd().await.to_string_lossy().to_string())
     }
@@ -252,6 +257,29 @@ mod tests {
         let result = client.execute("echo hello").await.expect("execute failed");
         assert!(result.ok());
         assert_eq!(result.text_out().trim(), "hello");
+    }
+
+    #[tokio::test]
+    async fn test_embedded_tool_schemas() {
+        let client = EmbeddedClient::transient().expect("failed to create client");
+        let schemas = client.tool_schemas().await.expect("tool_schemas failed");
+
+        // Several builtins should always be present.
+        assert!(!schemas.is_empty(), "expected at least one tool schema");
+
+        // A known builtin with a known flag exposes its parameters for completion.
+        let echo = schemas
+            .iter()
+            .find(|s| s.name == "echo")
+            .expect("echo builtin should be present");
+        // Flags are recorded without the leading dash; short is "n", long is
+        // "no-newline" (see schema_from_clap).
+        assert!(
+            echo.params
+                .iter()
+                .any(|p| p.matches_flag("n") && p.matches_flag("no-newline")),
+            "echo schema should expose its -n/--no-newline flag for completion"
+        );
     }
 
     #[tokio::test]
