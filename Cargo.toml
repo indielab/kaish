@@ -59,6 +59,9 @@ rustyline = "17"
 # Base64 encoding/decoding
 base64 = "0.22"
 
+# OS CSPRNG for mktemp's random suffixes (supports wasm32-wasip1)
+getrandom = "0.3"
+
 # Cryptographic hashing
 digest = "0.10"
 sha2 = "0.10"

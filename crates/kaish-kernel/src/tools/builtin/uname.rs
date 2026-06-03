@@ -1,7 +1,18 @@
 //! uname — Print system identification.
 //!
 //! Reports **kaish** as the system identity by default. Scripts can detect
-//! they're running in kaish and adapt. Use `--host` to escape to the real OS.
+//! they're running in kaish and adapt. The node name comes from the exported
+//! `HOSTNAME` variable (frontend-supplied, like the rest of the hermetic env),
+//! falling back to `kaish` — the kernel never reads the host's real hostname in
+//! this mode.
+//!
+//! `--host` escapes to the real OS by reading `/proc`. That is a host-capability
+//! and is only compiled in with the `native` feature; in a minimal/hermetic
+//! build `--host` reports an error rather than silently doing nothing.
+//!
+//! Note the deliberate POSIX divergence: when `HOSTNAME` is unset, `uname -n`
+//! reports `kaish`, whereas the `hostname` builtin (present only in `native`
+//! builds) reports the real host name. The two are *not* synonyms here.
 //!
 //! # Examples
 //!
@@ -9,13 +20,14 @@
 //! uname                          # → kaish
 //! uname -a                       # → kaish myhost 0.1.0 ... x86_64 Kaijutsu
 //! uname -snm                     # → kaish myhost x86_64
-//! uname --host                   # → Linux (or whatever the real OS is)
+//! uname --host                   # → Linux (native build only)
 //! uname --host -a                # → Linux myhost 6.x.y ... x86_64 GNU/Linux
 //! ```
 
 use async_trait::async_trait;
 use clap::{CommandFactory, Parser};
 
+use crate::ast::Value;
 use crate::interpreter::{ExecResult, OutputData};
 use crate::tools::{schema_from_clap, ExecContext, GlobalFlags, Tool, ToolArgs, ToolSchema};
 
@@ -63,7 +75,12 @@ struct UnameArgs {
     _a: bool,
 
     /// Report host OS identity instead of kaish.
+    ///
+    /// Hidden from the schema in non-`native` builds (the capability isn't
+    /// compiled in) while still parsed, so `uname --host` returns the curated
+    /// "unavailable" error instead of an unknown-argument complaint.
     #[arg(id = "host", long = "host")]
+    #[cfg_attr(not(feature = "native"), arg(hide = true))]
     _host: bool,
 
     #[command(flatten)]
@@ -82,14 +99,17 @@ struct UnameInfo {
 
 impl UnameInfo {
     /// Kaish identity — the shell reports itself as the system.
-    fn kaish() -> Self {
+    ///
+    /// `nodename` is supplied by the caller (the exported `HOSTNAME` var, or
+    /// the `kaish` default); we never touch `/proc` here.
+    fn kaish(nodename: String) -> Self {
         let version = env!("CARGO_PKG_VERSION");
         let git_hash = option_env!("KAISH_GIT_HASH").unwrap_or("unknown");
         let build_date = option_env!("KAISH_BUILD_DATE").unwrap_or("unknown");
 
         Self {
             sysname: "kaish".to_string(),
-            nodename: read_hostname(),
+            nodename,
             release: version.to_string(),
             version: format!("kaish {version} ({git_hash} {build_date})"),
             machine: std::env::consts::ARCH.to_string(),
@@ -97,7 +117,11 @@ impl UnameInfo {
         }
     }
 
-    /// Host OS identity — reads from /proc on Linux.
+    /// Host OS identity — reads from `/proc` on Linux.
+    ///
+    /// Host introspection is a capability gated behind the `native` feature;
+    /// the minimal/hermetic build has no path to the real host here.
+    #[cfg(feature = "native")]
     fn host() -> Self {
         let read = |name: &str| {
             std::fs::read_to_string(format!("/proc/sys/kernel/{name}"))
@@ -116,7 +140,20 @@ impl UnameInfo {
     }
 }
 
-/// Read the hostname from /proc/sys/kernel/hostname.
+/// Kaish-mode node name: the exported `HOSTNAME` variable, or `kaish` when it
+/// is unset/empty. Deliberately does not read the host — frontends seed
+/// `HOSTNAME` via `initial_vars` when they want the real value exposed.
+fn kaish_nodename(ctx: &ExecContext) -> String {
+    match ctx.scope.get("HOSTNAME") {
+        Some(Value::String(name)) if !name.is_empty() => name.clone(),
+        _ => "kaish".to_string(),
+    }
+}
+
+/// Read the real hostname from `/proc/sys/kernel/hostname`.
+///
+/// Host introspection — only compiled in with the `native` feature.
+#[cfg(feature = "native")]
 pub(super) fn read_hostname() -> String {
     std::fs::read_to_string("/proc/sys/kernel/hostname")
         .map(|s| s.trim().to_string())
@@ -153,9 +190,19 @@ impl Tool for Uname {
 
         let host_mode = args.has_flag("host");
         let info = if host_mode {
-            UnameInfo::host()
+            #[cfg(feature = "native")]
+            {
+                UnameInfo::host()
+            }
+            #[cfg(not(feature = "native"))]
+            {
+                return ExecResult::failure(
+                    2,
+                    "uname: --host is unavailable in this build (no host capability)".to_string(),
+                );
+            }
         } else {
-            UnameInfo::kaish()
+            UnameInfo::kaish(kaish_nodename(ctx))
         };
 
         let all = args.has_flag("a");
@@ -228,14 +275,27 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_flag_n() {
+    async fn test_flag_n_defaults_to_kaish() {
+        // With no HOSTNAME var, kaish-identity nodename is the literal "kaish" —
+        // the kernel must not read the host's real hostname here.
         let mut ctx = make_ctx();
         let mut args = ToolArgs::new();
         args.flags.insert("n".to_string());
         let result = Uname.execute(args, &mut ctx).await;
         assert!(result.ok());
-        // Should be non-empty hostname
-        assert!(!result.text_out().is_empty());
+        assert_eq!(&*result.text_out(), "kaish");
+    }
+
+    #[tokio::test]
+    async fn test_flag_n_uses_hostname_var() {
+        // A frontend-supplied (exported) HOSTNAME is honored as nodename.
+        let mut ctx = make_ctx();
+        ctx.scope.set_exported("HOSTNAME", Value::String("sandbox-01".into()));
+        let mut args = ToolArgs::new();
+        args.flags.insert("n".to_string());
+        let result = Uname.execute(args, &mut ctx).await;
+        assert!(result.ok());
+        assert_eq!(&*result.text_out(), "sandbox-01");
     }
 
     #[tokio::test]
@@ -335,6 +395,7 @@ mod tests {
         assert_eq!(parts[0], "kaish");
     }
 
+    #[cfg(all(target_os = "linux", feature = "native"))]
     #[tokio::test]
     async fn test_host_mode() {
         let mut ctx = make_ctx();
@@ -349,6 +410,7 @@ mod tests {
         assert_eq!(&*result.text_out(), "Linux");
     }
 
+    #[cfg(all(target_os = "linux", feature = "native"))]
     #[tokio::test]
     async fn test_host_all() {
         let mut ctx = make_ctx();
@@ -363,5 +425,18 @@ mod tests {
         let fields: Vec<&str> = text.split_whitespace().collect();
         assert_eq!(fields[0], "Linux");
         assert_eq!(*fields.last().unwrap(), "GNU/Linux");
+    }
+
+    /// Without the host capability, `--host` must fail loudly rather than
+    /// silently report kaish identity.
+    #[cfg(not(feature = "native"))]
+    #[tokio::test]
+    async fn test_host_unavailable_without_native() {
+        let mut ctx = make_ctx();
+        let mut args = ToolArgs::new();
+        args.flags.insert("host".to_string());
+
+        let result = Uname.execute(args, &mut ctx).await;
+        assert!(!result.ok(), "--host must error without the host capability");
     }
 }

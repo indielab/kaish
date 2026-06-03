@@ -12,15 +12,10 @@
 use async_trait::async_trait;
 use clap::{CommandFactory, Parser};
 use std::path::Path;
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::backend::WriteMode;
 use crate::interpreter::{ExecResult, OutputData};
 use crate::tools::{schema_from_clap, ExecContext, GlobalFlags, Tool, ToolArgs, ToolSchema};
-
-/// Global counter for unique temp file generation.
-static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 /// Mktemp tool: creates temporary files or directories with unique names.
 pub struct Mktemp;
@@ -96,8 +91,14 @@ impl Tool for Mktemp {
             .or_else(|| args.get_string("template", 0))
             .unwrap_or_else(|| "tmp.XXXXXXXXXX".to_string());
 
-        // Generate unique name from template
-        let name = expand_template(&template);
+        // Generate unique name from template. Entropy failure is fatal — we
+        // never emit a guessable name (see `random_suffix`).
+        let name = match expand_template(&template) {
+            Ok(name) => name,
+            Err(e) => {
+                return ExecResult::failure(1, format!("mktemp: could not obtain system entropy: {e}"));
+            }
+        };
         let full_path = format!("{}/{}", parent_dir, name);
         let resolved = ctx.resolve_path(&full_path);
 
@@ -122,7 +123,7 @@ impl Tool for Mktemp {
 /// Examples:
 /// - `tmp.XXXXXX` → `tmp.a1b2c3`
 /// - `myapp.XXX.tmp` → `myapp.f9d.tmp`
-fn expand_template(template: &str) -> String {
+fn expand_template(template: &str) -> Result<String, getrandom::Error> {
     // Find the longest sequence of X's
     let mut result = String::with_capacity(template.len());
     let mut x_count = 0;
@@ -133,7 +134,7 @@ fn expand_template(template: &str) -> String {
         } else {
             if x_count > 0 {
                 // Replace the X sequence with random chars
-                result.push_str(&random_suffix(x_count));
+                result.push_str(&random_suffix(x_count)?);
                 x_count = 0;
             }
             result.push(ch);
@@ -142,58 +143,28 @@ fn expand_template(template: &str) -> String {
 
     // Handle trailing X's
     if x_count > 0 {
-        result.push_str(&random_suffix(x_count));
+        result.push_str(&random_suffix(x_count)?);
     }
 
-    result
+    Ok(result)
 }
 
 /// Generate a random alphanumeric suffix of the given length.
-fn random_suffix(len: usize) -> String {
+///
+/// Pulls bytes from the OS CSPRNG via `getrandom` (works on Unix, macOS, and
+/// `wasm32-wasip1`). There is deliberately **no fallback**: a predictable temp
+/// name invites collision and symlink races, so if the system cannot supply
+/// entropy we fail loudly rather than emit a guessable name.
+fn random_suffix(len: usize) -> Result<String, getrandom::Error> {
     const CHARS: &[u8] = b"abcdefghijklmnopqrstuvwxyz0123456789";
 
-    // Try to get system randomness, fall back to time-based entropy
-    let mut entropy = get_system_entropy(len);
-    if entropy.len() < len {
-        // Fallback: use time + counter as entropy source
-        let now = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map(|d| d.as_nanos())
-            .unwrap_or(0);
-        let counter = TEMP_COUNTER.fetch_add(1, Ordering::SeqCst);
-        let mut state = now as u64 ^ (counter << 32) ^ (counter >> 32);
+    let mut entropy = vec![0u8; len];
+    getrandom::fill(&mut entropy)?;
 
-        entropy.clear();
-        for _ in 0..len {
-            state ^= state << 13;
-            state ^= state >> 7;
-            state ^= state << 17;
-            entropy.push(state as u8);
-        }
-    }
-
-    entropy
+    Ok(entropy
         .iter()
         .map(|b| CHARS[(*b as usize) % CHARS.len()] as char)
-        .collect()
-}
-
-/// Get system-provided random bytes.
-#[cfg(unix)]
-fn get_system_entropy(len: usize) -> Vec<u8> {
-    use std::io::Read;
-
-    let mut buf = vec![0u8; len];
-    if let Ok(mut file) = std::fs::File::open("/dev/urandom")
-        && file.read_exact(&mut buf).is_ok() {
-            return buf;
-        }
-    Vec::new() // Return empty on failure, triggering fallback
-}
-
-#[cfg(not(unix))]
-fn get_system_entropy(_len: usize) -> Vec<u8> {
-    Vec::new() // Use fallback on non-Unix
+        .collect())
 }
 
 #[cfg(test)]
@@ -212,7 +183,7 @@ mod tests {
 
     #[test]
     fn test_expand_template_suffix() {
-        let result = expand_template("tmp.XXXXXX");
+        let result = expand_template("tmp.XXXXXX").expect("entropy");
         assert!(result.starts_with("tmp."));
         assert_eq!(result.len(), 10);
         assert!(result[4..].chars().all(|c| c.is_ascii_alphanumeric()));
@@ -220,7 +191,7 @@ mod tests {
 
     #[test]
     fn test_expand_template_middle() {
-        let result = expand_template("app.XXX.tmp");
+        let result = expand_template("app.XXX.tmp").expect("entropy");
         assert!(result.starts_with("app."));
         assert!(result.ends_with(".tmp"));
         assert!(result[4..7].chars().all(|c| c.is_ascii_alphanumeric()));
@@ -228,8 +199,34 @@ mod tests {
 
     #[test]
     fn test_expand_template_no_x() {
-        let result = expand_template("fixed.txt");
+        let result = expand_template("fixed.txt").expect("entropy");
         assert_eq!(result, "fixed.txt");
+    }
+
+    #[test]
+    fn test_expand_template_multiple_groups() {
+        // Non-contiguous X runs each get filled; literals between them survive.
+        let result = expand_template("X_XXX_X").expect("entropy");
+        assert_eq!(result.len(), "X_XXX_X".len());
+        let chars: Vec<char> = result.chars().collect();
+        assert_eq!(chars[1], '_');
+        assert_eq!(chars[5], '_');
+        assert!(chars[0].is_ascii_alphanumeric());
+        assert!(chars[2..5].iter().all(|c| c.is_ascii_alphanumeric()));
+        assert!(chars[6].is_ascii_alphanumeric());
+    }
+
+    /// Suffixes must be unpredictable: a regression that swapped the CSPRNG
+    /// for a constant or a too-coarse clock source would collide here.
+    #[test]
+    fn test_random_suffix_is_unique() {
+        let mut seen = std::collections::HashSet::new();
+        for _ in 0..1000 {
+            let suffix = random_suffix(12).expect("entropy");
+            assert_eq!(suffix.len(), 12);
+            assert!(suffix.chars().all(|c| c.is_ascii_alphanumeric()));
+            assert!(seen.insert(suffix), "random_suffix produced a duplicate");
+        }
     }
 
     #[tokio::test]

@@ -1308,6 +1308,7 @@ dependencies = [
  "clap_complete",
  "digest",
  "directories",
+ "getrandom 0.3.4",
  "git2",
  "grep-matcher",
  "grep-pcre2",

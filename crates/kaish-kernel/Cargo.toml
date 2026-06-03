@@ -53,6 +53,7 @@ clap = { workspace = true }
 
 # Builtins (pure-Rust, always available)
 base64 = { workspace = true }
+getrandom = { workspace = true }
 digest = { workspace = true }
 sha2 = { workspace = true }
 sha1 = { workspace = true }

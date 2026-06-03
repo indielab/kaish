@@ -19,6 +19,35 @@ subprocess capture, arithmetic token leak) **all validate as fixed** on
 
 ## P1 — High-leverage features and diagnostics
 
+### Native builtins bypass the kaijutsu capability allow-set
+When kaish runs inside a kaijutsu context (via `context_shell` / rc scripts),
+the kernel enforces a per-context capability allow-set (deny-by-default;
+`ContextToolBinding`). Tool calls routed through `broker.call_tool`
+(`builtin.file:read`, MCP-registered tools) ARE gated. But kaish's **own native
+builtins** (file ops, `ls`, `rg`, glob, …) execute directly against the backend
+and are **not** subject to that allow-set. Net effect: granting a context the
+`shell` facade ≈ granting the whole native-kaish surface, so a "read-only"-style
+role that is given shell can still mutate via native builtins. Decide the model:
+either route native builtins through a capability check, or document that
+`shell` is all-or-nothing and roles must withhold it (as `explorer` does today).
+Surfaced 2026-06-03 during the kaijutsu deny-by-default capability rework.
+
+### Space-separated flag values to `kj` are dropped (`--flag val` vs `--flag=val`)
+`kj context create exp --type explorer` (space form) silently loses the value —
+the context is created as `default`, not `explorer`. `kj context create exp
+--type=explorer` (equals form) works. So a flag value passed as a separate token
+to a `kj` builtin invoked from kaish doesn't reach the builtin's argv; only the
+`=` form survives. Reproduced 2026-06-03 against the live kernel (one context per
+form, checked `context_type` in the DB). Was invisible until kaijutsu went
+deny-by-default: previously every context was permissive regardless of type, so a
+dropped `--type` had no observable effect. Now it's **security-relevant** —
+asking for a restricted role (e.g. read-only `explorer`) and silently getting a
+fully-permissive `default` is a privilege-escalation-by-typo. Likely the kaish
+tokenizer/arg-passing for `kj` (the `=` form being one token is the tell);
+related to the arg-handling quirks in `gotcha_kaish_kj_args`. Fix in the
+kaish→kj arg path, or have `kj` reject/normalize the space form.
+
+
 <!-- Resolved: see docs/plan-here-string.md. Decided against extending
 `${VAR.field}` to regular variables (non-bash, shellcheck-incompatible).
 Instead, added here-string `<<<` so the natural agent pattern is
@@ -59,6 +88,34 @@ when results are dropped.
 ---
 
 ## P2 — Focused refactors & real bugs
+
+### Minimal build (`--no-default-features`) test suite does not compile
+`cargo check -p kaish-kernel --no-default-features` compiles the **lib**, but
+`cargo test -p kaish-kernel --no-default-features` fails: test modules such as
+`ignore_config.rs` (~L582) call `tokio::fs::write` directly, which is only in
+the `native` feature's tokio set. So the sandbox/hermetic build cannot be
+*tested* in CI, only type-checked. This matters now that a read-only kaish is
+the intended sole tool of an MCP agent — we want the minimal surface to be a
+first-class, tested configuration. Fix: gate the offending test helpers behind
+`#[cfg(feature = "native")]`, or route them through `ctx.backend.write` like
+production code. Surfaced 2026-06-03 while gating `uname`/`hostname` and adding
+the minimal-build `--host` error test (which currently can't run for this
+reason). Folds naturally into the planned `native`→capability-feature split.
+
+### Kernel reads host `HOME` unconditionally — breaks hermetic-by-default
+`kernel.rs:763` does `if let Ok(home) = std::env::var("HOME") { scope.set("HOME", …) }`
+at construction, *before* `initial_vars` are applied. The doc at `kernel.rs:194`
+claims "the kernel itself is hermetic — it never reads `std::env::vars()`": true
+for the plural iterator, but this single `var("HOME")` read violates the spirit.
+An embedder that passes empty `initial_vars` for a hermetic build still gets the
+host `HOME` leaked into scope, and can override but not *suppress* it. This is
+the biggest remaining host-info leak for the "minimal attack surface by default"
+goal — larger than anything `uname`/`hostname` exposed. Fix: move `HOME` into the
+`initial_vars` path so the frontend owns it (REPL/MCP already seed env there).
+Surfaced by dpal review 2026-06-03; folds into the Phase 1 hermetic pass of the
+`native`→capability-feature split. (Frontend-side, `kaish-mcp` `server/execute.rs:238`
+seeds `initial_vars` from `std::env::vars()` wholesale — that's by-design env
+passthrough for the interactive MCP, but the read-only MCP frontend must opt out.)
 
 ### Split `kernel.rs::execute_stmt_flow`
 ~L1007–L1443 is an 18-arm async match. Each arm reaches into `scope`,
@@ -222,6 +279,30 @@ root) until the GC fix lands.
 ---
 
 ## P4 — Eventually
+
+### `mktemp` random suffix has slight modulo bias
+`random_suffix` (`tools/builtin/mktemp.rs`) maps random bytes onto a 36-char
+alphabet with `byte % 36`. Since `256 % 36 = 4`, bytes 252–255 land on the first
+four chars, giving them ~3.1% vs ~2.7% probability. Negligible for temp-file
+suffixes — the 36^N search space is dominated by N, not the per-char skew — so
+not worth the rejection-sampling loop (which also complicates the
+fail-loud-on-no-entropy contract). Flagged by dpal review 2026-06-03; recorded
+rather than fixed by deliberate choice.
+
+### `uname -v` discloses build provenance unconditionally
+`tools/builtin/uname.rs` formats the version field as
+`kaish {version} ({git_hash} {build_date})` from compile-time `option_env!`
+values. If an embedder sets `KAISH_GIT_HASH`/`KAISH_BUILD_DATE`, `uname -v`
+fingerprints the exact commit and build time even in a minimal build. Not host
+info, but a build fingerprint; gate behind a `verbose-identity`-style feature if
+a threat model cares. Flagged by dpal review 2026-06-03.
+
+### `mktemp` entropy-failure message is unhelpful on wasm
+On `wasm32-wasip1`, a `getrandom::fill` failure surfaces an opaque
+`getrandom::Error` whose `Display` may be near-empty, so the
+`mktemp: could not obtain system entropy: {e}` message loses its detail. Minor;
+add a `cfg!(target_arch = "wasm32")` hint to the message if it ever matters.
+Flagged by dpal review 2026-06-03.
 
 ### `touch .hidden.txt` fails — dot-prefixed filenames mis-tokenized
 The lexer splits `.hidden.txt` into `Dot` + `Ident("hidden.txt")`

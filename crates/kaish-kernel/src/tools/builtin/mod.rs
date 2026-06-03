@@ -41,6 +41,9 @@ mod rg;
 mod head;
 mod ignore;
 mod help;
+// `hostname` is pure host introspection (reads /proc) — gated behind the host
+// capability. `uname` stays available and reports kaish identity instead.
+#[cfg(feature = "native")]
 mod hostname;
 mod introspect;
 mod jobs;
@@ -136,6 +139,7 @@ pub fn register_builtins(registry: &mut ToolRegistry) {
     registry.register(head::Head);
     registry.register(help::Help);
     registry.register(ignore::KaishIgnore);
+    #[cfg(feature = "native")]
     registry.register(hostname::Hostname);
     registry.register(introspect::Mounts);
     registry.register(introspect::Tools);
