@@ -326,9 +326,12 @@ pub fn value_to_json(value: &Value) -> serde_json::Value {
         Value::Bool(b) => serde_json::Value::Bool(*b),
         Value::Int(i) => serde_json::Value::Number((*i).into()),
         Value::Float(f) => {
+            // JSON has no NaN/Infinity. Rather than silently collapse them to
+            // null (data loss), serialize the non-finite value to its string
+            // form ("NaN", "inf", "-inf") so the information survives the trip.
             serde_json::Number::from_f64(*f)
                 .map(serde_json::Value::Number)
-                .unwrap_or(serde_json::Value::Null)
+                .unwrap_or_else(|| serde_json::Value::String(f.to_string()))
         }
         Value::String(s) => serde_json::Value::String(s.clone()),
         Value::Json(json) => json.clone(),
@@ -358,6 +361,24 @@ mod tests {
         assert_eq!(result.code, 0);
         assert_eq!(result.out, "hello world");
         assert!(result.err.is_empty());
+    }
+
+    #[test]
+    fn value_to_json_finite_float_is_number() {
+        assert_eq!(value_to_json(&Value::Float(3.5)), serde_json::json!(3.5));
+    }
+
+    #[test]
+    fn value_to_json_non_finite_float_serializes_to_string() {
+        // JSON has no NaN/Infinity — preserve the info as a string, never null.
+        assert_eq!(value_to_json(&Value::Float(f64::NAN)), serde_json::json!("NaN"));
+        assert_eq!(value_to_json(&Value::Float(f64::INFINITY)), serde_json::json!("inf"));
+        assert_eq!(
+            value_to_json(&Value::Float(f64::NEG_INFINITY)),
+            serde_json::json!("-inf")
+        );
+        // Crucially: not null (the old data-losing behavior).
+        assert_ne!(value_to_json(&Value::Float(f64::NAN)), serde_json::Value::Null);
     }
 
     #[test]

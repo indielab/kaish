@@ -370,11 +370,6 @@ Mitigations already in place: `set -o latch`, `set -o trash`, `rm --
 *`. Future fix: the kernel knows which args are `GlobPattern`-sourced
 — `rm` could reject flag-shaped positional args from that path.
 
-### `Value::Float` NaN / Infinity silently becomes null
-`kaish-types/src/result.rs` uses `serde_json::Number::from_f64(*f).
-unwrap_or(Null)`. Roundtrip loses data. Either document as intentional
-or serialise non-finite floats to string form.
-
 ### Extract `skip_quoted_content()` shared by arithmetic/heredoc preprocessing
 `preprocess_arithmetic()` (~150 lines) and `preprocess_heredocs()`
 (~150 lines) both implement quote/escape tracking. Also a dependency
@@ -428,6 +423,14 @@ priority; decide whether multi-arg should accumulate per-path errors.
 
 Captured here so context from `cleanups-todo.md` / old `issues.md`
 isn't lost when those files are deleted.
+
+- **Non-finite `Value::Float` no longer collapses to null — fixed 2026-06-04.**
+  `value_to_json` mapped NaN/Infinity to `null` (JSON has no representation for
+  them), silently losing data on roundtrip. It now serializes the non-finite
+  value to its string form (`"NaN"`, `"inf"`, `"-inf"`) so the information
+  survives — favoring visibility over a silent fallback. Finite floats are
+  unchanged. Tests: `result.rs` `value_to_json_finite_float_is_number`,
+  `value_to_json_non_finite_float_serializes_to_string`.
 
 - **`--json` now holds on the error path — fixed 2026-06-04.**
   `apply_output_format` early-returned when stdout was empty, so a failure with
