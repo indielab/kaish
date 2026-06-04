@@ -31,8 +31,44 @@ struct FormatSpec {
 /// With width and `.precision`.
 ///
 /// Backslash escapes: `\n`, `\t`, `\r`, `\\`, `\0`
+///
+/// This is a single pass: each conversion consumes one argument in order, and
+/// missing arguments fall back to defaults (`""`, `0`, `0.0`). awk's `sprintf`
+/// uses this directly. POSIX `printf` reuses the format until all operands are
+/// consumed — see [`format_string_cycling`].
 pub fn format_string<A: FormatArg>(format: &str, args: &[A]) -> String {
     let mut output = String::new();
+    format_pass(format, args, &mut output);
+    output
+}
+
+/// POSIX `printf` cycling: reuse the format string until all operands are
+/// consumed. `printf '%s\n' a b c` → `a\nb\nc\n`.
+///
+/// Each pass consumes as many operands as the format has conversion
+/// specifiers. A format with no conversions is printed exactly once (extra
+/// operands are ignored, matching bash) — this also guards against an infinite
+/// loop. The final pass may run short on operands; the missing ones default.
+pub fn format_string_cycling<A: FormatArg>(format: &str, args: &[A]) -> String {
+    let mut output = String::new();
+    // The first pass always runs, so a zero-operand call still prints the
+    // literal text and an all-default conversion line.
+    let per_pass = format_pass(format, args, &mut output);
+    if per_pass == 0 {
+        return output;
+    }
+    let mut start = per_pass;
+    while start < args.len() {
+        let end = (start + per_pass).min(args.len());
+        format_pass(format, &args[start..end], &mut output);
+        start = end;
+    }
+    output
+}
+
+/// Run one formatting pass, appending to `output`. Returns the number of
+/// conversion specifiers applied (i.e. operand slots consumed this pass).
+fn format_pass<A: FormatArg>(format: &str, args: &[A], output: &mut String) -> usize {
     let mut arg_index = 0;
     let mut chars = format.chars().peekable();
 
@@ -41,7 +77,7 @@ pub fn format_string<A: FormatArg>(format: &str, args: &[A]) -> String {
             match parse_specifier(&mut chars) {
                 Some(spec) => {
                     let arg = args.get(arg_index);
-                    apply_specifier(&spec, arg, &mut output);
+                    apply_specifier(&spec, arg, output);
                     arg_index += 1;
                 }
                 None => {
@@ -67,7 +103,7 @@ pub fn format_string<A: FormatArg>(format: &str, args: &[A]) -> String {
         }
     }
 
-    output
+    arg_index
 }
 
 /// Parse a format specifier after the initial `%`.
@@ -370,5 +406,62 @@ mod tests {
     fn test_left_align_int() {
         let args = vec![TestVal::Int(42)];
         assert_eq!(format_string("%-6d|", &args), "42    |");
+    }
+
+    #[test]
+    fn test_cycling_single_conversion() {
+        // POSIX: `printf '%s\n' a b c` reuses the format per operand.
+        let args = vec![
+            TestVal::Str("a".into()),
+            TestVal::Str("b".into()),
+            TestVal::Str("c".into()),
+        ];
+        assert_eq!(format_string_cycling("%s\\n", &args), "a\nb\nc\n");
+    }
+
+    #[test]
+    fn test_cycling_two_conversions_per_pass() {
+        // `printf '%s-%s ' a b c d` → "a-b c-d "
+        let args = vec![
+            TestVal::Str("a".into()),
+            TestVal::Str("b".into()),
+            TestVal::Str("c".into()),
+            TestVal::Str("d".into()),
+        ];
+        assert_eq!(format_string_cycling("%s-%s ", &args), "a-b c-d ");
+    }
+
+    #[test]
+    fn test_cycling_partial_final_pass_defaults() {
+        // `printf '%s-%s ' a b c` → final pass runs short; missing operand defaults to "".
+        let args = vec![
+            TestVal::Str("a".into()),
+            TestVal::Str("b".into()),
+            TestVal::Str("c".into()),
+        ];
+        assert_eq!(format_string_cycling("%s-%s ", &args), "a-b c- ");
+    }
+
+    #[test]
+    fn test_cycling_no_conversions_prints_once() {
+        // No conversions: print the format exactly once, ignore extra operands.
+        // (Also guards against an infinite loop.)
+        let args = vec![TestVal::Str("a".into()), TestVal::Str("b".into())];
+        assert_eq!(format_string_cycling("hello\\n", &args), "hello\n");
+    }
+
+    #[test]
+    fn test_cycling_single_pass_when_args_match() {
+        let args = vec![TestVal::Str("Alice".into()), TestVal::Int(30)];
+        assert_eq!(
+            format_string_cycling("%s is %d", &args),
+            "Alice is 30"
+        );
+    }
+
+    #[test]
+    fn test_cycling_no_args_still_runs_once() {
+        let args: Vec<TestVal> = vec![];
+        assert_eq!(format_string_cycling("%s\\n", &args), "\n");
     }
 }

@@ -99,7 +99,8 @@ impl Tool for Printf {
         };
 
         let format_args: Vec<&Value> = args.positional.iter().skip(1).collect();
-        let output = format_string::format_string(&format, &format_args);
+        // POSIX printf reuses the format until all operands are consumed.
+        let output = format_string::format_string_cycling(&format, &format_args);
 
         ExecResult::with_output(OutputData::text(output))
     }
@@ -207,6 +208,20 @@ mod tests {
         let result = Printf.execute(args, &mut ctx).await;
         assert!(result.ok());
         assert_eq!(&*result.text_out(), "Alice is 30 years old");
+    }
+
+    #[tokio::test]
+    async fn test_printf_cycles_format_over_extra_args() {
+        // POSIX: `printf '%s\n' a b c` → "a\nb\nc\n"
+        let mut ctx = make_ctx();
+        let mut args = ToolArgs::new();
+        args.positional.push(Value::String("%s\\n".into()));
+        args.positional.push(Value::String("a".into()));
+        args.positional.push(Value::String("b".into()));
+        args.positional.push(Value::String("c".into()));
+        let result = Printf.execute(args, &mut ctx).await;
+        assert!(result.ok());
+        assert_eq!(&*result.text_out(), "a\nb\nc\n");
     }
 
     #[tokio::test]

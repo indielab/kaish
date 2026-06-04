@@ -384,16 +384,6 @@ but a "did-you-mean: quote it" diagnostic would smooth bash porting. Decide
 whether lone punctuation / digit-ranges that agents reach for as set/delim
 arguments should tokenize as barewords.
 
-### `printf` does not cycle its format over extra arguments
-Surfaced 2026-05-28. POSIX printf reuses the format string until all
-operands are consumed: `printf '%s\n' a b c` → `a\nb\nc\n`. kaish makes a
-single pass (`printf.rs:99` calls `format_string` once), so it prints only
-`a`, and `printf '%s-%s ' a b c d` prints `a-b ` (drops `c d`). Likely an
-80%-rule simplification, but agents porting `printf '%s\n' "$@"`-style
-loops will be surprised. Decide whether to add cycling (loop the format,
-chunking args by the conversion count per pass; guard the zero-conversion
-case to avoid an infinite loop) or document the single-pass contract.
-
 ### Flag injection via glob expansion in `rm`
 `rm *` in a directory containing `-rf.txt` expands to `rm -rf.txt …`
 and kaish's structured flag parsing then flips `rm` behaviour.
@@ -459,6 +449,17 @@ priority; decide whether multi-arg should accumulate per-path errors.
 
 Captured here so context from `cleanups-todo.md` / old `issues.md`
 isn't lost when those files are deleted.
+
+- **`printf` now cycles its format over extra operands — fixed 2026-06-04.**
+  POSIX `printf` reuses the format string until all operands are consumed
+  (`printf '%s\n' a b c` → `a\nb\nc\n`); kaish made a single pass and dropped
+  the rest. `format_string.rs` now factors the per-pass loop into `format_pass`
+  (returns the conversion count) and adds `format_string_cycling`, which repeats
+  the format in operand-count chunks. A zero-conversion format prints exactly
+  once (matches bash, guards the infinite loop); the final pass may run short
+  and defaults missing operands. `printf.rs` calls the cycling variant; awk's
+  `sprintf` keeps the single-pass `format_string`. Tests: `format_string`
+  `test_cycling_*` (six cases) + `printf::test_printf_cycles_format_over_extra_args`.
 
 - **Trace-context egress + the two minor OTel leftovers — done 2026-06-01.**
   The remaining OTel work landed in one batch:
