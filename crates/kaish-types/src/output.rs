@@ -520,6 +520,25 @@ pub enum OutputFormat {
 /// not errors. The `--json` contract must hold for all exit codes.
 pub fn apply_output_format(mut result: ExecResult, format: OutputFormat) -> ExecResult {
     if !result.has_output() && result.text_out().is_empty() {
+        // No stdout to format. A failure that carries a diagnostic message must
+        // still honor --json — otherwise the message leaks out as plain text
+        // even though structured output was requested. Emit a JSON error object
+        // so the contract holds on the error path. A clean non-zero exit with no
+        // message (e.g. `grep` no-match, exit 1) is not an error and stays empty.
+        if !result.ok() && !result.err.is_empty() {
+            match format {
+                OutputFormat::Json => {
+                    let obj = serde_json::json!({
+                        "error": result.err,
+                        "code": result.code,
+                    });
+                    result.data = Some(crate::result::json_to_value(obj.clone()));
+                    result.set_out(
+                        serde_json::to_string(&obj).unwrap_or_else(|_| "null".to_string()),
+                    );
+                }
+            }
+        }
         return result;
     }
     match format {
@@ -689,6 +708,44 @@ mod tests {
         let out = formatted.text_out();
         assert!(!out.contains('\n'), "should be compact JSON, got: {}", out);
         assert_eq!(&*out, r#"["file1","file2"]"#);
+    }
+
+    #[test]
+    fn apply_output_format_emits_json_error_object_on_failure() {
+        // A failure with empty stdout and a populated err must still honor
+        // --json: emit {"error", "code"} rather than leaking the message as
+        // plain text (e.g. `grep --json --bogus-flag`).
+        let result = ExecResult::failure(2, "grep: unknown flag --bogus-flag");
+        assert!(!result.has_output());
+        assert!(result.text_out().is_empty());
+
+        let formatted = apply_output_format(result, OutputFormat::Json);
+        let out = formatted.text_out().into_owned();
+        let parsed: serde_json::Value = serde_json::from_str(&out).expect("valid JSON");
+        assert_eq!(
+            parsed,
+            serde_json::json!({"error": "grep: unknown flag --bogus-flag", "code": 2})
+        );
+        // .data mirrors the JSON object.
+        assert!(matches!(formatted.data, Some(crate::value::Value::Json(_))));
+    }
+
+    #[test]
+    fn apply_output_format_leaves_clean_no_match_empty() {
+        // grep no-match: exit 1, empty stdout, empty err. Not an error — must
+        // NOT be wrapped in a JSON error object; stays empty.
+        let result = ExecResult::failure(1, "");
+        let formatted = apply_output_format(result, OutputFormat::Json);
+        assert!(formatted.text_out().is_empty());
+        assert!(formatted.data.is_none());
+    }
+
+    #[test]
+    fn apply_output_format_empty_success_stays_empty() {
+        let result = ExecResult::success("");
+        let formatted = apply_output_format(result, OutputFormat::Json);
+        assert!(formatted.text_out().is_empty());
+        assert!(formatted.data.is_none());
     }
 
     #[test]

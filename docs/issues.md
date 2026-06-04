@@ -178,27 +178,6 @@ Tool-side blast radius is limited to builtins that re-dispatch —
 currently only `timeout`. External-command path and normal pipelines
 are unaffected (they don't re-enter the dispatcher from inside a tool).
 
-### `apply_output_format` early-returns on empty stdout
-`kaish-types/src/output.rs:521-524`:
-```
-if !result.has_output() && result.text_out().is_empty() {
-    return result;
-}
-```
-The doc above the function claims it "serializes regardless of exit
-code." It doesn't — when the result is a failure with empty stdout and
-populated `err`, the early-return preserves stderr as text and skips
-JSON encoding entirely. For `grep --json --bogus-flag` and friends,
-the error message goes out as plain text even though `--json` was
-requested.
-
-Two ways forward: (1) when format=Json and stdout is empty but
-exit≠0, emit a JSON error object `{"error": <err>, "code": <code>}`
-to stdout; or (2) document the contract honestly as "--json applies
-to successful stdout only." Option (1) is the agent-friendly choice
-and matches the existing comment intent. Backward-compat audit
-needed for any test asserting err-via-stderr with --json present.
-
 ### grep `-E` is pure no-op
 `crates/kaish-kernel/src/tools/builtin/grep.rs:74-78`. Rust's regex
 crate is always extended, so `-E` semantically aliases to default.
@@ -449,6 +428,18 @@ priority; decide whether multi-arg should accumulate per-path errors.
 
 Captured here so context from `cleanups-todo.md` / old `issues.md`
 isn't lost when those files are deleted.
+
+- **`--json` now holds on the error path — fixed 2026-06-04.**
+  `apply_output_format` early-returned when stdout was empty, so a failure with
+  a populated `err` (e.g. `grep --json --bogus-flag`) leaked the message as
+  plain text despite `--json`. The empty-stdout branch now emits a JSON error
+  object `{"error": <err>, "code": <code>}` (and mirrors it onto `.data`) when
+  the result is a failure with a non-empty `err`. A clean non-zero exit with no
+  message (grep no-match, exit 1) and an empty success both stay empty — only
+  diagnostic-bearing failures are wrapped. Tests in `output.rs`:
+  `apply_output_format_emits_json_error_object_on_failure`,
+  `apply_output_format_leaves_clean_no_match_empty`,
+  `apply_output_format_empty_success_stays_empty`.
 
 - **`printf` now cycles its format over extra operands — fixed 2026-06-04.**
   POSIX `printf` reuses the format string until all operands are consumed
