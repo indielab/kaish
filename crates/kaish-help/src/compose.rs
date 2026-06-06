@@ -110,6 +110,10 @@ pub struct Fragment {
     pub locale: &'static str,
     /// `None` = shared (default); `Some(_)` = audience-specific divergence.
     pub audience: Option<Audience>,
+    /// Optional section heading for reference rendering (e.g. `"Quoting"`).
+    /// `None` for inline fragments (the Foundations spine renders under its
+    /// concept header instead). Used by [`render_syntax_reference`].
+    pub title: Option<&'static str>,
     /// Markdown body.
     pub body: &'static str,
 }
@@ -254,6 +258,24 @@ pub fn compose(selector: &Selector, generated: &dyn GeneratedContent) -> String 
     }
 
     sections.join("\n\n")
+}
+
+/// Render the `Syntax` concept as a standalone reference document.
+///
+/// This is the single source for `content/en/syntax.md` (which is a committed,
+/// drift-tested mirror) and for `help syntax`. Each Syntax fragment becomes a
+/// `## <title>` section, in registry order. `LANGUAGE.md` stays hand-authored as
+/// the deeper human reference; a test guards that it still covers this surface.
+pub fn render_syntax_reference() -> String {
+    let mut out = String::from("# kaish Syntax Reference\n");
+    for fragment in FRAGMENTS
+        .iter()
+        .filter(|f| f.concept == Concept::Syntax && f.locale == DEFAULT_LOCALE)
+    {
+        let title = fragment.title.unwrap_or(fragment.key);
+        out.push_str(&format!("\n## {title}\n\n{}\n", fragment.body.trim()));
+    }
+    out
 }
 
 /// A fragment present in English but missing in another locale.
@@ -433,6 +455,47 @@ mod tests {
     fn agent_onboarding_renders_section_headers() {
         let out = compose(&Recipe::agent_onboarding(), &no_content());
         assert!(out.contains("## "), "markdown clients want section headers:\n{out}");
+    }
+
+    #[test]
+    fn syntax_md_matches_fragments() {
+        assert_eq!(
+            crate::content::SYNTAX,
+            render_syntax_reference(),
+            "content/en/syntax.md is stale — run \
+             `cargo run -p kaish-help --example regen_syntax`"
+        );
+    }
+
+    #[test]
+    fn syntax_reference_covers_core_topics() {
+        let out = render_syntax_reference();
+        for needle in ["## Variables", "## Quoting", "## Command Substitution", "## Functions"] {
+            assert!(out.contains(needle), "syntax reference missing {needle}");
+        }
+    }
+
+    #[test]
+    fn language_md_still_covers_the_syntax_surface() {
+        // LANGUAGE.md stays hand-authored (deeper human reference); guard that it
+        // hasn't lost coverage of the syntax topics the fragments single-source.
+        let lang = std::fs::read_to_string(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../docs/LANGUAGE.md"
+        ))
+        .expect("read docs/LANGUAGE.md");
+        for needle in [
+            "Quoting",
+            "Parameter Expansion",
+            "Pipes & Redirects",
+            "Command Substitution",
+            "Arithmetic",
+            "Functions",
+            "Control Flow",
+            "Test Expressions",
+        ] {
+            assert!(lang.contains(needle), "LANGUAGE.md no longer covers: {needle}");
+        }
     }
 
     #[test]

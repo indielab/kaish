@@ -113,8 +113,10 @@ should preserve the real exit code. Surfaced by dpal design review 2026-06-03.
 `compose`/recipes + byte-stable `get_help` compat surface); help content moved to
 `crates/kaish-help/content/en/`; `kaish_kernel::help` is now a shim. Tests/clippy/
 WASI green. **Remaining:**
-- **Phase 2:** decompose `LANGUAGE.md`/`syntax.md` into `Syntax` fragments; make both
-  *generated* from fragments with a drift-check test.
+- **Phase 2 (done 2026-06-06, light):** `syntax.md` is now generated from
+  `Syntax` fragments (`render_syntax_reference()` + `regen_syntax` example),
+  drift-tested; byte-identical to the old file. `LANGUAGE.md` stays hand-authored
+  (full decomposition declined) with a coverage test.
 - **Phase 3 (mostly done 2026-06-06):** MCP `instructions:` and the REPL welcome now
   compose from recipes (hand-rolled prose gone from both). **Residual:** the `execute`
   **tool description** is still a `#[tool(description="…")]` macro literal — needs an

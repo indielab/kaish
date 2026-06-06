@@ -25,6 +25,6 @@ pub use topic::{get_help, list_topics, HelpTopic};
 
 // Composition surface — recipes for frontends and embedders.
 pub use compose::{
-    compose, coverage, Audience, Concept, Depth, Fragment, GeneratedContent, MissingFragment,
-    Recipe, SchemaContent, Selector, Variant, DEFAULT_LOCALE,
+    compose, coverage, render_syntax_reference, Audience, Concept, Depth, Fragment,
+    GeneratedContent, MissingFragment, Recipe, SchemaContent, Selector, Variant, DEFAULT_LOCALE,
 };

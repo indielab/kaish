@@ -263,8 +263,15 @@ for a human reader. Visibility lives at build/introspection time instead:
    green. (Refinement: `Fragment` carries `depth`; recipes `agent_onboarding` /
    `repl_welcome` / `tool_description` exist but aren't wired into MCP/REPL yet —
    that's Phase 3.)
-2. Decompose LANGUAGE.md into fragments; make LANGUAGE.md and syntax.md generated;
-   add the drift-check test.
+2. ✅ **DONE (2026-06-06, light variant — resolved scope Q).** Ported the 15
+   `syntax.md` sections into `Concept::Syntax` fragments (titled, via
+   `syntax_section()`); `render_syntax_reference()` composes them into
+   `content/en/syntax.md`, which is now a committed, **drift-tested** mirror
+   (`syntax_md_matches_fragments` + the `regen_syntax` example to regenerate). The
+   regenerated file is byte-identical to the old one — zero content change, source
+   moved to fragments. `LANGUAGE.md` stays hand-authored; a test guards that it
+   still covers the syntax surface. (Full decomposition of LANGUAGE.md itself was
+   declined — preserve its prose flow.)
 3. 🟡 **MOSTLY DONE (2026-06-06).** Wired the two runtime surfaces:
    - MCP `instructions:` (`handler.rs` `get_info`) → `compose(Recipe::agent_onboarding,
      SchemaContent::new(&[]))` (empty schemas → skips the inline builtin dump; clients

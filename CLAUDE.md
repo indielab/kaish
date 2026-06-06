@@ -101,7 +101,9 @@ Tests live in `crates/kaish-kernel/tests/`. Snapshots in `crates/kaish-kernel/te
   `docs/composable-help.md`.
 
 **Keep in sync:** When adding builtins or changing syntax, update the relevant help files.
-The builtin list in `help builtins` is generated dynamically from tool schemas, but
-`syntax.md` and `limits.md` need manual updates.
+The builtin list in `help builtins` is generated dynamically from tool schemas.
+`syntax.md` is **generated** from the Syntax fragments in `kaish-help/src/fragments.rs` —
+edit the fragments, then `cargo run -p kaish-help --example regen_syntax` (a drift test
+fails if it's stale). `limits.md` and the deeper `docs/LANGUAGE.md` still need manual updates.
 
 
