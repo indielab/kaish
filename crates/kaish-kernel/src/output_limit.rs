@@ -1,8 +1,18 @@
 //! Configurable output size limits for agent safety.
 //!
-//! When output exceeds the threshold, the full output is written to a
-//! spill file on the real filesystem and `ExecResult.out` is truncated
-//! with a pointer message. The agent can then selectively read the file.
+//! When output exceeds the threshold the result is capped and `ExecResult.out`
+//! is replaced with a head+tail preview. Two strategies, selected at runtime by
+//! [`SpillMode`]:
+//! - [`SpillMode::Disk`] (default): the full output is written to a spill file
+//!   on the real filesystem and the preview points at it. The agent can then
+//!   selectively read the file.
+//! - [`SpillMode::Memory`]: the output is truncated in memory only — no disk
+//!   I/O, no recoverable file. For runtime read-only kernels (e.g. kaibo) that
+//!   must not touch the host filesystem even when `localfs` is compiled in.
+//!   Memory stays bounded regardless of how much the command produces.
+//!
+//! Either way the exit code is remapped to 3 (`did_spill`) so callers can tell
+//! the output was capped.
 //!
 //! Per-mode defaults: MCP kernels get an 8KB limit, REPL/test kernels
 //! are unlimited. Runtime-switchable via the `kaish-output-limit` builtin.
@@ -22,6 +32,29 @@ const DEFAULT_HEAD_BYTES: usize = 1024;
 /// Default tail preview size (bytes of output end to keep).
 const DEFAULT_TAIL_BYTES: usize = 512;
 
+/// Where overflow output goes when it exceeds the limit.
+///
+/// This is a *runtime* choice, distinct from the compile-time `localfs`
+/// feature: a `localfs`-built kernel can still be told to truncate in memory.
+/// A build without `localfs` always behaves as [`SpillMode::Memory`] regardless
+/// of this setting, since disk I/O is unavailable.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum SpillMode {
+    /// Write overflow to a disk spill file under `paths::spill_dir()` and keep a
+    /// head+tail preview in the result (the message carries the file path).
+    /// Requires the `localfs` feature. This is the default.
+    ///
+    /// Auto-overridden to [`Memory`](Self::Memory) at kernel construction when
+    /// the VFS mount is `NoLocal` (memory-only) — such a kernel has no host
+    /// filesystem to spill to. See `Kernel::assemble`.
+    #[default]
+    Disk,
+    /// Truncate in memory to head+tail only — no disk I/O, no recoverable file.
+    /// For runtime read-only kernels (e.g. kaibo) that must never touch the host
+    /// filesystem even when `localfs` is compiled in.
+    Memory,
+}
+
 /// Configurable output size limit.
 ///
 /// Threaded through `KernelConfig` → `ExecContext` → kernel pipeline execution.
@@ -31,6 +64,7 @@ pub struct OutputLimitConfig {
     max_bytes: Option<usize>,
     head_bytes: usize,
     tail_bytes: usize,
+    spill_mode: SpillMode,
 }
 
 impl OutputLimitConfig {
@@ -40,6 +74,7 @@ impl OutputLimitConfig {
             max_bytes: None,
             head_bytes: DEFAULT_HEAD_BYTES,
             tail_bytes: DEFAULT_TAIL_BYTES,
+            spill_mode: SpillMode::Disk,
         }
     }
 
@@ -48,18 +83,41 @@ impl OutputLimitConfig {
         DEFAULT_MCP_LIMIT
     }
 
-    /// MCP-safe defaults: 8KB limit, 1KB head, 512B tail.
+    /// MCP-safe defaults: 8KB limit, 1KB head, 512B tail, disk spill.
     pub fn mcp() -> Self {
         Self {
             max_bytes: Some(DEFAULT_MCP_LIMIT),
             head_bytes: DEFAULT_HEAD_BYTES,
             tail_bytes: DEFAULT_TAIL_BYTES,
+            spill_mode: SpillMode::Disk,
         }
+    }
+
+    /// Switch to in-memory truncation — no disk spill, no host filesystem
+    /// writes. For runtime read-only kernels (e.g. kaibo). Builder form of
+    /// [`set_spill_mode`](Self::set_spill_mode).
+    ///
+    /// Note: a `NoLocal` VFS mount forces this mode automatically at kernel
+    /// construction, so an embedder only needs this for a `localfs`-mounted
+    /// kernel it nonetheless wants to keep off the host disk.
+    pub fn in_memory(mut self) -> Self {
+        self.spill_mode = SpillMode::Memory;
+        self
     }
 
     /// Whether output limiting is enabled.
     pub fn is_enabled(&self) -> bool {
         self.max_bytes.is_some()
+    }
+
+    /// The spill mode (disk vs in-memory truncation).
+    pub fn spill_mode(&self) -> SpillMode {
+        self.spill_mode
+    }
+
+    /// Set the spill mode.
+    pub fn set_spill_mode(&mut self, mode: SpillMode) {
+        self.spill_mode = mode;
     }
 
     /// The maximum output size in bytes, if set.
@@ -108,16 +166,18 @@ pub struct SpillResult {
 /// Fail fast: truncating output silently could corrupt structured data
 /// that an agent acts on. An explicit error is safer.
 ///
-/// Without the `native` feature, performs in-memory head+tail truncation
-/// (no disk I/O).
+/// In [`SpillMode::Memory`], or in any build without the `localfs` feature,
+/// performs in-memory head+tail truncation (no disk I/O) instead.
 pub async fn spill_if_needed(
     result: &mut ExecResult,
     config: &OutputLimitConfig,
 ) -> Option<SpillResult> {
     let max = config.max_bytes?;
 
+    // Disk spill requires `localfs` AND the caller selecting it. Memory mode
+    // (or a build without `localfs`) falls through to in-memory truncation.
     #[cfg(feature = "localfs")]
-    {
+    if config.spill_mode == SpillMode::Disk {
         // If result.out is already populated (external commands), check it directly
         if !result.text_out().is_empty() && !result.has_output() {
             let total = result.text_out().len();
@@ -144,32 +204,71 @@ pub async fn spill_if_needed(
             return spill_output_data(result, config, max).await;
         }
 
-        None
+        return None;
     }
 
-    // Without native: in-memory head+tail truncation (no disk I/O)
-    #[cfg(not(feature = "localfs"))]
-    {
-        // Materialize structured OutputData if present
-        if result.has_output() {
-            result.materialize();
-        }
+    // In-memory head+tail truncation (Memory mode or no `localfs`): no disk I/O.
+    truncate_in_memory(result, config, max)
+}
 
-        let total = result.text_out().len();
-        if total <= max {
+/// Truncate output in memory to head+tail, with no disk I/O.
+///
+/// Sets `did_spill = true` so the kernel remaps the exit code to 3 — the same
+/// "output was capped" signal as a disk spill — but the message carries no file
+/// path because there is no recoverable file. Returns `None` (no `SpillResult`,
+/// since nothing was written); the caller distinguishes truncation via
+/// `result.did_spill`.
+///
+/// Memory is bounded: large structured `OutputData` is streamed through a byte
+/// budget rather than materialized into a full `String`, so a builtin emitting
+/// a huge tree (e.g. a recursive `ls` of a giant directory) cannot OOM a
+/// read-only kernel.
+fn truncate_in_memory(
+    result: &mut ExecResult,
+    config: &OutputLimitConfig,
+    max: usize,
+) -> Option<SpillResult> {
+    // Structured OutputData: estimate first. If it would clearly overflow,
+    // render only a bounded head prefix via `write_canonical` rather than
+    // materializing the whole thing.
+    if let Some(output) = result.output() {
+        let estimate = output.estimated_byte_size();
+        if estimate > max {
+            // Render a bounded head prefix only — no full materialization.
+            let mut buf = Vec::with_capacity(config.head_bytes + 64);
+            // write_canonical stops shortly after the budget; ignore the count.
+            let _ = output.write_canonical(&mut buf, Some(config.head_bytes));
+            let s = String::from_utf8_lossy(&buf);
+            let head = truncate_to_char_boundary(&s, config.head_bytes);
+            let truncated = format!(
+                "{}\n...\n[output truncated in memory: ~{} bytes (exceeds {} byte limit) — head only, no spill file]",
+                head, estimate, max
+            );
+            result.set_out(truncated);
+            result.did_spill = true;
             return None;
         }
-
-        let text = result.text_out().into_owned();
-        let head = truncate_to_char_boundary(&text, config.head_bytes);
-        let tail = tail_from_str(&text, config.tail_bytes);
-        let truncated = format!(
-            "{}\n...\n{}\n[output truncated: {} bytes total — spill not available in sandbox mode]",
-            head, tail, total
-        );
-        result.set_out(truncated);
-        None
+        // Small enough to materialize safely.
+        result.materialize();
     }
+
+    let total = result.text_out().len();
+    if total <= max {
+        return None;
+    }
+
+    // Already-materialized text fits in memory (it was produced into RAM
+    // regardless) — give a precise head+tail+total.
+    let text = result.text_out().into_owned();
+    let head = truncate_to_char_boundary(&text, config.head_bytes);
+    let tail = tail_from_str(&text, config.tail_bytes);
+    let truncated = format!(
+        "{}\n...\n{}\n[output truncated in memory: {} bytes total — no spill file]",
+        head, tail, total
+    );
+    result.set_out(truncated);
+    result.did_spill = true;
+    None
 }
 
 /// Spill an already-materialized string in result.out.
@@ -374,21 +473,8 @@ async fn collect_stdout_with_spill<R: tokio::io::AsyncRead + Unpin>(
 
     // Phase 2: Check if we should switch to spill mode
     if buffer.len() > max_bytes {
-        // Already over limit — spill what we have and stream the rest to disk
-        match stream_to_spill(&buffer, stdout, config).await {
-            Ok(result) => return (result, true),
-            Err(e) => {
-                // Spill failed — return error. Don't continue accumulating.
-                // Dropping stdout closes the pipe, which sends SIGPIPE to the child.
-                tracing::error!("streaming spill failed: {}", e);
-                let size = buffer.len();
-                drop(buffer);
-                return (format!(
-                    "ERROR: output exceeded {} byte limit ({} bytes buffered) and spill to disk failed: {}",
-                    max_bytes, size, e
-                ), false);
-            }
-        }
+        // Already over limit — hand off to the disk-spill or in-memory-drain path
+        return handle_overflow(&buffer, stdout, config, max_bytes).await;
     }
 
     // Continue collecting (under limit so far)
@@ -400,18 +486,7 @@ async fn collect_stdout_with_spill<R: tokio::io::AsyncRead + Unpin>(
                 buffer.extend_from_slice(&chunk[..n]);
                 // Check if we've exceeded limit mid-stream
                 if buffer.len() > max_bytes {
-                    match stream_to_spill(&buffer, stdout, config).await {
-                        Ok(result) => return (result, true),
-                        Err(e) => {
-                            tracing::error!("streaming spill failed: {}", e);
-                            let size = buffer.len();
-                            drop(buffer);
-                            return (format!(
-                                "ERROR: output exceeded {} byte limit ({} bytes buffered) and spill to disk failed: {}",
-                                max_bytes, size, e
-                            ), false);
-                        }
-                    }
+                    return handle_overflow(&buffer, stdout, config, max_bytes).await;
                 }
             }
             Err(_) => break,
@@ -419,6 +494,102 @@ async fn collect_stdout_with_spill<R: tokio::io::AsyncRead + Unpin>(
     }
 
     (String::from_utf8_lossy(&buffer).into_owned(), false)
+}
+
+/// Decide how to handle stdout that has overflowed the limit: spill the rest to
+/// a disk file ([`SpillMode::Disk`]) or drain it with a bounded in-memory
+/// head+tail buffer ([`SpillMode::Memory`]). Returns `(message, did_spill)`.
+#[cfg(feature = "subprocess")]
+async fn handle_overflow<R: tokio::io::AsyncRead + Unpin>(
+    buffer: &[u8],
+    stdout: &mut R,
+    config: &OutputLimitConfig,
+    max_bytes: usize,
+) -> (String, bool) {
+    // Memory mode: never touch disk. Drain with a bounded head+tail buffer so
+    // an unbounded child cannot OOM us.
+    if config.spill_mode == SpillMode::Memory {
+        return (drain_in_memory(buffer, stdout, config).await, true);
+    }
+
+    match stream_to_spill(buffer, stdout, config).await {
+        Ok(result) => (result, true),
+        Err(e) => {
+            // Spill failed — return error. Don't continue accumulating.
+            // Dropping stdout closes the pipe, which sends SIGPIPE to the child.
+            tracing::error!("streaming spill failed: {}", e);
+            (
+                format!(
+                    "ERROR: output exceeded {} byte limit ({} bytes buffered) and spill to disk failed: {}",
+                    max_bytes,
+                    buffer.len(),
+                    e
+                ),
+                false,
+            )
+        }
+    }
+}
+
+/// Drain stdout to EOF keeping only a bounded head+tail in memory, discarding
+/// the middle. Memory use is capped at `head_bytes + tail_bytes + one chunk`
+/// regardless of how much the child produces. Counts the true total so the
+/// truncation marker is honest about how much was dropped.
+#[cfg(feature = "subprocess")]
+async fn drain_in_memory<R: tokio::io::AsyncRead + Unpin>(
+    buffer: &[u8],
+    stdout: &mut R,
+    config: &OutputLimitConfig,
+) -> String {
+    use tokio::io::AsyncReadExt;
+
+    // Head is fixed from the prefix we have already buffered.
+    let head = {
+        let s = String::from_utf8_lossy(buffer);
+        truncate_to_char_boundary(&s, config.head_bytes).to_string()
+    };
+
+    // Tail ring over the entire stream, bounded to tail_bytes.
+    let cap = config.tail_bytes;
+    let mut tail: std::collections::VecDeque<u8> = std::collections::VecDeque::with_capacity(cap + 1);
+    extend_ring(&mut tail, buffer, cap);
+    let mut total = buffer.len();
+
+    let mut chunk = [0u8; 8192];
+    loop {
+        match stdout.read(&mut chunk).await {
+            Ok(0) => break,
+            Ok(n) => {
+                total += n;
+                extend_ring(&mut tail, &chunk[..n], cap);
+            }
+            Err(_) => break,
+        }
+    }
+
+    let tail_bytes: Vec<u8> = tail.into_iter().collect();
+    let tail_str = String::from_utf8_lossy(&tail_bytes);
+    let dropped = total.saturating_sub(head.len() + tail_bytes.len());
+    format!(
+        "{}\n...\n{}\n[output truncated in memory: {} bytes total, {} discarded — no spill file]",
+        head, tail_str, total, dropped
+    )
+}
+
+/// Append `bytes` to a tail ring buffer bounded to `cap` bytes, evicting from
+/// the front. If `bytes` alone exceeds `cap`, only its last `cap` bytes are kept.
+#[cfg(feature = "subprocess")]
+fn extend_ring(ring: &mut std::collections::VecDeque<u8>, bytes: &[u8], cap: usize) {
+    if cap == 0 {
+        return;
+    }
+    let start = bytes.len().saturating_sub(cap);
+    for &b in &bytes[start..] {
+        if ring.len() == cap {
+            ring.pop_front();
+        }
+        ring.push_back(b);
+    }
 }
 
 /// Write buffered data + remaining stdout to a spill file, return truncated result.
@@ -708,6 +879,7 @@ mod tests {
             max_bytes: Some(100),
             head_bytes: 20,
             tail_bytes: 10,
+            spill_mode: SpillMode::Disk,
         };
         let big_output = "x".repeat(200);
         let mut result = ExecResult::success(big_output);
@@ -752,6 +924,7 @@ mod tests {
             max_bytes: Some(100),
             head_bytes: 5,
             tail_bytes: 3,
+            spill_mode: SpillMode::Disk,
         };
         let full = "abcdefghijklmnop";
         let path = PathBuf::from("/tmp/test-spill.txt");
@@ -772,6 +945,7 @@ mod tests {
                 max_bytes: Some(200),
                 head_bytes: 50,
                 tail_bytes: 30,
+                spill_mode: SpillMode::Disk,
             });
         let kernel = Kernel::new(config).expect("kernel creation");
 
@@ -792,6 +966,7 @@ mod tests {
                 max_bytes: Some(100),
                 head_bytes: 30,
                 tail_bytes: 20,
+                spill_mode: SpillMode::Disk,
             });
         let kernel = Kernel::new(config).expect("kernel creation");
 
@@ -825,6 +1000,7 @@ mod tests {
                 max_bytes: Some(100),
                 head_bytes: 30,
                 tail_bytes: 20,
+                spill_mode: SpillMode::Disk,
             });
         let kernel = Kernel::new(config).expect("kernel creation");
 
@@ -927,6 +1103,7 @@ mod tests {
             max_bytes: Some(1024),
             head_bytes: 100,
             tail_bytes: 50,
+            spill_mode: SpillMode::Disk,
         };
 
         // 100K nodes — large enough to detect OOM if materialized carelessly,
@@ -960,6 +1137,7 @@ mod tests {
             max_bytes: Some(1024),
             head_bytes: 100,
             tail_bytes: 50,
+            spill_mode: SpillMode::Disk,
         };
 
         // Write small data and close
@@ -981,6 +1159,7 @@ mod tests {
             max_bytes: Some(100),
             head_bytes: 20,
             tail_bytes: 10,
+            spill_mode: SpillMode::Disk,
         };
 
         // Write data exceeding limit and close
@@ -1004,6 +1183,7 @@ mod tests {
             max_bytes: Some(100),
             head_bytes: 20,
             tail_bytes: 10,
+            spill_mode: SpillMode::Disk,
         };
 
         // Write exactly max_bytes
@@ -1027,6 +1207,7 @@ mod tests {
             max_bytes: Some(1024),
             head_bytes: 100,
             tail_bytes: 50,
+            spill_mode: SpillMode::Disk,
         };
 
         // Write some data, then drop writer mid-stream
@@ -1039,5 +1220,171 @@ mod tests {
         let (result, did_spill) = collect_stdout_with_spill(&mut reader, 1024, &config).await;
         assert_eq!(result, "partial data");
         assert!(!did_spill);
+    }
+
+    // ── In-memory spill mode (SpillMode::Memory) ──
+
+    #[test]
+    fn test_in_memory_builder_and_default() {
+        assert_eq!(OutputLimitConfig::mcp().spill_mode(), SpillMode::Disk);
+        assert_eq!(OutputLimitConfig::mcp().in_memory().spill_mode(), SpillMode::Memory);
+
+        let mut config = OutputLimitConfig::none();
+        config.set_spill_mode(SpillMode::Memory);
+        assert_eq!(config.spill_mode(), SpillMode::Memory);
+    }
+
+    #[tokio::test]
+    async fn test_memory_mode_truncates_string_without_disk() {
+        let config = OutputLimitConfig {
+            max_bytes: Some(100),
+            head_bytes: 20,
+            tail_bytes: 10,
+            spill_mode: SpillMode::Memory,
+        };
+        let mut result = ExecResult::success("x".repeat(200));
+        let spill = spill_if_needed(&mut result, &config).await;
+
+        // No SpillResult (no file written) but did_spill flags the truncation.
+        assert!(spill.is_none(), "memory mode must not write a spill file");
+        assert!(result.did_spill, "memory truncation must set did_spill for the exit-3 remap");
+
+        let out = result.text_out();
+        assert!(out.contains("truncated in memory"), "got: {}", out);
+        assert!(out.contains("200 bytes total"), "got: {}", out);
+        assert!(!out.contains("full output at"), "memory mode must not point at a file: {}", out);
+        assert!(out.starts_with(&"x".repeat(20)), "head preserved");
+    }
+
+    #[tokio::test]
+    async fn test_memory_mode_under_limit_untouched() {
+        let config = OutputLimitConfig {
+            max_bytes: Some(100),
+            head_bytes: 20,
+            tail_bytes: 10,
+            spill_mode: SpillMode::Memory,
+        };
+        let mut result = ExecResult::success("short");
+        let spill = spill_if_needed(&mut result, &config).await;
+        assert!(spill.is_none());
+        assert!(!result.did_spill);
+        assert_eq!(&*result.text_out(), "short");
+    }
+
+    #[tokio::test]
+    async fn test_memory_mode_large_output_data_bounded() {
+        use crate::interpreter::{OutputData, OutputNode};
+
+        let config = OutputLimitConfig {
+            max_bytes: Some(1024),
+            head_bytes: 100,
+            tail_bytes: 50,
+            spill_mode: SpillMode::Memory,
+        };
+
+        // 100K nodes — would be a huge String if fully materialized.
+        let nodes: Vec<OutputNode> = (0..100_000)
+            .map(|i| OutputNode::new(format!("node_{:06}", i)))
+            .collect();
+        let mut result = ExecResult::with_output(OutputData::nodes(nodes));
+
+        let spill = spill_if_needed(&mut result, &config).await;
+        assert!(spill.is_none(), "memory mode writes no file");
+        assert!(result.did_spill);
+        let out = result.text_out();
+        assert!(out.contains("truncated in memory"), "got: {}", out);
+        assert!(out.starts_with("node_000000"), "head rendered: {}", out);
+        // Head-only path for oversized structured data: no tail section echoed.
+        assert!(out.contains("head only"), "got: {}", out);
+    }
+
+    #[tokio::test]
+    async fn test_kernel_memory_mode_exits_3_preserves_original() {
+        use crate::kernel::{Kernel, KernelConfig};
+
+        let config = KernelConfig::mcp().with_output_limit(OutputLimitConfig {
+            max_bytes: Some(100),
+            head_bytes: 30,
+            tail_bytes: 20,
+            spill_mode: SpillMode::Memory,
+        });
+        let kernel = Kernel::new(config).expect("kernel creation");
+
+        let big = "x".repeat(200);
+        let result = kernel.execute(&format!("echo '{}'", big)).await.expect("execute");
+        assert_eq!(result.code, 3, "memory truncation still signals via exit 3");
+        assert_eq!(result.original_code, Some(0), "original exit code preserved");
+        assert!(result.text_out().contains("truncated in memory"));
+        assert!(!result.text_out().contains("full output at"));
+    }
+
+    #[tokio::test]
+    async fn test_nolocal_kernel_forces_memory_spill() {
+        use crate::kernel::{Kernel, KernelConfig, VfsMountMode};
+
+        // NoLocal mount + an explicit Disk spill mode: the kernel must override
+        // to Memory so nothing is written to a host spill file, even though
+        // `localfs` is compiled in.
+        let config = KernelConfig::mcp()
+            .with_vfs_mode(VfsMountMode::NoLocal)
+            .with_output_limit(OutputLimitConfig {
+                max_bytes: Some(100),
+                head_bytes: 30,
+                tail_bytes: 20,
+                spill_mode: SpillMode::Disk,
+            });
+        let kernel = Kernel::new(config).expect("kernel creation");
+
+        let big = "x".repeat(200);
+        let result = kernel.execute(&format!("echo '{}'", big)).await.expect("execute");
+        assert_eq!(result.code, 3, "still signals truncation via exit 3");
+        assert!(result.text_out().contains("truncated in memory"), "got: {}", result.text_out());
+        assert!(
+            !result.text_out().contains("full output at"),
+            "NoLocal kernel must not write a host spill file: {}",
+            result.text_out()
+        );
+    }
+
+    #[cfg(feature = "subprocess")]
+    #[tokio::test]
+    async fn test_collect_memory_mode_drains_without_disk() {
+        let (mut writer, reader) = tokio::io::duplex(64 * 1024);
+        let config = OutputLimitConfig {
+            max_bytes: Some(100),
+            head_bytes: 20,
+            tail_bytes: 10,
+            spill_mode: SpillMode::Memory,
+        };
+
+        use tokio::io::AsyncWriteExt;
+        // head 'a's, filler 'b's, tail 'c's so we can check head+tail survive.
+        let data = format!("{}{}{}", "a".repeat(20), "b".repeat(500), "c".repeat(10));
+        writer.write_all(data.as_bytes()).await.unwrap();
+        drop(writer);
+
+        let mut reader = reader;
+        let (result, did_spill) = collect_stdout_with_spill(&mut reader, 100, &config).await;
+        assert!(did_spill, "drain flags truncation for the exit-3 remap");
+        assert!(result.contains("truncated in memory"), "got: {}", result);
+        assert!(!result.contains("full output at"), "no disk file in memory mode");
+        assert!(result.starts_with(&"a".repeat(20)), "head preserved: {}", result);
+        assert!(result.contains(&"c".repeat(10)), "tail preserved: {}", result);
+        assert!(result.contains("530 bytes total"), "honest total: {}", result);
+    }
+
+    #[cfg(feature = "subprocess")]
+    #[test]
+    fn test_extend_ring_keeps_last_cap_bytes() {
+        let mut ring = std::collections::VecDeque::new();
+        super::extend_ring(&mut ring, b"abcdef", 3);
+        assert_eq!(ring.iter().copied().collect::<Vec<u8>>(), b"def");
+        // Subsequent pushes keep evicting from the front.
+        super::extend_ring(&mut ring, b"gh", 3);
+        assert_eq!(ring.iter().copied().collect::<Vec<u8>>(), b"fgh");
+        // cap 0 retains nothing.
+        let mut empty = std::collections::VecDeque::new();
+        super::extend_ring(&mut empty, b"xyz", 0);
+        assert!(empty.is_empty());
     }
 }

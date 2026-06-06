@@ -35,7 +35,10 @@ pub struct ExecResult {
     pub data: Option<Value>,
     /// Structured output data for rendering.
     output: Option<OutputData>,
-    /// True if output was truncated and written to a spill file.
+    /// True if the output limiter capped this result. Either the overflow was
+    /// written to a disk spill file (the `out` message carries the path) or it
+    /// was truncated in memory (Memory spill mode — head+tail only, no
+    /// recoverable file). Both cases remap the exit code to 3.
     pub did_spill: bool,
     /// The command's original exit code before spill logic overwrote it with 2 or 3.
     /// Present only when `did_spill` is true and `code` was changed.

@@ -109,6 +109,11 @@ pub enum VfsMountMode {
     /// Complete isolation — no access to the host filesystem.
     /// Useful for tests or pure sandboxed execution.
     ///
+    /// Output spill is forced to [`SpillMode::Memory`](crate::output_limit::SpillMode::Memory)
+    /// for this mode at kernel construction: with no host filesystem mounted,
+    /// large output must not write a host spill file (`paths::spill_dir()`
+    /// bypasses the VFS). This overrides any explicit `SpillMode::Disk`.
+    ///
     /// Mounts:
     /// - `/` → MemoryFs
     /// - `/tmp` → MemoryFs
@@ -724,7 +729,19 @@ impl Kernel {
         configure_tools: impl FnOnce(&mut ToolRegistry),
         make_ctx: impl FnOnce(&Arc<VfsRouter>, &Arc<ToolRegistry>) -> ExecContext,
     ) -> Result<Self> {
-        let KernelConfig { name, cwd, skip_validation, interactive, ignore_config, output_limit, allow_external_commands, latch_enabled, trash_enabled, nonce_store, initial_vars, request_timeout, kill_grace, .. } = config;
+        // A NoLocal kernel mounts no host filesystem, so it must never spill
+        // output to one either. `paths::spill_dir()` targets host temp/cache
+        // regardless of the VFS, so disk spill would punch straight through the
+        // isolation — force in-memory truncation. This overrides an explicit
+        // `SpillMode::Disk`, which is nonsensical for a no-host-filesystem
+        // kernel. (When a dedicated runtime read-only flag exists, widen this.)
+        let force_memory_spill = matches!(config.vfs_mode, VfsMountMode::NoLocal);
+
+        let KernelConfig { name, cwd, skip_validation, interactive, ignore_config, mut output_limit, allow_external_commands, latch_enabled, trash_enabled, nonce_store, initial_vars, request_timeout, kill_grace, .. } = config;
+
+        if force_memory_spill {
+            output_limit.set_spill_mode(crate::output_limit::SpillMode::Memory);
+        }
 
         let mut tools = ToolRegistry::new();
         register_builtins(&mut tools);

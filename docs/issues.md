@@ -86,23 +86,48 @@ match JSON behaviour with an explicit failure marker, or fail loudly
 when results are dropped.
 
 ### Output disk-spill bypasses the VFS — defeats a runtime read-only kaish
-`output_limit.rs` writes overflow output to spill files via `paths::spill_dir()`
-+ `tokio::fs` directly, NOT through `ctx.backend`. So the spill path ignores the
-VFS mount mode entirely: a kaish configured *read-only at runtime* (the whole
-premise of the read-only MCP agent) can still write files to the host temp/cache
-dir just by producing large output — usable for data-exfil staging, disk-fill
-DoS, or leaving persistent artifacts, with no feature beyond the default
-`localfs`. The compile-time capability split can't catch this (it's a runtime
-path), and it directly undermines the project's core driver. Fix when building
-the read-only mode: route spill through the backend (so a read-only backend
-refuses it) or disable spill / fall back to in-memory truncation when the mount
-is read-only. Related: `host`'s `/proc` and `/etc` reads also bypass the VFS by
-design — if "read-only" is ever marketed as "no host observation," those need a
-runtime gate too. A second, caller-facing wrinkle confirmed live from kaibo's
-read-only `run_kaish` (2026-06-06): on spill the result `code` is remapped to `3`
-(with the real code in `original_code`), so a successful big `cat` (real code 0)
-reads as a failure to an automated MCP caller — the in-memory-truncation fix
-should preserve the real exit code. Surfaced by dpal design review 2026-06-03.
+**Core fix landed 2026-06-06.** `OutputLimitConfig` now carries a runtime
+`SpillMode` (`Disk` | `Memory`). `Memory` mode (builder: `OutputLimitConfig::mcp().in_memory()`)
+truncates overflow in memory to a head+tail preview with **no disk I/O** — no
+`paths::spill_dir()` write, no recoverable file — so a runtime read-only kernel
+(kaibo) can no longer stage data-exfil / disk-fill artifacts via large output.
+Memory use is bounded regardless of output size: the streaming external-command
+path (`drain_in_memory`) keeps only a head + a `tail_bytes` ring buffer while
+draining to EOF, and oversized structured `OutputData` is rendered through a
+`write_canonical` byte budget instead of being materialized into a full `String`.
+
+Original report (context): `output_limit.rs` wrote spill files via
+`paths::spill_dir()` + `tokio::fs` directly, NOT through `ctx.backend`, ignoring
+the VFS mount mode — exploitable for exfil staging, disk-fill DoS, or persistent
+artifacts with no feature beyond the default `localfs`. The compile-time
+capability split can't catch this (runtime path). Surfaced by dpal design review
+2026-06-03; live-confirmed from kaibo's read-only `run_kaish` 2026-06-06.
+
+**Design decision (2026-06-06):** Memory mode still remaps the exit code to `3`
+(`did_spill = true`, real code in `original_code`) — the caller-facing wrinkle
+(a successful big `cat` reading as a "failure") is resolved by callers treating
+`3` as "output capped, not error", NOT by preserving the real code. Disk vs
+memory is distinguished by the `out` message: memory says "truncated in memory …
+no spill file", disk says "full output at <path>".
+
+**Auto-force for NoLocal landed 2026-06-06.** `Kernel::assemble` now forces
+`SpillMode::Memory` whenever `vfs_mode == NoLocal` (overriding an explicit
+`Disk`), since a memory-only kernel has no host filesystem to spill to. A
+`NoLocal` kernel can no longer write a host spill file regardless of caller
+config. Documented on `VfsMountMode::NoLocal`, `SpillMode::Disk`, and
+`OutputLimitConfig::in_memory`.
+
+**Residual / follow-ups:**
+- `Disk` is still the default for `localfs` mounts. A `Sandboxed`/`Passthrough`
+  kernel run read-only that does *not* opt into `Memory` mode still spills to
+  disk — there is no dedicated runtime read-only flag yet, so `NoLocal` is the
+  only auto-trigger. Embedders wanting the guarantee on a `localfs` mount must
+  set `.in_memory()` (kaibo does). Widen the auto-force when a read-only flag lands.
+- No runtime switch via the `kaish-output-limit` builtin / `set -o` yet — mode is
+  config-only. Add a `memory`/`disk` subcommand if interactive control is wanted.
+- `host`'s `/proc` and `/etc` reads still bypass the VFS by design — if
+  "read-only" is ever marketed as "no host observation," those need a runtime
+  gate too.
 
 ---
 
