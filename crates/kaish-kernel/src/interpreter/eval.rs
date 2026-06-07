@@ -553,18 +553,24 @@ pub fn value_to_bool(value: &Value) -> bool {
 
 /// Expand tilde (~) to home directory.
 ///
-/// - `~` alone → `$HOME`
-/// - `~/path` → `$HOME/path`
+/// - `~` alone → `home`
+/// - `~/path` → `home/path`
 /// - `~user` → user's home directory (Unix only, reads /etc/passwd)
 /// - `~user/path` → user's home directory + path
 /// - Other strings are returned unchanged.
-pub fn expand_tilde(s: &str) -> String {
+///
+/// `home` is the kaish session's `HOME` (from the kernel scope), NOT the host
+/// process env — the kernel is hermetic and never reads `std::env::var("HOME")`.
+/// When `home` is `None` (no `HOME` in scope, e.g. a hermetic embedder that
+/// passed empty `initial_vars`), `~` / `~/path` are left unexpanded rather than
+/// leaking the host home directory.
+pub fn expand_tilde(s: &str, home: Option<&str>) -> String {
     if s == "~" {
-        std::env::var("HOME").unwrap_or_else(|_| "~".to_string())
+        home.map(|h| h.to_string()).unwrap_or_else(|| "~".to_string())
     } else if s.starts_with("~/") {
-        match std::env::var("HOME") {
-            Ok(home) => format!("{}{}", home, &s[1..]),
-            Err(_) => s.to_string(),
+        match home {
+            Some(home) => format!("{}{}", home, &s[1..]),
+            None => s.to_string(),
         }
     } else if s.starts_with('~') {
         // Try ~user expansion
@@ -622,9 +628,12 @@ fn expand_tilde_user(s: &str) -> String {
 }
 
 /// Convert a Value to its string representation, with tilde expansion for paths.
-pub fn value_to_string_with_tilde(value: &Value) -> String {
+///
+/// `home` is the session `HOME` from the kernel scope (see [`expand_tilde`]);
+/// `None` leaves `~`/`~/path` unexpanded rather than reading the host env.
+pub fn value_to_string_with_tilde(value: &Value, home: Option<&str>) -> String {
     match value {
-        Value::String(s) if s.starts_with('~') => expand_tilde(s),
+        Value::String(s) if s.starts_with('~') => expand_tilde(s, home),
         _ => value_to_string(value),
     }
 }
@@ -1182,27 +1191,38 @@ mod tests {
 
     #[test]
     fn expand_tilde_home() {
-        // Only test if HOME is set
-        if let Ok(home) = std::env::var("HOME") {
-            assert_eq!(expand_tilde("~"), home);
-            assert_eq!(expand_tilde("~/foo"), format!("{}/foo", home));
-            assert_eq!(expand_tilde("~/foo/bar"), format!("{}/foo/bar", home));
-        }
+        // HOME comes from the session scope, not the host env.
+        let home = "/home/session";
+        assert_eq!(expand_tilde("~", Some(home)), home);
+        assert_eq!(expand_tilde("~/foo", Some(home)), format!("{}/foo", home));
+        assert_eq!(
+            expand_tilde("~/foo/bar", Some(home)),
+            format!("{}/foo/bar", home)
+        );
+    }
+
+    #[test]
+    fn expand_tilde_hermetic_no_home_does_not_leak_host() {
+        // With no HOME in scope (hermetic embedder), `~` must NOT fall back to
+        // the host home directory — it stays literal.
+        assert_eq!(expand_tilde("~", None), "~");
+        assert_eq!(expand_tilde("~/foo", None), "~/foo");
     }
 
     #[test]
     fn expand_tilde_passthrough() {
         // These should not be expanded
-        assert_eq!(expand_tilde("/home/user"), "/home/user");
-        assert_eq!(expand_tilde("foo~bar"), "foo~bar");
-        assert_eq!(expand_tilde(""), "");
+        assert_eq!(expand_tilde("/home/user", Some("/h")), "/home/user");
+        assert_eq!(expand_tilde("foo~bar", Some("/h")), "foo~bar");
+        assert_eq!(expand_tilde("", Some("/h")), "");
     }
 
     #[test]
     #[cfg(all(unix, feature = "host"))]
     fn expand_tilde_user() {
-        // Test ~root expansion (root user exists on all Unix systems)
-        let expanded = expand_tilde("~root");
+        // Test ~root expansion (root user exists on all Unix systems).
+        // `~user` reads /etc/passwd and ignores the session HOME, so pass None.
+        let expanded = expand_tilde("~root", None);
         // root's home is typically /root or /var/root (macOS)
         assert!(
             expanded == "/root" || expanded == "/var/root",
@@ -1211,7 +1231,7 @@ mod tests {
         );
 
         // Test ~root/subpath
-        let expanded_path = expand_tilde("~root/subdir");
+        let expanded_path = expand_tilde("~root/subdir", None);
         assert!(
             expanded_path == "/root/subdir" || expanded_path == "/var/root/subdir",
             "expected /root/subdir or /var/root/subdir, got: {}",
@@ -1219,16 +1239,18 @@ mod tests {
         );
 
         // Nonexistent user should remain unchanged
-        let nonexistent = expand_tilde("~nonexistent_user_12345");
+        let nonexistent = expand_tilde("~nonexistent_user_12345", None);
         assert_eq!(nonexistent, "~nonexistent_user_12345");
     }
 
     #[test]
     fn value_to_string_with_tilde_expansion() {
-        if let Ok(home) = std::env::var("HOME") {
-            let val = Value::String("~/test".into());
-            assert_eq!(value_to_string_with_tilde(&val), format!("{}/test", home));
-        }
+        // HOME comes from the session scope, not the host env.
+        let val = Value::String("~/test".into());
+        assert_eq!(
+            value_to_string_with_tilde(&val, Some("/home/session")),
+            "/home/session/test"
+        );
     }
 
     #[test]

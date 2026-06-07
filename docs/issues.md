@@ -157,28 +157,6 @@ production code. Surfaced 2026-06-03 while gating `uname`/`hostname` and adding
 the minimal-build `--host` error test (which currently can't run for this
 reason). Folds naturally into the planned `native`→capability-feature split.
 
-### Kernel reads host `HOME` unconditionally — breaks hermetic-by-default
-`kernel.rs:763` does `if let Ok(home) = std::env::var("HOME") { scope.set("HOME", …) }`
-at construction, *before* `initial_vars` are applied. The doc at `kernel.rs:194`
-claims "the kernel itself is hermetic — it never reads `std::env::vars()`": true
-for the plural iterator, but this single `var("HOME")` read violates the spirit.
-An embedder that passes empty `initial_vars` for a hermetic build still gets the
-host `HOME` leaked into scope, and can override but not *suppress* it. This is
-the biggest remaining host-info leak for the "minimal attack surface by default"
-goal — larger than anything `uname`/`hostname` exposed. Fix: move `HOME` into the
-`initial_vars` path so the frontend owns it (REPL/MCP already seed env there).
-Surfaced by dpal review 2026-06-03; folds into the hermetic pass of the
-`native`→capability-feature split. (Frontend-side, `kaish-mcp` `server/execute.rs:238`
-seeds `initial_vars` from `std::env::vars()` wholesale — that's by-design env
-passthrough for the interactive MCP, but the read-only MCP frontend must opt out.)
-
-The same hermetic fix must cover the other direct `std::env::var("HOME")` reads
-found 2026-06-03: tilde expansion in `interpreter/eval.rs` (`~`/`~/path` at
-:563,:565 and the dup at :1182,:1224) and `cd` with no args (`cd.rs:62`). These
-bypass the scope's `HOME` and read the host env directly; they should consult the
-kernel scope var instead. (The `~user` → `/etc/passwd` read in eval.rs was the one
-true *new* leak and is now gated behind `host` as of the capability split.)
-
 ### Split `kernel.rs::execute_stmt_flow`
 ~L1007–L1443 is an 18-arm async match. Each arm reaches into `scope`,
 `exec_ctx`, and `user_tools` RwLocks; `For`/`While`/`Case` are 100+
@@ -477,6 +455,22 @@ priority; decide whether multi-arg should accumulate per-path errors.
 
 Captured here so context from `cleanups-todo.md` / old `issues.md`
 isn't lost when those files are deleted.
+
+- **Kernel no longer reads host `HOME` — hermetic by default — fixed 2026-06-07.**
+  The construction-time `std::env::var("HOME")` read in `kernel.rs` is gone:
+  `HOME` is owned entirely by the frontend via `initial_vars` (REPL/MCP seed it
+  from `std::env::vars()`; a hermetic embedder leaves it empty and gets no
+  HOME). Tilde expansion no longer reads the host env either — `expand_tilde`
+  and `apply_tilde_expansion` now take `home: Option<&str>`, sourced from the
+  kernel scope via a new `Kernel::scope_home()` and threaded through
+  `build_args_async` / `build_args_flat` / `consume_flag_positionals`. With no
+  HOME in scope, `~`/`~/path` stay literal instead of leaking the host home
+  dir. `cd` with no args dropped its `std::env::var("HOME")` fallback (scope
+  only, else `/`). `~user` → `/etc/passwd` is unchanged (already gated behind
+  `host`). Tests: `interpreter::eval::tests::expand_tilde_*` (incl.
+  `expand_tilde_hermetic_no_home_does_not_leak_host`) and the new
+  `tests/hermetic_home_tests.rs` (e2e: seeded vs hermetic kernel through
+  `kernel.execute`). Gates green in default + `--no-default-features` + WASI.
 
 - **`kaish-tool-api` public types are now `#[non_exhaustive]` — fixed 2026-06-07.**
   Added `#[non_exhaustive]` to the data types out-of-tree tools construct and

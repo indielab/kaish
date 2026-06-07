@@ -55,14 +55,15 @@ impl Tool for Cd {
         parsed.global.apply(ctx);
 
         let path_arg = args.get_string("path", 0).unwrap_or_else(|| {
-            // Check shell scope first, then process env, then fall back to /
+            // Consult the session HOME from the kernel scope only — never the
+            // host env (the kernel is hermetic). With no HOME in scope, bare
+            // `cd` falls back to `/` rather than leaking the host home dir.
             ctx.scope
                 .get("HOME")
                 .and_then(|v| match v {
                     Value::String(s) => Some(s.clone()),
                     _ => None,
                 })
-                .or_else(|| std::env::var("HOME").ok())
                 .unwrap_or_else(|| "/".to_string())
         });
 

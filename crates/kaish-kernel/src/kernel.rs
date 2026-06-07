@@ -777,9 +777,10 @@ impl Kernel {
             scope: RwLock::new({
                 let mut scope = Scope::new();
                 scope.set_pid(KERNEL_COUNTER.fetch_add(1, Ordering::Relaxed));
-                if let Ok(home) = std::env::var("HOME") {
-                    scope.set("HOME", Value::String(home));
-                }
+                // HOME is NOT read from the host env here — the kernel is
+                // hermetic. Frontends (REPL, MCP) seed it via `initial_vars`
+                // below (from `std::env::vars()`); a hermetic embedder leaves
+                // `initial_vars` empty and gets no HOME (tilde stays literal).
                 // Apply caller-supplied initial variables, all marked exported.
                 // Frontends (REPL, MCP) populate this from std::env::vars()
                 // for shell-like UX; embedders that want hermetic behavior
@@ -2338,6 +2339,17 @@ impl Kernel {
         Ok(result)
     }
 
+    /// The session `HOME` from the kernel scope, if set. Tilde expansion reads
+    /// this rather than `std::env::var("HOME")` so the kernel stays hermetic —
+    /// a hermetic embedder (empty `initial_vars`) gets `None`, and `~` is left
+    /// unexpanded rather than leaking the host home directory.
+    async fn scope_home(&self) -> Option<String> {
+        match self.scope.read().await.get("HOME") {
+            Some(Value::String(s)) => Some(s.clone()),
+            _ => None,
+        }
+    }
+
     /// Pull `consumes` positional args after a non-bool flag and stash them
     /// on `tool_args.named` under the canonical param name.
     ///
@@ -2362,6 +2374,7 @@ impl Kernel {
         current_idx: usize,
         tool_args: &mut ToolArgs,
     ) -> Result<()> {
+        let home = self.scope_home().await;
         let mut collected: Vec<Value> = Vec::with_capacity(consumes.max(1));
         for _ in 0..consumes.max(1) {
             let next_pos = positional_indices
@@ -2372,7 +2385,7 @@ impl Kernel {
                 Some(pos_idx) => {
                     if let Arg::Positional(expr) = &args[pos_idx] {
                         let value = self.eval_expr_async(expr).await?;
-                        let value = apply_tilde_expansion(value);
+                        let value = apply_tilde_expansion(value, home.as_deref());
                         collected.push(value);
                         consumed.insert(pos_idx);
                     }
@@ -2425,6 +2438,7 @@ impl Kernel {
     /// Uses async evaluation to support command substitution in arguments.
     async fn build_args_async(&self, args: &[Arg], schema: Option<&crate::tools::ToolSchema>) -> Result<ToolArgs> {
         let mut tool_args = ToolArgs::new();
+        let home = self.scope_home().await;
         let param_lookup = schema.map(schema_param_lookup).unwrap_or_default();
         let accepts_word_assign = schema
             .map(|s| crate::tools::accepts_word_assign(s.name.as_str()))
@@ -2479,18 +2493,18 @@ impl Kernel {
                             }
                         }
                         let value = self.eval_expr_async(expr).await?;
-                        let value = apply_tilde_expansion(value);
+                        let value = apply_tilde_expansion(value, home.as_deref());
                         tool_args.positional.push(value);
                     }
                 }
                 Arg::Named { key, value } => {
                     let val = self.eval_expr_async(value).await?;
-                    let val = apply_tilde_expansion(val);
+                    let val = apply_tilde_expansion(val, home.as_deref());
                     tool_args.named.insert(key.clone(), val);
                 }
                 Arg::WordAssign { key, value } => {
                     let val = self.eval_expr_async(value).await?;
-                    let val = apply_tilde_expansion(val);
+                    let val = apply_tilde_expansion(val, home.as_deref());
                     if accepts_word_assign {
                         tool_args.named.insert(key.clone(), val);
                     } else {
@@ -2637,6 +2651,7 @@ impl Kernel {
     #[cfg(feature = "subprocess")]
     async fn build_args_flat(&self, args: &[Arg]) -> Result<Vec<String>> {
         let mut argv = Vec::new();
+        let home = self.scope_home().await;
         for arg in args {
             match arg {
                 Arg::Positional(expr) => {
@@ -2671,17 +2686,17 @@ impl Kernel {
                         }
                     }
                     let value = self.eval_expr_async(expr).await?;
-                    let value = apply_tilde_expansion(value);
+                    let value = apply_tilde_expansion(value, home.as_deref());
                     argv.push(value_to_string(&value));
                 }
                 Arg::Named { key, value } => {
                     let val = self.eval_expr_async(value).await?;
-                    let val = apply_tilde_expansion(val);
+                    let val = apply_tilde_expansion(val, home.as_deref());
                     argv.push(format!("--{}={}", key, value_to_string(&val)));
                 }
                 Arg::WordAssign { key, value } => {
                     let val = self.eval_expr_async(value).await?;
-                    let val = apply_tilde_expansion(val);
+                    let val = apply_tilde_expansion(val, home.as_deref());
                     argv.push(format!("{}={}", key, value_to_string(&val)));
                 }
                 Arg::ShortFlag(name) => {
@@ -4133,10 +4148,12 @@ fn is_truthy(value: &Value) -> bool {
 
 /// Apply tilde expansion to a value.
 ///
-/// Only string values starting with `~` are expanded.
-fn apply_tilde_expansion(value: Value) -> Value {
+/// Only string values starting with `~` are expanded. `home` is the session
+/// `HOME` from the kernel scope (the kernel is hermetic and never reads the
+/// host env); `None` leaves `~`/`~/path` unexpanded. See [`expand_tilde`].
+fn apply_tilde_expansion(value: Value, home: Option<&str>) -> Value {
     match value {
-        Value::String(s) if s.starts_with('~') => Value::String(expand_tilde(&s)),
+        Value::String(s) if s.starts_with('~') => Value::String(expand_tilde(&s, home)),
         _ => value,
     }
 }
