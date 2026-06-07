@@ -195,6 +195,7 @@ impl OutputNode {
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(default)]
+#[non_exhaustive]
 pub struct OutputData {
     /// Column headers (optional, for table output).
     pub headers: Option<Vec<String>>,

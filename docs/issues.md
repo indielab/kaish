@@ -227,20 +227,6 @@ Currently declared as `_extended: bool` accept-and-ignore. Options:
 unnecessary; (c) note in the help text. (a) is lowest churn — leave
 unless someone reports surprise.
 
-### `kaish-tool-api` public types lack `#[non_exhaustive]`
-Surfaced by the dpal boundary review on 2026-06-03, after the tool-plugin API
-became a real public surface (two out-of-tree bundles now consume it:
-`kaish-tools-git`, `kaish-tools-host`). The data types third-party tools pattern-
-match and construct — `ExecResult`, `ToolArgs`, `ToolSchema`, `ParamSchema`,
-`OutputData`/`OutputFormat`, `ValidationIssue`, the `BackendError` family (all in
-`kaish-types`, re-exported from `kaish-tool-api`) — are not `#[non_exhaustive]`.
-Adding a field or variant in a minor release would break downstream exhaustive
-matches/struct literals. These were "public" before, but only `kaish-kernel`
-consumed them in-tree, so churn was free. Now that the contract is meant to be
-stable for out-of-tree authors, audit the exported surface and add
-`#[non_exhaustive]` (plus constructors where direct struct literals are common).
-Do this *before* the first external tool author pins a version.
-
 ---
 
 ## P3 — Scheduler and infra
@@ -491,6 +477,25 @@ priority; decide whether multi-arg should accumulate per-path errors.
 
 Captured here so context from `cleanups-todo.md` / old `issues.md`
 isn't lost when those files are deleted.
+
+- **`kaish-tool-api` public types are now `#[non_exhaustive]` — fixed 2026-06-07.**
+  Added `#[non_exhaustive]` to the data types out-of-tree tools construct and
+  pattern-match: `ExecResult`, `ToolArgs`, `ToolSchema`, `ParamSchema`,
+  `OutputData` (all `kaish-types`), `BackendError` (errors should be
+  non-exhaustive), and `ValidationIssue` (`kaish-tool-api`). `OutputFormat`
+  already carried it. Adding a field/variant in a minor release no longer
+  breaks downstream exhaustive matches or struct literals. Blast radius was
+  small — the types already routed through constructors; only `ParamSchema`
+  needed new builders (`new` + `with_required`/`with_default`/
+  `with_description`/`with_positional`), and the clap reflector + a few test
+  helpers moved off struct literals onto them.
+
+  **Deliberately not annotated:** the enums kaish matches heavily *in-tree*
+  (`EntryType`, `IssueCode`, `Severity`). `#[non_exhaustive]` on those would
+  force `_` arms in the kernel's cross-crate matches and *lose* the compiler's
+  exhaustiveness check — a worse trade than the external-stability gain for
+  enums external tools read but don't extend. Gates green: `--all` tests,
+  clippy, `--no-default-features`, WASI.
 
 - **Here-string `<<<` ambiguity now surfaces an actionable parse error — fixed 2026-06-07.**
   Two stdin sources on one command (`cat < a <<< b`, `cat <<< a <<< b`) used to

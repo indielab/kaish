@@ -174,6 +174,7 @@ impl Span {
 
 /// A validation issue found in the script.
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub struct ValidationIssue {
     /// Severity level.
     pub severity: Severity,

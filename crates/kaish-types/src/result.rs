@@ -23,6 +23,7 @@ use crate::value::Value;
 ///   (e.g. `seq`, `jq`, `cut`, `find`, `glob`, `split`). External commands
 ///   never populate this — pipe their stdout through `jq` to get it.
 #[derive(Debug, Clone, Default, PartialEq, serde::Serialize, serde::Deserialize)]
+#[non_exhaustive]
 pub struct ExecResult {
     /// Exit code. 0 means success.
     pub code: i64,

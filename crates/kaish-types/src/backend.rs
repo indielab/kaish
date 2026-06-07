@@ -30,6 +30,7 @@ pub struct MountInfo {
 
 /// Backend operation errors.
 #[derive(Debug, Clone, Error)]
+#[non_exhaustive]
 pub enum BackendError {
     #[error("not found: {0}")]
     NotFound(String),

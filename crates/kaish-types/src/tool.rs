@@ -10,6 +10,7 @@ fn default_consumes() -> usize {
 
 /// Schema for a tool parameter.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[non_exhaustive]
 pub struct ParamSchema {
     /// Parameter name.
     pub name: String,
@@ -72,6 +73,50 @@ impl ParamSchema {
         }
     }
 
+    /// Create a minimal parameter (not required, no default, empty
+    /// description, `consumes` 1, flag — not positional). Chain the `with_*`
+    /// setters to fill in fields. Use this when each field is computed
+    /// independently (e.g. reflected from clap) rather than fitting the
+    /// `required`/`optional` shortcuts. Keeps construction working across the
+    /// `#[non_exhaustive]` boundary.
+    pub fn new(name: impl Into<String>, param_type: impl Into<String>) -> Self {
+        Self {
+            name: name.into(),
+            param_type: param_type.into(),
+            required: false,
+            default: None,
+            description: String::new(),
+            aliases: Vec::new(),
+            consumes: 1,
+            positional: false,
+        }
+    }
+
+    /// Set the human-readable description.
+    pub fn with_description(mut self, description: impl Into<String>) -> Self {
+        self.description = description.into();
+        self
+    }
+
+    /// Set whether the parameter is required.
+    pub fn with_required(mut self, required: bool) -> Self {
+        self.required = required;
+        self
+    }
+
+    /// Set the default value (used when the parameter is omitted).
+    pub fn with_default(mut self, default: Option<Value>) -> Self {
+        self.default = default;
+        self
+    }
+
+    /// Set the positional flag from a computed boolean (the parameterless
+    /// [`positional`](Self::positional) sets it unconditionally to `true`).
+    pub fn with_positional(mut self, positional: bool) -> Self {
+        self.positional = positional;
+        self
+    }
+
     /// Mark this parameter as positional (matched by argv order rather than
     /// by name). Used by `params_from_clap` for clap args with an assigned
     /// index, and by hand-written schemas for positional parameters like
@@ -128,6 +173,7 @@ impl Example {
 
 /// Schema describing a tool's interface.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[non_exhaustive]
 pub struct ToolSchema {
     /// Tool name.
     pub name: String,
@@ -176,6 +222,7 @@ impl ToolSchema {
 
 /// Parsed arguments ready for tool execution.
 #[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+#[non_exhaustive]
 pub struct ToolArgs {
     /// Positional arguments in order.
     pub positional: Vec<Value>,

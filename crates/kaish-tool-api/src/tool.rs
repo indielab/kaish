@@ -206,36 +206,17 @@ mod validate_tests {
     fn schema_with_positionals_after_flags() -> ToolSchema {
         // Mirrors clap-derived order: flag fields first, positionals last.
         ToolSchema::new("demo", "demo")
-            .param(ParamSchema {
-                name: "verbose".into(),
-                param_type: "bool".into(),
-                required: false,
-                default: Some(Value::Bool(false)),
-                description: String::new(),
-                aliases: vec!["v".into()],
-                consumes: 1,
-                positional: false,
-            })
-            .param(ParamSchema {
-                name: "lines".into(),
-                param_type: "int".into(),
-                required: false,
-                default: None,
-                description: String::new(),
-                aliases: vec!["n".into()],
-                consumes: 1,
-                positional: false,
-            })
-            .param(ParamSchema {
-                name: "path".into(),
-                param_type: "string".into(),
-                required: true,
-                default: None,
-                description: String::new(),
-                aliases: Vec::new(),
-                consumes: 1,
-                positional: true,
-            })
+            .param(
+                ParamSchema::new("verbose", "bool")
+                    .with_default(Some(Value::Bool(false)))
+                    .with_aliases(["v"]),
+            )
+            .param(ParamSchema::new("lines", "int").with_aliases(["n"]))
+            .param(
+                ParamSchema::new("path", "string")
+                    .with_required(true)
+                    .positional(),
+            )
     }
 
     /// Regression for the clap-migration index-mismatch: `cat foo.txt` should
@@ -281,36 +262,17 @@ mod validate_tests {
         let mut schema = ToolSchema::new("demo", "demo");
         // Two positionals: count (int) then name (string).
         schema = schema
-            .param(ParamSchema {
-                name: "verbose".into(),
-                param_type: "bool".into(),
-                required: false,
-                default: Some(Value::Bool(false)),
-                description: String::new(),
-                aliases: Vec::new(),
-                consumes: 1,
-                positional: false,
-            })
-            .param(ParamSchema {
-                name: "count".into(),
-                param_type: "int".into(),
-                required: true,
-                default: None,
-                description: String::new(),
-                aliases: Vec::new(),
-                consumes: 1,
-                positional: true,
-            })
-            .param(ParamSchema {
-                name: "name".into(),
-                param_type: "string".into(),
-                required: true,
-                default: None,
-                description: String::new(),
-                aliases: Vec::new(),
-                consumes: 1,
-                positional: true,
-            });
+            .param(ParamSchema::new("verbose", "bool").with_default(Some(Value::Bool(false))))
+            .param(
+                ParamSchema::new("count", "int")
+                    .with_required(true)
+                    .positional(),
+            )
+            .param(
+                ParamSchema::new("name", "string")
+                    .with_required(true)
+                    .positional(),
+            );
 
         let mut args = ToolArgs::new();
         args.positional.push(Value::Int(5));
@@ -328,17 +290,11 @@ mod validate_tests {
     /// when absent — separating the loops shouldn't silently drop the check.
     #[test]
     fn required_flag_still_errors_when_missing() {
-        let schema = ToolSchema::new("demo", "demo")
-            .param(ParamSchema {
-                name: "output".into(),
-                param_type: "string".into(),
-                required: true,
-                default: None,
-                description: String::new(),
-                aliases: vec!["o".into()],
-                consumes: 1,
-                positional: false,
-            });
+        let schema = ToolSchema::new("demo", "demo").param(
+            ParamSchema::new("output", "string")
+                .with_required(true)
+                .with_aliases(["o"]),
+        );
 
         let args = ToolArgs::new();
         let issues = validate_against_schema(&args, &schema);

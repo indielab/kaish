@@ -131,16 +131,13 @@ fn arg_to_param(arg: &Arg) -> ParamSchema {
     // in `schema.params`, not by clap's internal index.
     let positional = arg.is_positional();
 
-    ParamSchema {
-        name,
-        param_type: param_type.to_string(),
-        required,
-        default,
-        description,
-        aliases,
-        consumes,
-        positional,
-    }
+    ParamSchema::new(name, param_type.to_string())
+        .with_required(required)
+        .with_default(default)
+        .with_description(description)
+        .with_aliases(aliases)
+        .consumes(consumes)
+        .with_positional(positional)
 }
 
 #[cfg(test)]
