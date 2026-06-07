@@ -286,14 +286,6 @@ diff against previous snapshot before notifying.
 `subscriptions.rs:33` bounds the file-watch channel; high-churn
 environments drop events silently.
 
-### `scheduler::job::tests::test_cleanup_removes_temp_files` flake
-Test reaches into the shared real-FS `/tmp/kaish/jobs/` path and races
-parallel test runs. Passes in isolation, fails intermittently under
-`cargo test --all`. Same root cause as the "job output files in
-`/tmp/kaish/jobs/` persist indefinitely" entry above. Switch the
-JobManager test path to `tempfile::tempdir()` (each test gets its own
-root) until the GC fix lands.
-
 ### `ToolCtx::backend()` forces a full `KernelBackend` mock for out-of-tree tests
 `crates/kaish-tool-api/src/ctx.rs`. `backend()` returns a non-optional
 `&Arc<dyn KernelBackend>`, so a third-party tool author who wants to unit-test
@@ -454,6 +446,20 @@ priority; decide whether multi-arg should accumulate per-path errors.
 
 Captured here so context from `cleanups-todo.md` / old `issues.md`
 isn't lost when those files are deleted.
+
+- **Job output filenames now include the OS pid — flake + cross-process collision fixed 2026-06-07.**
+  `write_output_file` named files `session_{session}_job_{id}.txt` in the shared
+  `/tmp/kaish/jobs/`. `session_id` is a *process-local* atomic that restarts at
+  0, so two kaish processes on one host — or two `cargo test --all` binaries —
+  both wrote `session_0_job_1.txt` and clobbered each other. That was a real
+  production cross-process collision *and* the source of the
+  `test_cleanup_removes_temp_files` flake. Filenames now mix in
+  `std::process::id()` (`session_{s}_job_{i}.{pid}.txt`), mirroring
+  `output_limit`'s spill convention — unique across processes. Chosen over the
+  issue's suggested per-test `tempfile::tempdir()` because pid namespacing fixes
+  the production bug too, with a smaller change than threading an injected dir
+  through the three `Job` constructors. (The separate "job files persist
+  indefinitely" GC item in P3 is unchanged.) `--all` tests green.
 
 - **`MemoryFs` `ensure_parents` TOCTOU closed — fixed 2026-06-07.**
   `ensure_parents` took and released its own write lock, then the caller

@@ -232,7 +232,20 @@ impl Job {
             return None;
         }
 
-        let filename = format!("session_{}_job_{}.txt", self.session_id, self.id.0);
+        // Include the OS pid: `session_id` is only unique *within* a process
+        // (it's a process-local atomic that restarts at 0), so two kaish
+        // processes on one host — or two `cargo test` binaries — would
+        // otherwise both write `session_0_job_1.txt` into this shared dir and
+        // clobber each other (a real cross-process collision, and the source
+        // of the `test_cleanup_removes_temp_files` flake). pid + session_id +
+        // job id is unique across processes. Mirrors `output_limit`'s spill
+        // filename convention.
+        let filename = format!(
+            "session_{}_job_{}.{}.txt",
+            self.session_id,
+            self.id.0,
+            std::process::id()
+        );
         let path = tmp_dir.join(filename);
 
         let mut content = String::new();
@@ -339,6 +352,8 @@ impl Job {
 /// Process-wide counter handing each JobManager a distinct session ID. Job IDs
 /// restart at 1 per manager, so the session ID is what keeps output file paths
 /// from colliding between managers sharing a process (concurrent tests, forks).
+/// It is process-LOCAL (restarts at 0 per process), so output filenames also
+/// mix in the OS pid to stay unique across processes — see `write_output_file`.
 static NEXT_SESSION_ID: AtomicU64 = AtomicU64::new(0);
 
 /// Manager for background jobs.
