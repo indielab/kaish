@@ -175,33 +175,6 @@ The six-field `ExecContext` ↔ kernel-state sync appears near every
 call site that fields a fork (`kernel.rs:3224-3271` and duplicates).
 One helper, one truth.
 
-### Dispatcher re-entrancy deadlock (P2, real bug surfaced by timeout)
-`timeout 5 echo works` deadlocks in production and the test
-`test_timeout_numeric_duration` is `#[ignore]`'d for the same reason.
-Root topology:
-1. `execute_command` (`kernel.rs:1788`) acquires `self.exec_ctx.write()`
-   and holds it across `tool.execute(...)`.
-2. `timeout` re-dispatches via `ctx.dispatcher`.
-3. The re-dispatch path (`dispatch_command` or `Kernel::fork`) tries to
-   acquire `self.exec_ctx` again — deadlock.
-
-Two fixes considered, both rejected for this release:
-- Sync `ctx.dispatcher` into `self.exec_ctx` so the tool sees it (trivial
-  one-liner in `dispatch_command`'s sync block). Makes the dispatcher
-  visible but converts a fast-fail "no dispatcher" error into a silent
-  5-second hang, so worse UX.
-- Have timeout use `dispatcher.fork().await`. `Kernel::fork` itself
-  reads parent `exec_ctx` and deadlocks on the outer write guard.
-
-Real fix: restructure `execute_command` so the `exec_ctx.write()` guard
-drops before `tool.execute`, with a snapshot-and-merge pattern like
-forks already use elsewhere. Tracked with the `Split execute_stmt_flow`
-refactor above since both touch the same lock discipline.
-
-Tool-side blast radius is limited to builtins that re-dispatch —
-currently only `timeout`. External-command path and normal pipelines
-are unaffected (they don't re-enter the dispatcher from inside a tool).
-
 ### grep `-E` is pure no-op
 `crates/kaish-kernel/src/tools/builtin/grep.rs:74-78`. Rust's regex
 crate is always extended, so `-E` semantically aliases to default.
@@ -446,6 +419,28 @@ priority; decide whether multi-arg should accumulate per-path errors.
 
 Captured here so context from `cleanups-todo.md` / old `issues.md`
 isn't lost when those files are deleted.
+
+- **Dispatcher re-entrancy deadlock resolved — verified/pinned 2026-06-07.**
+  `timeout 5 echo works` (and any builtin that re-dispatches through
+  `ctx.dispatcher`) no longer deadlocks. The fix — drop the `exec_ctx.write()`
+  guard before `tool.execute` via a snapshot-and-release in
+  `execute_command_depth` (`kernel.rs` ~L2252) — already landed with the
+  cancellation/concurrency rework (`719896f`); the issue text was stale. Audit
+  confirms there is exactly one `tool.execute` site and it runs with no
+  `exec_ctx` lock held. Hardened coverage:
+  - Un-ignored the three `timeout::tests::*` that were quarantined for "lexer
+    rejects `5s`/`100ms`" — that's also stale (`5s`/`100ms`/`500ms` lex fine
+    now via the NumberIdent/bareword work), so all 7 timeout tests run.
+  - Added `test_redispatch_does_not_deadlock`, which wraps the re-dispatch in
+    `tokio::time::timeout(10s)` so a *future* regression (holding the guard
+    across `tool.execute`) fails cleanly in 10s instead of hanging the suite —
+    verified by temporarily re-introducing the guard (failed at exactly 10.00s)
+    then reverting.
+  - Fixed an adjacent bug surfaced by un-ignoring `test_timeout_builtin_times_out`:
+    when the timer fired on a cancellation-aware *builtin* (`sleep` returns
+    "sleep: interrupted"), timeout's `if err.is_empty()` guard masked the
+    "timed out" reason. Now the authoritative "timed out after N" note is
+    always surfaced, *appended* to any inner detail (no data loss).
 
 - **Job output filenames now include the OS pid — flake + cross-process collision fixed 2026-06-07.**
   `write_output_file` named files `session_{session}_job_{id}.txt` in the shared
@@ -722,9 +717,10 @@ isn't lost when those files are deleted.
   `test_heredoc_quoted_delimiter_sets_literal`). Expected `content` strings
   now include the trailing `\n`.
 - **`test_timeout_numeric_duration` — root cause identified, fix deferred
-  2026-04-18.** The test is `#[ignore]`'d with a pointer to the P2
-  "Dispatcher re-entrancy deadlock" entry above, which captures the full
-  topology and fix direction.
+  2026-04-18.** The test was `#[ignore]`'d with a pointer to the P2
+  "Dispatcher re-entrancy deadlock" entry, which captured the full topology
+  and fix direction. *(Superseded — the deadlock is resolved as of 2026-06-07;
+  see the entry at the top of this section.)*
 - **Here-string `<<<`** — 2026-04-16. New `Token::HereString`,
   `RedirectKind::HereString`, parser arm in `redirect_parser()`, and
   stdin wiring in `setup_stdin_redirects` (append `\n`, match bash).

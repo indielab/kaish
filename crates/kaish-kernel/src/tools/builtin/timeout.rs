@@ -151,10 +151,18 @@ impl Tool for Timeout {
             Ok(mut result) => {
                 if elapsed.load(Ordering::SeqCst) {
                     result.code = 124;
-                    if result.err.is_empty() {
-                        result.err =
-                            format!("timeout: timed out after {}", duration_str);
-                    }
+                    // The timer firing is the authoritative reason, so always
+                    // surface "timed out" — even when the inner command wrote
+                    // its own cancellation message on the way down (e.g. a
+                    // cancellation-aware builtin like `sleep` returns
+                    // "sleep: interrupted"). Append rather than overwrite so
+                    // that inner detail isn't lost.
+                    let note = format!("timeout: timed out after {}", duration_str);
+                    result.err = if result.err.is_empty() {
+                        note
+                    } else {
+                        format!("{}\n{}", note, result.err)
+                    };
                 }
                 result
             }
@@ -203,8 +211,29 @@ mod tests {
         assert!(result.text_out().contains("works"));
     }
 
+    /// Regression guard for the dispatcher re-entrancy deadlock (docs/issues.md):
+    /// `timeout` re-dispatches its inner command through `ctx.dispatcher`, which
+    /// needs `exec_ctx.write()`. If `execute_command` ever again holds that write
+    /// guard across `tool.execute`, this hangs forever. The outer
+    /// `tokio::time::timeout` turns that regression into a clean, fast failure
+    /// instead of a wedged test suite.
     #[tokio::test]
-    #[ignore = "lexer rejects numeric-prefix identifiers like `5s`; tracked in docs/issues.md"]
+    async fn test_redispatch_does_not_deadlock() {
+        use std::time::Duration;
+        let kernel = make_kernel().await;
+        let outcome = tokio::time::timeout(
+            Duration::from_secs(10),
+            kernel.execute("timeout 5 echo works"),
+        )
+        .await;
+        let result = outcome
+            .expect("re-dispatch deadlocked: execute() did not return within 10s")
+            .expect("kernel execute errored");
+        assert!(result.ok(), "code={} err={:?}", result.code, result.err);
+        assert!(result.text_out().contains("works"));
+    }
+
+    #[tokio::test]
     async fn test_timeout_suffix_duration_succeeds() {
         let kernel = make_kernel().await;
         let result = kernel.execute("timeout 5s echo hello").await.unwrap();
@@ -213,7 +242,6 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore = "lexer rejects numeric-prefix identifiers like `100ms`; tracked in docs/issues.md"]
     async fn test_timeout_builtin_times_out() {
         let kernel = make_kernel().await;
         let result = kernel.execute("timeout 100ms sleep 10").await.unwrap();
@@ -222,7 +250,6 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore = "lexer rejects numeric-prefix identifiers like `5s`; tracked in docs/issues.md"]
     async fn test_timeout_command_not_found() {
         let kernel = make_kernel().await;
         let result = kernel
