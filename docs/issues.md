@@ -255,13 +255,13 @@ restoration or a reverse sync added.
 trait-object alias or a dedicated `Callback` trait would smooth the
 ergonomics. Not blocking; do it once we see real downstream pain.
 
-### Builtin `sleep` does not honor cancellation
-`tools/builtin/sleep.rs` is `tokio::time::sleep(d).await` and does not
-check `ctx.cancel`. A `timeout 1 sleep 60` works for *external* `sleep`
-because we kill the OS process, but for the builtin it sleeps the full
-60s. Make builtins that block on time/IO race their work against
-`ctx.cancel.cancelled()`. Same applies to other long-blocking builtins
-that hold a future without yielding through cancellation.
+### Long-blocking builtins other than `sleep` may not honor cancellation
+`sleep` itself is **done** (see Resolved 2026-06-07): it races
+`tokio::time::sleep` against `ctx.cancel.cancelled()` and returns 130 on
+cancel, pinned by `sleep::tests::test_sleep_honors_cancellation`. The general
+guidance still stands for any *other* builtin that holds a long time/IO future
+without yielding through `ctx.cancel` — audit and apply the same `tokio::select!`
+pattern where one is found (none currently known besides the now-fixed `sleep`).
 
 ### Job output files in `/tmp/kaish/jobs/` persist indefinitely
 `JobManager` only cleans up on explicit `cleanup()` / `remove()`. No
@@ -461,6 +461,14 @@ priority; decide whether multi-arg should accumulate per-path errors.
 
 Captured here so context from `cleanups-todo.md` / old `issues.md`
 isn't lost when those files are deleted.
+
+- **Builtin `sleep` honors cancellation — verified/pinned 2026-06-07.**
+  `tools/builtin/sleep.rs` already raced `tokio::time::sleep(d)` against
+  `ctx.cancel.cancelled()` (returns 130 on cancel) — the issue description was
+  stale. Added `sleep::tests::test_sleep_honors_cancellation` (an
+  already-cancelled token makes a 1h sleep return 130 near-instantly) so a
+  regression to a bare `.await` fails the suite. The general "audit other
+  long-blocking builtins" guidance is retained in P3.
 
 - **Kernel no longer reads host `HOME` — hermetic by default — fixed 2026-06-07.**
   The construction-time `std::env::var("HOME")` read in `kernel.rs` is gone:

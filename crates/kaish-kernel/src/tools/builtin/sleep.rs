@@ -151,6 +151,27 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_sleep_honors_cancellation() {
+        // A long sleep must be interrupted by ctx.cancel (request_timeout /
+        // Kernel::cancel()) rather than blocking the worker for the full
+        // duration. Returns 130 (interrupted), not 0.
+        let mut ctx = make_ctx();
+        ctx.cancel.cancel(); // already-cancelled token: select! resolves at once
+        let mut args = ToolArgs::new();
+        args.positional.push(Value::Int(3600)); // 1h — must NOT actually wait
+
+        let start = Instant::now();
+        let result = Sleep.execute(args, &mut ctx).await;
+        let elapsed = start.elapsed();
+
+        assert_eq!(result.code, 130, "cancelled sleep should exit 130");
+        assert!(
+            elapsed < Duration::from_secs(1),
+            "cancelled sleep returned in {elapsed:?}, should be near-instant"
+        );
+    }
+
+    #[tokio::test]
     async fn test_sleep_negative() {
         let mut ctx = make_ctx();
         let mut args = ToolArgs::new();
