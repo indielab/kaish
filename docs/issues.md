@@ -41,11 +41,16 @@ workload pushes against the buffer.
 carries a runtime `SpillMode` (`Disk` | `Memory`); `Memory` truncates in memory with
 no disk I/O, and `Kernel::assemble` auto-forces `Memory` for `NoLocal` mounts.
 Remaining open work:
-- `Disk` is still the default for `localfs` mounts. A `Sandboxed`/`Passthrough`
-  kernel run read-only that does *not* opt into `Memory` mode still spills to
-  disk — there is no dedicated runtime read-only flag yet, so `NoLocal` is the
-  only auto-trigger. Embedders wanting the guarantee on a `localfs` mount must
-  set `.in_memory()` (kaibo does). Widen the auto-force when a read-only flag lands.
+- `Disk` is still the default for *mode-based* `localfs` kernels built via
+  `Kernel::new` (`Sandboxed`/`Passthrough`) — those genuinely own their host
+  mounts, so disk spill is legitimate there. The auto-force to `Memory` now also
+  fires for **any `with_backend` kernel** (not just `NoLocal`): a custom-backend
+  kernel owns no host mounts, so a host spill — or a background-job output file —
+  is always a VFS bypass (fixed 2026-06-08, see Resolved; this closed the kaibo
+  gap — kaibo uses `with_backend` and did *not* opt into `Memory`, contrary to a
+  prior note here). Residual: a mode-based `Sandboxed` kernel an embedder runs
+  read-only via `Kernel::new` without `.in_memory()` still spills; none known in
+  the wild, and `with_backend` is the read-only embedder path.
 - No runtime switch via the `kaish-output-limit` builtin / `set -o` yet — mode is
   config-only. Add a `memory`/`disk` subcommand if interactive control is wanted.
 - `host`'s `/proc` and `/etc` reads still bypass the VFS by design — if
@@ -427,6 +432,28 @@ priority; decide whether multi-arg should accumulate per-path errors.
 
 Captured here so context from `cleanups-todo.md` / old `issues.md`
 isn't lost when those files are deleted.
+
+- **`with_backend` kernels now refuse host side channels — output spill + job-output leaks closed 2026-06-08.**
+  Two paths reached the real host filesystem via `std::fs`, bypassing the VFS (and
+  any read-only mount): output disk-spill (`paths::spill_dir()`) and background-job
+  output files (`Job::write_output_file` → `std::env::temp_dir()/kaish/jobs`). The
+  auto-force to `SpillMode::Memory` only triggered on `VfsMountMode::NoLocal`, but the
+  read-only embedder path is `Kernel::with_backend` (kaibo, kaijutsu) with a
+  `Sandboxed`-flavored config — so neither guard fired and a >limit `cat`/`rg` (8 KB
+  in kaibo) spilled project bytes to host `/tmp`, and `cmd & ; wait` wrote job output
+  there too. Both bypass the read-only `LocalFs` mount kaibo relies on. Realized the
+  "dedicated runtime read-only flag" the `assemble` comment anticipated, structurally:
+  `assemble` takes a `no_host_filesystem` bool (`true` from `with_backend`, since a
+  custom-backend kernel owns no host mounts so *any* host write is a bypass; `false`
+  from `Kernel::new`, where `NoLocal` still triggers via `vfs_mode`). When set it
+  forces `SpillMode::Memory` **and** `JobManager::set_persist_output_files(false)`.
+  Jobs stamp the flag at registration (`spawn`/`register`/`register_with_streams`);
+  `Job::wait` skips the host write when off — live output stays in-memory via the VFS
+  streams (`/v/jobs/{id}/stdout`) and the cached `ExecResult`, so nothing is lost
+  in-process. Tests: `scheduler::job::tests::test_no_host_output_file_when_persistence_disabled`
+  (mechanism) and `background_execution_tests::test_job_output_persistence_disabled_for_hostless_kernels`
+  (wiring: `NoLocal` + `with_backend` → off, `Sandboxed` → on). The `host` `/proc`/`/etc`
+  *reads* remain a separate, by-design, `host`-gated disclosure (P1).
 
 - **Stdin redirect (`< file`) now reads through the VFS, honors `$PWD`, and fails loud — fixed 2026-06-08.**
   `setup_stdin_redirects` (`scheduler/pipeline.rs`) read the target with

@@ -46,6 +46,74 @@ async fn wait_for_job(kernel: &Kernel, job_id: u64, timeout: Duration) -> String
 }
 
 // ============================================================================
+// Host filesystem isolation (no spill/job-output leaks)
+// ============================================================================
+
+/// A kernel that owns no host filesystem must not persist job output to a host
+/// temp file — that write goes through `std::fs`, bypassing the VFS and any
+/// read-only mount. Holds for `NoLocal` (mounts nothing) and `with_backend`
+/// (the embedder owns the VFS). A host-owning kernel still persists.
+#[tokio::test]
+async fn test_job_output_persistence_disabled_for_hostless_kernels() {
+    use kaish_kernel::vfs::{MemoryFs, VfsRouter};
+    use kaish_kernel::{KernelBackend, LocalBackend};
+
+    // NoLocal: no host filesystem mounted.
+    let isolated = Kernel::new(KernelConfig::isolated()).expect("isolated kernel");
+    assert!(
+        !isolated.jobs().persist_output_files(),
+        "NoLocal kernel must not write job output to host disk"
+    );
+
+    // Custom backend: embedder owns the entire VFS, kernel owns no host mounts.
+    let mut vfs = VfsRouter::new();
+    vfs.mount("/", MemoryFs::new());
+    let backend: Arc<dyn KernelBackend> = Arc::new(LocalBackend::new(Arc::new(vfs)));
+    let embedded = Kernel::with_backend(backend, KernelConfig::isolated(), |_| {}, |_| {})
+        .expect("with_backend kernel");
+    assert!(
+        !embedded.jobs().persist_output_files(),
+        "with_backend kernel must not write job output to host disk"
+    );
+
+    // A host-owning kernel (Sandboxed) keeps the default persistence.
+    let host_owning = Kernel::new(KernelConfig::transient()).expect("transient kernel");
+    assert!(
+        host_owning.jobs().persist_output_files(),
+        "a host-owning kernel should still persist job output files"
+    );
+}
+
+/// A `with_backend` kernel must truncate over-limit output in memory, never
+/// spill it to a host file via `std::fs` — even when the config requests
+/// `SpillMode::Disk`. Otherwise project bytes leak to host `/tmp`, bypassing the
+/// read-only VFS. Uses a `Sandboxed`-mode config (whose `vfs_mode` alone would
+/// NOT force memory) so this proves the `with_backend` override specifically.
+#[tokio::test]
+async fn test_with_backend_forces_in_memory_spill_not_host_disk() {
+    use kaish_kernel::vfs::{MemoryFs, VfsRouter};
+    use kaish_kernel::{KernelBackend, LocalBackend, OutputLimitConfig};
+
+    let mut limit = OutputLimitConfig::mcp(); // SpillMode::Disk (the leaky default)
+    limit.set_limit(Some(16));
+    let config = KernelConfig::transient().with_output_limit(limit); // Sandboxed mode
+
+    let mut vfs = VfsRouter::new();
+    vfs.mount("/", MemoryFs::new());
+    let backend: Arc<dyn KernelBackend> = Arc::new(LocalBackend::new(Arc::new(vfs)));
+    let kernel = Kernel::with_backend(backend, config, |_| {}, |_| {})
+        .expect("with_backend kernel");
+
+    let result = kernel.execute("seq 1 50").await.expect("execute failed");
+    assert!(result.did_spill, "output over the 16-byte limit should be truncated");
+    assert!(
+        result.text_out().contains("no spill file"),
+        "with_backend kernel must truncate in memory, not spill to host disk; got: {}",
+        result.text_out()
+    );
+}
+
+// ============================================================================
 // Basic Background Execution
 // ============================================================================
 

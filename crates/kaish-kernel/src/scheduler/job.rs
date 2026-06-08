@@ -36,6 +36,14 @@ pub struct Job {
     result: Option<ExecResult>,
     /// Path to output file (captures stdout/stderr after completion).
     output_file: Option<PathBuf>,
+    /// Whether to persist completed output to a host temp file. Disabled for
+    /// hermetic / read-only kernels (custom backend, NoLocal) whose output must
+    /// never reach the real filesystem outside the VFS — see
+    /// [`JobManager::set_persist_output_files`]. Stamped from the manager when
+    /// the job is registered. Live output is always available in-memory via the
+    /// VFS streams (`/v/jobs/{id}/stdout`), so suppressing the file loses
+    /// nothing for an in-process consumer.
+    persist_output: bool,
     /// Live stdout stream (bounded ring buffer).
     stdout_stream: Option<Arc<BoundedStream>>,
     /// Live stderr stream (bounded ring buffer).
@@ -59,6 +67,7 @@ impl Job {
             result_rx: None,
             result: None,
             output_file: None,
+            persist_output: true,
             stdout_stream: None,
             stderr_stream: None,
             pid: None,
@@ -77,6 +86,7 @@ impl Job {
             result_rx: Some(rx),
             result: None,
             output_file: None,
+            persist_output: true,
             stdout_stream: None,
             stderr_stream: None,
             pid: None,
@@ -104,6 +114,7 @@ impl Job {
             result_rx: Some(rx),
             result: None,
             output_file: None,
+            persist_output: true,
             stdout_stream: Some(stdout),
             stderr_stream: Some(stderr),
             pid: None,
@@ -122,6 +133,7 @@ impl Job {
             result_rx: None,
             result: None,
             output_file: None,
+            persist_output: true,
             stdout_stream: None,
             stderr_stream: None,
             pid: Some(pid),
@@ -208,8 +220,11 @@ impl Job {
             self.result.clone().unwrap_or_else(|| ExecResult::failure(1, "no result"))
         };
 
-        // Write output to temp file for later retrieval
-        if self.output_file.is_none()
+        // Write output to a host temp file for later retrieval — but only when
+        // persistence is enabled. A hermetic / read-only kernel disables it so
+        // job output never bypasses the VFS onto the real filesystem.
+        if self.persist_output
+            && self.output_file.is_none()
             && let Some(path) = self.write_output_file(&result) {
                 self.output_file = Some(path);
             }
@@ -364,6 +379,12 @@ pub struct JobManager {
     next_id: AtomicU64,
     /// Map of job ID to job.
     jobs: Arc<Mutex<HashMap<JobId, Job>>>,
+    /// Whether completed jobs persist their output to a host temp file. On by
+    /// default; a hermetic / read-only kernel disables it so output never
+    /// bypasses the VFS onto the real filesystem (see
+    /// [`set_persist_output_files`](Self::set_persist_output_files)). Stamped
+    /// onto each [`Job`] at registration.
+    persist_output_files: std::sync::atomic::AtomicBool,
 }
 
 impl JobManager {
@@ -373,7 +394,26 @@ impl JobManager {
             session_id: NEXT_SESSION_ID.fetch_add(1, Ordering::SeqCst),
             next_id: AtomicU64::new(1),
             jobs: Arc::new(Mutex::new(HashMap::new())),
+            persist_output_files: std::sync::atomic::AtomicBool::new(true),
         }
+    }
+
+    /// Toggle whether completed jobs persist their output to a host temp file.
+    ///
+    /// Disable this for a hermetic / read-only kernel: the host write in
+    /// [`Job::write_output_file`] uses `std::fs` directly and so bypasses the
+    /// VFS (and any read-only mount). Live output stays available in-memory via
+    /// the VFS streams (`/v/jobs/{id}/stdout`), so nothing is lost in-process.
+    ///
+    /// Must be set before jobs are spawned — the flag is stamped onto each job
+    /// at registration time, not consulted at completion.
+    pub fn set_persist_output_files(&self, on: bool) {
+        self.persist_output_files.store(on, Ordering::Relaxed);
+    }
+
+    /// Whether completed jobs persist their output to a host temp file.
+    pub fn persist_output_files(&self) -> bool {
+        self.persist_output_files.load(Ordering::Relaxed)
     }
 
     /// Spawn a new background job from a future.
@@ -388,7 +428,8 @@ impl JobManager {
         // Propagate the embedder's trace context across the spawn boundary so
         // background-job spans stay in the same trace (see telemetry module).
         let handle = tokio::spawn(crate::telemetry::bind_current_context(future));
-        let job = Job::new(id, self.session_id, command, handle);
+        let mut job = Job::new(id, self.session_id, command, handle);
+        job.persist_output = self.persist_output_files();
 
         // Spin on try_lock to guarantee the job is in the map on return.
         // The lock is tokio::sync::Mutex which is only held briefly during
@@ -414,7 +455,8 @@ impl JobManager {
     /// Spawn a job that's already running and communicate via channel.
     pub async fn register(&self, command: String, rx: oneshot::Receiver<ExecResult>) -> JobId {
         let id = JobId(self.next_id.fetch_add(1, Ordering::SeqCst));
-        let job = Job::from_channel(id, self.session_id, command, rx);
+        let mut job = Job::from_channel(id, self.session_id, command, rx);
+        job.persist_output = self.persist_output_files();
 
         let mut jobs = self.jobs.lock().await;
         jobs.insert(id, job);
@@ -433,7 +475,8 @@ impl JobManager {
         stderr: Arc<BoundedStream>,
     ) -> JobId {
         let id = JobId(self.next_id.fetch_add(1, Ordering::SeqCst));
-        let job = Job::with_streams(id, self.session_id, command, rx, stdout, stderr);
+        let mut job = Job::with_streams(id, self.session_id, command, rx, stdout, stderr);
+        job.persist_output = self.persist_output_files();
 
         let mut jobs = self.jobs.lock().await;
         jobs.insert(id, job);
@@ -643,6 +686,34 @@ impl Default for JobManager {
 mod tests {
     use super::*;
     use std::time::Duration;
+
+    #[tokio::test]
+    async fn test_no_host_output_file_when_persistence_disabled() {
+        // A hermetic / read-only kernel (custom backend, or NoLocal mode)
+        // disables host output-file persistence so a background job's output
+        // never lands on the real filesystem via `std::fs`, bypassing the VFS.
+        let manager = JobManager::new();
+        assert!(manager.persist_output_files(), "default is to persist");
+        manager.set_persist_output_files(false);
+        assert!(!manager.persist_output_files());
+
+        let id = manager.spawn("leaky".to_string(), async {
+            ExecResult::success("output that must not hit host disk")
+        });
+        tokio::time::sleep(Duration::from_millis(10)).await;
+        let result = manager.wait(id).await;
+        assert!(result.is_some());
+
+        // No temp file should have been written to the host filesystem.
+        let output_file = {
+            let jobs = manager.jobs.lock().await;
+            jobs.get(&id).and_then(|j| j.output_file().cloned())
+        };
+        assert!(
+            output_file.is_none(),
+            "no host output file should be written when persistence is disabled, got {output_file:?}"
+        );
+    }
 
     #[tokio::test]
     async fn test_spawn_and_wait() {

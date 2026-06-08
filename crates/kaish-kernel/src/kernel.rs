@@ -598,7 +598,10 @@ impl Kernel {
         // Mount JobFs for job observability at /v/jobs
         vfs.mount("/v/jobs", JobFs::new(jobs.clone()));
 
-        Self::assemble(config, vfs, jobs, |_| {}, |vfs_ref, tools| {
+        // Mode-based construction: the kernel owns its host mounts, so whether
+        // host side channels are allowed is decided by the VFS mode inside
+        // `assemble` (NoLocal forbids them).
+        Self::assemble(config, vfs, jobs, false, |_| {}, |vfs_ref, tools| {
             ExecContext::with_vfs_and_tools(vfs_ref.clone(), tools.clone())
         })
     }
@@ -710,7 +713,11 @@ impl Kernel {
         // Let caller add custom mounts (e.g., /v/docs, /v/g)
         configure_vfs(&mut vfs);
 
-        Self::assemble(config, vfs, jobs, configure_tools, |vfs_arc: &Arc<VfsRouter>, _: &Arc<ToolRegistry>| {
+        // A custom-backend kernel owns no host mounts — the embedder supplies
+        // the entire VFS — so any kernel write to a host filesystem via
+        // `std::fs` (output spill, job output files) bypasses that VFS and its
+        // read-only guarantees. Forbid host side channels unconditionally.
+        Self::assemble(config, vfs, jobs, true, configure_tools, |vfs_arc: &Arc<VfsRouter>, _: &Arc<ToolRegistry>| {
             let overlay: Arc<dyn KernelBackend> =
                 Arc::new(VirtualOverlayBackend::new(backend, vfs_arc.clone()));
             ExecContext::with_backend(overlay)
@@ -726,21 +733,30 @@ impl Kernel {
         config: KernelConfig,
         mut vfs: VfsRouter,
         jobs: Arc<JobManager>,
+        no_host_filesystem: bool,
         configure_tools: impl FnOnce(&mut ToolRegistry),
         make_ctx: impl FnOnce(&Arc<VfsRouter>, &Arc<ToolRegistry>) -> ExecContext,
     ) -> Result<Self> {
-        // A NoLocal kernel mounts no host filesystem, so it must never spill
-        // output to one either. `paths::spill_dir()` targets host temp/cache
-        // regardless of the VFS, so disk spill would punch straight through the
-        // isolation — force in-memory truncation. This overrides an explicit
-        // `SpillMode::Disk`, which is nonsensical for a no-host-filesystem
-        // kernel. (When a dedicated runtime read-only flag exists, widen this.)
-        let force_memory_spill = matches!(config.vfs_mode, VfsMountMode::NoLocal);
+        // A kernel with no host filesystem of its own must never write to one
+        // through a side channel. Two paths bypass the VFS by going straight to
+        // `std::fs`: output spill (`paths::spill_dir()` → host temp/cache) and
+        // background-job output files (`Job::write_output_file` → host temp).
+        // Both would punch through the isolation, so force them off:
+        // in-memory truncation for spill, no host file for job output.
+        //
+        // This is true for a `NoLocal` kernel (mounts nothing) and for any
+        // `with_backend` kernel (`no_host_filesystem` — the embedder owns the
+        // VFS, so the kernel controls no host mounts and any host write is a
+        // bypass). Overrides an explicit `SpillMode::Disk`, which is nonsensical
+        // when there is no kernel-owned host filesystem to spill to.
+        let no_host_side_channel =
+            no_host_filesystem || matches!(config.vfs_mode, VfsMountMode::NoLocal);
 
         let KernelConfig { name, cwd, skip_validation, interactive, ignore_config, mut output_limit, allow_external_commands, latch_enabled, trash_enabled, nonce_store, initial_vars, request_timeout, kill_grace, .. } = config;
 
-        if force_memory_spill {
+        if no_host_side_channel {
             output_limit.set_spill_mode(crate::output_limit::SpillMode::Memory);
+            jobs.set_persist_output_files(false);
         }
 
         let mut tools = ToolRegistry::new();
