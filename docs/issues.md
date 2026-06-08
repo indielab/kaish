@@ -19,40 +19,6 @@ subprocess capture, arithmetic token leak) **all validate as fixed** on
 
 ## P1 — High-leverage features and diagnostics
 
-### Native builtins bypass the kaijutsu capability allow-set
-When kaish runs inside a kaijutsu context (via `context_shell` / rc scripts),
-the kernel enforces a per-context capability allow-set (deny-by-default;
-`ContextToolBinding`). Tool calls routed through `broker.call_tool`
-(`builtin.file:read`, MCP-registered tools) ARE gated. But kaish's **own native
-builtins** (file ops, `ls`, `rg`, glob, …) execute directly against the backend
-and are **not** subject to that allow-set. Net effect: granting a context the
-`shell` facade ≈ granting the whole native-kaish surface, so a "read-only"-style
-role that is given shell can still mutate via native builtins. Decide the model:
-either route native builtins through a capability check, or document that
-`shell` is all-or-nothing and roles must withhold it (as `explorer` does today).
-Surfaced 2026-06-03 during the kaijutsu deny-by-default capability rework.
-
-### Space-separated flag values to `kj` are dropped (`--flag val` vs `--flag=val`)
-`kj context create exp --type explorer` (space form) silently loses the value —
-the context is created as `default`, not `explorer`. `kj context create exp
---type=explorer` (equals form) works. So a flag value passed as a separate token
-to a `kj` builtin invoked from kaish doesn't reach the builtin's argv; only the
-`=` form survives. Reproduced 2026-06-03 against the live kernel (one context per
-form, checked `context_type` in the DB). Was invisible until kaijutsu went
-deny-by-default: previously every context was permissive regardless of type, so a
-dropped `--type` had no observable effect. Now it's **security-relevant** —
-asking for a restricted role (e.g. read-only `explorer`) and silently getting a
-fully-permissive `default` is a privilege-escalation-by-typo. Likely the kaish
-tokenizer/arg-passing for `kj` (the `=` form being one token is the tell);
-related to the arg-handling quirks in `gotcha_kaish_kj_args`. Fix in the
-kaish→kj arg path, or have `kj` reject/normalize the space form.
-
-
-<!-- Resolved: see docs/plan-here-string.md. Decided against extending
-`${VAR.field}` to regular variables (non-bash, shellcheck-incompatible).
-Instead, added here-string `<<<` so the natural agent pattern is
-`jq -r '.key' <<< "$RESULT"`. kaish ships a native in-process jq. -->
-
 ### `rg` parallel walking
 The 2026-04-29 rg builtin uses `ignore::WalkBuilder::build()`, which
 yields a sequential iterator. `WalkParallel::run()` is a few lines'
@@ -70,39 +36,11 @@ A `SyncPipeReader` adapter (sync `std::io::Read` over async
 would stream chunks. Expected modest payoff; defer until a real
 workload pushes against the buffer.
 
-### Output disk-spill bypasses the VFS — defeats a runtime read-only kaish
-**Core fix landed 2026-06-06.** `OutputLimitConfig` now carries a runtime
-`SpillMode` (`Disk` | `Memory`). `Memory` mode (builder: `OutputLimitConfig::mcp().in_memory()`)
-truncates overflow in memory to a head+tail preview with **no disk I/O** — no
-`paths::spill_dir()` write, no recoverable file — so a runtime read-only kernel
-(kaibo) can no longer stage data-exfil / disk-fill artifacts via large output.
-Memory use is bounded regardless of output size: the streaming external-command
-path (`drain_in_memory`) keeps only a head + a `tail_bytes` ring buffer while
-draining to EOF, and oversized structured `OutputData` is rendered through a
-`write_canonical` byte budget instead of being materialized into a full `String`.
-
-Original report (context): `output_limit.rs` wrote spill files via
-`paths::spill_dir()` + `tokio::fs` directly, NOT through `ctx.backend`, ignoring
-the VFS mount mode — exploitable for exfil staging, disk-fill DoS, or persistent
-artifacts with no feature beyond the default `localfs`. The compile-time
-capability split can't catch this (runtime path). Surfaced by dpal design review
-2026-06-03; live-confirmed from kaibo's read-only `run_kaish` 2026-06-06.
-
-**Design decision (2026-06-06):** Memory mode still remaps the exit code to `3`
-(`did_spill = true`, real code in `original_code`) — the caller-facing wrinkle
-(a successful big `cat` reading as a "failure") is resolved by callers treating
-`3` as "output capped, not error", NOT by preserving the real code. Disk vs
-memory is distinguished by the `out` message: memory says "truncated in memory …
-no spill file", disk says "full output at <path>".
-
-**Auto-force for NoLocal landed 2026-06-06.** `Kernel::assemble` now forces
-`SpillMode::Memory` whenever `vfs_mode == NoLocal` (overriding an explicit
-`Disk`), since a memory-only kernel has no host filesystem to spill to. A
-`NoLocal` kernel can no longer write a host spill file regardless of caller
-config. Documented on `VfsMountMode::NoLocal`, `SpillMode::Disk`, and
-`OutputLimitConfig::in_memory`.
-
-**Residual / follow-ups:**
+### Output disk-spill — runtime read-only residuals (core fix done 2026-06-06)
+**Core fix landed 2026-06-06** (full narrative now in Resolved). `OutputLimitConfig`
+carries a runtime `SpillMode` (`Disk` | `Memory`); `Memory` truncates in memory with
+no disk I/O, and `Kernel::assemble` auto-forces `Memory` for `NoLocal` mounts.
+Remaining open work:
 - `Disk` is still the default for `localfs` mounts. A `Sandboxed`/`Passthrough`
   kernel run read-only that does *not* opt into `Memory` mode still spills to
   disk — there is no dedicated runtime read-only flag yet, so `NoLocal` is the
@@ -118,50 +56,30 @@ config. Documented on `VfsMountMode::NoLocal`, `SpillMode::Disk`, and
 
 ## P2 — Focused refactors & real bugs
 
-### Composable help/instructions library (`kaish-help` crate) — Phases 1–3 done
-**Phase 1 landed 2026-06-06:** `kaish-help` crate created (concept fragment model +
-`compose`/recipes + byte-stable `get_help` compat surface); help content moved to
-`crates/kaish-help/content/en/`; `kaish_kernel::help` is now a shim. Tests/clippy/
-WASI green. **Remaining:**
-- **Phase 2 (done 2026-06-06, light):** `syntax.md` is now generated from
-  `Syntax` fragments (`render_syntax_reference()` + `regen_syntax` example),
-  drift-tested; byte-identical to the old file. `LANGUAGE.md` stays hand-authored
-  (full decomposition declined) with a coverage test.
-- **Phase 3 (done 2026-06-06):** MCP `instructions:`, the REPL welcome, the `execute`
-  **tool description**, and the MCP **prompt set** all compose from the canonical
-  `kaish-help` corpus — no hand-rolled prose or hand-maintained lists left in the MCP
-  frontend.
-  - The tool description is now built in the `list_tools` runtime override from
-    `compose(Recipe::tool_description, …)` plus MCP-frontend framing (the
-    `#[tool(description=…)]` macro literal is reduced to a stable one-line fallback).
-  - The prompts dropped the `#[prompt_router]`/`#[prompt]` macros: `list_prompts`/
-    `get_prompt` are manual and single-source from `help::list_topics()` (one
-    `kaish-<topic>` prompt per topic, rendered via `get_help`). This also exposes the
-    previously-omitted `ignore` and `output-limit` topics as prompts (6 → 8), and
-    unknown prompt names now fail loudly instead of serving generic help.
+### Composable help/instructions library (`kaish-help` crate) — Phases 4–5 remaining
+Phases 1–3 done 2026-06-06: the `kaish-help` crate (concept fragments + `compose`/
+recipes + byte-stable `get_help`) is the single source for help content; `syntax.md`
+is generated + drift-tested; and MCP `instructions:`, the REPL welcome, the `execute`
+tool description, and the MCP prompt set all compose from it (no hand-rolled prose
+left in the MCP frontend). Remaining:
 - **Phase 4:** publish; kaijutsu/kaibo adopt `kaish-help`.
 - **Phase 5:** i18n scaffolding + first `ja` fragments.
 
 Full design + resolved decisions: [composable-help.md](composable-help.md).
 
 ### Minimal build (`--no-default-features`) — integration test binaries don't compile
-**Lib unit tests fixed 2026-06-07.** The cited blocker (`ignore_config.rs` L582
-calling `tokio::fs::write`, which needs tokio's `fs` feature, off in the minimal
-build) is resolved — the fixture now uses `std::fs::write`, faithful to the
-production read (`build_filter` uses `std::fs::read_to_string`). `cargo test
--p kaish-kernel --lib --no-default-features` now passes (1320 tests).
-
-**Remaining:** the *integration* test binaries (`tests/*.rs`) still don't
-compile minimally. 8 of 23 files use `KernelConfig::repl()` / the `kernel_at`
-harness, both `#[cfg(feature = "localfs")]` (real-FS) — so `cargo test
--p kaish-kernel --no-default-features` (which builds the integration binaries
-too) fails to compile those. Options: (a) file-level `#![cfg(feature =
-"localfs")]` on the inherently real-FS binaries so they're skipped minimally;
-(b) convert the ones that don't actually need real FS (e.g. `validation_tests`)
-to `KernelConfig::isolated()` (memory VFS) so they *run* minimally — strictly
-better coverage. `hermetic_home_tests.rs` already uses `isolated()` and runs in
-both modes as the pattern to follow. Surfaced 2026-06-03; partially resolved
-2026-06-07. Folds naturally into the planned `native`→capability-feature split.
+Lib unit tests pass minimally as of 2026-06-07 (`cargo test -p kaish-kernel --lib
+--no-default-features`, 1320 tests). Still open: the *integration* test binaries
+(`tests/*.rs`) don't compile minimally. 8 of 23 files use `KernelConfig::repl()` /
+the `kernel_at` harness, both `#[cfg(feature = "localfs")]` (real-FS) — so `cargo
+test -p kaish-kernel --no-default-features` (which builds the integration binaries
+too) fails to compile those. Options: (a) file-level `#![cfg(feature = "localfs")]`
+on the inherently real-FS binaries so they're skipped minimally; (b) convert the
+ones that don't actually need real FS (e.g. `validation_tests`) to
+`KernelConfig::isolated()` (memory VFS) so they *run* minimally — strictly better
+coverage. `hermetic_home_tests.rs` already uses `isolated()` and runs in both modes
+as the pattern to follow. Surfaced 2026-06-03; partially resolved 2026-06-07. Folds
+naturally into the planned `native`→capability-feature split.
 
 ### Split `kernel.rs::execute_stmt_flow`
 ~L1007–L1443 is an 18-arm async match. Each arm reaches into `scope`,
@@ -206,6 +124,29 @@ sig)` and accept the PID-reuse race for the direct child. macOS has no
 direct equivalent (FreeBSD has `procctl`/`pdfork` but the model differs).
 Acceptable today since kaish runs predominantly on Linux.
 
+### Sync `build_tool_args` lacks the undeclared-space-flag guard
+The async `build_args_async` (kernel.rs) fails loud when an undeclared flag under
+a `map_positionals` schema would silently divorce a space-form value (fixed
+2026-06-08, see Resolved). The sync twin `build_tool_args`
+(`scheduler/pipeline.rs:545`) shares the same `unwrap_or(true)` default-to-bool
+and has **no** equivalent guard. It can't trigger the production bug today — its
+only production callers are scatter/gather option parsing (builtin schemas,
+`map_positionals=false`); the backend-tool caller is the `#[cfg(test)]`
+`BackendDispatcher`. Applying the guard would require changing the return type to
+`Result` across ~22 call sites, so it was deferred. If the sync path ever fields a
+`map_positionals` backend tool in production, add the same guard (lift a shared
+helper) to keep the two builders in sync.
+
+### Undeclared space-flag guard covers long flags only (`-t val` still divorces)
+The 2026-06-08 fix errors on undeclared `--type value` but not single-char
+`-t value`, because short flags followed by a positional (`-r path`, `-f file`)
+are overwhelmingly legitimate bool+positional and erroring there would be too
+aggressive. Net: an undeclared short flag that *should* take a value still
+silently drops it under a `map_positionals` schema. Lower-risk than the long-flag
+case (backend/MCP tools rarely expose single-char value flags) and the real fix
+is the same — declare the flag in the schema. Revisit if a backend tool surfaces a
+`-x VALUE`-style flag.
+
 ### `dispatch_command` cancel sync is one-way (in only)
 `ec.cancel = ctx.cancel` is synced INTO `self.exec_ctx` at the start of
 each dispatch, but there's no `ctx.cancel = ec.cancel` reverse sync at
@@ -229,12 +170,10 @@ trait-object alias or a dedicated `Callback` trait would smooth the
 ergonomics. Not blocking; do it once we see real downstream pain.
 
 ### Long-blocking builtins other than `sleep` may not honor cancellation
-`sleep` itself is **done** (see Resolved 2026-06-07): it races
-`tokio::time::sleep` against `ctx.cancel.cancelled()` and returns 130 on
-cancel, pinned by `sleep::tests::test_sleep_honors_cancellation`. The general
-guidance still stands for any *other* builtin that holds a long time/IO future
-without yielding through `ctx.cancel` — audit and apply the same `tokio::select!`
-pattern where one is found (none currently known besides the now-fixed `sleep`).
+`sleep` is done (see Resolved 2026-06-07). The guidance stands for any *other*
+builtin that holds a long time/IO future without yielding through `ctx.cancel`:
+audit and apply the same `tokio::select!` pattern where one is found (none
+currently known besides the now-fixed `sleep`).
 
 ### Job output files in `/tmp/kaish/jobs/` persist indefinitely
 `JobManager` only cleans up on explicit `cleanup()` / `remove()`. No
@@ -432,6 +371,52 @@ priority; decide whether multi-arg should accumulate per-path errors.
 
 Captured here so context from `cleanups-todo.md` / old `issues.md`
 isn't lost when those files are deleted.
+
+- **Space-form flag values to backend tools no longer silently dropped — fixed 2026-06-08.**
+  `kj context create exp --type explorer` (space form) silently lost the value
+  while `--type=explorer` (equals form) worked — a **privilege-escalation-by-typo**
+  once kaijutsu went deny-by-default (asking for read-only `explorer`, silently
+  getting permissive `default`). Root-caused to kaish, not kaijutsu: in
+  `build_args_async` (kernel.rs) an *undeclared* flag — one the tool's schema
+  doesn't list as a non-bool param — defaults to `is_bool = true`
+  (`unwrap_or(true)`), so `--type` became a value-less boolean flag and `explorer`
+  was orphaned, then misrouted by `map_positionals` to a different param slot. The
+  `=` form survives because `--type=explorer` lexes as `Arg::Named` and bypasses
+  schema lookup entirely. Confirmed empirically: `{named:{name:"context"},
+  flags:{type}, positional:[create,exp,explorer]}`. Since kaish genuinely cannot
+  distinguish `--type explorer` (flag wants value) from `--force file.txt` (bool +
+  positional) without a complete schema, the fix **fails loud rather than guessing**
+  (crash > corruption): an undeclared long flag under a `map_positionals` schema
+  that is immediately followed by an unconsumed positional now errors with a
+  copy-pasteable fix — `kj: --type is not a declared flag … Use --type=explorer, or
+  have kj declare --type in its schema`. Surfaces like a validation failure (Err →
+  exit 1, message to stderr). Six guard tests pin the safe paths (declared flag
+  still binds, `=` form binds, bool-at-end ok, flag-before-flag ok, builtins
+  unaffected); one red-first test pins the loud error. The real binding fix remains
+  for kaijutsu to declare its `kj` flags in the schema, after which the existing
+  `consume_flag_positionals` machinery handles space form. Two residuals tracked
+  below (sync `build_tool_args`; single-char short flags).
+
+- **Output disk-spill no longer bypasses the VFS — core fix done 2026-06-06.**
+  `output_limit.rs` used to write spill files via `paths::spill_dir()` + `tokio::fs`
+  directly (not through `ctx.backend`), ignoring the VFS mount mode — exploitable for
+  exfil staging, disk-fill DoS, or persistent artifacts with no feature beyond the
+  default `localfs`, and invisible to the compile-time capability split (runtime path).
+  Surfaced by dpal design review 2026-06-03; live-confirmed from kaibo's read-only
+  `run_kaish` 2026-06-06. Fix: `OutputLimitConfig` gained a runtime `SpillMode`
+  (`Disk` | `Memory`). `Memory` (builder `OutputLimitConfig::mcp().in_memory()`)
+  truncates overflow in memory to a head+tail preview with **no disk I/O** — the
+  streaming external path (`drain_in_memory`) keeps only a head + a `tail_bytes` ring
+  buffer while draining to EOF, and oversized structured `OutputData` is rendered
+  through a `write_canonical` byte budget rather than materialized into a full
+  `String`, so memory stays bounded regardless of output size. Memory mode still
+  remaps the exit to `3` (`did_spill = true`, real code in `original_code`); callers
+  treat `3` as "output capped, not error". Disk vs memory distinguished by the `out`
+  message ("truncated in memory … no spill file" vs "full output at <path>").
+  `Kernel::assemble` auto-forces `Memory` whenever `vfs_mode == NoLocal` (overriding
+  an explicit `Disk`), so a memory-only kernel can never write a host spill file;
+  documented on `VfsMountMode::NoLocal`, `SpillMode::Disk`, `OutputLimitConfig::in_memory`.
+  Residual follow-ups (localfs default, runtime switch, host /proc/etc) tracked in P1.
 
 - **Dispatcher re-entrancy deadlock resolved — verified/pinned 2026-06-07.**
   `timeout 5 echo works` (and any builtin that re-dispatches through

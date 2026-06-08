@@ -2569,6 +2569,36 @@ impl Kernel {
                         tool_args.positional.push(Value::String(format!("--{name}")));
                     } else {
                         let lookup = param_lookup.get(name.as_str());
+                        // An *undeclared* long flag under a `map_positionals`
+                        // (backend/MCP) schema that is immediately followed by an
+                        // unconsumed positional is ambiguous: kaish can't tell the
+                        // space-form value (`--type explorer`) from a bool flag
+                        // before a real positional (`--force file.txt`). Defaulting
+                        // to bool here silently divorces the value and misroutes it
+                        // — a privilege-escalation-by-typo against deny-by-default
+                        // embedders (docs/issues.md). Fail loud instead of guessing.
+                        let ambiguous_value = (lookup.is_none()
+                            && schema.is_some_and(|s| s.map_positionals)
+                            && !consumed.contains(&(i + 1)))
+                            .then(|| match args.get(i + 1) {
+                                // Echo a concrete value for a copy-pasteable fix
+                                // when it's a plain literal; fall back to VALUE.
+                                Some(Arg::Positional(Expr::Literal(Value::String(s)))) => {
+                                    Some(s.clone())
+                                }
+                                Some(Arg::Positional(_)) => Some("VALUE".to_string()),
+                                _ => None,
+                            })
+                            .flatten();
+                        if let Some(val) = ambiguous_value {
+                            let tool = schema.map(|s| s.name.as_str()).unwrap_or("command");
+                            anyhow::bail!(
+                                "{tool}: --{name} is not a declared flag, so the \
+                                 space-separated value would be silently dropped. \
+                                 Use --{name}={val}, or have {tool} declare --{name} \
+                                 in its schema."
+                            );
+                        }
                         let is_bool = lookup.map(|(_, typ, _)| is_bool_type(typ)).unwrap_or(true);
 
                         if is_bool {
@@ -6275,7 +6305,6 @@ AFTER="yes"'"#)
         assert_eq!(built.positional.len(), 1);
         assert_eq!(built.positional[0], Value::String("filter".into()));
     }
-
     #[tokio::test]
     async fn build_args_multi_consume_two_occurrences_accumulate() {
         let kernel = Kernel::transient().expect("kernel");
@@ -6317,6 +6346,110 @@ AFTER="yes"'"#)
             }
             other => panic!("expected Json(Array(...)), got {other:?}"),
         }
+    }
+
+    // ── undeclared space-form flag under map_positionals (kj --type val) ──
+    //
+    // A backend/MCP tool whose schema does NOT declare a flag must not let
+    // `--flag value` (space form) silently divorce the value: that was a
+    // privilege-escalation-by-typo against kaijutsu (see docs/issues.md).
+    // kaish fails loud rather than guessing.
+
+    use crate::tools::{ParamSchema, ToolSchema};
+
+    /// Backend-style schema (map_positionals) declaring only a `name`
+    /// positional — `--type` is intentionally undeclared.
+    fn kj_like_schema() -> ToolSchema {
+        ToolSchema::new("kj", "incomplete backend schema")
+            .param(ParamSchema::optional("name", "string", Value::Null, "context name"))
+            .with_positional_mapping()
+    }
+
+    #[tokio::test]
+    async fn build_args_undeclared_space_flag_errors_under_map_positionals() {
+        let kernel = Kernel::transient().expect("kernel");
+        let schema = kj_like_schema();
+        // kj context create exp --type explorer
+        let args = vec![
+            pos("context"),
+            pos("create"),
+            pos("exp"),
+            Arg::LongFlag("type".into()),
+            pos("explorer"),
+        ];
+        let err = kernel
+            .build_args_async(&args, Some(&schema))
+            .await
+            .expect_err("undeclared --type with a space value must fail loud");
+        let msg = err.to_string();
+        assert!(msg.contains("--type"), "message should name the flag: {msg}");
+        assert!(msg.contains("--type=explorer"), "message should suggest the = form: {msg}");
+        assert!(msg.contains("kj"), "message should name the tool: {msg}");
+    }
+
+    #[tokio::test]
+    async fn build_args_declared_space_flag_still_binds() {
+        let kernel = Kernel::transient().expect("kernel");
+        // Same tool, but now the schema DECLARES --type as a string param.
+        let schema = ToolSchema::new("kj", "complete schema")
+            .param(ParamSchema::optional("name", "string", Value::Null, "context name"))
+            .param(ParamSchema::optional("type", "string", Value::Null, "role type"))
+            .with_positional_mapping();
+        let args = vec![
+            pos("exp"),
+            Arg::LongFlag("type".into()),
+            pos("explorer"),
+        ];
+        let built = kernel.build_args_async(&args, Some(&schema)).await.unwrap();
+        assert_eq!(built.named.get("type"), Some(&Value::String("explorer".into())));
+    }
+
+    #[tokio::test]
+    async fn build_args_equals_form_binds_for_undeclared_flag() {
+        let kernel = Kernel::transient().expect("kernel");
+        let schema = kj_like_schema();
+        // The unambiguous `=` form must keep working even when undeclared.
+        let args = vec![
+            pos("exp"),
+            Arg::Named { key: "type".into(), value: Expr::Literal(Value::String("explorer".into())) },
+        ];
+        let built = kernel.build_args_async(&args, Some(&schema)).await.unwrap();
+        assert_eq!(built.named.get("type"), Some(&Value::String("explorer".into())));
+    }
+
+    #[tokio::test]
+    async fn build_args_undeclared_bool_flag_at_end_is_ok() {
+        let kernel = Kernel::transient().expect("kernel");
+        let schema = kj_like_schema();
+        // No positional follows --force → unambiguously a bare flag.
+        let args = vec![pos("exp"), Arg::LongFlag("force".into())];
+        let built = kernel.build_args_async(&args, Some(&schema)).await.unwrap();
+        assert!(built.flags.contains("force"));
+    }
+
+    #[tokio::test]
+    async fn build_args_undeclared_flag_before_another_flag_is_ok() {
+        let kernel = Kernel::transient().expect("kernel");
+        let schema = kj_like_schema();
+        // --verbose is followed by a flag, not a positional → not ambiguous.
+        let args = vec![
+            Arg::LongFlag("verbose".into()),
+            Arg::Named { key: "name".into(), value: Expr::Literal(Value::String("x".into())) },
+        ];
+        let built = kernel.build_args_async(&args, Some(&schema)).await.unwrap();
+        assert!(built.flags.contains("verbose"));
+    }
+
+    #[tokio::test]
+    async fn build_args_undeclared_space_flag_ok_for_builtin_schema() {
+        let kernel = Kernel::transient().expect("kernel");
+        // Builtins set map_positionals=false; the ambiguity guard must not
+        // fire there (clap validates their flags separately).
+        let schema = ToolSchema::new("frobnicate", "builtin-style")
+            .param(ParamSchema::optional("name", "string", Value::Null, "name"));
+        let args = vec![Arg::LongFlag("frob".into()), pos("value")];
+        let built = kernel.build_args_async(&args, Some(&schema)).await.unwrap();
+        assert!(built.flags.contains("frob"));
     }
 
     // ── initial_vars + execute_with_vars + hermetic env ───────────────────
