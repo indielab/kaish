@@ -88,6 +88,66 @@ async fn sandbox_append_redirect_via_vfs() {
 }
 
 #[tokio::test]
+async fn sandbox_relative_redirect_honors_cwd() {
+    // Regression: redirect targets must resolve against $PWD like every other
+    // path operand, so a relative `>` write and a later relative read agree.
+    // Previously the redirect resolved against `/` while `cat` resolved against
+    // cwd, so the file written by `>` was invisible to `cat`.
+    let k = sandbox_kernel().await;
+    let r = k
+        .execute("mkdir -p /tmp/sub && cd /tmp/sub && echo x > f && cat f")
+        .await
+        .expect("execute failed");
+    assert!(r.ok(), "expected success, got code={} err={:?}", r.code, r.err);
+    assert_eq!(r.text_out().trim(), "x");
+
+    // The file must land at $PWD/f, not /f.
+    let at_cwd = k.execute("cat /tmp/sub/f").await.expect("execute failed");
+    assert!(at_cwd.ok(), "file should exist at /tmp/sub/f");
+    assert_eq!(at_cwd.text_out().trim(), "x");
+
+    let at_root = k.execute("cat /f").await.expect("execute failed");
+    assert!(!at_root.ok(), "relative redirect must not write to /f");
+}
+
+#[tokio::test]
+async fn sandbox_relative_append_honors_cwd() {
+    let k = sandbox_kernel().await;
+    let r = k
+        .execute("mkdir -p /tmp/sub && cd /tmp/sub && echo a > log && echo b >> log && cat log")
+        .await
+        .expect("execute failed");
+    assert!(r.ok(), "expected success, got code={} err={:?}", r.code, r.err);
+    assert_eq!(r.text_out().trim(), "a\nb");
+}
+
+#[tokio::test]
+async fn sandbox_stdin_redirect_reads_via_vfs_and_cwd() {
+    // `< file` must read through the VFS (not the host fs) with the target
+    // resolved against $PWD, so it round-trips with a relative `>` write.
+    let k = sandbox_kernel().await;
+    let r = k
+        .execute("mkdir -p /tmp/sub && cd /tmp/sub && echo payload > in && cat < in")
+        .await
+        .expect("execute failed");
+    assert!(r.ok(), "expected success, got code={} err={:?}", r.code, r.err);
+    assert_eq!(r.text_out().trim(), "payload");
+}
+
+#[tokio::test]
+async fn sandbox_stdin_redirect_missing_file_fails_loud() {
+    // A missing redirect source must error, not silently feed empty stdin.
+    let k = sandbox_kernel().await;
+    let r = k.execute("cat < /tmp/does-not-exist").await.expect("execute failed");
+    assert!(!r.ok(), "missing stdin redirect source should fail");
+    assert!(
+        r.err.contains("redirect"),
+        "error should mention redirect, got: {:?}",
+        r.err
+    );
+}
+
+#[tokio::test]
 async fn sandbox_test_builtin_cannot_probe_host() {
     let k = sandbox_kernel().await;
     // test -r should route through VFS, not the real filesystem.

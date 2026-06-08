@@ -132,28 +132,49 @@ fn eval_redirect_target(expr: &Expr, ctx: &ExecContext) -> Option<String> {
 }
 
 /// Write data to a file via the VFS backend.
+///
+/// The redirect target is resolved against `ctx.cwd` (like every other path
+/// operand — see `cat`/`cp`/etc.), so a relative `> f` write and a later
+/// relative read agree on the same `$PWD/f`. Without this the router would
+/// normalize a bare relative path to `/f`, diverging from cwd-resolved reads.
 async fn redirect_write(ctx: &ExecContext, path: &str, data: &[u8]) -> Result<(), String> {
     use crate::backend::WriteMode;
-    let p = std::path::Path::new(path);
-    ctx.backend.write(p, data, WriteMode::Overwrite).await.map_err(|e| e.to_string())
+    let resolved = ctx.resolve_path(path);
+    ctx.backend.write(&resolved, data, WriteMode::Overwrite).await.map_err(|e| e.to_string())
 }
 
 /// Append data to a file via the VFS backend.
+///
+/// Resolves the target against `ctx.cwd` for the same reason as `redirect_write`.
 async fn redirect_append(ctx: &ExecContext, path: &str, data: &[u8]) -> Result<(), String> {
-    let p = std::path::Path::new(path);
-    ctx.backend.append(p, data).await.map_err(|e| e.to_string())
+    let resolved = ctx.resolve_path(path);
+    ctx.backend.append(&resolved, data).await.map_err(|e| e.to_string())
 }
 
 /// Set up stdin from redirects (< file, <<heredoc).
 /// Called before command execution.
-fn setup_stdin_redirects(cmd: &Command, ctx: &mut ExecContext) {
+///
+/// `< file` reads through the VFS backend (not the host filesystem) with the
+/// target resolved against `ctx.cwd`, mirroring how `cat` and the output
+/// redirects resolve their operands. A missing/unreadable file or non-UTF-8
+/// content is a hard error — we never silently feed the command empty stdin.
+async fn setup_stdin_redirects(cmd: &Command, ctx: &mut ExecContext) -> Result<(), String> {
+    use std::path::Path;
     for redir in &cmd.redirects {
         match &redir.kind {
             RedirectKind::Stdin => {
-                if let Some(path) = eval_redirect_target(&redir.target, ctx)
-                    && let Ok(content) = std::fs::read_to_string(&path) {
-                        ctx.set_stdin(content);
-                    }
+                let Some(path) = eval_redirect_target(&redir.target, ctx) else {
+                    return Err("redirect: could not evaluate stdin target".to_string());
+                };
+                let resolved = ctx.resolve_path(&path);
+                let data = ctx
+                    .backend
+                    .read(Path::new(&resolved), None)
+                    .await
+                    .map_err(|e| format!("redirect: {path}: {e}"))?;
+                let content = String::from_utf8(data)
+                    .map_err(|_| format!("redirect: {path}: invalid UTF-8"))?;
+                ctx.set_stdin(content);
             }
             RedirectKind::HereDoc => {
                 match &redir.target {
@@ -179,6 +200,7 @@ fn setup_stdin_redirects(cmd: &Command, ctx: &mut ExecContext) {
             _ => {}
         }
     }
+    Ok(())
 }
 
 /// Runs pipelines by spawning tasks and connecting them via channels.
@@ -300,7 +322,9 @@ impl PipelineRunner {
         dispatcher: &dyn CommandDispatcher,
     ) -> ExecResult {
         // Set up stdin from redirects (< file, <<heredoc)
-        setup_stdin_redirects(cmd, ctx);
+        if let Err(e) = setup_stdin_redirects(cmd, ctx).await {
+            return ExecResult::failure(1, e);
+        }
 
         // Set stdin from pipeline (overrides redirect stdin)
         if let Some(input) = stdin {
@@ -371,8 +395,10 @@ impl PipelineRunner {
             // stage, not just the foreground one).
             let task_dispatcher: Arc<dyn CommandDispatcher> = dispatcher.fork_attached().await;
 
-            // Set up stdin from redirects on the child context
-            setup_stdin_redirects(&cmd, &mut stage_ctx);
+            // Set up stdin from redirects on the child context. A failure here
+            // (e.g. `cmd < missing`) fails this stage; surface it from inside
+            // the spawned task so the normal join/collection path reports it.
+            let stdin_setup = setup_stdin_redirects(&cmd, &mut stage_ctx).await;
 
             // Wire pipe_stdin: stage 0 gets parent stdin (if no redirect), others get pipe reader
             if i == 0 {
@@ -409,6 +435,11 @@ impl PipelineRunner {
             // so each concurrent stage's spans stay in the same trace.
             let handle: tokio::task::JoinHandle<(ExecResult, ExecContext)> =
                 tokio::spawn(crate::telemetry::bind_current_context(async move {
+                // A stdin-redirect setup failure short-circuits this stage.
+                if let Err(e) = stdin_setup {
+                    return (ExecResult::failure(1, e), stage_ctx);
+                }
+
                 // Receive structured data from previous stage (non-blocking).
                 // Using try_recv avoids a deadlock: streaming builtins (e.g. grep)
                 // write to their pipe_stdout during dispatch. If we blocked here

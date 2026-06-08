@@ -110,15 +110,16 @@ async fn unterminated_heredoc_with_dash_form_errors() {
 // Nested command substitution inside an interpolated heredoc body.
 //
 // **Known limitation (pre-existing, not heredoc-specific)**: redirect
-// target evaluation in `scheduler::pipeline::setup_stdin_redirects` goes
-// through the synchronous `eval_simple_expr`, which skips
+// *target expression* evaluation in `scheduler::pipeline::setup_stdin_redirects`
+// goes through the synchronous `eval_simple_expr`, which skips
 // `StringPart::CommandSubst` because it cannot execute pipelines. The
 // same limitation affects regular stdin redirects like `cmd < $(echo x)`.
-// Making this async requires making `setup_stdin_redirects` async and
-// threading a dispatcher through — out of scope for the heredoc work.
+// `setup_stdin_redirects` is now async (the file read routes through the VFS
+// backend), but the target *expression* is still evaluated synchronously;
+// threading a dispatcher into expr evaluation is the remaining work.
 //
-// Ignored until that refactor lands; both tests assert the *desired*
-// behaviour (bash-compatible). When the redirect path becomes async,
+// Ignored until that lands; both tests assert the *desired* behaviour
+// (bash-compatible). When target evaluation can run command substitution,
 // remove the `#[ignore]` and these should pass.
 // ============================================================================
 

@@ -372,6 +372,39 @@ priority; decide whether multi-arg should accumulate per-path errors.
 Captured here so context from `cleanups-todo.md` / old `issues.md`
 isn't lost when those files are deleted.
 
+- **Stdin redirect (`< file`) now reads through the VFS, honors `$PWD`, and fails loud — fixed 2026-06-08.**
+  `setup_stdin_redirects` (`scheduler/pipeline.rs`) read the target with
+  `std::fs::read_to_string` — bypassing the VFS entirely (host-fs leak in sandbox
+  mode, ignored VFS mounts), not resolving against cwd, and silently swallowing a
+  missing/unreadable file (`if let Ok(content)`) so the command ran with empty
+  stdin instead of erroring. Now the helper is `async`, resolves the target via
+  `ctx.resolve_path` and reads via `ctx.backend.read` (same path as `cat`), and a
+  missing file or non-UTF-8 content is a hard error (exit 1, `redirect: …`
+  message). Both call sites updated: `run_single` returns the failure directly;
+  the pipeline-stage path surfaces it from inside the spawned task. Two regression
+  tests (`sandbox_stdin_redirect_reads_via_vfs_and_cwd`,
+  `sandbox_stdin_redirect_missing_file_fails_loud`). **Remaining:** the redirect
+  *target expression* is still evaluated synchronously (`eval_simple_expr`), so
+  command substitution in a target/heredoc body (`cat < $(echo x)`) still doesn't
+  run — see the two `#[ignore]`d tests in `heredoc_tests.rs`; threading a
+  dispatcher into expr evaluation is the open work.
+
+- **Output redirects now resolve relative targets against `$PWD` — fixed 2026-06-08.**
+  `redirect_write`/`redirect_append` (`scheduler/pipeline.rs`) handed the raw
+  redirect target straight to `ctx.backend.write` with no cwd resolution, unlike
+  every other path operand. The router normalizes a bare relative path by
+  prepending `/` (`vfs/router.rs`), so `echo x > f` wrote `/f`, not `$PWD/f`. Two
+  symptoms: redirects ignored `cd` (`cd /sub; echo x > f` landed at `/f`), and
+  write/read disagreed — `echo x > f` then `cat f` failed because `cat` resolves
+  against cwd while the redirect resolved against `/`. Surfaced from kaibo, where
+  it made a sandbox test vacuous: a relative `>` into a read-only project landed
+  in the ephemeral `MemoryFs` `/` mount instead of being refused. Fix: both
+  helpers now call `ctx.resolve_path(path)` (the same cwd-relative, normalized
+  resolution `cat`/`cp`/etc. use) before handing the target to the backend;
+  absolute targets are unaffected. Two regression tests pin it
+  (`sandbox_relative_redirect_honors_cwd`, `sandbox_relative_append_honors_cwd`):
+  relative write+read agree at `$PWD/f`, and `cat /f` still fails.
+
 - **Space-form flag values to backend tools no longer silently dropped — fixed 2026-06-08.**
   `kj context create exp --type explorer` (space form) silently lost the value
   while `--type=explorer` (equals form) worked — a **privilege-escalation-by-typo**
