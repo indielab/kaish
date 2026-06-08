@@ -48,7 +48,7 @@
 
 mod job;
 mod pipe_stream;
-mod pipeline;
+pub(crate) mod pipeline;
 mod scatter;
 mod stderr_stream;
 mod stream;

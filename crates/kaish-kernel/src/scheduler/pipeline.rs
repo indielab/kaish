@@ -56,63 +56,71 @@ async fn apply_redirects(
                 }
             }
             RedirectKind::StdoutOverwrite => {
-                if let Some(path) = eval_redirect_target(&redir.target, ctx) {
-                    // Stream OutputData directly to file if available
-                    if let Some(output) = result.take_output_for_stream() {
-                        let mut buf = Vec::new();
-                        if let Err(e) = output.write_canonical(&mut buf, None) {
-                            return ExecResult::failure(1, format!("redirect: {e}"));
-                        }
-                        if let Err(e) = redirect_write(ctx, &path, &buf).await {
-                            return ExecResult::failure(1, format!("redirect: {e}"));
-                        }
-                    } else {
-                        if let Err(e) = redirect_write(ctx, &path, result.text_out().as_bytes()).await {
-                            return ExecResult::failure(1, format!("redirect: {e}"));
-                        }
+                let path = match eval_redirect_target(&redir.target, ctx).await {
+                    Ok(p) => p,
+                    Err(e) => return ExecResult::failure(1, format!("redirect: {e}")),
+                };
+                // Stream OutputData directly to file if available
+                if let Some(output) = result.take_output_for_stream() {
+                    let mut buf = Vec::new();
+                    if let Err(e) = output.write_canonical(&mut buf, None) {
+                        return ExecResult::failure(1, format!("redirect: {e}"));
                     }
-                    result.clear_out();
-                    result.set_output(None);
+                    if let Err(e) = redirect_write(ctx, &path, &buf).await {
+                        return ExecResult::failure(1, format!("redirect: {e}"));
+                    }
+                } else {
+                    if let Err(e) = redirect_write(ctx, &path, result.text_out().as_bytes()).await {
+                        return ExecResult::failure(1, format!("redirect: {e}"));
+                    }
                 }
+                result.clear_out();
+                result.set_output(None);
             }
             RedirectKind::StdoutAppend => {
-                if let Some(path) = eval_redirect_target(&redir.target, ctx) {
-                    // Stream OutputData directly if available
-                    if let Some(output) = result.take_output_for_stream() {
-                        let mut buf = Vec::new();
-                        if let Err(e) = output.write_canonical(&mut buf, None) {
-                            return ExecResult::failure(1, format!("redirect: {e}"));
-                        }
-                        if let Err(e) = redirect_append(ctx, &path, &buf).await {
-                            return ExecResult::failure(1, format!("redirect: {e}"));
-                        }
-                    } else {
-                        if let Err(e) = redirect_append(ctx, &path, result.text_out().as_bytes()).await {
-                            return ExecResult::failure(1, format!("redirect: {e}"));
-                        }
+                let path = match eval_redirect_target(&redir.target, ctx).await {
+                    Ok(p) => p,
+                    Err(e) => return ExecResult::failure(1, format!("redirect: {e}")),
+                };
+                // Stream OutputData directly if available
+                if let Some(output) = result.take_output_for_stream() {
+                    let mut buf = Vec::new();
+                    if let Err(e) = output.write_canonical(&mut buf, None) {
+                        return ExecResult::failure(1, format!("redirect: {e}"));
                     }
-                    result.clear_out();
-                    result.set_output(None);
+                    if let Err(e) = redirect_append(ctx, &path, &buf).await {
+                        return ExecResult::failure(1, format!("redirect: {e}"));
+                    }
+                } else {
+                    if let Err(e) = redirect_append(ctx, &path, result.text_out().as_bytes()).await {
+                        return ExecResult::failure(1, format!("redirect: {e}"));
+                    }
                 }
+                result.clear_out();
+                result.set_output(None);
             }
             RedirectKind::Stderr => {
-                if let Some(path) = eval_redirect_target(&redir.target, ctx) {
-                    if let Err(e) = redirect_write(ctx, &path, result.err.as_bytes()).await {
-                        return ExecResult::failure(1, format!("redirect: {e}"));
-                    }
-                    result.err.clear();
+                let path = match eval_redirect_target(&redir.target, ctx).await {
+                    Ok(p) => p,
+                    Err(e) => return ExecResult::failure(1, format!("redirect: {e}")),
+                };
+                if let Err(e) = redirect_write(ctx, &path, result.err.as_bytes()).await {
+                    return ExecResult::failure(1, format!("redirect: {e}"));
                 }
+                result.err.clear();
             }
             RedirectKind::Both => {
-                if let Some(path) = eval_redirect_target(&redir.target, ctx) {
-                    let combined = format!("{}{}", result.text_out(), result.err);
-                    if let Err(e) = redirect_write(ctx, &path, combined.as_bytes()).await {
-                        return ExecResult::failure(1, format!("redirect: {e}"));
-                    }
-                    result.clear_out();
-                    result.set_output(None);
-                    result.err.clear();
+                let path = match eval_redirect_target(&redir.target, ctx).await {
+                    Ok(p) => p,
+                    Err(e) => return ExecResult::failure(1, format!("redirect: {e}")),
+                };
+                let combined = format!("{}{}", result.text_out(), result.err);
+                if let Err(e) = redirect_write(ctx, &path, combined.as_bytes()).await {
+                    return ExecResult::failure(1, format!("redirect: {e}"));
                 }
+                result.clear_out();
+                result.set_output(None);
+                result.err.clear();
             }
             // Pre-execution redirects - already handled before command execution
             RedirectKind::Stdin | RedirectKind::HereDoc | RedirectKind::HereString => {}
@@ -126,9 +134,24 @@ async fn apply_redirects(
     result
 }
 
-/// Evaluate a redirect target expression to get the file path.
-fn eval_redirect_target(expr: &Expr, ctx: &ExecContext) -> Option<String> {
-    eval_simple_expr(expr, ctx).map(|v| value_to_string(&v))
+/// Evaluate a redirect target expression to get the file path (or heredoc body).
+///
+/// Routes through `ctx.dispatcher` so command substitution (`$(...)`) in the
+/// target runs — e.g. `cat < $(echo f)`, `echo x > $(echo f)`, and `$(...)`
+/// inside a heredoc body. Falls back to the sync evaluator (which skips
+/// command substitution) only when no dispatcher is attached.
+async fn eval_redirect_target(expr: &Expr, ctx: &ExecContext) -> Result<String, String> {
+    if let Some(dispatcher) = &ctx.dispatcher {
+        dispatcher
+            .eval_expr(expr, ctx)
+            .await
+            .map(|v| value_to_string(&v))
+            .map_err(|e| e.to_string())
+    } else {
+        eval_simple_expr(expr, ctx)
+            .map(|v| value_to_string(&v))
+            .ok_or_else(|| "could not evaluate redirect target".to_string())
+    }
 }
 
 /// Write data to a file via the VFS backend.
@@ -163,9 +186,7 @@ async fn setup_stdin_redirects(cmd: &Command, ctx: &mut ExecContext) -> Result<(
     for redir in &cmd.redirects {
         match &redir.kind {
             RedirectKind::Stdin => {
-                let Some(path) = eval_redirect_target(&redir.target, ctx) else {
-                    return Err("redirect: could not evaluate stdin target".to_string());
-                };
+                let path = eval_redirect_target(&redir.target, ctx).await?;
                 let resolved = ctx.resolve_path(&path);
                 let data = ctx
                     .backend
@@ -181,21 +202,20 @@ async fn setup_stdin_redirects(cmd: &Command, ctx: &mut ExecContext) -> Result<(
                     Expr::Literal(Value::String(content)) => {
                         ctx.set_stdin(content.clone());
                     }
+                    // Heredoc bodies may contain `$(...)`; route through the
+                    // dispatcher so command substitution runs.
                     expr => {
-                        if let Some(value) = eval_simple_expr(expr, ctx) {
-                            ctx.set_stdin(value_to_string(&value));
-                        }
+                        let body = eval_redirect_target(expr, ctx).await?;
+                        ctx.set_stdin(body);
                     }
                 }
             }
             RedirectKind::HereString => {
                 // Per bash, here-strings append a trailing newline to the
                 // expanded word so the command receives a terminated line.
-                if let Some(value) = eval_simple_expr(&redir.target, ctx) {
-                    let mut s = value_to_string(&value);
-                    s.push('\n');
-                    ctx.set_stdin(s);
-                }
+                let mut s = eval_redirect_target(&redir.target, ctx).await?;
+                s.push('\n');
+                ctx.set_stdin(s);
             }
             _ => {}
         }
@@ -773,7 +793,7 @@ pub fn build_tool_args(args: &[Arg], ctx: &ExecContext, schema: Option<&ToolSche
 }
 
 /// Simple expression evaluation for args (without full scope access).
-fn eval_simple_expr(expr: &Expr, ctx: &ExecContext) -> Option<Value> {
+pub(crate) fn eval_simple_expr(expr: &Expr, ctx: &ExecContext) -> Option<Value> {
     match expr {
         Expr::Literal(value) => Some(eval_literal(value, ctx)),
         Expr::VarRef(path) => ctx.scope.resolve_path(path),

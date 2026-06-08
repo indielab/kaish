@@ -26,15 +26,13 @@ use std::sync::Arc;
 use anyhow::Result;
 use async_trait::async_trait;
 
-use crate::ast::Command;
+use crate::ast::{Command, Expr, Value};
 use crate::interpreter::ExecResult;
 use crate::tools::ExecContext;
 
 // The following imports are only used by the test-only `BackendDispatcher`.
 #[cfg(test)]
-use crate::ast::{Arg, Value};
-#[cfg(all(test, feature = "subprocess"))]
-use crate::ast::Expr;
+use crate::ast::Arg;
 #[cfg(test)]
 use crate::backend::BackendError;
 #[cfg(test)]
@@ -76,6 +74,17 @@ pub trait CommandDispatcher: Send + Sync {
     /// Implementations should handle schema-aware argument parsing and
     /// output format extraction internally.
     async fn dispatch(&self, cmd: &Command, ctx: &mut ExecContext) -> Result<ExecResult>;
+
+    /// Evaluate an expression through the full async chain.
+    ///
+    /// Unlike the runner's sync `eval_simple_expr`, this can run command
+    /// substitution (`$(...)`) because it has access to pipeline execution.
+    /// Used for redirect targets and heredoc bodies so `cat < $(cmd)`,
+    /// `echo x > $(cmd)`, and `$(...)` inside heredoc bodies work. The `ctx`
+    /// carries scope/cwd/backend for dispatchers that evaluate against it;
+    /// stateful dispatchers (Kernel) snapshot their own session state and
+    /// only let command output escape (side effects like `cd` do not).
+    async fn eval_expr(&self, expr: &Expr, ctx: &ExecContext) -> Result<Value>;
 
     /// Fork the dispatcher for concurrent execution (detached).
     ///
@@ -431,6 +440,13 @@ impl CommandDispatcher for BackendDispatcher {
         };
 
         Ok(result)
+    }
+
+    /// Sync-only evaluation (no command substitution) — matches this
+    /// test dispatcher's documented "no async argument evaluation" limit.
+    async fn eval_expr(&self, expr: &Expr, ctx: &ExecContext) -> Result<Value> {
+        crate::scheduler::pipeline::eval_simple_expr(expr, ctx)
+            .ok_or_else(|| anyhow::anyhow!("cannot evaluate expression in test dispatcher"))
     }
 
     /// BackendDispatcher is stateless, so a fork is just a clone.

@@ -4112,6 +4112,16 @@ impl CommandDispatcher for Kernel {
         self.dispatch_command(cmd, ctx).await
     }
 
+    /// Evaluate an expression through the kernel's async chain, including
+    /// command substitution. Delegates to `eval_expr_async`, which snapshots
+    /// the kernel's scope/cwd and restores them after any `$(...)` runs, so
+    /// only command output escapes. The `ctx` is unused here because the
+    /// kernel evaluates against its own session state (a fork carries the
+    /// pipeline stage's snapshot); var refs resolve against that scope.
+    async fn eval_expr(&self, expr: &Expr, _ctx: &ExecContext) -> Result<Value> {
+        self.eval_expr_async(expr).await
+    }
+
     /// Produce a forked dispatcher with independent mutable state (detached).
     ///
     /// Calls the inherent `Kernel::fork` method (note the UFCS to avoid

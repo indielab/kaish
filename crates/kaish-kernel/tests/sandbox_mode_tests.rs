@@ -148,6 +148,26 @@ async fn sandbox_stdin_redirect_missing_file_fails_loud() {
 }
 
 #[tokio::test]
+async fn sandbox_redirect_target_command_substitution() {
+    // Command substitution must run in redirect targets: both the output
+    // target of `>` and the source of `<`. The subst yields the whole path.
+    let k = sandbox_kernel().await;
+    let r = k
+        .execute("echo hi > $(echo /tmp/gen.txt) && cat /tmp/gen.txt")
+        .await
+        .expect("execute failed");
+    assert!(r.ok(), "expected success, got code={} err={:?}", r.code, r.err);
+    assert_eq!(r.text_out().trim(), "hi");
+
+    let r = k
+        .execute("echo via-subst > /tmp/src && cat < $(echo /tmp/src)")
+        .await
+        .expect("execute failed");
+    assert!(r.ok(), "expected success, got code={} err={:?}", r.code, r.err);
+    assert_eq!(r.text_out().trim(), "via-subst");
+}
+
+#[tokio::test]
 async fn sandbox_test_builtin_cannot_probe_host() {
     let k = sandbox_kernel().await;
     // test -r should route through VFS, not the real filesystem.

@@ -109,22 +109,13 @@ async fn unterminated_heredoc_with_dash_form_errors() {
 // ============================================================================
 // Nested command substitution inside an interpolated heredoc body.
 //
-// **Known limitation (pre-existing, not heredoc-specific)**: redirect
-// *target expression* evaluation in `scheduler::pipeline::setup_stdin_redirects`
-// goes through the synchronous `eval_simple_expr`, which skips
-// `StringPart::CommandSubst` because it cannot execute pipelines. The
-// same limitation affects regular stdin redirects like `cmd < $(echo x)`.
-// `setup_stdin_redirects` is now async (the file read routes through the VFS
-// backend), but the target *expression* is still evaluated synchronously;
-// threading a dispatcher into expr evaluation is the remaining work.
-//
-// Ignored until that lands; both tests assert the *desired* behaviour
-// (bash-compatible). When target evaluation can run command substitution,
-// remove the `#[ignore]` and these should pass.
+// Redirect target/heredoc-body evaluation routes through
+// `CommandDispatcher::eval_expr` (see `scheduler::pipeline::eval_redirect_target`),
+// so command substitution (`$(...)`) runs in heredoc bodies and stdin/output
+// redirect targets. Fixed 2026-06-08.
 // ============================================================================
 
 #[tokio::test]
-#[ignore = "blocked on async redirect-target evaluation (see module comment)"]
 async fn nested_command_substitution_in_body() {
     let k = setup().await;
     let r = k
@@ -135,7 +126,6 @@ async fn nested_command_substitution_in_body() {
 }
 
 #[tokio::test]
-#[ignore = "blocked on async redirect-target evaluation (see module comment)"]
 async fn nested_pipeline_command_substitution_in_body() {
     let k = setup().await;
     let r = k

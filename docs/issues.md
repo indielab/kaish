@@ -102,6 +102,18 @@ Currently declared as `_extended: bool` accept-and-ignore. Options:
 unnecessary; (c) note in the help text. (a) is lowest churn — leave
 unless someone reports surprise.
 
+### Redirect targets parse as a single primary expr — no interpolated paths
+`crates/kaish-kernel/src/parser.rs:1540` (`redirect_parser`) binds the target
+with `primary_expr_parser()`, which matches exactly one primary expression. So
+`> $(echo /tmp/x)` and `> $FILE` work, but a target that *interpolates* literal
+text with a substitution/variable — `> /tmp/$(echo x).txt` or `> $dir/out` — is
+a parse error (`found '$(' expected redirect, …`). Bash treats a redirect target
+as a single word that undergoes expansion, so `/tmp/$(…).txt` is one word. Fix:
+parse the target as a word/interpolation (the same machinery argv operands use)
+rather than a lone primary expr, then evaluate via the now-async
+`eval_redirect_target`. Surfaced 2026-06-08 while adding command-substitution
+support to redirect targets; the bare-subst form is a working workaround.
+
 ---
 
 ## P3 — Scheduler and infra
@@ -383,11 +395,28 @@ isn't lost when those files are deleted.
   message). Both call sites updated: `run_single` returns the failure directly;
   the pipeline-stage path surfaces it from inside the spawned task. Two regression
   tests (`sandbox_stdin_redirect_reads_via_vfs_and_cwd`,
-  `sandbox_stdin_redirect_missing_file_fails_loud`). **Remaining:** the redirect
-  *target expression* is still evaluated synchronously (`eval_simple_expr`), so
-  command substitution in a target/heredoc body (`cat < $(echo x)`) still doesn't
-  run — see the two `#[ignore]`d tests in `heredoc_tests.rs`; threading a
-  dispatcher into expr evaluation is the open work.
+  `sandbox_stdin_redirect_missing_file_fails_loud`). Command substitution in
+  redirect targets was a follow-on fix (see next entry).
+
+- **Command substitution now runs in redirect targets and heredoc bodies — fixed 2026-06-08.**
+  Redirect-target and heredoc-body evaluation went through the synchronous
+  `eval_simple_expr`/`eval_string_parts_sync`, whose `CommandSubst` arm was a
+  no-op (no pipeline execution available), so `cat < $(echo x)`,
+  `echo x > $(echo f)`, and `$(...)` inside a heredoc body silently dropped the
+  substitution. Fix (design chosen with the maintainer): added
+  `async fn eval_expr(&self, expr, ctx)` to the `CommandDispatcher` trait — the
+  Kernel delegates to the existing `eval_expr_async` (snapshots scope/cwd, runs
+  the pipeline, restores; only output escapes), the test `BackendDispatcher`
+  keeps its sync-only behavior. `eval_redirect_target` is now async, returns
+  `Result`, and routes through `ctx.dispatcher.eval_expr` (already populated on
+  every `ExecContext`), falling back to the sync evaluator only when no
+  dispatcher is attached. All four output-redirect arms in `apply_redirects` and
+  the stdin/heredoc/here-string arms in `setup_stdin_redirects` were converted to
+  the async fail-loud path. Un-ignored the two `heredoc_tests` command-subst
+  tests; added `sandbox_redirect_target_command_substitution`. **Remaining:**
+  command substitution *embedded in* an interpolated redirect path
+  (`> /tmp/$(echo x).txt`) still fails to parse — see P2 below; the bare-subst
+  form (`> $(echo /tmp/x.txt)`) works.
 
 - **Output redirects now resolve relative targets against `$PWD` — fixed 2026-06-08.**
   `redirect_write`/`redirect_append` (`scheduler/pipeline.rs`) handed the raw
