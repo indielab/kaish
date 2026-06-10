@@ -166,15 +166,6 @@ Remaining open work:
 
 ## P2 — Focused refactors & real bugs
 
-### `break 2` silently discards output accumulated before the break
-Verified 2026-06-09: a nested loop printing before `break 2` prints **nothing**
-(exit 0); single-level `break` keeps its output. `ControlFlow::break_n`
-(`control_flow.rs:41-46`) carries a fresh empty `ExecResult`; when the Break
-propagates past the inner loop the accumulated output is replaced rather than
-merged. Bash prints the pre-break output. `LANGUAGE.md:240` documents `break 2`
-with no caveat. Fix: merge the loop's accumulated output into the propagating
-Break result; kernel-routed test asserting pre-break output survives.
-
 ### `--` does not protect dash-words with internal hyphens; snapshot blesses the bug
 `echo -- -not-a-flag` prints `-not -a -flag` (three args; external argv gets
 four: `[--][-not][-a][-flag]`). Mechanism: `ShortFlag` regex
@@ -687,6 +678,17 @@ priority; decide whether multi-arg should accumulate per-path errors.
 
 Captured here so context from `cleanups-todo.md` / old `issues.md`
 isn't lost when those files are deleted.
+
+- **`break N` / `continue N` no longer discard pre-signal output — fixed 2026-06-10.**
+  A nested loop printing before `break 2` printed nothing: the Break signal
+  carried a fresh empty `ExecResult` and *replaced* the loop's accumulated
+  output as it propagated up, instead of merging. Fix in `kernel.rs`: two
+  helpers (`fold_loop_output_into_flow` when a break/continue propagates to an
+  outer loop, `accumulate_flow_output` when a loop finally handles one) applied
+  to the For and While break/continue arms. Bash-cross-checked compat tests
+  (`break_2_preserves_inner_output`, `break_2_preserves_outer_and_inner_output`,
+  `continue_2_preserves_inner_output`, plus the single-level control). Same
+  defect fixed for `continue N`, which shared the mechanism.
 
 - **`${VAR:-"default"}` default-word quote removal — fixed 2026-06-10.** The
   default word was passed verbatim to `parse_interpolated_string`, so quote

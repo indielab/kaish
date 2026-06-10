@@ -558,3 +558,34 @@ shell_compat! {
     script: r#"NAME=actual; echo ${NAME:-"default"}"#,
     eq: "actual",
 }
+
+// =============================================================================
+// `break N` / `continue N` must not discard output printed before the signal.
+// The signal used to replace the loop's accumulated result on its way up, so
+// `break 2` swallowed everything the inner loop had printed. Regression for
+// the 2026-06-09 finding.
+// =============================================================================
+
+shell_compat! {
+    name: break_2_preserves_inner_output,
+    script: "for i in 1 2; do for j in a b; do echo \"$j\"; break 2; done; done",
+    eq: "a",
+}
+
+shell_compat! {
+    name: break_1_preserves_output,
+    script: "for i in 1 2 3; do echo \"$i\"; break; done",
+    eq: "1",
+}
+
+shell_compat! {
+    name: break_2_preserves_outer_and_inner_output,
+    script: "for i in x y; do echo \"outer$i\"; for j in a b; do echo \"inner$j\"; break 2; done; done",
+    eq: "outerx\ninnera",
+}
+
+shell_compat! {
+    name: continue_2_preserves_inner_output,
+    script: "for i in 1 2; do for j in a b; do echo \"i${i}j${j}\"; continue 2; done; done",
+    eq: "i1ja\ni2ja",
+}

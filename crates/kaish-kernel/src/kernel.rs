@@ -1664,16 +1664,20 @@ impl Kernel {
                             }
                             ControlFlow::Break { .. } => {
                                 if flow.decrement_level() {
+                                    accumulate_flow_output(&mut result, &flow);
                                     break 'outer;
                                 }
+                                fold_loop_output_into_flow(std::mem::take(&mut result), &mut flow);
                                 let mut scope = self.scope.write().await;
                                 scope.pop_frame();
                                 return Ok(flow);
                             }
                             ControlFlow::Continue { .. } => {
                                 if flow.decrement_level() {
+                                    accumulate_flow_output(&mut result, &flow);
                                     continue 'outer;
                                 }
+                                fold_loop_output_into_flow(std::mem::take(&mut result), &mut flow);
                                 let mut scope = self.scope.write().await;
                                 scope.pop_frame();
                                 return Ok(flow);
@@ -1726,14 +1730,18 @@ impl Kernel {
                             }
                             ControlFlow::Break { .. } => {
                                 if flow.decrement_level() {
+                                    accumulate_flow_output(&mut result, &flow);
                                     break 'outer;
                                 }
+                                fold_loop_output_into_flow(std::mem::take(&mut result), &mut flow);
                                 return Ok(flow);
                             }
                             ControlFlow::Continue { .. } => {
                                 if flow.decrement_level() {
+                                    accumulate_flow_output(&mut result, &flow);
                                     continue 'outer;
                                 }
+                                fold_loop_output_into_flow(std::mem::take(&mut result), &mut flow);
                                 return Ok(flow);
                             }
                             ControlFlow::Return { .. } | ControlFlow::Exit { .. } => {
@@ -4232,6 +4240,28 @@ fn accumulate_result(accumulated: &mut ExecResult, new: &ExecResult) {
     accumulated.original_code = new.original_code;
     accumulated.content_type = new.content_type.clone();
     accumulated.baggage.clone_from(&new.baggage);
+}
+
+/// Fold a loop's accumulated output into a break/continue signal that is
+/// propagating to an *outer* loop. Output printed before `break N`/`continue N`
+/// (with `N > 1`) would otherwise be discarded when the signal replaces the
+/// loop's result on its way up. The loop's output comes first (it ran before
+/// the signal was raised), then the signal's already-carried output.
+fn fold_loop_output_into_flow(loop_output: ExecResult, flow: &mut ControlFlow) {
+    if let ControlFlow::Break { result, .. } | ControlFlow::Continue { result, .. } = flow {
+        let mut merged = loop_output;
+        accumulate_result(&mut merged, result);
+        *result = merged;
+    }
+}
+
+/// Accumulate the output a break/continue signal carried (from inner loops it
+/// propagated through) into the loop that finally handles it, so it survives
+/// into that loop's result.
+fn accumulate_flow_output(accumulated: &mut ExecResult, flow: &ControlFlow) {
+    if let ControlFlow::Break { result, .. } | ControlFlow::Continue { result, .. } = flow {
+        accumulate_result(accumulated, result);
+    }
 }
 
 /// Check if a value is truthy.
