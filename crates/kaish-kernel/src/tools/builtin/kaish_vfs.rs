@@ -2,19 +2,20 @@
 //!
 //! Subcommands: status, diff, commit, reset.
 //!
-//! Every subcommand requires an active overlay session (`kernel started with
-//! --overlay` or `KernelConfig::with_overlay(true)`). Without one, the
-//! subcommand exits 1 with a clear message. In no-default-features
-//! (minimal/wasm) builds, the `commit` subcommand additionally fails at
-//! runtime because `LocalFs` is absent — other subcommands still work
-//! against the in-memory overlay.
+//! `status` always works: it reports `mode: transaction` inside an overlay
+//! session and `mode: direct` otherwise, so an agent can ask "what session am
+//! I in?" without an error path. The mutating/inspecting subcommands (diff,
+//! commit, reset) are meaningless without a transaction and exit 1 with a
+//! clear message when no overlay is active (`--overlay` /
+//! `KernelConfig::with_overlay(true)`). In no-default-features (minimal/wasm)
+//! builds, the `commit` subcommand additionally fails at runtime because
+//! `LocalFs` is absent — other subcommands still work against the in-memory
+//! overlay.
 
 use async_trait::async_trait;
 use clap::{CommandFactory, Parser};
 
-#[cfg(all(feature = "localfs", feature = "overlay"))]
-use crate::interpreter::{OutputData, OutputNode};
-use crate::interpreter::ExecResult;
+use crate::interpreter::{ExecResult, OutputData, OutputNode};
 use crate::tools::{schema_from_clap, ExecContext, ToolCtx, GlobalFlags, Tool, ToolArgs, ToolSchema};
 
 /// kaish-vfs tool: inspect and manage the overlay VFS transaction.
@@ -49,7 +50,7 @@ impl Tool for KaishVfs {
             "kaish-vfs",
             "Inspect and manage the overlay VFS transaction (requires --overlay)",
             [
-                ("Show overlay status", "kaish-vfs status"),
+                ("Show session mode and overlay status (works in any session)", "kaish-vfs status"),
                 ("Show unified diff of all changes", "kaish-vfs diff"),
                 ("Show diff for a specific path", "kaish-vfs diff src/main.rs"),
                 ("Commit all changes to real files", "kaish-vfs commit"),
@@ -120,12 +121,32 @@ impl Tool for KaishVfs {
 
 // ── Subcommand implementations ──────────────────────────────────────────────
 
+/// Status for a session with no overlay: not an error — `mode: direct` is a
+/// valid answer to "what session am I in?". The budget row still applies
+/// (kernels can be budgeted without an overlay).
+fn direct_mode_status(ctx: &ExecContext) -> ExecResult {
+    let budget_str = match &ctx.vfs_budget {
+        Some(b) => format!(
+            "{} used / {} limit",
+            format_bytes(b.used()),
+            format_bytes(b.limit())
+        ),
+        None => "unlimited".to_string(),
+    };
+    let headers = vec!["KEY".to_string(), "VALUE".to_string()];
+    let rows = vec![
+        OutputNode::new("mode").with_cells(vec!["direct".to_string()]),
+        OutputNode::new("budget").with_cells(vec![budget_str]),
+    ];
+    ExecResult::with_output(OutputData::table(headers, rows))
+}
+
 #[cfg(all(feature = "localfs", feature = "overlay"))]
 async fn cmd_status(ctx: &ExecContext) -> ExecResult {
     use kaish_vfs::Filesystem as _;  // for resident_bytes()
     let handle = match &ctx.overlay_handle {
         Some(h) => h.clone(),
-        None => return ExecResult::failure(1, NO_OVERLAY_MSG),
+        None => return direct_mode_status(ctx),
     };
 
     let is_dirty = handle.fs.is_dirty().await;
@@ -157,6 +178,7 @@ async fn cmd_status(ctx: &ExecContext) -> ExecResult {
 
     let headers = vec!["KEY".to_string(), "VALUE".to_string()];
     let rows = vec![
+        OutputNode::new("mode").with_cells(vec!["transaction".to_string()]),
         OutputNode::new("dirty").with_cells(vec![if is_dirty { "yes" } else { "no" }.to_string()]),
         OutputNode::new("added").with_cells(vec![added.to_string()]),
         OutputNode::new("modified").with_cells(vec![modified.to_string()]),
@@ -171,8 +193,8 @@ async fn cmd_status(ctx: &ExecContext) -> ExecResult {
 
 #[cfg(not(all(feature = "localfs", feature = "overlay")))]
 async fn cmd_status(ctx: &ExecContext) -> ExecResult {
-    let _ = ctx;
-    ExecResult::failure(1, NO_OVERLAY_MSG)
+    // No overlay support in this build: every session is direct mode.
+    direct_mode_status(ctx)
 }
 
 #[cfg(all(feature = "localfs", feature = "overlay"))]
@@ -432,7 +454,6 @@ async fn cmd_reset(_path_arg: Option<&str>, ctx: &ExecContext) -> ExecResult {
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
 /// Format a byte count in a human-readable form.
-#[cfg(all(feature = "localfs", feature = "overlay"))]
 fn format_bytes(bytes: u64) -> String {
     const UNITS: &[&str] = &["B", "KiB", "MiB", "GiB", "TiB"];
     if bytes == 0 {
@@ -503,12 +524,25 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_status_without_overlay_returns_error() {
+    async fn test_status_without_overlay_reports_direct_mode() {
         let mut ctx = make_ctx_no_overlay();
         let result = KaishVfs.execute(args_with_subcmd("status"), &mut ctx).await;
-        assert!(!result.ok());
-        assert!(result.err.contains("no overlay active") || result.text_out().contains("no overlay active"),
-            "expected no-overlay message, got: err='{}' out='{}'", result.err, result.text_out());
+        assert!(
+            result.ok(),
+            "status is introspection — it answers in any session: err='{}'",
+            result.err
+        );
+        let out = result.text_out();
+        assert!(
+            out.lines().any(|l| l == "mode\tdirect"),
+            "expected mode=direct row, got: {}",
+            out
+        );
+        assert!(
+            out.lines().any(|l| l == "budget\tunlimited"),
+            "expected budget row, got: {}",
+            out
+        );
     }
 
     #[tokio::test]
@@ -540,7 +574,6 @@ mod tests {
         assert!(result.err.contains("unknown subcommand"));
     }
 
-    #[cfg(all(feature = "localfs", feature = "overlay"))]
     #[test]
     fn test_format_bytes() {
         assert_eq!(format_bytes(0), "0 B");

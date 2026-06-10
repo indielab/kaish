@@ -313,6 +313,7 @@ mod overlay_tests {
         // Overlay must still be dirty (file_b untouched by reset).
         let (status, code) = run(&kernel, "kaish-vfs status").await;
         assert_eq!(code, 0);
+        assert_eq!(status_field(&status, "mode"), "transaction");
         assert_eq!(status_field(&status, "dirty"), "yes",
             "overlay should still be dirty after partial reset: {}", status);
         assert_eq!(status_field(&status, "modified"), "1",
@@ -320,20 +321,44 @@ mod overlay_tests {
     }
 
     // ------------------------------------------------------------------
-    // Test 3: kaish-vfs on a non-overlay kernel returns error
+    // Test 3: kaish-vfs on a non-overlay kernel — status reports direct
+    // mode (introspection, no error path); transaction subcommands error.
     // ------------------------------------------------------------------
 
     #[tokio::test]
-    async fn kaish_vfs_without_overlay_exits_1() {
+    async fn kaish_vfs_without_overlay() {
         let kernel = Kernel::new(
             KernelConfig::isolated()
         ).expect("kernel");
 
+        // status answers "what session am I in?" in any session.
         let result = kernel.execute("kaish-vfs status").await.expect("execute");
-        assert_ne!(result.code, 0, "kaish-vfs status on non-overlay kernel should exit non-zero");
-        let combined = format!("{}{}", result.text_out(), result.err);
-        assert!(combined.contains("no overlay active"),
-            "should say 'no overlay active': {}", combined);
+        assert_eq!(
+            result.code, 0,
+            "kaish-vfs status must work in any session: {}",
+            result.err
+        );
+        let status = result.text_out();
+        assert_eq!(status_field(&status, "mode"), "direct");
+        assert_eq!(status_field(&status, "budget"), "unlimited");
+
+        // The transaction subcommands stay loud without an overlay.
+        for subcmd in ["diff", "commit", "reset"] {
+            let result = kernel
+                .execute(&format!("kaish-vfs {subcmd}"))
+                .await
+                .expect("execute");
+            assert_ne!(
+                result.code, 0,
+                "kaish-vfs {subcmd} on a non-overlay kernel should exit non-zero"
+            );
+            let combined = format!("{}{}", result.text_out(), result.err);
+            assert!(
+                combined.contains("no overlay active"),
+                "kaish-vfs {subcmd} should say 'no overlay active': {}",
+                combined
+            );
+        }
     }
 
     // ------------------------------------------------------------------

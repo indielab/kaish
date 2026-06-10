@@ -17,12 +17,15 @@ KernelConfig::with_overlay(true)      # embedder API
 
 ## kaish-vfs subcommands
 
-All subcommands require an active overlay session. Without one they exit 1
-with a clear message.
+`kaish-vfs status` works in any session: it reports `mode: transaction`
+inside an overlay session and `mode: direct` (plus the budget) otherwise, so
+you can always ask "what session am I in?" without an error path. The other
+subcommands require an active overlay session — without one they exit 1 with
+a clear message.
 
 | Subcommand | Description |
 |---|---|
-| `kaish-vfs status` | Is the overlay dirty? Counts by kind, resident bytes, budget. |
+| `kaish-vfs status` | Session mode (direct/transaction); when in transaction: dirty?, counts by kind, resident bytes, budget. |
 | `kaish-vfs diff [path...]` | Unified diff of pending changes. Exits 1 when changes exist, 0 when clean. With path args, filtered. |
 | `kaish-vfs commit` | Write all changes to the real filesystem, then reset. |
 | `kaish-vfs reset [path]` | Discard one path's edits, or all of them. |
