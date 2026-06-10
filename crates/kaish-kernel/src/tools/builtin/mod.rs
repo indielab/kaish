@@ -52,6 +52,7 @@ mod kaish_last;
 mod kaish_trash;
 mod kaish_status;
 mod kaish_version;
+mod kaish_vfs;
 mod kill;
 mod ln;
 mod ls;
@@ -147,6 +148,7 @@ pub fn register_builtins(registry: &mut ToolRegistry) {
     registry.register(kaish_trash::KaishTrash);
     registry.register(kaish_status::KaishStatus);
     registry.register(kaish_version::KaishVersion);
+    registry.register(kaish_vfs::KaishVfs);
     registry.register(kill::Kill);
     registry.register(ln::Ln);
     registry.register(ls::Ls);

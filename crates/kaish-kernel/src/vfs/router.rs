@@ -71,6 +71,7 @@ impl VfsRouter {
             .map(|(path, fs)| MountInfo {
                 path: path.clone(),
                 read_only: fs.read_only(),
+                resident_bytes: fs.resident_bytes(),
             })
             .collect()
     }

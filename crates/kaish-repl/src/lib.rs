@@ -723,6 +723,84 @@ fn resolve_prompt(repl: &Repl) -> String {
 
 // ── Entry points ────────────────────────────────────────────────────
 
+/// Run the REPL with optional overlay mode.
+///
+/// When `overlay` is `true`, writes are virtual (copy-on-write overlay).
+/// Use `kaish-vfs commit` to apply changes to real files.
+pub fn run_with_overlay(overlay: bool) -> Result<()> {
+    println!("会sh — kaish v{}", env!("CARGO_PKG_VERSION"));
+    use kaish_kernel::help::{compose, Recipe, SchemaContent};
+
+    if overlay {
+        println!("[overlay mode: writes are virtual — use 'kaish-vfs commit' to apply]");
+    }
+    println!("{}", compose(&Recipe::repl_welcome(), &SchemaContent::new(&[])));
+
+    let config = KernelConfig::repl()
+        .with_interactive(true)
+        .with_initial_vars(os_env_vars())
+        .with_overlay(overlay);
+    let mut repl = Repl::with_config(config)?;
+
+    // Source RC file (interactive only)
+    load_rc_file(&repl);
+
+    let helper = KaishHelper::new(
+        Box::new(repl.client.clone()),
+        repl.runtime.handle().clone(),
+    );
+
+    let mut rl: Editor<KaishHelper, DefaultHistory> =
+        Editor::new().context("Failed to create editor")?;
+    rl.set_helper(Some(helper));
+
+    let history_path = load_history(&mut rl);
+
+    loop {
+        let prompt_string = resolve_prompt(&repl);
+        let prompt: &str = &prompt_string;
+
+        match rl.readline(prompt) {
+            Ok(line) => {
+                if let Err(e) = rl.add_history_entry(line.as_str()) {
+                    tracing::warn!("Failed to add history entry: {}", e);
+                }
+
+                match repl.process_line(&line) {
+                    ProcessResult::Output(output) => {
+                        if output.ends_with('\n') {
+                            print!("{}", output);
+                        } else {
+                            println!("{}", output);
+                        }
+                    }
+                    ProcessResult::Empty => {}
+                    ProcessResult::Exit => {
+                        save_history(&mut rl, &history_path);
+                        return Ok(());
+                    }
+                }
+            }
+            Err(ReadlineError::Interrupted) => {
+                println!("^C");
+                continue;
+            }
+            Err(ReadlineError::Eof) => {
+                println!("^D");
+                break;
+            }
+            Err(err) => {
+                eprintln!("Error: {}", err);
+                break;
+            }
+        }
+    }
+
+    save_history(&mut rl, &history_path);
+
+    Ok(())
+}
+
 /// Run the REPL.
 pub fn run() -> Result<()> {
     println!("会sh — kaish v{}", env!("CARGO_PKG_VERSION"));

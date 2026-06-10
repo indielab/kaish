@@ -183,6 +183,23 @@ pub const FRAGMENTS: &[Fragment] = &[
         "When orchestrating tools, prefer `--json` piped through `jq` — consuming \
          structured data beats scraping text output.",
     ),
+    en(
+        Concept::Foundations,
+        "overlay-mode",
+        Variant::Rule,
+        Depth::Summary,
+        Some(Audience::Agent),
+        "**Overlay mode** (opt-in: `--overlay` flag or `KernelConfig::with_overlay`). \
+         All writes go into a virtual in-memory layer; the real filesystem is never \
+         touched until you explicitly commit. Use `kaish-vfs` to inspect and finalize \
+         the transaction: `kaish-vfs status` (dirty flag + counts), `kaish-vfs diff` \
+         (unified diff), `kaish-vfs commit` (write to real files), \
+         `kaish-vfs reset [path]` (discard edits). \
+         **MCP per-call rule**: each `execute()` call gets a fresh kernel and a fresh \
+         overlay transaction. `kaish-vfs commit` MUST run in the same call as the \
+         writes — if you commit in a later call the transaction from the write call \
+         was already discarded.",
+    ),
     // ---- Syntax reference (single source for content/en/syntax.md) -----------
     syntax_section(
         "variables",

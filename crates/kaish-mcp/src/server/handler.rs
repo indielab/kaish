@@ -62,6 +62,12 @@ pub struct KaishServerHandler {
     /// Paths to init scripts loaded before each execute() call.
     /// Re-read from disk on each call so edits take effect without restart.
     init_paths: Vec<PathBuf>,
+    /// Whether to enable overlay mode for each execute() call.
+    ///
+    /// Each call gets a fresh kernel, so the overlay is a per-call transaction:
+    /// `kaish-vfs commit` must run in the SAME call as the writes, or the
+    /// transaction is discarded when the kernel is dropped at call exit.
+    overlay: bool,
 }
 
 /// The client-facing description of the `execute` tool, composed at runtime.
@@ -150,7 +156,16 @@ impl KaishServerHandler {
             tool_schemas,
             nonce_store: NonceStore::new(),
             init_paths,
+            overlay: false,
         })
+    }
+
+    /// Create a new handler with overlay mode enabled.
+    ///
+    /// When overlay is true, each execute() call wraps writes in a per-call
+    /// overlay transaction. Use `kaish-vfs commit` in the same call to apply.
+    pub fn with_overlay(self, overlay: bool) -> Self {
+        Self { overlay, ..self }
     }
 
     /// Capture the peer handle on first contact. Idempotent.
@@ -294,6 +309,7 @@ impl KaishServerHandler {
                 Some(self.nonce_store.clone()),
                 &self.init_paths,
                 trace,
+                self.overlay,
             )
                 .await
                 .map_err(|e| McpError::internal_error(e.to_string(), None))?;

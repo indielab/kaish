@@ -52,6 +52,11 @@ impl ByteBudget {
         self.used.load(Ordering::Acquire)
     }
 
+    /// The label used in error messages and introspection.
+    pub fn label(&self) -> &str {
+        &self.label
+    }
+
     /// Bytes still available.
     pub fn remaining(&self) -> u64 {
         self.limit.saturating_sub(self.used())

@@ -63,6 +63,9 @@ use crate::validator::{Severity, Validator};
 #[cfg(feature = "localfs")]
 use crate::vfs::LocalFs;
 use crate::vfs::{BuiltinFs, JobFs, MemoryFs, VfsRouter};
+use kaish_vfs::ByteBudget;
+#[cfg(all(feature = "localfs", feature = "overlay"))]
+use kaish_vfs::OverlayFs;
 
 /// VFS mount mode determines how the local filesystem is exposed.
 ///
@@ -216,6 +219,48 @@ pub struct KernelConfig {
     /// Defaults to 2 seconds. Set to `Duration::ZERO` to escalate immediately
     /// to SIGKILL. Long-shutdown processes (databases, etc.) may need more.
     pub kill_grace: Duration,
+
+    /// Cap on memory-resident bytes across all kernel-owned `MemoryFs` mounts.
+    ///
+    /// One shared `ByteBudget` (labeled `"vfs-memory"`) is created at kernel
+    /// construction and handed to every `MemoryFs` the kernel builds in
+    /// `setup_vfs` (Passthrough `/v`; Sandboxed `/` and `/v`; NoLocal `/`,
+    /// `/tmp`, `/v`). Writes that would exceed the cap fail loudly with
+    /// `StorageFull` — an in-band error a model reads and adapts to; fail
+    /// loud over quietly eating RAM.
+    ///
+    /// **Why MCP is bounded by default:** each `execute()` call creates a fresh
+    /// kernel (see `server/execute.rs`), so the 64 MiB cap is per-call, not
+    /// per-session. Embedders that know their workload needs more opt out with
+    /// `without_vfs_budget()` or raise the cap with `with_vfs_budget(bytes)` —
+    /// protection on by default, opt out knowingly. All other profiles default
+    /// to `None` (unbounded).
+    ///
+    /// Follows the same pattern as `OutputLimitConfig`: MCP bounded, rest unbounded.
+    pub vfs_budget_bytes: Option<u64>,
+
+    /// Enable copy-on-write overlay mode (opt-in).
+    ///
+    /// When `true`, the primary local filesystem mount is wrapped in an
+    /// `OverlayFs` so writes are virtual — the lower layer is never touched.
+    /// Use `kaish-vfs status/diff/commit/reset` to inspect and manage the
+    /// overlay transaction.
+    ///
+    /// **Passthrough:** `/` becomes `OverlayFs over LocalFs::read_only("/")`.
+    /// **Sandboxed{root}:** the `{root}` mount becomes
+    /// `OverlayFs over LocalFs::read_only(root)`; the `/tmp` and XDG runtime
+    /// mounts stay as real `LocalFs` (real writes escape the transaction —
+    /// see `docs/kaish-overlayfs.md` for the escape-hatch inventory).
+    /// **NoLocal:** incompatible — construction fails loudly (everything is
+    /// already virtual; an overlay adds no value and no lower layer to wrap).
+    /// **with_backend:** incompatible — the embedder controls the VFS; the
+    /// kernel cannot wrap it without bypassing the embedder's semantics.
+    ///
+    /// **Not default-on for MCP:** each `execute()` call gets a fresh kernel,
+    /// making the overlay a per-call transaction — `kaish-vfs commit` must run
+    /// in the same call as the writes, or the transaction is discarded on drop.
+    /// Frontends (REPL, MCP) expose `--overlay` as an explicit opt-in flag.
+    pub overlay: bool,
 }
 
 /// Get the default sandbox root ($HOME).
@@ -246,6 +291,8 @@ impl Default for KernelConfig {
                 initial_vars: HashMap::new(),
                 request_timeout: None,
                 kill_grace: Duration::from_secs(2),
+                vfs_budget_bytes: None,
+                overlay: false,
             }
         }
         #[cfg(not(feature = "localfs"))]
@@ -265,6 +312,8 @@ impl Default for KernelConfig {
                 initial_vars: HashMap::new(),
                 request_timeout: None,
                 kill_grace: Duration::from_secs(2),
+                vfs_budget_bytes: None,
+                overlay: false,
             }
         }
     }
@@ -290,6 +339,8 @@ impl KernelConfig {
             initial_vars: HashMap::new(),
             request_timeout: None,
             kill_grace: Duration::from_secs(2),
+            vfs_budget_bytes: None,
+            overlay: false,
         }
     }
 
@@ -318,6 +369,8 @@ impl KernelConfig {
             initial_vars: HashMap::new(),
             request_timeout: None,
             kill_grace: Duration::from_secs(2),
+            vfs_budget_bytes: None,
+            overlay: false,
         }
     }
 
@@ -352,6 +405,8 @@ impl KernelConfig {
             initial_vars: HashMap::new(),
             request_timeout: None,
             kill_grace: Duration::from_secs(2),
+            vfs_budget_bytes: None,
+            overlay: false,
         }
     }
 
@@ -361,6 +416,10 @@ impl KernelConfig {
     /// but sandboxed to `$HOME`. Paths outside the sandbox are not accessible
     /// through builtins. External commands still access the real filesystem —
     /// use `.with_allow_external_commands(false)` to block them.
+    ///
+    /// VFS memory is bounded at 64 MiB per `execute()` call by default
+    /// (MCP creates a fresh kernel per call). Raise or remove with
+    /// `with_vfs_budget` / `without_vfs_budget`.
     #[cfg(feature = "localfs")]
     pub fn mcp() -> Self {
         let home = default_sandbox_root();
@@ -379,12 +438,17 @@ impl KernelConfig {
             initial_vars: HashMap::new(),
             request_timeout: None,
             kill_grace: Duration::from_secs(2),
+            vfs_budget_bytes: Some(64 * 1024 * 1024),
+            overlay: false,
         }
     }
 
     /// Create an MCP server config with a custom sandbox root.
     ///
     /// Use this to restrict access to a subdirectory like `~/src`.
+    ///
+    /// VFS memory is bounded at 64 MiB per `execute()` call by default.
+    /// Raise or remove with `with_vfs_budget` / `without_vfs_budget`.
     #[cfg(feature = "localfs")]
     pub fn mcp_with_root(root: PathBuf) -> Self {
         Self {
@@ -402,6 +466,8 @@ impl KernelConfig {
             initial_vars: HashMap::new(),
             request_timeout: None,
             kill_grace: Duration::from_secs(2),
+            vfs_budget_bytes: Some(64 * 1024 * 1024),
+            overlay: false,
         }
     }
 
@@ -425,6 +491,8 @@ impl KernelConfig {
             initial_vars: HashMap::new(),
             request_timeout: None,
             kill_grace: Duration::from_secs(2),
+            vfs_budget_bytes: None,
+            overlay: false,
         }
     }
 
@@ -529,6 +597,57 @@ impl KernelConfig {
         self.kill_grace = grace;
         self
     }
+
+    /// Cap VFS memory-resident bytes at `bytes` across all kernel-owned
+    /// `MemoryFs` mounts. A shared `ByteBudget` labeled `"vfs-memory"` is
+    /// created at kernel construction and passed to every `MemoryFs` the
+    /// kernel builds (see `setup_vfs` and `with_backend`).
+    ///
+    /// Writes that would exceed the cap fail loudly with `StorageFull` — an
+    /// in-band error a model reads and adapts to; fail loud over quietly eating
+    /// RAM. Use `without_vfs_budget` to remove the cap entirely.
+    pub fn with_vfs_budget(mut self, bytes: u64) -> Self {
+        self.vfs_budget_bytes = Some(bytes);
+        self
+    }
+
+    /// Remove the VFS memory budget — all `MemoryFs` mounts are unbounded.
+    ///
+    /// Use when the caller knows the workload and the default 64 MiB cap
+    /// (set by `KernelConfig::mcp`) is too conservative.
+    pub fn without_vfs_budget(mut self) -> Self {
+        self.vfs_budget_bytes = None;
+        self
+    }
+
+    /// Enable or disable copy-on-write overlay mode.
+    ///
+    /// When `true`, the primary local filesystem mount is wrapped in an
+    /// `OverlayFs` so writes are virtual — the lower layer is never touched.
+    /// Incompatible with `VfsMountMode::NoLocal` (fails loudly at construction)
+    /// and `with_backend` kernels (same — the embedder controls the VFS).
+    pub fn with_overlay(mut self, overlay: bool) -> Self {
+        self.overlay = overlay;
+        self
+    }
+}
+
+/// Handle to an active overlay session, kept on the kernel and shared to
+/// `ExecContext` so the `kaish-vfs` builtin can reach the `OverlayFs`.
+///
+/// The `mount_path` is the VFS prefix the overlay was mounted under (e.g.
+/// `/home/user`); `commit_root` is the real filesystem path the overlay's
+/// lower is backed by (used as the target for `kaish-vfs commit`).
+#[cfg(all(feature = "localfs", feature = "overlay"))]
+#[derive(Clone)]
+pub struct OverlayHandle {
+    /// The mounted `OverlayFs`, Arc-shared so the builtin can call inspection
+    /// methods without holding a VfsRouter lock.
+    pub fs: Arc<OverlayFs>,
+    /// VFS path this overlay is mounted at (e.g. `/home/user`).
+    pub mount_path: PathBuf,
+    /// Real filesystem root to commit into. Same as the lower's root.
+    pub commit_root: PathBuf,
 }
 
 /// The Kernel (核) — executes kaish code.
@@ -558,6 +677,21 @@ pub struct Kernel {
     interactive: bool,
     /// Whether external command execution is allowed.
     allow_external_commands: bool,
+    /// Shared memory budget for all kernel-owned `MemoryFs` mounts.
+    ///
+    /// `None` when `KernelConfig::vfs_budget_bytes` was `None` (unbounded).
+    /// `Some` is Arc-cloned into forks so all concurrent execution draws from
+    /// the same pool — a background job's writes reduce the same cap as
+    /// foreground writes, which is the correct behaviour.
+    vfs_budget: Option<Arc<kaish_vfs::ByteBudget>>,
+    /// Active overlay session handle, if this kernel was constructed with
+    /// `overlay: true`. Arc-shared so `ExecContext` (and thus the
+    /// `kaish-vfs` builtin) can inspect and mutate the overlay without
+    /// holding a kernel write lock. Propagated to forks via `fork_inner`
+    /// and `child_for_pipeline` so `kaish-vfs` works inside background
+    /// jobs, scatter workers, and pipeline stages.
+    #[cfg(all(feature = "localfs", feature = "overlay"))]
+    overlay_handle: Option<Arc<OverlayHandle>>,
     /// Default per-request timeout (None = no default).
     request_timeout: Option<Duration>,
     /// SIGTERM-to-SIGKILL grace period for child kills.
@@ -595,40 +729,128 @@ pub struct Kernel {
     execute_lock: tokio::sync::Mutex<()>,
 }
 
+/// Internal result of [`Kernel::setup_vfs`].
+struct VfsSetupResult {
+    vfs: VfsRouter,
+    budget: Option<Arc<ByteBudget>>,
+    #[cfg(all(feature = "localfs", feature = "overlay"))]
+    overlay_handle: Option<Arc<OverlayHandle>>,
+}
+
 impl Kernel {
     /// Create a new kernel with the given configuration.
     pub fn new(config: KernelConfig) -> Result<Self> {
-        let mut vfs = Self::setup_vfs(&config);
+        let mut setup = Self::setup_vfs(&config)?;
         let jobs = Arc::new(JobManager::new());
 
         // Mount JobFs for job observability at /v/jobs
-        vfs.mount("/v/jobs", JobFs::new(jobs.clone()));
+        setup.vfs.mount("/v/jobs", JobFs::new(jobs.clone()));
+
+        #[cfg(all(feature = "localfs", feature = "overlay"))]
+        let overlay_handle = setup.overlay_handle.take();
 
         // Mode-based construction: the kernel owns its host mounts, so whether
         // host side channels are allowed is decided by the VFS mode inside
         // `assemble` (NoLocal forbids them).
-        Self::assemble(config, vfs, jobs, false, |_| {}, |vfs_ref, tools| {
+        let kernel = Self::assemble(config, setup.vfs, jobs, false, setup.budget, |_| {}, |vfs_ref, tools| {
             ExecContext::with_vfs_and_tools(vfs_ref.clone(), tools.clone())
-        })
+        })?;
+
+        #[cfg(all(feature = "localfs", feature = "overlay"))]
+        {
+            let mut kernel = kernel;
+            kernel.overlay_handle = overlay_handle;
+            // Also set it on the ExecContext so builtins can access it.
+            if let Some(ref handle) = kernel.overlay_handle {
+                kernel.exec_ctx.get_mut().overlay_handle = Some(Arc::clone(handle));
+            }
+            return Ok(kernel);
+        }
+
+        #[allow(unreachable_code)]
+        Ok(kernel)
     }
 
     /// Set up VFS based on mount mode.
-    fn setup_vfs(config: &KernelConfig) -> VfsRouter {
+    ///
+    /// Returns the router, the budget handle (if bounded), and an optional
+    /// overlay handle when `config.overlay` is true. The budget is Arc-shared:
+    /// every `MemoryFs` the kernel creates here holds a clone of the same
+    /// `Arc<ByteBudget>`, so the total charged against it is the sum of all
+    /// in-memory content across all kernel-owned memory mounts.
+    ///
+    /// # Errors
+    /// Returns `Err` if `config.overlay` is true and the mode is `NoLocal`
+    /// (overlay is meaningless when everything is already virtual — there is
+    /// no real lower layer to wrap). The caller (`Kernel::new`) propagates
+    /// this as an `anyhow::Error`.
+    fn setup_vfs(config: &KernelConfig) -> Result<VfsSetupResult> {
         let mut vfs = VfsRouter::new();
+
+        // One budget for all memory mounts this kernel owns — labeled so the
+        // error message tells the user exactly which knob to raise.
+        let budget: Option<Arc<ByteBudget>> = config
+            .vfs_budget_bytes
+            .map(|bytes| Arc::new(ByteBudget::labeled(bytes, "vfs-memory")));
+
+        /// Helper: construct a `MemoryFs` wired to `budget` if present.
+        fn mem(budget: &Option<Arc<ByteBudget>>) -> MemoryFs {
+            match budget {
+                Some(b) => MemoryFs::with_budget(Arc::clone(b)),
+                None => MemoryFs::new(),
+            }
+        }
+
+        // Overlay handle — populated below if config.overlay is true.
+        #[cfg(all(feature = "localfs", feature = "overlay"))]
+        let mut overlay_handle: Option<Arc<OverlayHandle>> = None;
 
         match &config.vfs_mode {
             #[cfg(feature = "localfs")]
             VfsMountMode::Passthrough => {
-                // LocalFs at "/" — native paths work directly
-                vfs.mount("/", LocalFs::new(PathBuf::from("/")));
+                #[cfg(feature = "overlay")]
+                if config.overlay {
+                    // Wrap "/" in an OverlayFs so writes are virtual.
+                    let lower = Arc::new(LocalFs::read_only(PathBuf::from("/")));
+                    let overlay_fs = Arc::new(match &budget {
+                        Some(b) => OverlayFs::over_with_budget(lower, Arc::clone(b)),
+                        None => OverlayFs::over(lower),
+                    });
+                    let handle = Arc::new(OverlayHandle {
+                        fs: Arc::clone(&overlay_fs),
+                        mount_path: PathBuf::from("/"),
+                        commit_root: PathBuf::from("/"),
+                    });
+                    vfs.mount_arc("/", overlay_fs as Arc<dyn kaish_vfs::Filesystem>);
+                    overlay_handle = Some(handle);
+                } else {
+                    // LocalFs at "/" — native paths work directly
+                    vfs.mount("/", LocalFs::new(PathBuf::from("/")));
+                }
+                #[cfg(not(feature = "overlay"))]
+                {
+                    if config.overlay {
+                        return Err(anyhow::anyhow!(
+                            "overlay=true requires the `overlay` feature, but this build \
+                             was compiled without it. Recompile with --features overlay \
+                             (or the default feature set) to enable overlay mode."
+                        ));
+                    }
+                    // LocalFs at "/" — native paths work directly
+                    vfs.mount("/", LocalFs::new(PathBuf::from("/")));
+                }
                 // Memory for blobs
-                vfs.mount("/v", MemoryFs::new());
+                vfs.mount("/v", mem(&budget));
             }
             #[cfg(feature = "localfs")]
             VfsMountMode::Sandboxed { root } => {
-                // Memory at root for safety (catches paths outside sandbox)
-                vfs.mount("/", MemoryFs::new());
-                vfs.mount("/v", MemoryFs::new());
+                // Memory at root for safety (catches paths outside sandbox).
+                // Note: /tmp and the XDG runtime dir are LocalFs — writes
+                // there escape the VFS budget and are NOT virtual. This is
+                // intentional: /tmp interop with other processes matters more
+                // than accounting for scratch files there.
+                vfs.mount("/", mem(&budget));
+                vfs.mount("/v", mem(&budget));
 
                 // Real /tmp for interop with other processes
                 vfs.mount("/tmp", LocalFs::new(PathBuf::from("/tmp")));
@@ -647,21 +869,64 @@ impl Kernel {
                         .unwrap_or_else(|_| PathBuf::from("/"))
                 });
 
-                // Mount at the real path for transparent access
-                // e.g., /home/atobey → LocalFs("/home/atobey")
-                // so /home/atobey/src/kaish just works
                 let mount_point = local_root.to_string_lossy().to_string();
-                vfs.mount(&mount_point, LocalFs::new(local_root));
+
+                #[cfg(feature = "overlay")]
+                if config.overlay {
+                    // Wrap the sandbox root in an OverlayFs.
+                    let lower = Arc::new(LocalFs::read_only(local_root.clone()));
+                    let overlay_fs = Arc::new(match &budget {
+                        Some(b) => OverlayFs::over_with_budget(lower, Arc::clone(b)),
+                        None => OverlayFs::over(lower),
+                    });
+                    let handle = Arc::new(OverlayHandle {
+                        fs: Arc::clone(&overlay_fs),
+                        mount_path: PathBuf::from(&mount_point),
+                        commit_root: local_root,
+                    });
+                    vfs.mount_arc(&mount_point, overlay_fs as Arc<dyn kaish_vfs::Filesystem>);
+                    overlay_handle = Some(handle);
+                } else {
+                    // Mount at the real path for transparent access
+                    // e.g., /home/atobey → LocalFs("/home/atobey")
+                    // so /home/atobey/src/kaish just works
+                    vfs.mount(&mount_point, LocalFs::new(local_root));
+                }
+                #[cfg(not(feature = "overlay"))]
+                {
+                    if config.overlay {
+                        return Err(anyhow::anyhow!(
+                            "overlay=true requires the `overlay` feature, but this build \
+                             was compiled without it. Recompile with --features overlay \
+                             (or the default feature set) to enable overlay mode."
+                        ));
+                    }
+                    // Mount at the real path for transparent access
+                    vfs.mount(&mount_point, LocalFs::new(local_root));
+                }
             }
             VfsMountMode::NoLocal => {
+                if config.overlay {
+                    return Err(anyhow::anyhow!(
+                        "overlay=true is incompatible with VfsMountMode::NoLocal: \
+                         everything is already virtual, there is no real lower layer \
+                         to wrap. Use with_overlay(false) or switch to a Passthrough \
+                         or Sandboxed VFS mode."
+                    ));
+                }
                 // Pure memory mode — no local filesystem
-                vfs.mount("/", MemoryFs::new());
-                vfs.mount("/tmp", MemoryFs::new());
-                vfs.mount("/v", MemoryFs::new());
+                vfs.mount("/", mem(&budget));
+                vfs.mount("/tmp", mem(&budget));
+                vfs.mount("/v", mem(&budget));
             }
         }
 
-        vfs
+        Ok(VfsSetupResult {
+            vfs,
+            budget,
+            #[cfg(all(feature = "localfs", feature = "overlay"))]
+            overlay_handle,
+        })
     }
 
     /// Create a transient kernel (no persistence).
@@ -710,11 +975,33 @@ impl Kernel {
     ) -> Result<Self> {
         use crate::backend::VirtualOverlayBackend;
 
+        // overlay=true is incompatible with with_backend: the embedder controls
+        // the VFS and the kernel cannot wrap it without bypassing the embedder's
+        // semantics. Fail loudly rather than silently ignoring the flag.
+        if config.overlay {
+            return Err(anyhow::anyhow!(
+                "overlay=true is incompatible with Kernel::with_backend: the embedder \
+                 controls the VFS; the kernel cannot wrap it with an OverlayFs without \
+                 bypassing the embedder's storage semantics. Use KernelConfig::with_overlay(false)."
+            ));
+        }
+
         let mut vfs = VfsRouter::new();
         let jobs = Arc::new(JobManager::new());
 
+        // Create the budget from config so `with_vfs_budget` / `without_vfs_budget`
+        // work for `with_backend` callers too. The /v/blobs MemoryFs is the only
+        // kernel-owned memory mount here — embedders own the rest of the VFS.
+        let vfs_budget: Option<Arc<ByteBudget>> = config
+            .vfs_budget_bytes
+            .map(|bytes| Arc::new(ByteBudget::labeled(bytes, "vfs-memory")));
+
         vfs.mount("/v/jobs", JobFs::new(jobs.clone()));
-        vfs.mount("/v/blobs", MemoryFs::new());
+        let blobs_fs = match &vfs_budget {
+            Some(b) => MemoryFs::with_budget(Arc::clone(b)),
+            None => MemoryFs::new(),
+        };
+        vfs.mount("/v/blobs", blobs_fs);
 
         // Let caller add custom mounts (e.g., /v/docs, /v/g)
         configure_vfs(&mut vfs);
@@ -723,7 +1010,7 @@ impl Kernel {
         // the entire VFS — so any kernel write to a host filesystem via
         // `std::fs` (output spill, job output files) bypasses that VFS and its
         // read-only guarantees. Forbid host side channels unconditionally.
-        Self::assemble(config, vfs, jobs, true, configure_tools, |vfs_arc: &Arc<VfsRouter>, _: &Arc<ToolRegistry>| {
+        Self::assemble(config, vfs, jobs, true, vfs_budget, configure_tools, |vfs_arc: &Arc<VfsRouter>, _: &Arc<ToolRegistry>| {
             let overlay: Arc<dyn KernelBackend> =
                 Arc::new(VirtualOverlayBackend::new(backend, vfs_arc.clone()));
             ExecContext::with_backend(overlay)
@@ -740,6 +1027,7 @@ impl Kernel {
         mut vfs: VfsRouter,
         jobs: Arc<JobManager>,
         no_host_filesystem: bool,
+        vfs_budget: Option<Arc<ByteBudget>>,
         configure_tools: impl FnOnce(&mut ToolRegistry),
         make_ctx: impl FnOnce(&Arc<VfsRouter>, &Arc<ToolRegistry>) -> ExecContext,
     ) -> Result<Self> {
@@ -790,6 +1078,7 @@ impl Kernel {
         exec_ctx.ignore_config = ignore_config;
         exec_ctx.output_limit = output_limit;
         exec_ctx.allow_external_commands = allow_external_commands;
+        exec_ctx.vfs_budget = vfs_budget.clone();
         if let Some(store) = nonce_store {
             exec_ctx.nonce_store = store;
         }
@@ -823,6 +1112,7 @@ impl Kernel {
             skip_validation,
             interactive,
             allow_external_commands,
+            vfs_budget,
             request_timeout,
             kill_grace,
             stderr_receiver: tokio::sync::Mutex::new(stderr_receiver),
@@ -832,6 +1122,11 @@ impl Kernel {
             self_weak: std::sync::OnceLock::new(),
             execute_lock: tokio::sync::Mutex::new(()),
             bg_job_id: None,
+            // Overlay handle is set by Kernel::new after assemble returns;
+            // assemble itself doesn't know the handle (it's constructed in setup_vfs).
+            // with_backend always has None (overlay=true is rejected above).
+            #[cfg(all(feature = "localfs", feature = "overlay"))]
+            overlay_handle: None,
         })
     }
 
@@ -955,6 +1250,10 @@ impl Kernel {
             // Forks are never the TTY owner — they run in the background.
             interactive: false,
             allow_external_commands: self.allow_external_commands,
+            // Arc-clone the budget so the fork draws from the same pool as the
+            // parent — background jobs and scatter workers count against the same
+            // cap as foreground writes.
+            vfs_budget: self.vfs_budget.clone(),
             request_timeout: self.request_timeout,
             kill_grace: self.kill_grace,
             stderr_receiver: tokio::sync::Mutex::new(stderr_receiver),
@@ -964,6 +1263,11 @@ impl Kernel {
             self_weak: std::sync::OnceLock::new(),
             execute_lock: tokio::sync::Mutex::new(()),
             bg_job_id,
+            // Arc-clone the overlay handle so forks (background jobs, scatter
+            // workers, pipeline stages) can reach the same overlay transaction
+            // via `kaish-vfs status/diff/commit/reset`.
+            #[cfg(all(feature = "localfs", feature = "overlay"))]
+            overlay_handle: self.overlay_handle.clone(),
         };
 
         fork.into_arc()
@@ -1998,6 +2302,9 @@ impl Kernel {
                     token.clone()
                 },
                 output_format: None,
+                vfs_budget: self.vfs_budget.clone(),
+                #[cfg(all(feature = "localfs", feature = "overlay"))]
+                overlay_handle: self.overlay_handle.clone(),
             }
         }; // locks released
 
@@ -2352,6 +2659,9 @@ impl Kernel {
                 // default fresh token from a non-dispatch path.
                 cancel: ec.cancel.clone(),
                 output_format: None,
+                vfs_budget: self.vfs_budget.clone(),
+                #[cfg(all(feature = "localfs", feature = "overlay"))]
+                overlay_handle: self.overlay_handle.clone(),
             }
         }; // both locks released — tool.execute can re-dispatch safely
 

@@ -44,7 +44,7 @@ async fn mcp_execute_forwards_traceparent_into_kernel() {
         baggage,
     };
 
-    let result = execute(params, 30_000, None, &[], trace)
+    let result = execute(params, 30_000, None, &[], trace, false)
         .await
         .expect("execute should succeed");
     assert_eq!(result.code, 0, "`true` should exit 0");

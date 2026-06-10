@@ -23,11 +23,10 @@ The one-line pitch: **an overlay makes any kaish session a transaction.**
    parallel agents each see their own pending edits without merging raw bytes.
    Needs: a cheap `fork()` (shared lower, cloned upper).
 3. **kaish `--overlay` session mode.** Run a destructive-looking pipeline, inspect
-   what it *would have* done (`vfs-diff`), then commit or drop. Probably default-on
-   for agent-facing surfaces (kaish-mcp) and explicit for the REPL — silently
-   making writes virtual would surprise a human user, and surprise is what kaish
-   exists to remove. Needs: `vfs-diff` / `vfs-commit` builtins riding the
-   inspection API.
+   what it *would have* done (`kaish-vfs diff`), then commit or drop. Opt-in on
+   every frontend — silently making writes virtual would surprise both human users
+   and agent operators, and surprise is what kaish exists to remove. Needs:
+   `kaish-vfs` builtin with subcommands riding the inspection API.
 
 ## Where it sits
 
@@ -236,17 +235,20 @@ cost model:
 Counting and limiting are different concerns; split them:
 
 - **Counting is always on, inside each memory-resident fs.** The trait grows
-  `fn resident_bytes(&self) -> Option<u64>` (default `None`); `MemoryFs`,
-  `OverlayFs`, and `JobFs` maintain an exact internal counter — *net*, not
-  gross: an overwrite charges the delta, a remove credits, all under the lock
-  that already guards the entry map (only the fs itself knows the old size, so
-  counting anywhere else — router, wrapper — is racy or gross-only). Cost is an
-  integer update next to a `HashMap` insert: noise. `LocalFs` stays `None` —
-  disk residency is the host's concern (page cache, `df`); this counter is
+  `fn resident_bytes(&self) -> Option<u64>` (default `None`); `MemoryFs` and
+  `OverlayFs` maintain an exact internal counter — *net*, not gross: an
+  overwrite charges the delta, a remove credits, all under the lock that
+  already guards the entry map (only the fs itself knows the old size, so
+  counting anywhere else — router, wrapper — is racy or gross-only). Cost is
+  an integer update next to a `HashMap` insert: noise. `LocalFs` stays `None`
+  — disk residency is the host's concern (page cache, `df`); this counter is
   about RAM. `OverlayFs` counts its **base snapshots** too — overlay-owned RAM
-  regardless of upper choice, the hidden 2×. Zero config, no wrapper to
-  remember: unbounded growth becomes structurally impossible to *miss*, which
-  is the kaish way.
+  regardless of upper choice, the hidden 2×. `JobFs` is intentionally excluded:
+  it synthesizes a filesystem over already-bounded `BoundedStream` ring buffers
+  that are size-capped independently; double-counting those bytes against the
+  `vfs-memory` budget would be incorrect. Zero config, no wrapper to remember:
+  unbounded growth becomes structurally impossible to *miss*, which is the
+  kaish way.
 - **Limiting is a shared `ByteBudget`** (`Arc`: atomic used + limit), accepted
   at construction (`MemoryFs::with_budget`, `OverlayFs::with_budget`) and
   charged by every fs holding it — one handle across a kernel's `/` scratch and
@@ -258,6 +260,9 @@ Counting and limiting are different concerns; split them:
   interactive/host profiles generous or none. That flips the polarity —
   embedders are protected by default and opt *out* knowingly — at the cost of
   one loud, documented behavior change for existing embedders.
+  `KernelConfig::mcp()` and `mcp_with_root()` default to a 64 MiB budget
+  with the label `"vfs-memory"`. Opt out via `without_vfs_budget()` or
+  override with `with_vfs_budget(limit, label)`.
 - **Introspection rides the counters**: a `df --json`-style surface (per mount:
   `resident_bytes`, budget used/remaining) feeds `workspace list --json`,
   LRU/idle eviction on real numbers, and lets a driving agent manage its own
@@ -289,12 +294,30 @@ drifts.
   symlinks error `Unsupported` loudly.
 - **Commit atomicity**: pre-flight all base checks, then write; loud partial
   failure, not transactional.
+- **`--overlay` surface** (settled 2026-06-10): opt-in on every frontend —
+  never default-on anywhere.
+  - `kaish --overlay` — interactive REPL
+  - `kaish --overlay -c 'script'` — one-shot
+  - `kaish-mcp --overlay` — MCP server
+  - `KernelConfig::with_overlay(true)` — embedder API
+  - **MCP per-call semantics**: each `execute()` call creates a fresh kernel
+    with a fresh overlay transaction. `kaish-vfs commit` must run in the
+    **same call** as the writes — if you write in call N and commit in call N+1,
+    the transaction from call N was discarded when its kernel was dropped. This
+    is why default-on for MCP was rejected: a model that issues writes and
+    commits in separate calls would silently lose every write.
+- **Builtin name** (settled): `kaish-vfs` with subcommands, superseding the
+  earlier design names `vfs-diff` / `vfs-commit`. Subcommands: `status`,
+  `diff [path...]`, `commit`, `reset [path]`.
+- **JobFs resident counting**: intentionally excluded from `resident_bytes()`
+  and the `vfs-memory` budget. JobFs synthesizes a filesystem over already-bounded
+  `BoundedStream` ring buffers; those bytes are accounted separately.
+- **Budget defaults**: `KernelConfig::mcp()` / `mcp_with_root()` default to
+  64 MiB with label `"vfs-memory"`. Opt out with `without_vfs_budget()`.
 
 ## Open forks (still)
 
 - **Whiteout of a directory**: whole-subtree whiteout vs. per-file (per-file is
   simpler and matches `remove`'s empty-dir contract; subtree can come later).
-- **`--overlay` surface**: which kaish frontends default to it (kaish-mcp likely
-  yes, REPL opt-in) and the `vfs-diff` / `vfs-commit` builtin names.
 - **Base persistence** for disk-backed uppers (only matters when someone wants
   restart-surviving overlays; kaibo will, eventually — "backing store later").

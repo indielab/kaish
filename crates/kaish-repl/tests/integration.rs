@@ -663,9 +663,12 @@ fn introspect_mounts_json_format() {
         kaish-mounts --json
     "#);
     let joined = outputs.join("\n");
-    // Global --json produces table-keyed JSON: [{"PATH": ..., "MODE": ...}]
-    assert!(joined.contains("\"PATH\""), "mounts --json should have PATH. Output was: {}", joined);
-    assert!(joined.contains("\"MODE\""), "mounts --json should have MODE. Output was: {}", joined);
+    // Global --json produces {mounts: [{path, read_only, resident_bytes}, ...]}
+    // (shape changed in Part A to support the budget object alongside mounts).
+    assert!(joined.contains("\"mounts\""), "mounts --json should have 'mounts' key. Output was: {}", joined);
+    assert!(joined.contains("\"path\""), "mounts --json should have 'path' field. Output was: {}", joined);
+    assert!(joined.contains("\"read_only\""), "mounts --json should have 'read_only' field. Output was: {}", joined);
+    assert!(joined.contains("\"resident_bytes\""), "mounts --json should have 'resident_bytes' field. Output was: {}", joined);
 }
 
 // ============================================================================

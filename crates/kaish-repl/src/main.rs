@@ -30,11 +30,19 @@ fn main() -> ExitCode {
 fn run() -> Result<ExitCode> {
     let args: Vec<String> = env::args().collect();
 
+    // Extract --overlay flag (can appear anywhere before positionals).
+    let overlay = args.iter().any(|a| a == "--overlay");
+    // Remaining args with --overlay stripped out.
+    let rest: Vec<&str> = args.iter().skip(1)
+        .filter(|a| *a != "--overlay")
+        .map(|a| a.as_str())
+        .collect();
+
     // Parse arguments
-    match args.get(1).map(|s| s.as_str()) {
+    match rest.first().copied() {
         None => {
             // No args: interactive REPL
-            kaish_repl::run()?;
+            kaish_repl::run_with_overlay(overlay)?;
             Ok(ExitCode::SUCCESS)
         }
 
@@ -52,14 +60,14 @@ fn run() -> Result<ExitCode> {
         }
 
         Some("-c") => {
-            let cmd = args.get(2)
+            let cmd = rest.get(1).copied()
                 .context("-c requires a command argument")?;
-            run_command(cmd)
+            run_command(cmd, overlay)
         }
 
         Some(path) if !path.starts_with('-') => {
             // Treat as script file
-            run_script(path)
+            run_script(path, overlay)
         }
 
         Some(unknown) => {
@@ -79,19 +87,23 @@ Usage:
   kaish <script.kai>           Run a script file
 
 Options:
+  --overlay                    Enable copy-on-write overlay mode (writes are
+                               virtual; use kaish-vfs commit to apply them)
   -c <command>                 Execute command string and exit
   -h, --help                   Show this help
   -V, --version                Show version
 
 Examples:
   kaish                        # Start interactive REPL
+  kaish --overlay              # REPL with virtual writes (overlay mode)
   kaish -c 'echo hello'       # Run a command
+  kaish --overlay -c 'echo test > file.txt; kaish-vfs diff'
   kaish deploy.kai             # Run a deployment script
 "#, env!("CARGO_PKG_VERSION"));
 }
 
 /// Run a script file.
-fn run_script(path: &str) -> Result<ExitCode> {
+fn run_script(path: &str, overlay: bool) -> Result<ExitCode> {
     use kaish_client::EmbeddedClient;
     use kaish_kernel::{Kernel, KernelConfig};
 
@@ -108,7 +120,9 @@ fn run_script(path: &str) -> Result<ExitCode> {
 
     // Non-interactive: pipe stdout so command substitution captures output.
     // The streaming callback below still prints output for the user.
-    let config = KernelConfig::repl().with_initial_vars(kaish_repl::os_env_vars());
+    let config = KernelConfig::repl()
+        .with_initial_vars(kaish_repl::os_env_vars())
+        .with_overlay(overlay);
     let kernel = Kernel::new(config)
         .context("Failed to create kernel")?;
 
@@ -138,13 +152,15 @@ fn run_script(path: &str) -> Result<ExitCode> {
 }
 
 /// Execute a command string and exit.
-fn run_command(cmd: &str) -> Result<ExitCode> {
+fn run_command(cmd: &str, overlay: bool) -> Result<ExitCode> {
     use kaish_client::EmbeddedClient;
     use kaish_kernel::{Kernel, KernelConfig};
 
     // Non-interactive: pipe stdout so command substitution captures output.
     // The streaming callback below still prints output for the user.
-    let config = KernelConfig::repl().with_initial_vars(kaish_repl::os_env_vars());
+    let config = KernelConfig::repl()
+        .with_initial_vars(kaish_repl::os_env_vars())
+        .with_overlay(overlay);
     let kernel = Kernel::new(config)
         .context("Failed to create kernel")?;
 

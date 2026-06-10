@@ -159,6 +159,7 @@ pub async fn execute(
     nonce_store: Option<NonceStore>,
     init_paths: &[PathBuf],
     trace: McpTraceContext,
+    overlay: bool,
 ) -> Result<ExecuteResult> {
     let timeout_ms = params.timeout_ms.unwrap_or(default_timeout_ms);
 
@@ -217,6 +218,12 @@ pub async fn execute(
                 };
                 if let Some(store) = nonce_store {
                     config = config.with_nonce_store(store);
+                }
+                // Apply per-call overlay mode. Each call gets a fresh kernel
+                // (and thus a fresh transaction). kaish-vfs commit must run
+                // in the same call as writes, or changes are discarded.
+                if overlay {
+                    config = config.with_overlay(true);
                 }
 
                 // Apply kernel-level settings from per-request env before creating the kernel.
@@ -297,7 +304,7 @@ mod tests {
             timeout_ms: None,
         };
 
-        let result = execute(params, 30_000, None, &[], McpTraceContext::default())
+        let result = execute(params, 30_000, None, &[], McpTraceContext::default(), false)
             .await
             .expect("execute failed");
         assert!(result.ok);
@@ -318,7 +325,7 @@ mod tests {
             timeout_ms: None,
         };
 
-        let result = execute(params, 30_000, None, &[], McpTraceContext::default())
+        let result = execute(params, 30_000, None, &[], McpTraceContext::default(), false)
             .await
             .expect("execute failed");
         assert!(result.ok);
@@ -335,7 +342,7 @@ mod tests {
             timeout_ms: None,
         };
 
-        let result = execute(params, 30_000, None, &[], McpTraceContext::default())
+        let result = execute(params, 30_000, None, &[], McpTraceContext::default(), false)
             .await
             .expect("execute failed");
         assert!(!result.ok);
@@ -353,7 +360,7 @@ mod tests {
             timeout_ms: None,
         };
 
-        let result = execute(params, 30_000, None, &[], McpTraceContext::default())
+        let result = execute(params, 30_000, None, &[], McpTraceContext::default(), false)
             .await
             .expect("execute failed");
         assert!(result.ok);
@@ -375,7 +382,7 @@ mod tests {
             timeout_ms: None,
         };
 
-        let result = execute(params, 30_000, None, &[], McpTraceContext::default())
+        let result = execute(params, 30_000, None, &[], McpTraceContext::default(), false)
             .await
             .expect("execute failed");
         assert!(
@@ -402,7 +409,7 @@ mod tests {
             timeout_ms: Some(10), // Very short timeout
         };
 
-        let result = execute(params, 30_000, None, &[], McpTraceContext::default())
+        let result = execute(params, 30_000, None, &[], McpTraceContext::default(), false)
             .await
             .expect("execute failed");
         assert!(!result.ok);
@@ -478,7 +485,7 @@ mod tests {
             timeout_ms: None,
         };
 
-        let result = execute(params, 30_000, None, &[], McpTraceContext::default())
+        let result = execute(params, 30_000, None, &[], McpTraceContext::default(), false)
             .await
             .expect("execute failed");
         assert!(result.ok);
@@ -497,7 +504,7 @@ mod tests {
             timeout_ms: None,
         };
 
-        let result = execute(params, 30_000, None, &[], McpTraceContext::default())
+        let result = execute(params, 30_000, None, &[], McpTraceContext::default(), false)
             .await
             .expect("execute failed");
         assert!(result.ok);
@@ -516,7 +523,7 @@ mod tests {
             timeout_ms: None,
         };
 
-        let result = execute(params, 30_000, None, &[], McpTraceContext::default())
+        let result = execute(params, 30_000, None, &[], McpTraceContext::default(), false)
             .await
             .expect("execute failed");
         assert!(result.ok);
@@ -536,7 +543,7 @@ mod tests {
             env: None,
             timeout_ms: None,
         };
-        let result = execute(params, 30_000, None, &[init_path], McpTraceContext::default())
+        let result = execute(params, 30_000, None, &[init_path], McpTraceContext::default(), false)
             .await
             .expect("execute failed");
         assert!(result.ok);
@@ -557,7 +564,7 @@ mod tests {
             env: None,
             timeout_ms: None,
         };
-        let result = execute(params, 30_000, None, &[init1, init2], McpTraceContext::default())
+        let result = execute(params, 30_000, None, &[init1, init2], McpTraceContext::default(), false)
             .await
             .expect("execute failed");
         assert!(result.ok);
@@ -578,6 +585,7 @@ mod tests {
             None,
             &[PathBuf::from("/nonexistent/init.kai")],
             McpTraceContext::default(),
+            false,
         )
         .await;
         assert!(result.is_err());
@@ -608,6 +616,7 @@ mod tests {
             None,
             &[init_path.clone()],
             McpTraceContext::default(),
+            false,
         )
             .await
             .expect("execute failed");
@@ -616,7 +625,7 @@ mod tests {
 
         // Modify file and run again — should pick up the change
         std::fs::write(&init_path, "GREETING=howdy\n").unwrap();
-        let result2 = execute(params, 30_000, None, &[init_path], McpTraceContext::default())
+        let result2 = execute(params, 30_000, None, &[init_path], McpTraceContext::default(), false)
             .await
             .expect("execute failed");
         assert!(result2.ok);
@@ -636,7 +645,7 @@ mod tests {
             env: None,
             timeout_ms: None,
         };
-        let result = execute(params, 30_000, None, &[init_path], McpTraceContext::default())
+        let result = execute(params, 30_000, None, &[init_path], McpTraceContext::default(), false)
             .await
             .expect("execute should return Ok with structured failure");
         assert!(!result.ok);

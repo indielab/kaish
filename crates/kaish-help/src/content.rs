@@ -13,3 +13,4 @@ pub const SCATTER: &str = include_str!("../content/en/scatter.md");
 pub const IGNORE: &str = include_str!("../content/en/ignore.md");
 pub const OUTPUT_LIMIT: &str = include_str!("../content/en/output-limit.md");
 pub const LIMITS: &str = include_str!("../content/en/limits.md");
+pub const OVERLAY: &str = include_str!("../content/en/overlay.md");

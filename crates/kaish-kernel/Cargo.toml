@@ -102,11 +102,16 @@ nix = { version = "0.29", features = ["signal", "process", "term"], optional = t
 # desktop integration, or tokenizer. Each of those is an opt-in capability so
 # the dangerous surface is named, not inherited. Read-only-ness is a runtime
 # backend mode on top of this, not a missing feature.
-default = ["localfs"]
+default = ["localfs", "overlay"]
 
 # Real local filesystem: LocalFs backend, passthrough/sandboxed VFS mount modes,
 # and output spill-to-disk. Off → in-memory/VFS only (the wasm32-wasip1 sandbox).
 localfs = ["tokio/fs", "kaish-vfs/localfs"]
+
+# Copy-on-write overlay filesystem: wraps a LocalFs lower layer so writes are
+# virtual. Needs localfs for the lower layer. kaish-vfs/overlay is always enabled
+# in the dep above; this feature gates the kernel-side wiring.
+overlay = ["localfs", "kaish-vfs/overlay"]
 
 # External process execution + job control: exec/spawn/which/bg/fg/kill, PATH
 # resolution, OS signals, controlling-terminal job control, pidfd. The single
@@ -130,7 +135,7 @@ os-integration = ["localfs", "dep:trash", "dep:directories"]
 tokens = ["dep:tiktoken-rs"]
 
 # Everything — the full native surface (what the old monolithic `native` was).
-full = ["localfs", "subprocess", "host", "git", "os-integration", "tokens"]
+full = ["localfs", "overlay", "subprocess", "host", "git", "os-integration", "tokens"]
 # Ergonomic alias for the REPL/CLI and muscle memory; not a compatibility shim.
 native = ["full"]
 

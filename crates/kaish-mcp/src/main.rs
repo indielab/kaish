@@ -39,6 +39,14 @@ struct Args {
     /// Can be specified multiple times; files are loaded in order.
     #[arg(long, value_name = "PATH")]
     init: Vec<String>,
+
+    /// Enable copy-on-write overlay mode per execute() call.
+    ///
+    /// Each execute() call gets a fresh kernel (and thus a fresh overlay
+    /// transaction). Writes are virtual within a call; use `kaish-vfs commit`
+    /// in the SAME call as the writes, or they are discarded on call exit.
+    #[arg(long, default_value_t = false)]
+    overlay: bool,
 }
 
 #[tokio::main]
@@ -115,7 +123,8 @@ async fn main() -> Result<()> {
     );
 
     let handler = KaishServerHandler::new(config, init_paths)
-        .context("Failed to create server handler")?;
+        .context("Failed to create server handler")?
+        .with_overlay(args.overlay);
 
     tracing::info!("Serving on stdio");
 

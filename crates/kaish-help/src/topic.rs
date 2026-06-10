@@ -6,7 +6,7 @@
 
 use kaish_types::ToolSchema;
 
-use crate::content::{IGNORE, LIMITS, OUTPUT_LIMIT, OVERVIEW, SCATTER, SYNTAX, VFS};
+use crate::content::{IGNORE, LIMITS, OUTPUT_LIMIT, OVERLAY, OVERVIEW, SCATTER, SYNTAX, VFS};
 
 /// Help topics available in kaish.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -27,6 +27,8 @@ pub enum HelpTopic {
     OutputLimit,
     /// Known limitations.
     Limits,
+    /// Overlay VFS mode and kaish-vfs builtin.
+    Overlay,
     /// Help for a specific tool.
     Tool(String),
 }
@@ -46,6 +48,7 @@ impl HelpTopic {
             "ignore" | "gitignore" | "kaish-ignore" => Self::Ignore,
             "output-limit" | "spill" | "truncate" | "kaish-output-limit" => Self::OutputLimit,
             "limits" | "limitations" | "missing" => Self::Limits,
+            "overlay" | "kaish-vfs" | "vfs-overlay" => Self::Overlay,
             other => Self::Tool(other.to_string()),
         }
     }
@@ -61,6 +64,7 @@ impl HelpTopic {
             Self::Ignore => "Ignore file configuration",
             Self::OutputLimit => "Output size limit configuration",
             Self::Limits => "Known limitations",
+            Self::Overlay => "Copy-on-write overlay mode and kaish-vfs",
             Self::Tool(_) => "Help for a specific tool",
         }
     }
@@ -81,6 +85,7 @@ pub fn get_help(topic: &HelpTopic, tool_schemas: &[ToolSchema]) -> String {
         HelpTopic::Ignore => IGNORE.to_string(),
         HelpTopic::OutputLimit => OUTPUT_LIMIT.to_string(),
         HelpTopic::Limits => LIMITS.to_string(),
+        HelpTopic::Overlay => OVERLAY.to_string(),
         HelpTopic::Tool(name) => format_tool_help(name, tool_schemas),
     }
 }
@@ -165,6 +170,7 @@ pub fn list_topics() -> Vec<(&'static str, &'static str)> {
         ("ignore", "Ignore file configuration"),
         ("output-limit", "Output size limit configuration"),
         ("limits", "Known limitations"),
+        ("overlay", "Copy-on-write overlay mode and kaish-vfs"),
     ]
 }
 

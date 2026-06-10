@@ -123,6 +123,30 @@ struct MountsArgs {
     global: GlobalFlags,
 }
 
+/// Format a byte count in a human-readable short form (right-aligned for columns).
+/// Returns "-" for None (disk-backed mount — disk residency is the host's concern).
+fn format_resident(bytes: Option<u64>) -> String {
+    match bytes {
+        None => "-".to_string(),
+        Some(b) => {
+            const UNITS: &[&str] = &["", "K", "M", "G", "T"];
+            let mut size = b as f64;
+            let mut idx = 0;
+            while size >= 1024.0 && idx < UNITS.len() - 1 {
+                size /= 1024.0;
+                idx += 1;
+            }
+            if idx == 0 {
+                b.to_string()
+            } else if size >= 10.0 {
+                format!("{:.0}{}", size, UNITS[idx])
+            } else {
+                format!("{:.1}{}", size, UNITS[idx])
+            }
+        }
+    }
+}
+
 #[async_trait]
 impl Tool for Mounts {
     fn name(&self) -> &str {
@@ -151,21 +175,76 @@ impl Tool for Mounts {
         parsed.global.apply(ctx);
 
         let mounts = ctx.backend.mounts();
+        let budget = ctx.vfs_budget.as_ref();
 
         let headers = vec![
             "PATH".to_string(),
             "MODE".to_string(),
+            "RESIDENT".to_string(),
         ];
 
         let nodes: Vec<OutputNode> = mounts
             .iter()
             .map(|m| {
                 let mode = if m.read_only { "ro" } else { "rw" };
-                OutputNode::new(m.path.to_string_lossy()).with_cells(vec![mode.to_string()])
+                OutputNode::new(m.path.to_string_lossy())
+                    .with_cells(vec![mode.to_string(), format_resident(m.resident_bytes)])
             })
             .collect();
 
-        ExecResult::with_output(OutputData::table(headers, nodes))
+        // Build the text-mode budget summary line (appended after the table).
+        let budget_summary = budget.map(|b| {
+            format!(
+                "\nvfs-memory budget: {} used / {} limit / {} remaining",
+                format_resident(Some(b.used())),
+                format_resident(Some(b.limit())),
+                format_resident(Some(b.remaining())),
+            )
+        });
+
+        // Build the --json override: {mounts: [...], budget: {...}} so the
+        // budget object is not a fake mount row. OutputData::with_rich_json
+        // makes to_json() return this verbatim.
+        let rich = {
+            let mount_array: Vec<serde_json::Value> = mounts
+                .iter()
+                .map(|m| {
+                    let mut obj = serde_json::Map::new();
+                    obj.insert("path".to_string(), serde_json::Value::String(m.path.to_string_lossy().into_owned()));
+                    obj.insert("read_only".to_string(), serde_json::Value::Bool(m.read_only));
+                    match m.resident_bytes {
+                        Some(n) => obj.insert("resident_bytes".to_string(), serde_json::Value::Number(n.into())),
+                        None => obj.insert("resident_bytes".to_string(), serde_json::Value::Null),
+                    };
+                    serde_json::Value::Object(obj)
+                })
+                .collect();
+
+            let mut top = serde_json::Map::new();
+            top.insert("mounts".to_string(), serde_json::Value::Array(mount_array));
+            if let Some(b) = budget {
+                let mut bobj = serde_json::Map::new();
+                bobj.insert("label".to_string(), serde_json::Value::String(b.label().to_string()));
+                bobj.insert("used".to_string(), serde_json::Value::Number(b.used().into()));
+                bobj.insert("limit".to_string(), serde_json::Value::Number(b.limit().into()));
+                bobj.insert("remaining".to_string(), serde_json::Value::Number(b.remaining().into()));
+                top.insert("budget".to_string(), serde_json::Value::Object(bobj));
+            }
+            serde_json::Value::Object(top)
+        };
+
+        let output = OutputData::table(headers, nodes).with_rich_json(rich);
+
+        // For text mode: if there's a budget summary, materialize the table
+        // to its canonical string first, then append the summary line.
+        // `with_output_and_text` stores both: `out` (text rendering) and
+        // `output` (structured, used by --json via rich_json override).
+        if let Some(summary) = budget_summary {
+            let text = format!("{}{}", output.to_canonical_string(), summary);
+            ExecResult::with_output_and_text(output, text)
+        } else {
+            ExecResult::with_output(output)
+        }
     }
 }
 
@@ -270,16 +349,26 @@ mod tests {
         let result = Mounts.execute(args, &mut ctx).await;
         assert!(result.ok());
 
-        // Simulate global --json (handled by kernel)
+        // Simulate global --json (handled by kernel).
+        // Shape is now {mounts: [{path, read_only, resident_bytes}, ...]}
+        // (and optionally a "budget" key when a budget is set — not present here).
         let result = apply_output_format(result, OutputFormat::Json);
-        let data: Vec<serde_json::Value> = serde_json::from_str(&*result.text_out()).expect("valid JSON");
+        let top: serde_json::Value =
+            serde_json::from_str(&*result.text_out()).expect("valid JSON");
+
+        let data = top.get("mounts").expect("must have 'mounts' key");
+        assert!(data.is_array(), "'mounts' must be an array");
+        let data = data.as_array().unwrap();
         assert!(!data.is_empty());
 
         let paths: Vec<&str> = data
             .iter()
-            .filter_map(|v| v.get("PATH").and_then(|p| p.as_str()))
+            .filter_map(|v| v.get("path").and_then(|p| p.as_str()))
             .collect();
         assert!(paths.contains(&"/"));
         assert!(paths.contains(&"/tmp"));
+
+        // No budget key for an unbudgeted context.
+        assert!(top.get("budget").is_none(), "no budget key for unbudgeted ctx");
     }
 }

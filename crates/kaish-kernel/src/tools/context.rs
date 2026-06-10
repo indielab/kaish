@@ -15,6 +15,7 @@ use crate::scheduler::{JobManager, PipeReader, PipeWriter, StderrStream};
 use crate::tools::ToolRegistry;
 use crate::trash::TrashBackend;
 use crate::vfs::VfsRouter;
+use kaish_vfs::ByteBudget;
 use tokio_util::sync::CancellationToken;
 
 use crate::interpreter::OutputFormat;
@@ -132,6 +133,22 @@ pub struct ExecContext {
     /// Builtins set this via `GlobalFlags::apply(ctx)`; external commands
     /// don't touch it.
     pub output_format: Option<OutputFormat>,
+
+    /// Shared VFS memory budget for this kernel's `MemoryFs` mounts.
+    ///
+    /// `Arc`-cloned from the owning `Kernel` (or its fork parent) so all
+    /// concurrent execution paths draw from the same pool. `None` means
+    /// unbounded. Populated by `Kernel::assemble` and forwarded through
+    /// `child_for_pipeline` / `fork_inner` so background jobs and scatter
+    /// workers see the same cap as foreground execution.
+    pub vfs_budget: Option<Arc<ByteBudget>>,
+
+    /// Active overlay handle when the kernel was constructed with `overlay: true`.
+    ///
+    /// `Arc`-cloned so forks and pipeline stages share the same transaction.
+    /// `None` when no overlay is active (most kernels).
+    #[cfg(all(feature = "localfs", feature = "overlay"))]
+    pub overlay_handle: Option<Arc<crate::kernel::OverlayHandle>>,
 }
 
 impl ExecContext {
@@ -166,6 +183,9 @@ impl ExecContext {
             dispatcher: None,
             cancel: CancellationToken::new(),
             output_format: None,
+            vfs_budget: None,
+            #[cfg(all(feature = "localfs", feature = "overlay"))]
+            overlay_handle: None,
         }
     }
 
@@ -200,6 +220,9 @@ impl ExecContext {
             dispatcher: None,
             cancel: CancellationToken::new(),
             output_format: None,
+            vfs_budget: None,
+            #[cfg(all(feature = "localfs", feature = "overlay"))]
+            overlay_handle: None,
         }
     }
 
@@ -231,6 +254,9 @@ impl ExecContext {
             dispatcher: None,
             cancel: CancellationToken::new(),
             output_format: None,
+            vfs_budget: None,
+            #[cfg(all(feature = "localfs", feature = "overlay"))]
+            overlay_handle: None,
         }
     }
 
@@ -262,6 +288,9 @@ impl ExecContext {
             dispatcher: None,
             cancel: CancellationToken::new(),
             output_format: None,
+            vfs_budget: None,
+            #[cfg(all(feature = "localfs", feature = "overlay"))]
+            overlay_handle: None,
         }
     }
 
@@ -296,6 +325,9 @@ impl ExecContext {
             dispatcher: None,
             cancel: CancellationToken::new(),
             output_format: None,
+            vfs_budget: None,
+            #[cfg(all(feature = "localfs", feature = "overlay"))]
+            overlay_handle: None,
         }
     }
 
@@ -327,6 +359,9 @@ impl ExecContext {
             dispatcher: None,
             cancel: CancellationToken::new(),
             output_format: None,
+            vfs_budget: None,
+            #[cfg(all(feature = "localfs", feature = "overlay"))]
+            overlay_handle: None,
         }
     }
 
@@ -447,6 +482,11 @@ impl ExecContext {
             cancel: self.cancel.clone(),
             // Output format is per-execution; child pipeline stages start fresh.
             output_format: None,
+            // Budget is shared: the child draws from the same pool as the parent.
+            vfs_budget: self.vfs_budget.clone(),
+            // Overlay handle is shared: pipeline stages share the same transaction.
+            #[cfg(all(feature = "localfs", feature = "overlay"))]
+            overlay_handle: self.overlay_handle.clone(),
         }
     }
 

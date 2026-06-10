@@ -26,6 +26,14 @@ pub struct MountInfo {
     pub path: PathBuf,
     /// Whether this mount is read-only.
     pub read_only: bool,
+    /// Memory-resident content bytes held by this mount, if it tracks them.
+    ///
+    /// `Some(n)` for memory-backed mounts (`MemoryFs`, `OverlayFs`).
+    /// `None` for disk-backed mounts (`LocalFs`) — disk residency is the
+    /// host's concern (`df`), not this counter. Embedder-supplied `MountInfo`
+    /// values that do not track residency should use `None` so `kaish-mounts`
+    /// renders `-` rather than a misleading number.
+    pub resident_bytes: Option<u64>,
 }
 
 /// Backend operation errors.
