@@ -21,7 +21,6 @@
 
 mod builtin_fs;
 mod jobfs;
-mod memory;
 mod router;
 
 pub use builtin_fs::BuiltinFs;
@@ -30,13 +29,13 @@ pub use builtin_fs::BuiltinFs;
 #[cfg(feature = "git")]
 pub use kaish_tools_git::{FileStatus, GitVfs, LogEntry, StatusSummary, WorktreeInfo};
 pub use jobfs::JobFs;
-pub use memory::MemoryFs;
 pub use router::{MountInfo, VfsRouter};
 
-// The `Filesystem` trait + `LocalFs` moved to the leaf `kaish-vfs` crate so
-// out-of-tree backends (notably `GitVfs`, which wraps a `LocalFs` worktree)
-// can implement the trait without depending on the kernel. Re-exported here so
-// existing `crate::vfs::{Filesystem, DirEntry, LocalFs}` paths keep working.
-pub use kaish_vfs::{DirEntry, DirEntryKind, Filesystem};
+// The `Filesystem` trait + `LocalFs` + `MemoryFs` moved to the leaf `kaish-vfs`
+// crate so out-of-tree backends (notably `GitVfs`, which wraps a `LocalFs`
+// worktree) and overlay consumers can implement/compose the trait without
+// depending on the kernel. Re-exported here so existing
+// `crate::vfs::{Filesystem, DirEntry, LocalFs, MemoryFs}` paths keep working.
+pub use kaish_vfs::{DirEntry, DirEntryKind, Filesystem, MemoryFs};
 #[cfg(feature = "localfs")]
 pub use kaish_vfs::LocalFs;

@@ -19,3 +19,10 @@ pub use traits::{DirEntry, DirEntryKind, Filesystem};
 mod local;
 #[cfg(feature = "localfs")]
 pub use local::LocalFs;
+
+// `MemoryFs` only needs `tokio/sync` (runtime-free), but gated so the bare
+// trait-only build stays dependency-free.
+#[cfg(feature = "memory")]
+mod memory;
+#[cfg(feature = "memory")]
+pub use memory::MemoryFs;

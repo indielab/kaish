@@ -2,7 +2,7 @@
 //!
 //! Used for `/v` and testing. All data is ephemeral.
 
-use super::{DirEntry, DirEntryKind, Filesystem};
+use crate::traits::{DirEntry, DirEntryKind, Filesystem};
 use async_trait::async_trait;
 use std::collections::HashMap;
 use std::io;
