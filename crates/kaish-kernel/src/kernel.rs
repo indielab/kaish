@@ -2348,6 +2348,11 @@ impl Kernel {
             ec.cwd = ctx.cwd;
             ec.prev_cwd = ctx.prev_cwd;
             ec.aliases = ctx.aliases;
+            // A builtin (`set -o output-limit`, `kaish-output-limit set`) can
+            // mutate the runtime output limit; without this sync the change is
+            // dropped here and never reaches dispatch_command's read-back, so
+            // it would not survive past the current statement.
+            ec.output_limit = ctx.output_limit.clone();
             ec.pipe_stdin = ctx.pipe_stdin.take();
             ec.pipe_stdout = ctx.pipe_stdout.take();
         }

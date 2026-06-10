@@ -839,12 +839,42 @@ where
             select! { Token::PlusFlag(f) => Arg::Positional(Expr::Literal(Value::String(format!("+{}", f)))) },
         ));
 
+        // Option value after `-o`/`+o`: a size literal (`8K`, `1M`) or raw
+        // byte count. Stringified so `set.rs` can `parse_size` the
+        // `output-limit=<value>` it reconstructs.
+        let option_value_str = select! {
+            Token::NumberIdent(s) => s,
+            Token::Int(n) => n.to_string(),
+            Token::Ident(s) => s,
+        };
+
+        // `-o output-limit=8K`: `name`, `=`, `value` are three tokens; fold
+        // them back into a single `name=value` positional (the form `set.rs`
+        // and bash both expect). Without this the `=` is a parse error.
+        let set_option_assign = ident_parser()
+            .then_ignore(just(Token::Eq))
+            .then(option_value_str)
+            .map(|(name, value)| {
+                Arg::Positional(Expr::Literal(Value::String(format!("{name}={value}"))))
+            });
+
+        // Quoted option such as `set -o "output-limit=8K"`: the whole thing is
+        // one string token. Accept it as a positional so the quoted form works
+        // too (agents reach for it after the unquoted form trips a shell lint).
+        let set_quoted_arg = select! {
+            Token::String(s) => Arg::Positional(Expr::Literal(Value::String(s))),
+            Token::SingleString(s) => Arg::Positional(Expr::Literal(Value::String(s))),
+        };
+
         // set with flags: `set -e`, `set -e -u -o pipefail`
         let set_with_flags = just(Token::Set)
             .then(set_flag_arg)
             .then(
                 choice((
                     set_flag_arg,
+                    // `-o name=value` (try before the bare-ident arm).
+                    set_option_assign,
+                    set_quoted_arg,
                     // Identifiers like 'pipefail' after -o
                     ident_parser().map(|name| Arg::Positional(Expr::Literal(Value::String(name)))),
                 ))
@@ -1850,6 +1880,11 @@ where
         Token::In => "in",
         Token::Do => "do",
         Token::Esac => "esac",
+        // `set` in argument position is the literal word (`echo set`,
+        // `kaish-output-limit set 1K`); the `set` *builtin* is only matched
+        // when `Token::Set` leads a statement (see `set_command`), so this
+        // arm never shadows it.
+        Token::Set => "set",
     }
     .map(|s| Expr::Literal(Value::String(s.to_string())));
 

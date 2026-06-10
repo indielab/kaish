@@ -24,27 +24,6 @@ subprocess capture, arithmetic token leak) **all validate as fixed** on
 
 ## P1 — High-leverage features and diagnostics
 
-### Output-limit runtime control is unreachable from the shell (bug cluster, 2026-06-09)
-Every documented way to adjust the output limit at runtime fails:
-- `set -o output-limit=8K` is a **parse error** — the set-statement grammar
-  (`parser.rs:835-857`) accepts only flag tokens and bare identifiers, so the
-  `output-limit=SIZE` handling in `set.rs:130-138` is unreachable. Quoted form
-  also fails. Only the valueless toggles `set -o output-limit` / `set +o` parse.
-- `kaish-output-limit set 1K` is a **parse error** — the `set` *keyword* token
-  hijacks the subcommand position ("found 'NUMIDENT(1K)'"); the builtin's own
-  error hint ("try: set, on, off, head, tail") is partly unusable. `head`/`tail`
-  subcommands work.
-- The doc-exposure finding behind this: `output-limit.md:10/:43/:44` documents a
-  64K default; code default is **8K** (`DEFAULT_MCP_LIMIT`, `output_limit.rs:27`).
-- Related persistence bug surfaced by the same probe: `ExecContext.output_limit`
-  mutations don't persist past the current statement, so even the paths that
-  parse don't stick.
-Fix direction: rename or special-case the `set` subcommand collision, make
-`set -o output-limit=SIZE` parseable (or stop documenting it), make the limit
-mutation persist via the dispatch ctx-sync, then re-true the docs (8K vs 64K:
-pick one). Found by the 2026-06-09 doc-accuracy pass (output-limit.md exposed
-all four). Also reconcile `LANGUAGE.md:419-425` and `:704`.
-
 ### Documentation accuracy sweep — LANGUAGE.md + help content (2026-06-09)
 Every claim in LANGUAGE.md was executed against the v0.8.0 binary; help content
 checked against code. Verified falsehoods to fix (each needs a "fix doc vs fix
@@ -728,6 +707,28 @@ priority; decide whether multi-arg should accumulate per-path errors.
 
 Captured here so context from `cleanups-todo.md` / old `issues.md`
 isn't lost when those files are deleted.
+
+- **Output-limit runtime control is now reachable from the shell — fixed 2026-06-10.**
+  The four-part bug cluster the 2026-06-09 doc-accuracy pass surfaced is closed,
+  each with kernel-routed coverage in `tests/output_limit_control_tests.rs`:
+  - **`set -o output-limit=SIZE` parses.** The set grammar
+    (`parser.rs`, `set_with_flags`) only accepted flag tokens and bare
+    identifiers, so the `name`/`=`/`value` token triple was a parse error. Added
+    a `set_option_assign` arm that folds the three tokens back into one
+    `name=value` positional (the form `set.rs` already parses), plus a
+    `set_quoted_arg` arm so `set -o "output-limit=8K"` works too.
+  - **`kaish-output-limit set N` parses.** `set` is a keyword token and was
+    absent from `keyword_as_bareword` (`parser.rs:primary_expr_parser`), so it
+    couldn't be an argument — the `set` subcommand (and `echo set`) were parse
+    errors / silently mis-parsed. Added `Token::Set => "set"`; the `set` *builtin*
+    is still matched only when the token leads a statement, so nothing is shadowed.
+  - **Runtime mutations persist.** `execute_command`'s sync-back (`kernel.rs`)
+    synced scope/cwd/aliases/pipes back into `self.exec_ctx` but **not**
+    `output_limit`, so a builtin's change was dropped before `dispatch_command`
+    could read it back. Added the one missing `ec.output_limit = ctx.output_limit`.
+  - **Docs re-trued to the real 8K default** (was 8K in code, 64K in docs):
+    `output-limit.md` MCP-limit row + `on` default, `limits.md` set-options row,
+    and `LANGUAGE.md`'s set-builtins note (which now lists `-o output-limit`).
 
 - **`touch .hidden.txt` / dot-prefixed filenames — fixed (validated 2026-06-09).**
   The old P4 entry is closed: dot-prefixed names now lex as a single

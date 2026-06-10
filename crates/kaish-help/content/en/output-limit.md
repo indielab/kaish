@@ -7,7 +7,7 @@ Controls maximum command output size. When exceeded, full output is written to a
 | Mode | Enabled by default | Limit | Head | Tail |
 |------|---------|-------|------|------|
 | REPL | off | unlimited | 1K | 512 |
-| MCP | on | 64K | 1K | 512 |
+| MCP | on | 8K | 1K | 512 |
 
 The REPL starts with no limit but `set -o output-limit` works at any time. To make it persistent, add it to `~/.kaishrc`.
 
@@ -41,7 +41,7 @@ Location: `$XDG_RUNTIME_DIR/kaish/spill/` (typically `/run/user/$UID/kaish/spill
 ```bash
 kaish-output-limit                    # show current config
 kaish-output-limit set 64K            # set limit (K/M suffixes or raw bytes)
-kaish-output-limit on                 # enable with default 64K limit
+kaish-output-limit on                 # enable with default 8K limit
 kaish-output-limit off                # disable (unlimited)
 kaish-output-limit head 2048          # set head preview size
 kaish-output-limit tail 1024          # set tail preview size
