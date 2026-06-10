@@ -24,6 +24,25 @@ subprocess capture, arithmetic token leak) **all validate as fixed** on
 
 ## P1 — High-leverage features and diagnostics
 
+### OverlayFs hunk 2+ — inspection API and kernel surface (2026-06-10)
+Hunk 1 landed (`69c42e3` MemoryFs lift, `2a62a72` overlay core). Remaining, per
+`docs/kaish-overlayfs.md`:
+- **Hunk 2 — inspection API**: `changes()` / `is_dirty()` / `reset(path)` /
+  `reset_all()` / `commit_into(target)` (pre-flight stale-base checks, loud
+  partial failure) / `fork_into(fresh_upper)`. Plus the `max_bytes` write-path
+  quota (bases count toward it) and a cheap `bytes()` accounting accessor.
+  Doc tests 7–10 cover this hunk; test 4's base-survives-remove assertion
+  (behavioral half already tested) gets its `changes()` half here.
+- **Hunk 3 — kernel surface**: mount OverlayFs via VfsRouter, `--overlay`
+  session mode (kaish-mcp likely default-on, REPL opt-in), `vfs-diff` /
+  `vfs-commit` builtins, and doc test 12 (strict-glob over a merged dir,
+  kernel-routed).
+- **Punted in core** (revisit if a consumer hits them): cross-layer symlink
+  resolution is layer-local (an upper symlink can't point into lower);
+  whiteout of a directory is per-file only. Naming proximity note:
+  `VirtualOverlayBackend` (backend/overlay.rs) is unrelated prefix routing —
+  consider a doc cross-reference when wiring the kernel.
+
 ### Documentation accuracy sweep — LANGUAGE.md + help content (2026-06-09)
 Every claim in LANGUAGE.md was executed against the v0.8.0 binary; help content
 checked against code. Verified falsehoods to fix (each needs a "fix doc vs fix
