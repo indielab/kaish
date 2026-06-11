@@ -89,49 +89,6 @@ Remaining open work:
 
 ## P2 — Focused refactors & real bugs
 
-### `$()` rejects `;` sequences, multi-line bodies, and `#` comments
-Residual from the 2026-06-09 `;`-separator probe (the separator half is fixed —
-see Resolved). `$(printf a; printf b)` is a parse error: `;` is not accepted
-inside `$()` at all; multi-line `$( )` and `#` comments inside `$()` are also
-parse errors, with no test pinning either behavior (`skip_command_substitution`,
-`lexer.rs:1096`, skips quotes but not comments — same family as the
-comment-arithmetic preprocessor gotcha). Decide whether `$()` should accept the
-full statement grammar (sequences/newlines/comments) or document the
-single-pipeline restriction loudly.
-
-### Inline env prefix `FOO=bar cmd` parses as persistent assignment + command
-Verified 2026-06-11 via MCP probe: `FOO=bar echo hi` runs `echo hi` **and**
-leaves `FOO=bar` set for the rest of the script — bash scopes the assignment
-to that one command's environment. Silent semantic divergence when porting
-bash (a "temporary" override leaks into everything after it). Note this is
-*not* the behavior the resonance panel described (`FOO=bar` becoming `$1`);
-it has changed since. Decide: command-scoped env (bash semantics), a
-validator diagnostic, or document loudly. README's agent-gotchas section
-warns about it as of 2026-06-11.
-
-### `kill -<sig>` bash shorthand (`kill -9 %1`, `kill -STOP %1`) isn't accepted
-`kill` takes the signal via `--signal NAME` / `-s NAME` only; the bash idioms
-`kill -9 %1`, `kill -KILL %1`, `kill -STOP %1` fail at clap arg parsing (`-9`
-lexes as `Int(-9)`, `-STOP`/`-KILL` as a `ShortFlag`, neither a declared flag).
-Job-control-heavy users reach for these constantly. Fix: give `kill` bespoke
-argv handling (à la `set.rs`) that strips a leading `-<signum>` / `-<SIGNAME>`
-token and maps it to the signal before clap sees the rest. The signal *delivery*
-mechanism is already in place (see Resolved `kill %N` entry); this is purely the
-front-door syntax.
-
-### scatter does not fan out plain-text stdin — the docs' canonical examples run one worker
-`cat items.txt | scatter --as ITEM ...` (`LANGUAGE.md:607`, `:611-613`) binds
-the **entire** stdin to one item — one worker, exit 0, silent. Structured input
-`cat items.txt | scatter --as ITEM ...` (`LANGUAGE.md:607`, `:611-613`) binds
-the **entire** stdin to one item — one worker, exit 0, silent. Structured input
-fans out correctly (`split ... | scatter` works as documented). The behavior is
-deliberate (`extract_items`, `scatter.rs:327-328`: "Raw text without structured
-data — one item (no implicit split)") but it contradicts the for-loop
-newline-split philosophy adopted later, and the doc's canonical examples
-silently degrade. Decide: newline-split plain text in scatter (consistent with
-`for`), or fix the examples to `... | split --lines | scatter` and state the
-structured-data requirement loudly.
-
 ### Kernel-routed port residuals: `read`, `env`, `exec` deep coverage
 The realworld port is **done 2026-06-11** (see Resolved) — 48 tests through
 `kernel.execute`, plus a new rg section; the port immediately caught the
@@ -199,34 +156,36 @@ fill that niche) — the goal is to guide agents to write reliable scripts, and
 "always quote interpolated words" is a simpler, lint-aligned rule than bash's
 implicit pasting. Two surfaces expose the no-pasting behavior differently:
 
-- **Redirect target** (`crates/kaish-kernel/src/parser.rs:1540`, `redirect_parser`)
+- **Redirect target** (`crates/kaish-kernel/src/parser.rs`, `redirect_parser`)
   binds with a single `primary_expr_parser()`, so `> /tmp/$(echo x).txt` is a
   hard parse error (`found '$(' expected redirect, …`). Bare-subst
   (`> $(echo /tmp/x)`) and quoted (`> "/tmp/$(echo x).txt"`) both work.
   *Polish (P4, deferred):* turn the parse error into a "quote the redirect
   target" hint instead of the generic expected-token list.
-- **Argv** (next entry) silently splats into multiple args instead of erroring —
-  the more dangerous of the two.
+- **Argv** now also rejects glued positionals with a "quote the whole word"
+  hint (fixed 2026-06-11 — see Resolved). Residual (P4): the check covers
+  positional args *before* `--`; post-`--` positionals and a flag-adjacent-to-
+  positional glue are not yet flagged (rare; the pre-`--` positional case is the
+  documented bug class).
 
 Surfaced 2026-06-08 while adding command-substitution support to redirect
 targets.
 
-### Unquoted interpolated argv word silently splats into multiple args
-Because there is no token-pasting (see previous entry), `echo /tmp/$(echo gen).txt`
-parses as **three** positional args and prints `/tmp/ gen .txt` (space-joined),
-and `echo $dir/out.txt` prints `/tmp /out.txt` — two args. `command_parser` uses
-`primary_expr_parser().repeated()`, so adjacent exprs are each accepted as their
-own `Arg::Positional` with no diagnostic. This is worse than the redirect case
-because it *silently* produces wrong argv rather than failing. Given the
-keep-quoting decision, the right fix is a **validator diagnostic**: flag adjacent
-argv exprs with no intervening whitespace (lexer would need to preserve adjacency
-spans) and tell the agent to quote — e.g. `E0xx: '/tmp/' and '$(…)' are adjacent;
-quote the word as "/tmp/$(…)"`. Until then, the quoting rule in the docs is the
-mitigation. Deferred (needs adjacency tracking in the lexer).
-
 ---
 
 ## P3 — Scheduler and infra
+
+### `kill -<sig>` bash shorthand (`kill -9 %1`, `kill -STOP %1`) isn't accepted
+`kill` takes the signal via `--signal NAME` / `-s NAME` only; the bash idioms
+`kill -9 %1`, `kill -KILL %1`, `kill -STOP %1` fail at clap arg parsing (`-9`
+lexes as `Int(-9)`, `-STOP`/`-KILL` as a `ShortFlag`, neither a declared flag).
+Job-control-heavy users reach for these constantly. Fix: give `kill` bespoke
+argv handling (à la `set.rs`) that strips a leading `-<signum>` / `-<SIGNAME>`
+token and maps it to the signal before clap sees the rest. The signal *delivery*
+mechanism is already in place (see Resolved `kill %N` entry); this is purely the
+front-door syntax. **Demoted P2→P3 2026-06-11 (Amy):** the `-<signum>` shorthand
+leans POSIX-y and starts to touch underlying OS signal-number variance; the
+loud `--signal NAME %N` form already covers the need. Defer.
 
 ### Process-group kill still has a (small) PID-reuse window
 The direct-child kill path now uses `pidfd_send_signal` on Linux (see
@@ -404,6 +363,17 @@ hatch-free) is more churn than the current need justifies.
 
 ## P4 — Eventually
 
+### Control structures inside `$()` are not supported
+The `$()` body accepts the full *statement* grammar — pipelines, `&&`/`||`
+chains, `;`/newline sequences, `#` comments (landed 2026-06-11, see Resolved) —
+but **not** `if`/`for`/`while`/`case`. The chain/sequence grammar is built
+locally in `cmd_subst_parser`; wiring control structures in would require
+threading the recursive `stmt` parser through ~17 expression call sites
+(`primary_expr_parser`/`expr_parser` and their callers), a much larger parser
+refactor. `$(if …; then …; fi)` is exotic in command-substitution position;
+revisit if a real workload needs it. Workaround: compute at statement level and
+capture the variable.
+
 ### Soften the "sh subset that passes shellcheck" framing
 CLAUDE.md (and the README) describe kaish as "a `sh` subset that passes
 `shellcheck --enable=all`." That framing is now more aspirational than accurate
@@ -569,6 +539,67 @@ priority; decide whether multi-arg should accumulate per-path errors.
 
 Captured here so context from `cleanups-todo.md` / old `issues.md`
 isn't lost when those files are deleted.
+
+- **0.8.2 swipe: four agent-facing language fixes — done 2026-06-11.** One
+  session, TDD throughout (failing test first), kaish+bash compat sides both
+  green, clippy clean on default / `--no-default-features` / `subprocess`.
+  - **#1 inline env prefix is command-scoped (`FOO=bar cmd`).** New
+    `Stmt::EnvScoped { assignments, body }` (parser produces it when ≥1
+    `NAME=value` is immediately followed by a command/pipeline; a bare
+    `NAME=value` with no command stays a persistent `Assignment`, and
+    `FOO=bar && cmd` does not over-capture). The kernel applies the assignments
+    as **exported** vars in a fresh scope frame for the body only, then unwinds
+    the frame and restores export marks — so the subprocess env sees them and
+    nothing leaks. Values evaluate left-to-right (`A=1 B=$A cmd`). Documented
+    kaish divergence: the prefixed var is visible to the command's own arg
+    expansion (kaish builtins read scope), where bash expands args first. Tests:
+    parser shape + disambiguation, `shell_compat` leak/persist/visibility,
+    subprocess `env_prefix_reaches_subprocess_then_does_not_leak`.
+  - **#2 unquoted glued argv words are a parse error, not a silent splat.**
+    `args_list_parser` captures each pre-`--` arg's span and rejects two
+    positional args with touching spans (`/tmp/$(echo x).txt`, `$dir/out.txt`,
+    `foo$(x)baz`) with a "quote the whole word" `Rich::custom` error — mirroring
+    the existing `WordAssign` spaces-around-`=` check. Precise: single-token
+    words (`file.txt`, `a.b.c`, `v1.2.3`) are one arg and never trip it (probed
+    against the live binary first). Landed as a **parse error** (not the
+    originally-floated validator E-code) because spans live in the parser and
+    `parse()` already favors unskippable parse-time rejection for dangerous
+    ambiguities (`first_ambiguous_stdin`). Residual post-`--`/flag-glue case →
+    P4 above.
+  - **#3 scatter newline-splits plain-text stdin.** `extract_items` now mirrors
+    the for-loop `$(cmd)` contract (split on `\n` only, trim trailing `\n`/`\r`,
+    keep interior blanks, whitespace-in-line intact) so `cat items.txt | scatter
+    --as ITEM …` runs one worker per line instead of binding the whole stdin to
+    one worker. Both scatter files' unit tests + a kernel-routed
+    `scatter_plain_text_stdin_fans_out_per_line`. LANGUAGE.md states the
+    contract.
+  - **#5 `$()` accepts the full statement grammar.** `Expr::CommandSubst` /
+    `StringPart::CommandSubst` now hold `Vec<Stmt>` (the old `Pipeline`-only
+    representation and the dead `stmt_to_pipeline` helper were **deleted** — one
+    representation, no compat shim). `cmd_subst_parser` builds a local
+    chain/sequence parser (`&&`/`||`/`;`/newlines/comments); the kernel runs the
+    block via a new `execute_block_capturing` (output accumulates with no
+    separator, last statement's `.data`/exit ride through, scope/cwd snapshot
+    restored). String interpolation `"$(a && b)"` gets the full grammar for free
+    (it already routed through `parse()`). The sync `Executor::execute` trait now
+    takes `&[Stmt]` (only `NoOpExecutor` implements it). Control structures in
+    `$()` are the one boundary → P4 above. Tests: bash-cross-checked
+    `cmdsubst_*` (`&&`/`||`/`;`/multiline/comment/string-interp/cd-containment).
+
+- **`kill` job control works in hermetic builds — fixed 2026-06-11.** The whole
+  `kill` builtin was gated `#[cfg(all(unix, feature = "subprocess"))]`, so
+  `kill %1` returned "not supported on this platform" without `subprocess` —
+  even though terminating a kaish background job is pure kernel work (a
+  cancellation token, not an OS signal). Restructured: the builtin is always
+  active; arg parsing + `%N`-vs-PID dispatch are platform-independent; `kill_job`
+  and `kill_pid` have two cfg variants. Hermetic `kill_job` cancels the job via
+  its token (terminating signals) or refuses loudly (non-terminating, no process
+  group to signal). The `subprocess` variant keeps the full OS-signal fidelity
+  (`killpg` of recorded process groups, bare-PID `nix::kill`) byte-for-byte —
+  and when external commands are on, `/bin/kill` covers raw PIDs anyway. The
+  `kill %N` / `wait %N` builtin-job tests in `background_execution_tests.rs` were
+  un-gated from `subprocess` (they assert pure kaish job control) and now pass in
+  both builds; the `--json` sweep's `kill %1` case passes in the default build.
 
 - **grep/rg value-bearing flags were silently dropped on the kernel path — fixed 2026-06-11.**
   The realworld-port's first kernel-routed run caught it: `grep -A 5` (and the

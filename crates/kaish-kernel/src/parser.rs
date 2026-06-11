@@ -139,17 +139,13 @@ fn parse_varpath(raw: &str) -> VarPath {
     VarPath { segments }
 }
 
-/// Parse an interpolated string like "Hello ${NAME}!" or "Hello $NAME!" into parts.
-/// Extract a pipeline from a statement if possible.
-fn stmt_to_pipeline(stmt: Stmt) -> Option<Pipeline> {
-    match stmt {
-        Stmt::Pipeline(p) => Some(p),
-        Stmt::Command(cmd) => Some(Pipeline {
-            commands: vec![cmd],
-            background: false,
-        }),
-        _ => None,
-    }
+/// Drop `Stmt::Empty` (bare newlines/semicolons) from a parsed `$()` body so an
+/// empty or whitespace-only substitution collapses to nothing runnable.
+fn strip_empty_stmts(statements: Vec<Stmt>) -> Vec<Stmt> {
+    statements
+        .into_iter()
+        .filter(|s| !matches!(s, Stmt::Empty))
+        .collect()
 }
 
 /// Parse an unquoted heredoc body's interpolation while tracking each part's
@@ -304,19 +300,18 @@ fn parse_interpolated_string_spanned(s: &str, base_offset: usize) -> Vec<Spanned
                     }
                 }
                 let inserted = if let Ok(program) = parse(&cmd_content) {
-                    if let Some(stmt) = program.statements.first() {
-                        if let Some(pipeline) = stmt_to_pipeline(stmt.clone()) {
-                            parts.push(SpannedPart {
-                                part: StringPart::CommandSubst(pipeline),
-                                offset: base_offset + part_start,
-                                len: pos - part_start,
-                            });
-                            true
-                        } else {
-                            false
-                        }
-                    } else {
+                    // The full statement block runs as the substitution body
+                    // (pipelines, `&&`/`||`, `;`/newline sequences, comments).
+                    let stmts = strip_empty_stmts(program.statements);
+                    if stmts.is_empty() {
                         false
+                    } else {
+                        parts.push(SpannedPart {
+                            part: StringPart::CommandSubst(stmts),
+                            offset: base_offset + part_start,
+                            len: pos - part_start,
+                        });
+                        true
                     }
                 } else {
                     false
@@ -538,19 +533,17 @@ fn parse_interpolated_string(s: &str) -> Vec<StringPart> {
                     }
                 }
 
-                // Parse the command content as a pipeline
-                // We need to use the main parser for this
+                // Parse the command content as a full statement block
+                // (pipelines, `&&`/`||` chains, `;`/newline sequences, comments).
                 if let Ok(program) = parse(&cmd_content) {
-                    // Extract the pipeline from the parsed result
-                    if let Some(stmt) = program.statements.first() {
-                        if let Some(pipeline) = stmt_to_pipeline(stmt.clone()) {
-                            parts.push(StringPart::CommandSubst(pipeline));
-                        } else {
-                            // If we can't extract a pipeline, treat as literal
-                            current_text.push_str("$(");
-                            current_text.push_str(&cmd_content);
-                            current_text.push(')');
-                        }
+                    let stmts = strip_empty_stmts(program.statements);
+                    if stmts.is_empty() {
+                        // Nothing runnable — treat as literal text.
+                        current_text.push_str("$(");
+                        current_text.push_str(&cmd_content);
+                        current_text.push(')');
+                    } else {
+                        parts.push(StringPart::CommandSubst(stmts));
                     }
                 } else {
                     // Parse failed - treat as literal
@@ -943,10 +936,31 @@ where
         // If neither matches, fall through to assignment_parser
         let set_command = set_with_flags.or(set_no_args);
 
+        // Inline env prefix: `NAME=value ... command`. One or more bash-style
+        // assignments immediately followed by a command/pipeline scopes those
+        // assignments to that command only (Stmt::EnvScoped). With no command
+        // following, this alternative fails and we fall through to a plain,
+        // persistent assignment. Must precede `assignment_parser` so the
+        // prefixed-command form wins when a command follows.
+        let env_prefix_assign = ident_parser()
+            .then_ignore(just(Token::Eq))
+            .then(expr_parser())
+            .map(|(name, value)| Assignment { name, value, local: false });
+        let env_scoped = env_prefix_assign
+            .repeated()
+            .at_least(1)
+            .collect::<Vec<_>>()
+            .then(pipeline_parser().map(pipeline_into_stmt))
+            .map(|(assignments, body)| Stmt::EnvScoped {
+                assignments,
+                body: Box::new(body),
+            });
+
         // Base statement (without chaining)
         let base_statement = choice((
             just(Token::Newline).to(Stmt::Empty),
             set_command,
+            env_scoped,
             assignment_parser().map(Stmt::Assignment),
             // Shell-style functions (use $1, $2 positional params)
             posix_function_parser(stmt.clone()).map(Stmt::ToolDef),  // name() { }
@@ -961,23 +975,7 @@ where
             exit_stmt,
             test_expr_stmt_parser().map(Stmt::Test),
             // Note: 'true' and 'false' are handled by command_parser/pipeline_parser
-            pipeline_parser().map(|p| {
-                // Unwrap single-command pipelines without background and without redirects
-                if p.commands.len() == 1 && !p.background {
-                    // Only unwrap if no redirects - redirects require pipeline processing
-                    if p.commands[0].redirects.is_empty() {
-                        // Safe: we just checked len == 1
-                        match p.commands.into_iter().next() {
-                            Some(cmd) => Stmt::Command(cmd),
-                            None => Stmt::Empty, // unreachable but safe
-                        }
-                    } else {
-                        Stmt::Pipeline(p)
-                    }
-                } else {
-                    Stmt::Pipeline(p)
-                }
-            }),
+            pipeline_parser().map(pipeline_into_stmt),
         ))
         .boxed();
 
@@ -1426,6 +1424,21 @@ where
         .boxed()
 }
 
+/// Map a parsed `Pipeline` to a statement, unwrapping a single redirect-free
+/// foreground command to `Stmt::Command` (the canonical shape used throughout
+/// the parser). Shared by the top-level statement parser, `$()` bodies, and
+/// inline env-prefix bodies so the unwrap rule lives in one place.
+fn pipeline_into_stmt(p: Pipeline) -> Stmt {
+    if p.commands.len() == 1 && !p.background && p.commands[0].redirects.is_empty() {
+        match p.commands.into_iter().next() {
+            Some(cmd) => Stmt::Command(cmd),
+            None => Stmt::Empty, // unreachable (len checked) but safe
+        }
+    } else {
+        Stmt::Pipeline(p)
+    }
+}
+
 /// True if `cmd` has more than one stdin source (`<`, `<<`, `<<<`). Such a
 /// command would silently depend on redirect ordering at execution time
 /// (`setup_stdin_redirects` is last-wins), so `parse()` rejects it loudly.
@@ -1466,6 +1479,7 @@ fn stmt_has_ambiguous_stdin(stmt: &Stmt) -> bool {
         Stmt::AndChain { left, right } | Stmt::OrChain { left, right } => {
             stmt_has_ambiguous_stdin(left) || stmt_has_ambiguous_stdin(right)
         }
+        Stmt::EnvScoped { body, .. } => stmt_has_ambiguous_stdin(body),
         Stmt::Assignment(_)
         | Stmt::Break(_)
         | Stmt::Continue(_)
@@ -1484,10 +1498,34 @@ fn args_list_parser<'tokens, I>(
 where
     I: ValueInput<'tokens, Token = Token, Span = Span>,
 {
-    // Arguments before `--` (normal parsing)
+    // Arguments before `--` (normal parsing). Each arg is captured with its
+    // source span so we can reject the silent argv-splat: two positional words
+    // with no whitespace between them (`/tmp/$(echo x).txt` → 3 args). kaish does
+    // no token pasting, so an unquoted interpolated word fragments into separate
+    // args; the fix is to quote the whole word. Single-token words (`file.txt`,
+    // `v1.2.3`) are one arg and never trigger this. See docs/issues.md #2.
     let pre_dash = arg_before_double_dash_parser()
+        .map_with(|arg, e| -> (Arg, Span) { (arg, e.span()) })
         .repeated()
-        .collect::<Vec<_>>();
+        .collect::<Vec<(Arg, Span)>>()
+        .try_map(|args, _span| {
+            for pair in args.windows(2) {
+                let (prev, prev_span) = &pair[0];
+                let (next, next_span) = &pair[1];
+                if matches!(prev, Arg::Positional(_))
+                    && matches!(next, Arg::Positional(_))
+                    && prev_span.end == next_span.start
+                {
+                    return Err(Rich::custom(
+                        *next_span,
+                        "adjacent words with no space between them are not joined into one \
+                         argument (kaish does no token pasting); quote the whole word, e.g. \
+                         \"/tmp/$(echo x).txt\" or \"$dir/out.txt\"",
+                    ));
+                }
+            }
+            Ok(args.into_iter().map(|(arg, _)| arg).collect::<Vec<Arg>>())
+        });
 
     // The `--` marker itself
     let double_dash = select! {
@@ -2064,10 +2102,53 @@ where
             background: false,
         });
 
+    // A single pipeline becomes one statement (`$(echo x)` → one `Stmt::Command`),
+    // keeping the AST shape uniform with the rest of the parser.
+    let pipeline_stmt = pipeline.map(pipeline_into_stmt);
+
+    // Statement chaining inside `$()`, same precedence as the top level
+    // (`&&` binds tighter than `||`). This is the full statement grammar a
+    // command substitution body accepts — pipelines, `&&`/`||` chains, and
+    // (via the sequence below) `;`/newline separators and `#` comments.
+    // Control structures (`if`/`for`/`while`/`case`) are intentionally out of
+    // scope here; they require threading the recursive statement parser through
+    // every expression site (see docs/issues.md). The body grammar otherwise
+    // mirrors `statement_parser`.
+    let and_chain = pipeline_stmt.clone().foldl(
+        just(Token::And).ignore_then(pipeline_stmt.clone()).repeated(),
+        |left, right| Stmt::AndChain {
+            left: Box::new(left),
+            right: Box::new(right),
+        },
+    );
+    let chained = and_chain.clone().foldl(
+        just(Token::Or).ignore_then(and_chain).repeated(),
+        |left, right| Stmt::OrChain {
+            left: Box::new(left),
+            right: Box::new(right),
+        },
+    );
+
+    // `;` / newline separated sequence of chained statements, with optional
+    // leading/trailing/interior separators (so multi-line bodies and a trailing
+    // `;` or comment-induced newline parse cleanly). `#` comments lex to
+    // newlines, so they are consumed here as ordinary separators.
+    let separator = choice((just(Token::Newline), just(Token::Semi)));
+    let body = separator
+        .clone()
+        .repeated()
+        .ignore_then(
+            chained
+                .separated_by(separator.clone().repeated().at_least(1))
+                .allow_trailing()
+                .collect::<Vec<_>>(),
+        )
+        .then_ignore(separator.repeated());
+
     just(Token::CmdSubstStart)
-        .ignore_then(pipeline)
+        .ignore_then(body)
         .then_ignore(just(Token::RParen))
-        .map(|pipeline| Expr::CommandSubst(Box::new(pipeline)))
+        .map(Expr::CommandSubst)
         .labelled("command substitution")
 }
 
@@ -2151,6 +2232,28 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Extract the single `Command` from a one-statement `$(cmd)` body.
+    fn subst_cmd(expr: &Expr) -> &Command {
+        match expr {
+            Expr::CommandSubst(stmts) => match stmts.as_slice() {
+                [Stmt::Command(cmd)] => cmd,
+                other => panic!("expected a single command in $(), got {other:?}"),
+            },
+            other => panic!("expected command subst, got {other:?}"),
+        }
+    }
+
+    /// Extract the single `Pipeline` from a one-statement `$(a | b)` body.
+    fn subst_pipeline(expr: &Expr) -> &Pipeline {
+        match expr {
+            Expr::CommandSubst(stmts) => match stmts.as_slice() {
+                [Stmt::Pipeline(p)] => p,
+                other => panic!("expected a single pipeline in $(), got {other:?}"),
+            },
+            other => panic!("expected command subst, got {other:?}"),
+        }
+    }
 
     #[test]
     fn parse_empty() {
@@ -2517,18 +2620,14 @@ mod tests {
         match &result.statements[0] {
             Stmt::Assignment(a) => {
                 assert_eq!(a.name, "X");
-                match &a.value {
-                    Expr::CommandSubst(outer) => {
-                        assert_eq!(outer.commands[0].name, "echo");
-                        // The argument should be another command substitution
-                        match &outer.commands[0].args[0] {
-                            Arg::Positional(Expr::CommandSubst(inner)) => {
-                                assert_eq!(inner.commands[0].name, "date");
-                            }
-                            other => panic!("expected nested cmd subst, got {:?}", other),
-                        }
+                let outer = subst_cmd(&a.value);
+                assert_eq!(outer.name, "echo");
+                // The argument should be another command substitution
+                match &outer.args[0] {
+                    Arg::Positional(inner_expr) => {
+                        assert_eq!(subst_cmd(inner_expr).name, "date");
                     }
-                    other => panic!("expected cmd subst, got {:?}", other),
+                    other => panic!("expected nested cmd subst arg, got {:?}", other),
                 }
             }
             other => panic!("expected assignment, got {:?}", other),
@@ -2540,24 +2639,23 @@ mod tests {
         // Three levels deep
         let result = parse("X=$(a $(b $(c)))").unwrap();
         match &result.statements[0] {
-            Stmt::Assignment(a) => match &a.value {
-                Expr::CommandSubst(level1) => {
-                    assert_eq!(level1.commands[0].name, "a");
-                    match &level1.commands[0].args[0] {
-                        Arg::Positional(Expr::CommandSubst(level2)) => {
-                            assert_eq!(level2.commands[0].name, "b");
-                            match &level2.commands[0].args[0] {
-                                Arg::Positional(Expr::CommandSubst(level3)) => {
-                                    assert_eq!(level3.commands[0].name, "c");
-                                }
-                                other => panic!("expected level3 cmd subst, got {:?}", other),
+            Stmt::Assignment(a) => {
+                let level1 = subst_cmd(&a.value);
+                assert_eq!(level1.name, "a");
+                match &level1.args[0] {
+                    Arg::Positional(level2_expr) => {
+                        let level2 = subst_cmd(level2_expr);
+                        assert_eq!(level2.name, "b");
+                        match &level2.args[0] {
+                            Arg::Positional(level3_expr) => {
+                                assert_eq!(subst_cmd(level3_expr).name, "c");
                             }
+                            other => panic!("expected level3 cmd subst, got {:?}", other),
                         }
-                        other => panic!("expected level2 cmd subst, got {:?}", other),
                     }
+                    other => panic!("expected level2 cmd subst, got {:?}", other),
                 }
-                other => panic!("expected cmd subst, got {:?}", other),
-            },
+            }
             other => panic!("expected assignment, got {:?}", other),
         }
     }
@@ -2989,13 +3087,7 @@ mod tests {
         match &result.statements[0] {
             Stmt::Assignment(a) => {
                 assert_eq!(a.name, "X");
-                match &a.value {
-                    Expr::CommandSubst(pipeline) => {
-                        assert_eq!(pipeline.commands.len(), 1);
-                        assert_eq!(pipeline.commands[0].name, "echo");
-                    }
-                    other => panic!("expected command subst, got {:?}", other),
-                }
+                assert_eq!(subst_cmd(&a.value).name, "echo");
             }
             other => panic!("expected assignment, got {:?}", other),
         }
@@ -3005,17 +3097,15 @@ mod tests {
     fn parse_cmd_subst_with_args() {
         let result = parse(r#"X=$(fetch url="http://example.com")"#).unwrap();
         match &result.statements[0] {
-            Stmt::Assignment(a) => match &a.value {
-                Expr::CommandSubst(pipeline) => {
-                    assert_eq!(pipeline.commands[0].name, "fetch");
-                    assert_eq!(pipeline.commands[0].args.len(), 1);
-                    match &pipeline.commands[0].args[0] {
-                        Arg::WordAssign { key, .. } => assert_eq!(key, "url"),
-                        other => panic!("expected WordAssign arg, got {:?}", other),
-                    }
+            Stmt::Assignment(a) => {
+                let cmd = subst_cmd(&a.value);
+                assert_eq!(cmd.name, "fetch");
+                assert_eq!(cmd.args.len(), 1);
+                match &cmd.args[0] {
+                    Arg::WordAssign { key, .. } => assert_eq!(key, "url"),
+                    other => panic!("expected WordAssign arg, got {:?}", other),
                 }
-                other => panic!("expected command subst, got {:?}", other),
-            },
+            }
             other => panic!("expected assignment, got {:?}", other),
         }
     }
@@ -3024,14 +3114,12 @@ mod tests {
     fn parse_cmd_subst_pipeline() {
         let result = parse("X=$(cat file | grep pattern)").unwrap();
         match &result.statements[0] {
-            Stmt::Assignment(a) => match &a.value {
-                Expr::CommandSubst(pipeline) => {
-                    assert_eq!(pipeline.commands.len(), 2);
-                    assert_eq!(pipeline.commands[0].name, "cat");
-                    assert_eq!(pipeline.commands[1].name, "grep");
-                }
-                other => panic!("expected command subst, got {:?}", other),
-            },
+            Stmt::Assignment(a) => {
+                let pipeline = subst_pipeline(&a.value);
+                assert_eq!(pipeline.commands.len(), 2);
+                assert_eq!(pipeline.commands[0].name, "cat");
+                assert_eq!(pipeline.commands[1].name, "grep");
+            }
             other => panic!("expected assignment, got {:?}", other),
         }
     }
@@ -3051,6 +3139,133 @@ mod tests {
         }
     }
 
+    // ═══════════════════════════════════════════════════════════════════════════
+    // Inline env-prefix (`NAME=value command`) Tests
+    // ═══════════════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn parse_env_prefix_single() {
+        let result = parse("FOO=bar echo hi").unwrap();
+        match &result.statements[0] {
+            Stmt::EnvScoped { assignments, body } => {
+                assert_eq!(assignments.len(), 1);
+                assert_eq!(assignments[0].name, "FOO");
+                assert!(!assignments[0].local);
+                match body.as_ref() {
+                    Stmt::Command(cmd) => assert_eq!(cmd.name, "echo"),
+                    other => panic!("expected command body, got {other:?}"),
+                }
+            }
+            other => panic!("expected env-scoped, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_env_prefix_multiple() {
+        let result = parse("A=1 B=2 run").unwrap();
+        match &result.statements[0] {
+            Stmt::EnvScoped { assignments, body } => {
+                assert_eq!(assignments.len(), 2);
+                assert_eq!(assignments[0].name, "A");
+                assert_eq!(assignments[1].name, "B");
+                assert!(matches!(body.as_ref(), Stmt::Command(c) if c.name == "run"));
+            }
+            other => panic!("expected env-scoped, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_bare_assignment_is_not_env_scoped() {
+        // No command follows — stays a plain (persistent) assignment.
+        let result = parse("FOO=bar").unwrap();
+        assert!(
+            matches!(&result.statements[0], Stmt::Assignment(a) if a.name == "FOO"),
+            "got {:?}",
+            result.statements[0]
+        );
+    }
+
+    #[test]
+    fn parse_assignment_then_and_chain_does_not_over_capture() {
+        // `FOO=bar && echo` is a (persistent) assignment chained with `&&`, NOT
+        // an env-prefixed command — the `&&` is not a command for the prefix.
+        let result = parse("FOO=bar && echo hi").unwrap();
+        match &result.statements[0] {
+            Stmt::AndChain { left, right } => {
+                assert!(matches!(left.as_ref(), Stmt::Assignment(a) if a.name == "FOO"));
+                assert!(matches!(right.as_ref(), Stmt::Command(c) if c.name == "echo"));
+            }
+            other => panic!("expected and-chain, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_env_prefix_pipeline_body() {
+        let result = parse("FOO=bar cat | grep x").unwrap();
+        match &result.statements[0] {
+            Stmt::EnvScoped { assignments, body } => {
+                assert_eq!(assignments[0].name, "FOO");
+                match body.as_ref() {
+                    Stmt::Pipeline(p) => assert_eq!(p.commands.len(), 2),
+                    other => panic!("expected pipeline body, got {other:?}"),
+                }
+            }
+            other => panic!("expected env-scoped, got {other:?}"),
+        }
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════════
+    // Argv-splat rejection (adjacent unquoted words — docs/issues.md #2)
+    // ═══════════════════════════════════════════════════════════════════════════
+
+    fn parse_err_message(source: &str) -> String {
+        parse(source)
+            .expect_err("expected a parse error")
+            .iter()
+            .map(|e| e.message.clone())
+            .collect::<Vec<_>>()
+            .join(" ")
+    }
+
+    #[test]
+    fn argv_splat_cmdsubst_glued_to_path_is_rejected() {
+        // `/tmp/$(echo x).txt` lexes as 3 adjacent tokens; unquoted it would
+        // silently splat into 3 args. Reject with a quote-it hint.
+        let msg = parse_err_message("echo /tmp/$(echo x).txt");
+        assert!(msg.contains("quote"), "expected quote hint, got: {msg}");
+    }
+
+    #[test]
+    fn argv_splat_var_glued_to_path_is_rejected() {
+        assert!(parse("echo $dir/out.txt").is_err());
+    }
+
+    #[test]
+    fn argv_splat_three_way_glue_is_rejected() {
+        assert!(parse("echo foo$(echo bar)baz").is_err());
+    }
+
+    #[test]
+    fn argv_splat_quoted_word_is_accepted() {
+        // The supported idiom: quote the whole interpolated word.
+        assert!(parse(r#"echo "/tmp/$(echo x).txt""#).is_ok());
+        assert!(parse(r#"echo "$dir/out.txt""#).is_ok());
+    }
+
+    #[test]
+    fn argv_single_token_words_are_not_splat() {
+        // These lex as a single token each — no adjacency, must still parse.
+        assert!(parse("echo file.txt").is_ok(), "file.txt");
+        assert!(parse("echo a.b.c").is_ok(), "a.b.c");
+        assert!(parse("echo v1.2.3").is_ok(), "v1.2.3");
+    }
+
+    #[test]
+    fn argv_spaced_words_are_not_splat() {
+        assert!(parse("echo a b c").is_ok());
+        assert!(parse("echo /tmp/x $(echo y)").is_ok());
+    }
+
     #[test]
     fn parse_cmd_subst_in_command_arg() {
         let result = parse("echo $(whoami)").unwrap();
@@ -3058,8 +3273,8 @@ mod tests {
             Stmt::Command(cmd) => {
                 assert_eq!(cmd.name, "echo");
                 match &cmd.args[0] {
-                    Arg::Positional(Expr::CommandSubst(pipeline)) => {
-                        assert_eq!(pipeline.commands[0].name, "whoami");
+                    Arg::Positional(expr) => {
+                        assert_eq!(subst_cmd(expr).name, "whoami");
                     }
                     other => panic!("expected command subst, got {:?}", other),
                 }
@@ -3395,12 +3610,7 @@ fi
         match stmts[0] {
             Stmt::Assignment(a) => {
                 assert_eq!(a.name, "RESULT");
-                match &a.value {
-                    Expr::CommandSubst(pipeline) => {
-                        assert_eq!(pipeline.commands.len(), 3);
-                    }
-                    other => panic!("expected command subst, got {:?}", other),
-                }
+                assert_eq!(subst_pipeline(&a.value).commands.len(), 3);
             }
             other => panic!("expected assignment, got {:?}", other),
         }

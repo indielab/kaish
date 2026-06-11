@@ -18,7 +18,7 @@
 |-----------|---------|------------|
 | `[[ ]]` parsed as two brackets | Two separate `[` tokens, not a compound keyword | Works for tests; kaish will never have `[]` array syntax |
 | Statement-opening keywords as bare arguments | `echo if` / `echo for` / `echo while` / `echo case` are parse errors (keyword starts a statement). Closers (`done`, `then`, `fi`) are fine. | Quote: `echo "if"` |
-| No token-pasting of adjacent unquoted words | `$VAR`/`$(cmd)`/globs are separate words; `echo $dir/f` → 2 args, `echo /tmp/$(id -u).x` → 3 args (silent). Bare interpolated redirect target (`> $dir/f`) is a parse error. | **Quote the whole word**: `"$dir/f"`, `"/tmp/$(id -u).x"`. See `help syntax` → Quoting. |
+| No token-pasting of adjacent unquoted words | `$VAR`/`$(cmd)`/globs are separate words. Unquoted text glued to an expansion (`echo $dir/f`, `echo /tmp/$(id -u).x`, `> $dir/f`) is a **parse error**, not a silent splat. Single-token words (`file.txt`, `v1.2.3`) are fine. | **Quote the whole word**: `"$dir/f"`, `"/tmp/$(id -u).x"`. See `help syntax` → Quoting. |
 
 ## Builtin Constraints
 

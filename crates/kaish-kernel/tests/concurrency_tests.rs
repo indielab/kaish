@@ -274,6 +274,34 @@ async fn scatter_parallel_runs_user_function() {
     assert!(out.contains("loud-c"), "missing loud-c: {out}");
 }
 
+/// The docs' canonical plain-text example (`cat file | scatter --as ITEM ...`)
+/// must fan out one worker per line, not bind the whole stdin to one worker.
+/// Regression test for the scatter newline-split fix (docs/issues.md #3).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn scatter_plain_text_stdin_fans_out_per_line() {
+    let kernel = setup().await;
+    kernel
+        .execute(r#"shout() { echo "loud-${ITEM}"; }"#)
+        .await
+        .expect("define tool");
+    // Plain-text, newline-separated stdin — no split/structured data.
+    let r = kernel
+        .execute(r#"printf "a\nb\nc\n" | scatter --as ITEM | shout | gather"#)
+        .await
+        .expect("scatter");
+    assert!(r.ok(), "scatter failed: {}", r.err);
+    let out = r.text_out();
+    assert!(out.contains("loud-a"), "missing loud-a (no fan-out?): {out}");
+    assert!(out.contains("loud-b"), "missing loud-b: {out}");
+    assert!(out.contains("loud-c"), "missing loud-c: {out}");
+    // The whole-stdin-as-one-item bug would have produced a single worker
+    // bound to "a\nb\nc"; assert that degenerate item never appears.
+    assert!(
+        !out.contains("loud-a\nb"),
+        "stdin bound as one item instead of fanning out: {out}"
+    );
+}
+
 // ============================================================================
 // Helpers
 // ============================================================================

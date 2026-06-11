@@ -249,6 +249,34 @@ async fn external_command_sees_initial_vars() {
     assert_eq!(result.text_out().trim(), "seeded");
 }
 
+#[tokio::test]
+async fn env_prefix_reaches_subprocess_then_does_not_leak() {
+    // `NAME=value cmd` exports the assignment into the command's environment
+    // (so the child sees it), but it must not persist: a later `printenv NAME`
+    // finds nothing. Regression test for docs/issues.md #1.
+    use kaish_kernel::ast::Value;
+    use std::collections::HashMap;
+
+    let mut vars = HashMap::new();
+    vars.insert("PATH".to_string(), Value::String("/usr/bin:/bin".into()));
+    let kernel = Kernel::new(KernelConfig::repl().with_initial_vars(vars))
+        .expect("Failed to create kernel");
+
+    let scoped = kernel
+        .execute("MY_PROBE=fromprefix printenv MY_PROBE")
+        .await
+        .unwrap();
+    assert!(scoped.ok(), "prefixed printenv should see MY_PROBE: {scoped:?}");
+    assert_eq!(scoped.text_out().trim(), "fromprefix");
+
+    // Not leaked: a fresh execute in the same kernel no longer has MY_PROBE.
+    let after = kernel.execute("printenv MY_PROBE").await.unwrap();
+    assert!(
+        !after.ok(),
+        "MY_PROBE must not persist past the prefixed command: {after:?}"
+    );
+}
+
 // ============================================================================
 // Interactive Stdin Inheritance Tests
 // ============================================================================

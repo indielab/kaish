@@ -30,6 +30,54 @@
 
 mod common;
 
+// ---- $() full statement grammar (docs/issues.md #5) -----------------------
+// $() bodies accept the full statement grammar — &&/|| chains, ; sequences,
+// multi-line bodies, and # comments — not just a single pipeline.
+
+shell_compat! {
+    name: cmdsubst_and_chain,
+    script: "echo $(true && echo hi)",
+    eq: "hi",
+}
+
+shell_compat! {
+    name: cmdsubst_and_chain_short_circuits,
+    script: "echo $(false && echo nope)",
+    eq: "",
+}
+
+shell_compat! {
+    name: cmdsubst_or_chain,
+    script: "echo $(false || echo fallback)",
+    eq: "fallback",
+}
+
+shell_compat! {
+    name: cmdsubst_semicolon_sequence,
+    script: "echo $(printf a; printf b)",
+    eq: "ab",
+}
+
+shell_compat! {
+    name: cmdsubst_multiline_body,
+    script: "echo $(printf a
+printf b)",
+    eq: "ab",
+}
+
+shell_compat! {
+    name: cmdsubst_comment_in_body,
+    script: "echo $(printf a # trailing note
+printf b)",
+    eq: "ab",
+}
+
+shell_compat! {
+    name: cmdsubst_chain_in_string_interpolation,
+    script: r#"echo "result: $(false || echo recovered)""#,
+    eq: "result: recovered",
+}
+
 // ---- $? and ${?}: exit-code variable forms --------------------------------
 
 shell_compat! {
@@ -171,6 +219,41 @@ shell_compat! {
     name: export_multiple_vars,
     script: "export A=1; export B=2; echo \"$A $B\"",
     eq: "1 2",
+}
+
+// ---- Inline env prefix `FOO=bar cmd` (docs/issues.md #1) ------------------
+// An inline assignment prefix is scoped to the one command — it does NOT leak
+// into the rest of the script (the bash-divergence bug this fixes).
+
+shell_compat! {
+    name: env_prefix_does_not_leak,
+    script: r#"FOO=bar echo hi; echo "[$FOO]""#,
+    eq: "hi\n[]",
+}
+
+shell_compat! {
+    name: env_prefix_multiple_do_not_leak,
+    script: r#"A=1 B=2 echo hi; echo "[$A$B]""#,
+    eq: "hi\n[]",
+}
+
+// A plain assignment (no command following) still persists — only the
+// prefixed-command form is command-scoped.
+shell_compat! {
+    name: plain_assignment_still_persists,
+    script: "FOO=bar; echo $FOO",
+    eq: "bar",
+}
+
+// kaish divergence (documented): the prefixed variable is visible to the
+// command itself, including its argument expansion, because kaish builtins read
+// from scope. bash expands the command's args before applying the prefix, so it
+// prints empty. The leak-free guarantee above is the shared, load-bearing part.
+shell_compat! {
+    name: env_prefix_visible_to_command_args,
+    script: "FOO=bar echo $FOO",
+    kaish_eq: "bar",
+    bash_eq: "",
 }
 
 // ---- Nested ${VAR:-default} -----------------------------------------------

@@ -2270,6 +2270,58 @@ impl Kernel {
                     Ok(ControlFlow::ok(ExecResult::failure(1, "")))
                 }
             }
+            Stmt::EnvScoped { assignments, body } => {
+                // Inline env prefix (`NAME=value ... command`): apply the
+                // assignments as EXPORTED vars in a fresh frame so the command
+                // — and its subprocess environment — sees them, then unwind so
+                // they do NOT persist (bash-style command-scoped env). Values
+                // evaluate left-to-right with earlier ones already in scope, so
+                // `A=1 B=$A cmd` works.
+                {
+                    let mut scope = self.scope.write().await;
+                    scope.push_frame();
+                }
+                let mut prior_export: Vec<(String, bool)> =
+                    Vec::with_capacity(assignments.len());
+                let mut setup_err: Option<anyhow::Error> = None;
+                for assign in assignments {
+                    match self.eval_expr_async(&assign.value).await {
+                        Ok(value) => {
+                            let mut scope = self.scope.write().await;
+                            prior_export
+                                .push((assign.name.clone(), scope.is_exported(&assign.name)));
+                            scope.set_exported(&assign.name, value);
+                        }
+                        Err(e) => {
+                            setup_err = Some(e);
+                            break;
+                        }
+                    }
+                }
+
+                let flow = if setup_err.is_none() {
+                    self.execute_stmt_flow(body).await
+                } else {
+                    Ok(ControlFlow::ok(ExecResult::success("")))
+                };
+
+                // Unwind the env frame and restore export marks unconditionally
+                // (names that were not exported before must not stay exported).
+                {
+                    let mut scope = self.scope.write().await;
+                    scope.pop_frame();
+                    for (name, was_exported) in &prior_export {
+                        if !*was_exported {
+                            scope.unexport(name);
+                        }
+                    }
+                }
+
+                match setup_err {
+                    Some(e) => Err(e),
+                    None => flow,
+                }
+            }
             Stmt::Empty => Ok(ControlFlow::ok(ExecResult::success(""))),
         }
         }.instrument(span))
@@ -3220,7 +3272,7 @@ impl Kernel {
                     self.eval_expr_async(right).await
                 }
             },
-            Expr::CommandSubst(pipeline) => {
+            Expr::CommandSubst(stmts) => {
                 // Snapshot scope+cwd before running — only output escapes,
                 // not side effects like `cd` or variable assignments.
                 let saved_scope = { self.scope.read().await.clone() };
@@ -3230,7 +3282,7 @@ impl Kernel {
                 };
 
                 // Capture result without `?` — restore state unconditionally
-                let run_result = self.execute_pipeline(pipeline).await;
+                let run_result = self.execute_block_capturing(stmts).await;
 
                 // Restore scope and cwd regardless of success/failure
                 {
@@ -3465,7 +3517,7 @@ impl Kernel {
                     Err(_) => Ok(String::new()),
                 }
             }
-            StringPart::CommandSubst(pipeline) => {
+            StringPart::CommandSubst(stmts) => {
                 // Snapshot scope+cwd — command substitution in strings must
                 // not leak side effects (e.g., `"dir: $(cd /; pwd)"` must not change cwd).
                 let saved_scope = { self.scope.read().await.clone() };
@@ -3475,7 +3527,7 @@ impl Kernel {
                 };
 
                 // Capture result without `?` — restore state unconditionally
-                let run_result = self.execute_pipeline(pipeline).await;
+                let run_result = self.execute_block_capturing(stmts).await;
 
                 // Restore scope and cwd regardless of success/failure
                 {
@@ -3634,6 +3686,63 @@ impl Kernel {
         }
 
         Ok(ExecResult::from_parts(last_code, accumulated_out, accumulated_err, last_data))
+    }
+
+    /// Execute a command-substitution body — a block of statements — and return
+    /// the combined result. Stdout/stderr accumulate across statements with **no
+    /// inserted separator** (matching bash and the `;`/`&&`/`||` output model),
+    /// and the last statement's exit code and structured `.data` ride through,
+    /// so `for x in $(seq 3)` still iterates the array and `$(printf a; printf b)`
+    /// captures `ab`. Scope/cwd snapshotting (so `$(cd / && pwd)` cannot leak the
+    /// cwd) is the caller's responsibility.
+    async fn execute_block_capturing(&self, stmts: &[Stmt]) -> Result<ExecResult> {
+        let mut accumulated_out = String::new();
+        let mut accumulated_err = String::new();
+        let mut last_code = 0i64;
+        let mut last_data: Option<Value> = None;
+
+        for stmt in stmts {
+            let flow = self.execute_stmt_flow(stmt).await?;
+
+            // Drain pipeline stderr after each sub-statement (incremental, like
+            // the control-structure and function-body executors).
+            let drained = {
+                let mut receiver = self.stderr_receiver.lock().await;
+                receiver.drain_lossy()
+            };
+            if !drained.is_empty() {
+                accumulated_err.push_str(&drained);
+            }
+
+            match flow {
+                ControlFlow::Normal(r)
+                | ControlFlow::Break { result: r, .. }
+                | ControlFlow::Continue { result: r, .. } => {
+                    accumulated_out.push_str(&r.text_out());
+                    accumulated_err.push_str(&r.err);
+                    last_code = r.code;
+                    last_data = r.data;
+                }
+                ControlFlow::Return { value } => {
+                    accumulated_out.push_str(&value.text_out());
+                    accumulated_err.push_str(&value.err);
+                    last_code = value.code;
+                    last_data = value.data;
+                    break;
+                }
+                ControlFlow::Exit { code } => {
+                    last_code = code;
+                    break;
+                }
+            }
+        }
+
+        Ok(ExecResult::from_parts(
+            last_code,
+            accumulated_out,
+            accumulated_err,
+            last_data,
+        ))
     }
 
     /// Execute the `source` / `.` command to include and run a script.
@@ -7028,9 +7137,9 @@ AFTER="yes"'"#)
         let kernel = Kernel::transient().expect("kernel");
         let schema = kj_tree_schema();
         // kj $(echo context) — routing can't see the value; fail loud.
-        let args = vec![Arg::Positional(Expr::CommandSubst(Box::new(
-            crate::ast::Pipeline { commands: vec![], background: false },
-        )))];
+        let args = vec![Arg::Positional(Expr::CommandSubst(vec![Stmt::Command(
+            crate::ast::Command { name: "echo".into(), args: vec![], redirects: vec![] },
+        )]))];
         let err = kernel
             .build_args_async(&args, Some(&schema))
             .await

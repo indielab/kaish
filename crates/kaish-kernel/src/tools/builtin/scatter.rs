@@ -147,19 +147,20 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_scatter_multiline_is_one_item() {
+    async fn test_scatter_multiline_fans_out_per_line() {
         use crate::vfs::{MemoryFs, VfsRouter};
         use std::sync::Arc;
 
         let mut vfs = VfsRouter::new();
         vfs.mount("/", MemoryFs::new());
         let mut ctx = ExecContext::new(Arc::new(vfs));
-        // Multi-line text without structured data = one item (no implicit splitting)
+        // Plain-text stdin splits on newlines — one worker per line (matches
+        // for-loop $(cmd) semantics; docs/issues.md #3).
         ctx.set_stdin("a\nb\nc".to_string());
 
         let result = Scatter.execute(ToolArgs::new(), &mut ctx).await;
         assert!(result.ok());
-        assert!(result.text_out().contains("1 items"), "should be 1 item: {}", result.text_out());
+        assert!(result.text_out().contains("3 items"), "should fan out to 3 items: {}", result.text_out());
     }
 
     #[tokio::test]

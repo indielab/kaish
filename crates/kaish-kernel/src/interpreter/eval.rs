@@ -10,7 +10,7 @@
 use std::fmt;
 
 use crate::arithmetic;
-use crate::ast::{BinaryOp, Expr, FileTestOp, Pipeline, StringPart, StringTestOp, TestCmpOp, TestExpr, Value, VarPath};
+use crate::ast::{BinaryOp, Expr, FileTestOp, Stmt, StringPart, StringTestOp, TestCmpOp, TestExpr, Value, VarPath};
 use crate::vfs::DirEntry;
 use std::path::Path;
 
@@ -82,13 +82,15 @@ pub type EvalResult<T> = Result<T, EvalError>;
 /// actual command execution. The evaluator calls this when it encounters
 /// a `$(pipeline)` expression.
 pub trait Executor {
-    /// Execute a pipeline and return its result.
+    /// Execute a command-substitution body — a block of statements (the full
+    /// grammar: pipelines, `&&`/`||` chains, `;`/newline sequences) — and return
+    /// its combined result.
     ///
     /// The executor should:
-    /// 1. Parse and execute the pipeline
-    /// 2. Capture stdout/stderr
+    /// 1. Run each statement, accumulating stdout/stderr
+    /// 2. Carry the last statement's exit code and structured data through
     /// 3. Return an ExecResult with code, output, and parsed data
-    fn execute(&mut self, pipeline: &Pipeline, scope: &mut Scope) -> EvalResult<ExecResult>;
+    fn execute(&mut self, stmts: &[Stmt], scope: &mut Scope) -> EvalResult<ExecResult>;
 
     /// Stat a file path through the VFS.
     ///
@@ -123,7 +125,7 @@ pub trait Executor {
 pub struct NoOpExecutor;
 
 impl Executor for NoOpExecutor {
-    fn execute(&mut self, _pipeline: &Pipeline, _scope: &mut Scope) -> EvalResult<ExecResult> {
+    fn execute(&mut self, _stmts: &[Stmt], _scope: &mut Scope) -> EvalResult<ExecResult> {
         Err(EvalError::NoExecutor)
     }
 }
@@ -166,7 +168,7 @@ impl<'a, E: Executor> Evaluator<'a, E> {
                 }
             }
             Expr::BinaryOp { left, op, right } => self.eval_binary_op(left, *op, right),
-            Expr::CommandSubst(pipeline) => self.eval_command_subst(pipeline),
+            Expr::CommandSubst(stmts) => self.eval_command_subst(stmts),
             Expr::Test(test_expr) => self.eval_test(test_expr),
             Expr::Positional(n) => self.eval_positional(*n),
             Expr::AllArgs => self.eval_all_args(),
@@ -201,12 +203,9 @@ impl<'a, E: Executor> Evaluator<'a, E> {
             _ => {}
         }
 
-        // For other commands, create a single-command pipeline to execute
-        let pipeline = crate::ast::Pipeline {
-            commands: vec![cmd.clone()],
-            background: false,
-        };
-        let result = self.executor.execute(&pipeline, self.scope)?;
+        // For other commands, run the command as a one-statement block.
+        let block = [Stmt::Command(cmd.clone())];
+        let result = self.executor.execute(&block, self.scope)?;
         // Exit code 0 = true, non-zero = false
         Ok(Value::Bool(result.code == 0))
     }
@@ -429,9 +428,9 @@ impl<'a, E: Executor> Evaluator<'a, E> {
                     let value = self.eval_arithmetic_string(expr)?;
                     result.push_str(&value_to_string(&value));
                 }
-                StringPart::CommandSubst(pipeline) => {
-                    // Execute the pipeline and capture its output
-                    let value = self.eval_command_subst(pipeline)?;
+                StringPart::CommandSubst(stmts) => {
+                    // Execute the statement block and capture its output
+                    let value = self.eval_command_subst(stmts)?;
                     result.push_str(&value_to_string(&value));
                 }
                 StringPart::LastExitCode => {
@@ -476,8 +475,8 @@ impl<'a, E: Executor> Evaluator<'a, E> {
     }
 
     /// Evaluate command substitution.
-    fn eval_command_subst(&mut self, pipeline: &Pipeline) -> EvalResult<Value> {
-        let result = self.executor.execute(pipeline, self.scope)?;
+    fn eval_command_subst(&mut self, stmts: &[Stmt]) -> EvalResult<Value> {
+        let result = self.executor.execute(stmts, self.scope)?;
 
         // Update $? with the result
         self.scope.set_last_result(result.clone());
@@ -997,18 +996,14 @@ mod tests {
 
     #[test]
     fn eval_command_subst_fails_without_executor() {
-        use crate::ast::{Command, Pipeline};
+        use crate::ast::Command;
 
         let mut scope = Scope::new();
-        let pipeline = Pipeline {
-            commands: vec![Command {
-                name: "echo".into(),
-                args: vec![],
-                redirects: vec![],
-            }],
-            background: false,
-        };
-        let expr = Expr::CommandSubst(Box::new(pipeline));
+        let expr = Expr::CommandSubst(vec![Stmt::Command(Command {
+            name: "echo".into(),
+            args: vec![],
+            redirects: vec![],
+        })]);
 
         assert!(matches!(
             eval_expr(&expr, &mut scope),

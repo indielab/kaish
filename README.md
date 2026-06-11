@@ -300,10 +300,12 @@ Per-call lifecycle — each `execute` call gets a fresh kernel:
 #### Agent gotchas
 
 - **Quote to join.** Unlike bash, kaish never concatenates adjacent unquoted
-  tokens: `echo $dir/out.txt` passes `$dir` and `/out.txt` as **two
-  arguments**. Quote the whole word: `echo "$dir/out.txt"`.
-- `FOO=bar cmd` sets `FOO` for the rest of the script, not just for `cmd`
-  as bash does. Prefer the `env` request parameter or a plain assignment.
+  tokens. `echo $dir/out.txt` is a **parse error** (the words would otherwise
+  splat into two arguments) — quote the whole word: `echo "$dir/out.txt"`.
+  Single-token words like `file.txt` or `v1.2.3` are fine unquoted.
+- `FOO=bar cmd` scopes `FOO` to that one command (its environment and arguments),
+  like bash — it does **not** persist afterward. A plain `FOO=bar` with no
+  command following still sets `FOO` persistently.
 - Help is in-band: `help builtins`, `help syntax`, `help <tool>` — or use
   the MCP prompts.
 

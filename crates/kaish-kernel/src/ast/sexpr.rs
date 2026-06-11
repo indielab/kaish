@@ -60,6 +60,10 @@ pub fn format_stmt(stmt: &Stmt) -> String {
         Stmt::OrChain { left, right } => {
             format!("(or-chain {} {})", format_stmt(left), format_stmt(right))
         }
+        Stmt::EnvScoped { assignments, body } => {
+            let assigns: Vec<String> = assignments.iter().map(format_assignment).collect();
+            format!("(env-scoped ({}) {})", assigns.join(" "), format_stmt(body))
+        }
         Stmt::Empty => "(empty)".to_string(),
     }
 }
@@ -114,6 +118,18 @@ fn format_redirect(redir: &Redirect) -> String {
 }
 
 /// Format a pipeline as an S-expression.
+/// Format a command-substitution body — a block of statements — as an s-expr.
+/// A one-statement block formats as that statement; multiple are wrapped in a
+/// `(block …)` so the sequence is visible in snapshots.
+pub fn format_stmt_block(stmts: &[Stmt]) -> String {
+    if stmts.len() == 1 {
+        format_stmt(&stmts[0])
+    } else {
+        let inner: Vec<String> = stmts.iter().map(format_stmt).collect();
+        format!("(block {})", inner.join(" "))
+    }
+}
+
 pub fn format_pipeline(p: &Pipeline) -> String {
     let cmds: Vec<String> = p.commands.iter().map(format_command).collect();
 
@@ -274,8 +290,8 @@ pub fn format_expr(expr: &Expr) -> String {
             };
             format!("({} {} {})", op_str, format_expr(left), format_expr(right))
         }
-        Expr::CommandSubst(pipeline) => {
-            format!("(cmdsubst {})", format_pipeline(pipeline))
+        Expr::CommandSubst(stmts) => {
+            format!("(cmdsubst {})", format_stmt_block(stmts))
         }
         Expr::Test(test_expr) => format!("(test {})", format_test_expr(test_expr)),
         Expr::Positional(n) => format!("(positional {})", n),
@@ -365,7 +381,7 @@ fn format_string_part(part: &StringPart) -> String {
         StringPart::AllArgs => "(allargs)".to_string(),
         StringPart::ArgCount => "(argcount)".to_string(),
         StringPart::Arithmetic(expr) => format!("(arith \"{}\")", expr),
-        StringPart::CommandSubst(pipeline) => format!("(cmdsubst {})", format_pipeline(pipeline)),
+        StringPart::CommandSubst(stmts) => format!("(cmdsubst {})", format_stmt_block(stmts)),
         StringPart::LastExitCode => "(last-exit-code)".to_string(),
         StringPart::CurrentPid => "(current-pid)".to_string(),
     }

@@ -26,6 +26,24 @@ echo "${NAME} more text"
 
 **Why strict booleans?** Only `true`/`false` are valid. `TRUE`, `Yes`, `1` are errors — catches AI generation mistakes early.
 
+### Inline environment prefix — `NAME=value command`
+
+One or more assignments placed *before* a command scope those variables to that
+command only — they reach the command (its arguments and, for external commands,
+its subprocess environment) and are **removed afterward**, matching bash:
+
+```bash
+RUST_LOG=debug cargo run        # RUST_LOG set for cargo only
+A=1 B=2 ./script                # both scoped to ./script
+echo "$RUST_LOG"                # empty — the prefix did not persist
+```
+
+A bare assignment with **no** command following (`NAME=value` alone, or
+`NAME=value; …`) is a normal persistent assignment, as before. (kaish divergence:
+the prefixed variable is visible to the command's own argument expansion, e.g.
+`FOO=bar echo $FOO` prints `bar`, because kaish builtins read from scope; bash
+expands the args first and prints empty.)
+
 ## Parameter Expansion
 
 ```bash
@@ -64,18 +82,20 @@ plus interpolation, **quote the whole thing**:
 "out-$(date +%s).log"          # filename: text + command substitution
 cat "$HOME/.config/app.toml"
 
-# Surprising — unquoted, these are MULTIPLE words:
-echo $dir/file.txt             # two args: "$dir" and "/file.txt"
-echo /tmp/$(id -u).sock        # three args: "/tmp/", "$(id -u)", ".sock"
+# Rejected — unquoted text adjacent to an expansion is a PARSE ERROR:
+echo $dir/file.txt             # error: quote the whole word "$dir/file.txt"
+echo /tmp/$(id -u).sock        # error: quote "/tmp/$(id -u).sock"
 ```
+
+Rather than silently splat such a word into multiple arguments, kaish rejects it
+at parse time with a "quote the whole word" hint — fail-loud beats wrong argv.
+Single-token words are unaffected: `file.txt`, `a.b.c`, and `v1.2.3` lex as one
+token, so they need no quoting.
 
 This is the complement of the no-word-splitting rule: kaish neither splits a
 variable's value **nor** pastes neighbouring words. The "always quote
 interpolated words" habit is exactly what `shellcheck --enable=all` enforces
 (SC2086), so quoted kaish stays lint-clean. When in doubt, quote.
-
-> **Agents:** treat unquoted text adjacent to `$VAR`/`$(…)`/globs as a bug.
-> Any filename or path that contains an expansion should be a quoted word.
 
 ## Arguments
 
@@ -253,6 +273,24 @@ echo "Current time: $NOW"
 
 RESULT=$(cat file.json | jq ".name")
 ```
+
+A `$(...)` body accepts the **full statement grammar**, not just a single
+pipeline: `&&`/`||` chains, `;` sequences, multi-line bodies, and `#` comments
+all work. Output accumulates across the statements (no separator inserted, like
+`;`), and the body's side effects (`cd`, assignments) stay contained — only the
+captured stdout escapes.
+
+```bash
+HEAD=$(cd "$repo" && git rev-parse HEAD)   # && chain
+BOTH=$(printf a; printf b)                 # ; sequence  → "ab"
+VER=$(                                      # multi-line + comment
+    grep '^version' Cargo.toml             # find the line
+    | cut -d'"' -f2
+)
+```
+
+Control structures (`if`/`for`/`while`/`case`) inside `$(...)` are not currently
+supported — keep those at statement level.
 
 ### Structured Data and Newline Splitting in Command Substitution
 
@@ -613,6 +651,12 @@ cat big_list.txt \
     | slow-operation --id $ID \
     | gather --progress true
 ```
+
+Scatter's input fans out one worker per item: structured `.data` (a JSON array
+from `split`/`seq`/`glob`/`find`) spreads element-by-element, and **plain-text
+stdin splits on newlines** — one worker per line, exactly like `for line in
+$(cmd)` (whitespace within a line is never split; trailing newlines and `\r` are
+trimmed). So `cat items.txt | scatter --as ITEM ...` runs one worker per line.
 
 Each **scatter worker** runs in its own **parallel kernel fork**. This means
 workers can run the full resolution chain: user-defined functions, `.kai`

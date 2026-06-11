@@ -41,6 +41,11 @@ pub enum Stmt {
     AndChain { left: Box<Stmt>, right: Box<Stmt> },
     /// Statement chain with `||`: run right only if left fails
     OrChain { left: Box<Stmt>, right: Box<Stmt> },
+    /// Inline env prefix: `NAME=value... command`. The assignments are exported
+    /// for the duration of `body` only (bash-style command-scoped environment)
+    /// and do not persist after it — distinct from a plain `Assignment`, which
+    /// is persistent. `body` is always a command or pipeline.
+    EnvScoped { assignments: Vec<Assignment>, body: Box<Stmt> },
     /// Empty statement (newline or semicolon only)
     Empty,
 }
@@ -64,6 +69,7 @@ impl Stmt {
             Stmt::Test(_) => "test",
             Stmt::AndChain { .. } => "and_chain",
             Stmt::OrChain { .. } => "or_chain",
+            Stmt::EnvScoped { .. } => "env_scoped",
             Stmt::Empty => "empty",
         }
     }
@@ -265,8 +271,10 @@ pub enum Expr {
         op: BinaryOp,
         right: Box<Expr>,
     },
-    /// Command substitution: `$(pipeline)` - runs a pipeline and returns its result
-    CommandSubst(Box<Pipeline>),
+    /// Command substitution: `$(...)` — runs a statement block (the full grammar:
+    /// pipelines, `&&`/`||` chains, `;`/newline sequences, `#` comments) and
+    /// returns its accumulated stdout. A single `$(cmd)` is a one-statement block.
+    CommandSubst(Vec<Stmt>),
     /// Test expression: `[[ -f path ]]` or `[[ $X == "value" ]]`
     Test(Box<TestExpr>),
     /// Positional parameter: `$0` through `$9`
@@ -421,8 +429,9 @@ pub enum StringPart {
     ArgCount,
     /// Arithmetic expansion: `$((expr))`
     Arithmetic(String),
-    /// Command substitution: `$(pipeline)` embedded in a string
-    CommandSubst(Pipeline),
+    /// Command substitution: `$(...)` embedded in a string — runs a statement
+    /// block (full grammar; see `Expr::CommandSubst`) and inlines its stdout.
+    CommandSubst(Vec<Stmt>),
     /// Last exit code: `$?`
     LastExitCode,
     /// Current shell PID: `$$`

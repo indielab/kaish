@@ -1204,9 +1204,13 @@ mod select_leaf_tests {
         let schema = kj_schema();
         // `kj $(echo context)` — a command substitution where a subcommand name
         // is required must fail loud, not silently pick a leaf.
-        let args = vec![Arg::Positional(Expr::CommandSubst(Box::new(
-            crate::ast::Pipeline { commands: vec![], background: false },
-        )))];
+        let args = vec![Arg::Positional(Expr::CommandSubst(vec![
+            crate::ast::Stmt::Command(crate::ast::Command {
+                name: "echo".into(),
+                args: vec![],
+                redirects: vec![],
+            }),
+        ]))];
         let err = select_leaf(&schema, &args).expect_err("must error");
         let msg = err.to_string();
         assert!(msg.contains("subcommand name is required"), "got: {msg}");
@@ -1229,9 +1233,9 @@ mod select_leaf_tests {
         let args = vec![
             word("context"),
             word("list"),
-            Arg::Positional(Expr::CommandSubst(Box::new(
-                crate::ast::Pipeline { commands: vec![], background: false },
-            ))),
+            Arg::Positional(Expr::CommandSubst(vec![crate::ast::Stmt::Command(
+                crate::ast::Command { name: "echo".into(), args: vec![], redirects: vec![] },
+            )])),
         ];
         let leaf = select_leaf(&schema, &args).expect("ok");
         assert_eq!(leaf.name, "list");

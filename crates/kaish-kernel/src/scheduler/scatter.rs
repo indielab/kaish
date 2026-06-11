@@ -302,10 +302,12 @@ impl ScatterGatherRunner {
 
 /// Extract items from structured data or text.
 ///
-/// kaish does not split implicitly — this function requires structured data
-/// (JSON array from split/seq/glob/find) for multi-item input. Single-line
-/// text is treated as one item. Multi-line text without structured data is
-/// an error.
+/// Structured `.data` (a JSON array from split/seq/glob/find) wins and fans out
+/// element-by-element. Plain-text stdin is split on newlines only — one item per
+/// line — matching the for-loop `$(cmd)` contract (docs/plan-for-loop-newline-split.md):
+/// trailing newlines are trimmed once (no phantom tail item), each line's trailing
+/// `\r` is stripped, interior blank lines are preserved, and whitespace within a
+/// line is never split. Empty / newline-only input yields zero items.
 pub fn extract_items(data: Option<&Value>, text: &str) -> Result<Vec<String>, String> {
     // 1. Structured data (JSON array from split/seq/glob/find) — use it
     if let Some(Value::Json(serde_json::Value::Array(arr))) = data {
@@ -318,14 +320,15 @@ pub fn extract_items(data: Option<&Value>, text: &str) -> Result<Vec<String>, St
         return Ok(vec![s.clone()]);
     }
 
-    // 2. Empty — return empty
-    let trimmed = text.trim();
+    // 2. Plain text — newline-split, mirroring kernel.rs for-loop $(cmd) semantics.
+    let trimmed = text.trim_end_matches(['\n', '\r']);
     if trimmed.is_empty() {
         return Ok(vec![]);
     }
-
-    // 3. Raw text without structured data — one item (no implicit splitting)
-    Ok(vec![trimmed.to_string()])
+    Ok(trimmed
+        .split('\n')
+        .map(|line| line.trim_end_matches('\r').to_string())
+        .collect())
 }
 
 /// Rendered gather output plus the names of any failed tasks that the
@@ -501,10 +504,45 @@ mod tests {
     }
 
     #[test]
-    fn test_extract_items_multiline_is_one_item() {
-        // No implicit splitting — multi-line text is one item
+    fn test_extract_items_multiline_fans_out_per_line() {
+        // Plain-text stdin splits on newlines, matching for-loop $(cmd)
+        // semantics (docs/plan-for-loop-newline-split.md) — one worker per line.
         let items = extract_items(None, "one\ntwo\nthree").unwrap();
-        assert_eq!(items, vec!["one\ntwo\nthree"]);
+        assert_eq!(items, vec!["one", "two", "three"]);
+    }
+
+    #[test]
+    fn test_extract_items_trailing_newline_no_phantom_item() {
+        // Trailing newline is trimmed once before splitting — no empty tail item.
+        let items = extract_items(None, "one\ntwo\n").unwrap();
+        assert_eq!(items, vec!["one", "two"]);
+    }
+
+    #[test]
+    fn test_extract_items_crlf_per_line() {
+        // Each line's trailing \r is stripped (CRLF input).
+        let items = extract_items(None, "one\r\ntwo\r\n").unwrap();
+        assert_eq!(items, vec!["one", "two"]);
+    }
+
+    #[test]
+    fn test_extract_items_interior_blank_line_preserved() {
+        // Interior empty lines are preserved (matches for-loop split('\n')).
+        let items = extract_items(None, "a\n\nb").unwrap();
+        assert_eq!(items, vec!["a", "", "b"]);
+    }
+
+    #[test]
+    fn test_extract_items_whitespace_within_line_not_split() {
+        // Only newlines split; spaces within a line stay in the item.
+        let items = extract_items(None, "a b\nc d").unwrap();
+        assert_eq!(items, vec!["a b", "c d"]);
+    }
+
+    #[test]
+    fn test_extract_items_only_newlines_is_empty() {
+        let items = extract_items(None, "\n\n").unwrap();
+        assert!(items.is_empty());
     }
 
     #[test]

@@ -388,8 +388,7 @@ async fn wait_propagates_background_job_failure() {
 
 /// `kill %N` removes the job from the table, so a subsequent `wait %N` reports
 /// it gone (exit 1, "not found") rather than hanging or succeeding silently.
-/// (`kill` is gated on the `subprocess` feature.)
-#[cfg(feature = "subprocess")]
+/// Pure kaish job control — works in hermetic builds (no `subprocess`).
 #[tokio::test]
 async fn wait_after_kill_reports_job_gone() {
     let kernel = setup().await;
@@ -406,9 +405,8 @@ async fn wait_after_kill_reports_job_gone() {
 }
 
 /// Phase 1: `kill %N` stops a pure-builtin background job (no OS process
-/// group) via its cancellation token, and removes it from the table.
-/// (`kill` is gated on the `subprocess` feature.)
-#[cfg(feature = "subprocess")]
+/// group) via its cancellation token, and removes it from the table. This is
+/// kernel-level job control: it works in **every** build, hermetic included.
 #[tokio::test]
 async fn kill_terminates_builtin_background_job() {
     let kernel = setup().await;
@@ -424,7 +422,7 @@ async fn kill_terminates_builtin_background_job() {
 
 /// A non-terminating signal to a pure-builtin job is refused loudly (there is
 /// no process group to deliver SIGUSR1 to), rather than silently terminating.
-#[cfg(feature = "subprocess")]
+/// Holds in every build — the refusal is the same with or without `subprocess`.
 #[tokio::test]
 async fn kill_nonterminating_signal_on_builtin_job_errors() {
     let kernel = setup().await;

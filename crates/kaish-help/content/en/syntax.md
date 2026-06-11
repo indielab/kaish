@@ -53,11 +53,11 @@ cd -                      # previous directory
 "out-$(date +%s).log"     # one filename (text + command substitution)
 echo "/tmp/$(id -u).sock" # one argument
 
-# Unquoted, adjacent tokens stay SEPARATE — usually not what you want:
-echo $dir/file.txt        # TWO args: "$dir" and "/file.txt"
-echo /tmp/$(id -u).sock   # THREE args: "/tmp/", "$(id -u)", ".sock"
-cmd > "$dir/out.txt"      # redirect target MUST be one word — quote it
-cmd > $dir/out.txt        # parse error (target is a single word slot)
+# Unquoted text adjacent to an expansion is a PARSE ERROR (quote the word):
+echo $dir/file.txt        # error — quote "$dir/file.txt"
+echo /tmp/$(id -u).sock   # error — quote "/tmp/$(id -u).sock"
+cmd > $dir/out.txt        # error — quote "$dir/out.txt"
+# (single-token words like file.txt or v1.2.3 are fine unquoted)
 ```
 
 ## Pipes & Redirects
@@ -148,6 +148,11 @@ for i in $(seq 1 5); do echo $i; done
 # Outside for-loops, $(cmd) is one value:
 R=$(printf 'a\nb')                # R is "a\nb"
 echo "got: $(printf 'x\ny')"      # one echo, newline preserved
+
+# A $(...) body takes the full statement grammar: &&/|| chains, ; sequences,
+# multi-line bodies, and # comments (not just a single pipeline):
+H=$(cd "$repo" && git rev-parse HEAD)
+B=$(printf a; printf b)           # "ab"
 
 # kaish-last prints the previous command's .data (or its stdout) as text:
 seq 1 5

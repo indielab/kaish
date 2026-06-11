@@ -73,6 +73,14 @@ impl<'a> Validator<'a> {
                 self.validate_stmt(left);
                 self.validate_stmt(right);
             }
+            Stmt::EnvScoped { assignments, body } => {
+                // Validate each prefix assignment (values + bind the name so the
+                // body's references resolve), then the command it scopes.
+                for assign in assignments {
+                    self.validate_assignment(assign);
+                }
+                self.validate_stmt(body);
+            }
             Stmt::Empty => {}
         }
     }
@@ -384,7 +392,11 @@ impl<'a> Validator<'a> {
                 self.validate_expr(left);
                 self.validate_expr(right);
             }
-            Expr::CommandSubst(pipeline) => self.validate_pipeline(pipeline),
+            Expr::CommandSubst(stmts) => {
+                for stmt in stmts {
+                    self.validate_stmt(stmt);
+                }
+            }
             Expr::Test(test) => self.validate_test(test),
             Expr::Positional(_) | Expr::AllArgs | Expr::ArgCount => {}
             Expr::VarLength(name) => self.check_var_defined(name),
@@ -450,7 +462,11 @@ impl<'a> Validator<'a> {
             StringPart::VarLength(name) => self.check_var_defined(name),
             StringPart::Positional(_) | StringPart::AllArgs | StringPart::ArgCount => {}
             StringPart::Arithmetic(_) => {} // Arithmetic expressions are validated at eval time
-            StringPart::CommandSubst(pipeline) => self.validate_pipeline(pipeline),
+            StringPart::CommandSubst(stmts) => {
+                for stmt in stmts {
+                    self.validate_stmt(stmt);
+                }
+            }
             StringPart::LastExitCode | StringPart::CurrentPid => {}
         }
     }
