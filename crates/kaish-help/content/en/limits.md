@@ -10,14 +10,14 @@
 | `eval` | Write explicit code |
 | Implicit word splitting on whitespace | `split "$VAR"` (for-loop `$(cmd)` does split on newlines — see Bash vs kaish below) |
 
-`[ ]` is supported as a builtin but `[[ ]]` is preferred.
+`[ expr ]` (single brackets) does not parse — use `[[ ]]` (preferred) or the `test` builtin.
 
 ## Lexer/Parser Limitations
 
 | Limitation | Details | Workaround |
 |-----------|---------|------------|
 | `[[ ]]` parsed as two brackets | Two separate `[` tokens, not a compound keyword | Works for tests; kaish will never have `[]` array syntax |
-| Keywords as bare arguments | `echo done` may fail because `done` is a keyword token | Quote: `echo "done"` |
+| Statement-opening keywords as bare arguments | `echo if` / `echo for` / `echo while` / `echo case` are parse errors (keyword starts a statement). Closers (`done`, `then`, `fi`) are fine. | Quote: `echo "if"` |
 | No token-pasting of adjacent unquoted words | `$VAR`/`$(cmd)`/globs are separate words; `echo $dir/f` → 2 args, `echo /tmp/$(id -u).x` → 3 args (silent). Bare interpolated redirect target (`> $dir/f`) is a parse error. | **Quote the whole word**: `"$dir/f"`, `"/tmp/$(id -u).x"`. See `help syntax` → Quoting. |
 
 ## Builtin Constraints
@@ -30,7 +30,7 @@
 | `rm` (latch) | Nonces scoped to (command, paths). Subset confirmation only. 60s TTL. Persist within MCP session, not across reconnects. |
 | `ps` | Linux-only (reads `/proc`) |
 | `git` | Operates on real filesystem, not VFS |
-| `head`/`tail -c` | Counts UTF-8 characters, not bytes |
+| `head`/`tail -c` | Counts bytes (POSIX); can split multi-byte UTF-8 — prefer `-n` for text |
 | `**` globs | Slow on deep trees; use specific prefixes |
 | `kaish-ignore` | Runtime changes don't persist across sessions; use `~/.kaishrc` or `--init` |
 | `kaish-output-limit` | Runtime changes don't persist across sessions; use `~/.kaishrc` or `--init` |
@@ -38,7 +38,6 @@
 ## Execution
 
 - **Pipeline stages run concurrently** with isolated scopes (like bash subshells). Variable assignments in one stage aren't visible in others. Last stage syncs back to parent.
-- **User functions and .kai scripts cannot run inside pipeline stages, scatter workers, or background jobs (`&`).** Only builtins and external commands work in these contexts. Future: per-worker kernel instances.
 - **Scatter results in completion order**, not input order.
 - **Command substitution runs in redirect targets and here-doc bodies** — `cmd > $(gen-path)`, `cat < $(find-cfg)`, and `$(...)` inside a here-doc body all work. The target is a single word, so quote it when it mixes text with an expansion: `> "/tmp/$(id -u).log"`, not `> /tmp/$(id -u).log`.
 - **Preprocessor is context-unaware** — `$(( ))` and heredoc markers replaced before parsing.

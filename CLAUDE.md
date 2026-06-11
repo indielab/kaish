@@ -20,14 +20,18 @@ Eagerly read the `crates/kaish-types/` crate in full.
 
 ```
 crates/
-├── kaish-types/     # Pure-data leaf crate: OutputData, ExecResult, Value, DirEntry, etc.
-├── kaish-help/      # Composable help & instructions content (fragments + recipes); content/en/*.md
-├── kaish-glob/      # Glob matching and async file walking with gitignore support
-├── kaish-kernel/    # Core: lexer, parser, interpreter, tools, VFS, validator
-├── kaish-mcp/       # MCP server (expose kaish as an MCP tool)
-├── kaish-client/    # Client implementations (embedded)
-├── kaish-repl/      # Interactive REPL with rustyline
-└── kaish-wasi/      # WASI target (wasm32-wasip1)
+├── kaish-types/      # Pure-data leaf crate: OutputData, ExecResult, Value, DirEntry, etc.
+├── kaish-tool-api/   # Tool author API: Tool, ToolCtx, KernelBackend traits
+├── kaish-glob/       # Glob matching and async file walking with gitignore support
+├── kaish-vfs/        # Filesystem trait + LocalFs/MemoryFs/OverlayFs backends
+├── kaish-help/       # Composable help & instructions content (fragments + recipes); content/en/*.md
+├── kaish-kernel/     # Core: lexer, parser, interpreter, tools, VFS router, validator
+├── kaish-tools-git/  # git builtin + GitVfs (libgit2; behind the `git` feature)
+├── kaish-tools-host/ # Host introspection tools (ps; behind the `host` feature)
+├── kaish-mcp/        # MCP server (expose kaish as an MCP tool)
+├── kaish-client/     # Client implementations (embedded)
+├── kaish-repl/       # Interactive REPL with rustyline
+└── kaish-wasi/       # WASI target (wasm32-wasip1)
 ```
 
 ## Build Commands
@@ -57,7 +61,7 @@ cargo insta review                       # Interactive review of pending snapsho
 ### Code Style
 
 - Comments only for non-obvious intent or complex behavior
-- Avoid `mod.rs` — use `src/module_name.rs`
+- Avoid `mod.rs` in new modules — use `src/module_name.rs` (legacy `mod.rs` files remain; don't add more)
 - Full words for names, avoid abbreviations
 - Tokio for all async. Blocking in async: `tokio::task::block_in_place(|| ...)`
 
@@ -81,7 +85,7 @@ Kernel (核)
     ├── Validator (pre-execution checks)
     ├── Interpreter (tokio async)
     ├── Tool Registry (builtins + user tools)
-    ├── VFS Router (local, memory, git backends)
+    ├── VFS Router (local, memory, overlay backends)
     └── Job Scheduler (background jobs, scatter/gather)
 ```
 
@@ -93,6 +97,8 @@ Tests live in `crates/kaish-kernel/tests/`. Snapshots in `crates/kaish-kernel/te
 ## Documentation
 
 - `docs/LANGUAGE.md` — complete language reference
+- `docs/EMBEDDING.md` — embedder guide (kernel construction, capability
+  features, ExecuteOptions, custom tools); git integration in `docs/EMBEDDING-GIT.md`
 - `crates/kaish-help/content/en/*.md` — help system content, embedded at compile time
   via the `kaish-help` crate (repo-root `docs/help` symlinks here). Shared by the
   kernel `help` builtin, the REPL, the MCP server, and embedders.

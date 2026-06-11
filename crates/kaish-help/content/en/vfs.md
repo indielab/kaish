@@ -18,8 +18,9 @@ In sandboxed mode, paths look native but access outside `$HOME` fails (except `/
 /v/blobs/      memory storage for blobs
 /v/bin/        read-only listing of builtins (can invoke: /v/bin/echo hello)
 /v/jobs/{id}/  live background job state (see below)
-/git/          read-only git metadata for cwd
 ```
+
+Git is the `git` *builtin* (`git status`, `git log`, `git diff`), not a VFS mount.
 
 ## /v/jobs — Job Observability
 
@@ -37,15 +38,6 @@ cargo build &
 cat /v/jobs/1/status       # running
 cat /v/jobs/1/stdout       # build output so far
 jobs --cleanup             # remove completed jobs
-```
-
-## /git — Repository Introspection
-
-```bash
-cat /git/status            # git status
-cat /git/log               # recent commits
-cat /git/diff              # current diff
-cat /git/blame/path/to/f   # blame for specific file
 ```
 
 ## /tmp — Interop

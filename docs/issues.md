@@ -47,105 +47,56 @@ kaish-vfs builtin status/diff/commit/reset). Residuals:
   commit_into doesn't propagate mtimes. `VirtualOverlayBackend`
   (backend/overlay.rs) is unrelated prefix routing, not CoW.
 
-### Documentation accuracy sweep — LANGUAGE.md + help content (2026-06-09)
-Every claim in LANGUAGE.md was executed against the v0.8.0 binary; help content
-checked against code. Verified falsehoods to fix (each needs a "fix doc vs fix
-code" decision; bugs with their own entries are cross-referenced):
-- `LANGUAGE.md:206`/`:659` vs `:674` — three mutually contradictory statements
-  about `[ ]`. Binary truth: `[ expr ]` does **not** parse (`found '-f' expected
-  '['`); `test` builtin works; only `[[ ]]` is test syntax. The `:661`
-  intentionally-missing row also lists "Aliases" while `:96-100` documents them.
-- `LANGUAGE.md:643-648`/`:686` — VFS table lists a `/git/` mount that does not
-  exist anywhere (`ls /git` → not found; no GitFs mount in `setup_vfs`); git
-  ships as the `git` *builtin* via kaish-tools-git. Table also says `/` is
-  "kernel root (cwd)" while `ls /` lists the host root, and omits `/v/`
-  entirely. Same stale `/git` story in `vfs.md:21` + `:42-49` (whole section of
-  `cat /git/status` examples) and in repo CLAUDE.md's "VFS Router (local,
-  memory, git backends)".
-- `LANGUAGE.md:707` + `limits.md:33` — claim `head`/`tail -c` counts UTF-8
-  characters; implementation is deliberate POSIX **bytes** (`head.rs:163`
-  comment says exactly that). Doc records the opposite of a code decision.
-- `LANGUAGE.md:720` — "parser combinator library is sourced from git" is now
-  false; chumsky is crates.io `1.0.0-alpha.8` (see P4 chumsky entry). The
-  resonance panel independently cited this line as adoption risk.
-- `limits.md:41` — claims user functions/.kai scripts cannot run in pipeline
-  stages, scatter workers, or background jobs. All three work since the fork
-  refactor; `scatter.md:33` documents the opposite. Two help topics from one
-  corpus disagree.
-- `limits.md:64` — printf row documents `a\nb` for `printf "a"; printf "b"`;
-  CLI emits `ab`. Mechanism subtlety: `accumulate_result` *does* insert newline
-  separators between statement outputs but the `;`-sequence path bypasses it —
-  see the P2 entry before editing either side.
-- `limits.md:20` — keyword-bareword row's own example (`echo done`) works now.
-- `limits.md:28` — `set` options row omits `-o output-limit`.
-- `rg.md:12` — `rg -trust` glued short-flag example fails under clap
-  ("unexpected argument '-r'"); spaced `-t rust` works. `:48` references
-  nonexistent `kaish-jq` (builtin is `jq`).
-- `README.md:253-258` — documents a `help` **MCP tool**; the server exposes
-  exactly one tool, `execute` (`handler.rs` tool_router); help is a builtin +
-  MCP prompts. Topic list also stale (missing ignore, output-limit). The
-  resonance panel's #1 convergent finding (MCP JSON contradiction) lives in
-  this same section — rewrite it once, fixing both.
-- `README.md:189-192` — embedding snippet reads `result.out`, a private field
-  (`pub` accessor is `text_out()`); first Rust sample an embedder sees fails to
-  compile. Same bug in EMBEDDING.md Quick Start (see next entry).
-- `LANGUAGE.md:411-414` — latch message format drifted (no filename on first
-  line; nonce now quoted; new `Authorized:` line). Cosmetic but agents
-  pattern-match it.
-- Stale test-file header comments that misdescribe what's covered:
-  `heredoc_compat_tests.rs:10-14` (claims unterminated-heredoc tolerance and
-  ignored $()-tests; both now wrong) and `heredoc_tests.rs:10-11` (claims CR/LF
-  normalization; tests assert `\r` preserved).
-Verified-accurate (no action): README builtin table matches all 86 registered
-builtins exactly; all Quick Tour examples run; syntax.md drift test passes and
-every spot-checked syntax.md claim verified; timeout/ignore/scatter help claims
-verified.
+### Release 0.8.1 for kaibo: ByteBudget is the payload; re-export it from kaish-kernel
+kaibo's scratch-quota fix (its P2 "Unquota'd `/` MemoryFs scratch", proven live
+2026-06-10: a redirect loop wrote 17.4 MB into MemoryFs unbounded) is blocked on
+the registry — kaibo depends on published kaish-kernel 0.8.0, which predates the
+accounting work (`dddc85d`/`d0e0deb`). Everything it needs is already on HEAD:
+kaibo builds its own `MemoryFs` and mounts it via `Kernel::with_backend`
+(kaibo `sandbox.rs:170`), so it attaches its own labeled budget with
+`MemoryFs::with_budget` at construction and never touches
+`KernelConfig.vfs_budget_bytes`. One gap found 2026-06-11: `ByteBudget` is not
+re-exported through kaish-kernel — `kernel/src/vfs/mod.rs:39` re-exports
+`MemoryFs`/`LocalFs` but not the budget type — so a `with_backend` embedder
+needs a direct kaish-vfs dep just to *name* the type it hands to
+`MemoryFs::with_budget`. Add `pub use kaish_vfs::ByteBudget;` (one line) so the
+embedder surface stays one crate, and cut 0.8.1 for the whole `kaish-*` family
+(kaish-kernel pulls kaish-vfs by version). Remember the `kaish-mounts --json`
+breaking shape in the release notes (OverlayFs residual above).
 
-### EMBEDDING.md predates the 0.8.0 split — 4 of 8 samples don't compile
-Last touched 2026-05-02 (fb49110). Verified against HEAD:
-- Quick Start (`:19`) and README both read private `result.out` → `text_out()`.
-- Custom Tools (`:144`) implements removed `Tool::execute(&mut ExecContext)`;
-  trait is now `execute(&mut dyn ToolCtx)` (`kaish-tool-api/src/tool.rs:27`)
-  with the downcast pattern every builtin uses.
-- KaijutsuBackend example (`:75`) calls `LocalBackend::new()` with no args;
-  signature requires `Arc<VfsRouter>` (`backend/local.rs:31`).
-- Programmatic VFS read (`:473`) passes `&str` where `&Path` is required and
-  never imports the `Filesystem` trait.
-- Promotes `Kernel::execute_with_vars`, now `#[deprecated]` (`kernel.rs:1080`).
-- Silent on everything an embedder now needs: **capability features** (default
-  is `localfs` only; every GitVfs example needs non-default `git`, external
-  commands need `subprocess` — no mention anywhere), **ExecuteOptions**
-  (timeout incl. ZERO dry-run, cancel_token, cwd, W3C trace context — the
-  canonical per-call surface, undocumented), `with_backend` hermeticity from
-  037aa63 (spill forced in-memory, job files off — embedders relying on disk
-  spill or `/v/jobs` persistence must know), `owns_output` from cd23012, and
-  the kaish-client `KernelClient`/`EmbeddedClient` surface.
-- `JobFs` status documented as `"completed:0"`; actual is `"done:0"`
-  (`job.rs:180-186`) — string-matching embedders never match.
-- Resonance panel (Gemini): GitVfs/kaijutsu material is ~60% of the doc and
-  reads as an app tutorial, not a library guide — move to its own doc when
-  rewriting. Panel also wants a stability/semver/MSRV statement and the
-  panic-safety line contextualized. See [resonance-2026-06.md](resonance-2026-06.md).
-Repo CLAUDE.md/GEMINI.md (byte-identical) share the staleness: crate tree lists
-8 of 12 crates — missing exactly kaish-tool-api, kaish-vfs, kaish-tools-git,
-kaish-tools-host, the ones an agent needs to find Tool/GitVfs. Also the
-"Avoid mod.rs" style rule is contradicted by 7 mod.rs files in kaish-kernel —
-scope it ("new modules") or drop it.
+### Watchdog seam: a per-builtin "patient" budget — one fixed script timer can't serve model-backed builtins
+For kaibo (its P1 "Per-builtin timeouts"); targets 0.8.2 — touches the execute
+hot path, wants its own failing-first tests, shouldn't hold up the 0.8.1 train.
 
-### Resonance follow-ups — MCP contract docs (2026-06-09)
-Both panel models independently ranked the same gaps top-3; full report in
-[resonance-2026-06.md](resonance-2026-06.md). The doc work, in leverage order:
-1. README MCP section rewrite: the JSON-either-way vs clean-text-by-default
-   contradiction, plus an explicit `execute` **return contract** (envelope
-   shape, exit-code table 0/1/2/3, where `.data` lives, truncation recovery).
-2. Per-call **lifecycle table**: what resets each `execute()` (vars, functions,
-   cwd, aliases) vs what persists (nonce store, trash, init script) — "the
-   contract the agent codes against."
-3. Surface the existing security model: `allow_external_commands`, capability
-   features, with_backend hermeticity are invisible in user-facing docs; Gemini
-   read the external-command path as an undisclosed sandbox escape.
-4. Agent "Do Not" callouts: inline env vars (`FOO=bar cmd` → `$1`), one
-   concrete quote-to-join error example, latch exit-2 → parse nonce recipe.
+Evidence (2026-06-11): timeout enforcement is a kernel-side watchdog, strictly
+per-execute — `execute_with_options_inner` resolves one duration
+(`kernel.rs:1511`, per-call `opts.timeout` over `KernelConfig::request_timeout`)
+and spawns a timer task that sleeps it whole and fires the cancel token
+(`kernel.rs:1618-1625`). Nothing can suspend or extend it mid-script. An
+embedder registering a model-backed builtin (kaibo's planned image2image/tts:
+provider calls that legitimately run minutes) can only resize the *script*
+budget — and stretching 30s to minutes hands a `while true` loop the same
+minutes. The two jobs need separate knobs.
+
+Fix shape — a deadline the watchdog polls instead of a fixed sleep:
+- Replace the one-shot `sleep(d)` with a movable deadline (watch channel or
+  `Arc<Mutex<Instant>>`) the timer task re-arms against.
+- An RAII guard obtained through `ToolCtx` (`kaish-tool-api/src/ctx.rs`) — e.g.
+  `ctx.patient(budget)` — freezes/extends the deadline while held, bounded by
+  its own per-call budget, restored on `Drop` (same discipline as the kernel's
+  `VarsFrameGuard`/`CwdGuard`). Only Rust builtin code can hold it; script code
+  has no path to it, so the script-level budget keeps its teeth.
+- Cancellation stays live while suspended: `Kernel::cancel()` and the embedder
+  token fire immediately — only the *timer* pauses, never the cancel surface.
+  A patient builtin must still `select!` on `ctx.cancel` (cross-ref P3
+  "Long-blocking builtins other than `sleep` may not honor cancellation").
+- Define the interaction with the `timeout` builtin, which re-dispatches and
+  save/restores `ctx.cancel` itself (cross-ref P3 "`dispatch_command` cancel
+  sync is one-way").
+
+Failing-first tests: a patient builtin that sleeps past the script timeout but
+under its own budget completes; a pure-script spin still dies 124 at the script
+budget; cancel during a patient wait still kills promptly.
 
 ### `rg` parallel walking
 The 2026-04-29 rg builtin uses `ignore::WalkBuilder::build()`, which
@@ -198,6 +149,16 @@ parse errors, with no test pinning either behavior (`skip_command_substitution`,
 comment-arithmetic preprocessor gotcha). Decide whether `$()` should accept the
 full statement grammar (sequences/newlines/comments) or document the
 single-pipeline restriction loudly.
+
+### Inline env prefix `FOO=bar cmd` parses as persistent assignment + command
+Verified 2026-06-11 via MCP probe: `FOO=bar echo hi` runs `echo hi` **and**
+leaves `FOO=bar` set for the rest of the script — bash scopes the assignment
+to that one command's environment. Silent semantic divergence when porting
+bash (a "temporary" override leaks into everything after it). Note this is
+*not* the behavior the resonance panel described (`FOO=bar` becoming `$1`);
+it has changed since. Decide: command-scoped env (bash semantics), a
+validator diagnostic, or document loudly. README's agent-gotchas section
+warns about it as of 2026-06-11.
 
 ### `kill -<sig>` bash shorthand (`kill -9 %1`, `kill -STOP %1`) isn't accepted
 `kill` takes the signal via `--signal NAME` / `-s NAME` only; the bash idioms
@@ -633,10 +594,8 @@ split into smaller helpers for maintainability.
 ### chumsky alpha → 1.0 before kaish 1.0
 Updated 2026-06-09: chumsky moved to crates.io `1.0.0-alpha.8` in `229f363`
 (release prep) — the old "pin a git commit" option is moot. Residual: upgrade
-to a stable chumsky 1.0 when it ships, before kaish 1.0. `LANGUAGE.md:720`
-still claims the parser "is sourced from git rather than crates.io" — now
-factually wrong; fix with the doc sweep (the resonance panel cited that exact
-line as adoption risk the project has already paid down).
+to a stable chumsky 1.0 when it ships, before kaish 1.0. (The stale
+`LANGUAGE.md` "sourced from git" line was fixed 2026-06-11.)
 
 ### REPL polish
 Syntax highlighting (chumsky already produces structured tokens),
@@ -652,10 +611,6 @@ is E012 hard error, and `$(cmd)` in for-position splits on `\n`. What
 remains is "soft" guidance for less-common ports; a shellcheck-style
 actionable warning without rejection would steer without frustrating.
 Optional but moderate leverage now that the loud cases are handled.
-
-### `EmbeddedClient::shutdown()` is a no-op
-Intentional (embedder owns lifecycle) but worth one doc line in
-`EMBEDDING.md`.
 
 ### Multi-file `grep` silently skips unreadable explicit operands
 `grep_multiple_files` does `Err(_) => continue` per file — right for the
@@ -678,6 +633,47 @@ priority; decide whether multi-arg should accumulate per-path errors.
 
 Captured here so context from `cleanups-todo.md` / old `issues.md`
 isn't lost when those files are deleted.
+
+- **Documentation truth slate — fixed 2026-06-11.** Every verified falsehood
+  from the 2026-06-09 accuracy sweep corrected, re-probed against the live
+  binary first: LANGUAGE.md `[ ]` story unified (docs-only decision —
+  `[ expr ]` doesn't parse; `[[ ]]`/`test` are the forms; aliases dropped
+  from the intentionally-missing row), VFS table re-trued (no `/git` mount
+  anywhere; git is a builtin; `/v/*` mounts documented), `head/tail -c`
+  re-trued to deliberate POSIX bytes, chumsky line updated to crates.io
+  alpha, latch example matches the `Authorized:`/quoted-nonce format.
+  limits.md: `[ ]` line fixed, keyword row narrowed (statement-openers
+  `echo if`/`for`/`while`/`case` still fail; closers like `echo done` work
+  now), `-c` row fixed, stale functions-can't-run-in-pipelines bullet
+  dropped. vfs.md: `/git` mount + section removed. rg.md: `-trust` example
+  → `-t rust` + glued-flag caveat, `kaish-jq` → `jq`, dead native/WASI
+  caveat replaced (rg deps are unconditional and registration ungated).
+  README: embedding snippet `result.out` → `text_out()`; MCP section
+  rewritten per the resonance panel's top-3 — single `execute` tool (the
+  phantom `help` tool claim removed), `structured_content` envelope +
+  exit-code table (0/1/2/3/124/130) with recovery actions, per-call
+  lifecycle table (resets vs persists), sandbox section naming
+  `allow_external_commands`/capability features/`--overlay`/64 MiB budget,
+  and agent-gotcha callouts. Heredoc test headers re-trued (body `\r`
+  preserved + CR-tolerant delimiter, unterminated = hard error, body-`$()`
+  tests live and un-ignored). New finding recorded as its own P2 entry:
+  inline env prefix persists past the command.
+
+- **EMBEDDING.md rewritten + git material split out — fixed 2026-06-11.**
+  Full restructure per the resonance recommendation. Core guide now leads
+  with a stability/MSRV statement and capability-feature table, then:
+  KernelClient/EmbeddedClient surface (incl. `shutdown()` no-op),
+  KernelConfig modes/builders, `with_backend` hermeticity guarantees,
+  `ExecuteOptions` (vars overlay replacing deprecated `execute_with_vars`,
+  `Duration::ZERO` dry-run, cancel_token, W3C trace context), current
+  `Tool` trait (`&mut dyn ToolCtx`) + `owns_output`, `Filesystem`/`&Path`
+  VFS access, JobFs `"done:0"` status strings. GitVfs/kaijutsu tutorial
+  moved to `docs/EMBEDDING-GIT.md` with corrected samples
+  (`LocalBackend::new(Arc<VfsRouter>)`, `git` feature callout). Repo
+  CLAUDE.md/GEMINI.md crate tree lists all 12 crates, mod.rs rule scoped to
+  new modules, VFS Router line de-gitted. Residual: samples are still not
+  doc-tested or generated, so drift will recur — reviews.md's
+  generate-or-doctest suggestion stands.
 
 - **Minimal-build lib-test regression — fixed 2026-06-10.** `touch.rs`'s
   `test_touch_existing_readonly_rejects` did an ungated `use crate::vfs::LocalFs;`,

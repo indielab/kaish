@@ -7,13 +7,15 @@
 //! when `KAISH_BASH_COMPAT=1` is set.
 //!
 //! This file keeps:
-//! - **CRLF normalization** in heredoc bodies. Kaish normalizes CR/LF
-//!   line endings; bash preserves `\r` and rejects `EOF\r` as a non-match
-//!   for the `EOF` delimiter, so the heredoc never terminates under bash.
-//! - **Unterminated heredoc contract**. Kaish uses whatever was collected
-//!   up to EOF; bash warns to stderr and appends a trailing newline.
-//! - Two pre-existing `#[ignore]`d tests for nested command substitution
-//!   inside heredoc bodies — blocked on async redirect-target evaluation.
+//! - **Line-ending handling** (hybrid, diverges from bash): `\r` bytes in
+//!   heredoc bodies are preserved verbatim, but a CRLF-terminated delimiter
+//!   line (`EOF\r\n`) still matches `EOF` so CRLF-saved scripts terminate.
+//!   Bash also preserves body `\r` but rejects `EOF\r` as a delimiter match.
+//! - **Unterminated heredoc contract**. Kaish errors loudly ("unterminated
+//!   heredoc"); bash warns to stderr and tolerates, appending a newline.
+//! - **Nested command substitution in bodies** — `$(...)` runs inside
+//!   heredoc bodies (these were `#[ignore]`d until async redirect-target
+//!   evaluation landed).
 
 use std::sync::Arc;
 

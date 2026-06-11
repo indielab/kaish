@@ -91,7 +91,7 @@ seq 1 10 | scatter --as N --limit 4 | echo "processing $N" | gather
 | **Builtins** | grep, rg, jq, git, find, sed, awk, diff, patch, and more — all in-process |
 | **Structured data** | Commands return typed arrays — `for i in $(seq 1 5)` iterates 5 values, not word-split text |
 | **Strict validation** | Errors caught before execution with clear messages |
-| **Virtual filesystem** | Unified access: native `$HOME` paths (sandboxed), `/tmp`, `/v/jobs` (observability) |
+| **Virtual filesystem** | Unified access: native `$HOME` paths (sandboxed), `/tmp`, and the in-memory `/v/` namespace (`/v/jobs` observability, scratch storage) |
 | **Scatter/gather** | Built-in parallelism with 散/集 |
 
 See [Language Reference](docs/LANGUAGE.md) for complete syntax. Use `help builtins` or `help <tool>` for per-tool docs.
@@ -188,7 +188,7 @@ use kaish_kernel::{Kernel, KernelConfig};
 
 let kernel = Kernel::new(KernelConfig::default())?;
 let result = kernel.execute("echo hello | tr a-z A-Z").await?;
-println!("{}", result.out);  // "HELLO"
+println!("{}", result.text_out());  // "HELLO"
 ```
 
 The kernel is embeddable — no external dependencies, no subprocess spawning for builtins.
@@ -207,9 +207,9 @@ kaish>
 
 ### kaish-mcp
 
-MCP server exposing kaish as tools for AI agents. Builtins produce structured
-data internally — humans see clean readable text. The --json flag is still available
-as a rendering option but your agent will see json either way.
+MCP server exposing kaish to AI agents as a single tool, `execute`. Help
+content ships as MCP prompts (`kaish-overview`, `kaish-syntax`, …), and VFS
+files are addressable as MCP resources (`kaish://vfs/{path}`).
 
 #### Installation
 
@@ -231,31 +231,81 @@ aliases, safety options, environment setup. Repeatable (multiple `--init` flags
 load in order). Hot-reloaded: edit the file, next call picks up changes without
 restarting. Omit `args` entirely if no init scripts are needed.
 
-#### Tools
+#### The `execute` tool
 
-**`execute`** — Run kaish scripts. Each call gets a fresh kernel (variables and
-functions reset), but confirmation nonces (`set -o latch`) persist across calls
-within the MCP session.
+Runs a kaish script: pipes, redirects, here-docs, if/for/while, functions,
+`${VAR:-default}`, `$((arithmetic))`, scatter/gather parallelism. Not
+supported: process substitution `<()`, backticks, `eval`. Native paths work
+within `$HOME`; `/tmp` for interop; `/v/` is in-memory scratch.
 
+Every call returns human-readable text content plus a machine-readable
+`structured_content` envelope:
+
+```json
+{
+  "code": 0,
+  "ok": true,
+  "stdout": "...",
+  "stderr": "...",
+  "data": null,
+  "output": null,
+  "content_type": null,
+  "baggage": {}
+}
 ```
-Supports: pipes, redirects, here-docs, if/for/while, functions, builtins,
-${VAR:-default}, $((arithmetic)), scatter/gather parallelism.
 
-NOT supported: process substitution <(), backticks, eval.
+Output is clean text by default — simple commands return plain text,
+structured builtins (`ls`, `kaish-mounts`, `kaish-vars`) render readable
+tab-separated values. Add `--json` to any command to get JSON on stdout and
+the parsed value in `data`; `output` carries the renderable structured form
+(tables and trees) from structured builtins. `data` is only ever set
+explicitly by builtins — kaish never infers it by sniffing stdout. When `data` or `output` already
+carry the same information, `stdout` is omitted from the envelope; the text
+content blocks always have the rendered form.
 
-Paths: Native paths work within $HOME (e.g., /home/user/src/project). /tmp for temp files.
-```
+Exit codes agents can branch on:
 
-Output is clean text by default — simple commands return plain text, structured
-builtins (`ls`, `kaish-mounts`, `kaish-vars`) return readable tab-separated values. Use
-`--json` on any command for structured JSON output when needed.
+| `code` | Meaning | Recovery |
+|--------|---------|----------|
+| 0 | Success | — |
+| 1 | Failure | Read `stderr` |
+| 2 | Confirmation required (`set -o latch`) | Re-run with `--confirm="<nonce>"` — the nonce is in the `To confirm, run:` line and in `data` |
+| 3 | Output truncated by the output limit | `original_code` holds the real exit code; the message names the spill file — `cat` it, or narrow the query |
+| 124 | Timeout (`timeout_ms`, default 30 s) | — |
+| 130 | Cancelled | — |
 
-**`help`** — Discover syntax, builtins, VFS, and capabilities.
+Per-call lifecycle — each `execute` call gets a fresh kernel:
 
-```
-Topics: overview, syntax, builtins, vfs, scatter, limits
-Tool help: help grep, help rg, help jq, help git
-```
+| Resets every call | Persists across calls |
+|-------------------|-----------------------|
+| Variables, functions, aliases | Confirmation nonces (60 s TTL) |
+| Working directory (`cwd` param, default `$HOME`) | Trash contents |
+| `set -o` options | Init scripts (re-read each call — edits hot-reload) |
+| `--overlay` writes (commit in the same call) | |
+
+#### Sandbox & safety
+
+- Builtins go through the VFS, sandboxed to `$HOME` + `/tmp`; `/v/` is
+  in-memory scratch with a 64 MiB per-call budget.
+- **External commands resolved via `PATH` run against the real filesystem**
+  — the VFS sandbox does not apply to them. Block them entirely with
+  `allow_external_commands=false`, or build without the `subprocess`
+  capability feature.
+- `--overlay` makes the sandbox copy-on-write for the call: writes stay in
+  memory unless the script runs `kaish-vfs commit` (same call — overlays
+  don't persist across calls).
+- `set -o latch` gates destructive commands behind exit-2 nonce
+  confirmation; `set -o trash` diverts deletes to the trash instead.
+
+#### Agent gotchas
+
+- **Quote to join.** Unlike bash, kaish never concatenates adjacent unquoted
+  tokens: `echo $dir/out.txt` passes `$dir` and `/out.txt` as **two
+  arguments**. Quote the whole word: `echo "$dir/out.txt"`.
+- `FOO=bar cmd` sets `FOO` for the rest of the script, not just for `cmd`
+  as bash does. Prefer the `env` request parameter or a plain assignment.
+- Help is in-band: `help builtins`, `help syntax`, `help <tool>` — or use
+  the MCP prompts.
 
 #### Why an MCP shell?
 
@@ -274,8 +324,6 @@ done
 # Parallel processing
 seq 1 10 | scatter --as N --limit 4 | echo "processing $N" | gather
 ```
-
-The kernel runs builtins in-process (no fork/exec), making it fast and predictable.
 
 ## Why 会sh (kaish)?
 

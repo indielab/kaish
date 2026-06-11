@@ -203,7 +203,7 @@ mkdir /tmp/work && cd /tmp/work && echo "ready"
 [[ ! -f a || -d b && -e c ]]    # parsed as: (! -f a) || ((-d b) && (-e c))
 ```
 
-Note: `[ ]` (single brackets) is supported as a builtin but `[[ ]]` is preferred for all tests.
+Note: `[ expr ]` (single brackets) is **not** kaish syntax — it does not parse. Use `[[ ]]` (preferred) or the `test` builtin (`test -f file && echo yes`).
 
 ## Control Flow
 
@@ -409,8 +409,9 @@ Environment variables `KAISH_LATCH=1` and `KAISH_TRASH=1` enable at kernel start
 When latch is enabled, `rm` returns **exit code 2** with a nonce:
 ```bash
 $ rm important.dat
-rm: important.dat: confirmation required (latch enabled)
-To confirm, run: rm --confirm=a3f7b2c1 important.dat
+rm: confirmation required (latch enabled)
+Authorized: important.dat
+To confirm, run: rm --confirm="a3f7b2c1" important.dat
 Nonce expires in 60 seconds.
 ```
 
@@ -641,11 +642,16 @@ When `kill %N` targets external processes it signals their **process group**, so
 VFS mounts provide unified resource access:
 
 ```
-/                  → kernel root (current working directory)
-/tmp/              → temporary storage (real filesystem)
-/mnt/<name>/       → mounted local paths
-/git/              → git repository introspection (status, log, diff, blame)
+/                  → host filesystem (Passthrough/REPL) or in-memory root (Sandboxed/isolated)
+/tmp/              → real /tmp (local mount)
+/v/                → in-memory scratch storage
+/v/bin/            → read-only builtin listing (invocable: /v/bin/echo hi)
+/v/blobs/          → in-memory blob storage
+/v/jobs/<id>/      → live background job state (stdout, stderr, status, command)
 ```
+
+Embedders can mount additional prefixes (e.g. `/mnt/<name>/`) via `Kernel::with_backend`.
+Git operations are provided by the `git` *builtin*, not a VFS mount.
 
 ## What's Intentionally Missing
 
@@ -656,8 +662,8 @@ These bash features are omitted because they're confusing, error-prone, or ambig
 | Shell brace expansion `echo {a,b,c}` | Tools support globs with braces internally | SC1083 |
 | Process substitution `<(cmd)` | Use temp files | — |
 | Backtick substitution `` `cmd` `` | Use `$(cmd)` — a bare backtick is a lexer error, not silently accepted | SC2006 |
-| Single bracket tests `[ ]` | Supported; prefer `[[ ]]` | SC2039 |
-| Aliases, `eval` | Explicit is better | SC2091 |
+| Single bracket tests `[ ]` | Not parsed; use `[[ ]]` or the `test` builtin | SC2039 |
+| `eval` | Explicit is better | SC2091 |
 
 ## ShellCheck Alignment
 
@@ -671,7 +677,7 @@ Features that ShellCheck warns about (word splitting, backticks) don't exist in 
 | SC2086 | Double quote to prevent word splitting | No implicit word splitting on whitespace; `$VAR` is always one value |
 | SC2046 | Quote this to prevent word splitting | `$(cmd)` is one value in argv/assignment/interp; for-loop iteration splits on newlines only |
 | SC2035 | Use `./*` so globs don't expand | Bare globs expand; use `set +o glob` to disable |
-| SC2039 | Use `[[ ]]` in POSIX sh | Only `[[ ]]` exists |
+| SC2039 | Use `[[ ]]` in POSIX sh | `[ ]` doesn't parse; `[[ ]]` and `test` are the test forms |
 | SC1083 | Escape literal braces | No shell-level brace expansion |
 
 ## Beyond Bourne
@@ -683,7 +689,7 @@ Features that ShellCheck warns about (word splitting, backticks) don't exist in 
 | **Typed params** | None | `name:string` | Tool definitions with validation |
 | **Arithmetic** | `$(( ))` | `$((expr))` with comparisons | Integer arithmetic + `>`, `<`, `==` returning 1/0 |
 | **Scatter/gather** | None | `散/集` | Built-in parallelism *(experimental)* |
-| **VFS** | None | `/tmp/`, `/v/`, `/git/` | Unified resource access |
+| **VFS** | None | `/tmp/`, `/v/` | Unified resource access |
 | **Pre-validation** | None | `kaish-validate` builtin | Catch errors before execution |
 | **Strict validation** | Guesses | Rejects `TRUE`, `yes`, `123abc` | Agent-friendly, fail-fast |
 
@@ -704,7 +710,7 @@ These are documented limitations of the current implementation:
 - **`set` supports `-e`, `-o latch`, `-o trash`, `-o glob`, `-o output-limit[=SIZE]`** — Unlike bash, only these options are implemented. `set -o output-limit=8K` caps command output (see Output Size Limits); `set +o output-limit` disables it. `-u`, `-x`, `pipefail` and other bash set options are silently ignored for compatibility.
 - **`ps` is Linux-only** — The process listing builtin reads from `/proc` and only works on Linux systems.
 - **`git` requires real filesystem** — The git builtin operates on the actual filesystem, not the VFS. It won't work with memory-backed or remote VFS mounts.
-- **`head`/`tail -c` counts UTF-8 characters** — Unlike POSIX which specifies bytes, `-c` in kaish counts Unicode characters. This is intentional for safer text handling.
+- **`head`/`tail -c` counts bytes** — POSIX semantics, deliberately. A byte count can split a multi-byte UTF-8 sequence; use line-based forms (`-n`) for text.
 
 ### Execution
 
@@ -717,5 +723,5 @@ These are documented limitations of the current implementation:
 
 ### Build/Development
 
-- **chumsky parser from git** — The parser combinator library is sourced from git rather than crates.io to get unreleased features.
+- **chumsky parser is pre-1.0** — The parser combinator library is the crates.io `1.0.0-alpha` series; kaish will move to stable chumsky 1.0 before its own 1.0.
 - **Fuzz tests require nightly** — The fuzz testing infrastructure requires Rust nightly compiler.

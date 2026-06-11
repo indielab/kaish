@@ -5,13 +5,13 @@
 //! semantics turn on trailing newlines.
 //!
 //! Skipped from this suite (kaish behavior diverges from bash by design):
-//! - CRLF normalization in heredoc bodies (kaish normalizes; bash preserves
-//!   `\r` and rejects `EOF\r` as a non-match for the delimiter `EOF`).
-//! - Unterminated heredocs (kaish uses whatever was collected; bash warns
-//!   to stderr and appends a trailing newline).
-//! - `$(cmd)` inside heredoc bodies (kaish has a known limitation around
-//!   async redirect-target evaluation; tests in heredoc_tests.rs are
-//!   `#[ignore]` until that lands).
+//! - CRLF-terminated delimiter lines (kaish matches `EOF\r\n` against `EOF`
+//!   so CRLF-saved scripts terminate; bash rejects it as a non-match). Body
+//!   `\r` bytes are preserved by both — see heredoc_tests.rs.
+//! - Unterminated heredocs (kaish errors loudly; bash warns to stderr,
+//!   tolerates, and appends a trailing newline).
+//! - `$(cmd)` inside heredoc bodies works; its tests live in
+//!   heredoc_tests.rs alongside the other kaish-specific contracts.
 
 mod common;
 

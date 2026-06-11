@@ -1,8 +1,22 @@
 # Embedding kaish
 
-This guide shows how to embed kaish in your application, providing shell
-scripting capabilities with access to VFS, git operations, and the full
-builtin toolkit.
+This guide shows how to embed the kaish kernel in your application: kernel
+construction, capability features, per-call execution options, custom tools,
+and output capture. Git integration (custom backends mapping VFS paths to
+worktrees, direct `GitVfs` access) has its own guide:
+[EMBEDDING-GIT.md](EMBEDDING-GIT.md).
+
+## Stability
+
+kaish is pre-1.0 (currently 0.8.x, MSRV 1.85). The language has settled;
+the embedding API may still change between minor versions where it improves
+both kaish and its embedders — [kaijutsu](https://github.com/tobert/kaijutsu)
+is the reference embedder. Pin a minor version and read release notes when
+bumping.
+
+**Panic safety:** kaish makes no panic-unwind guarantees. Errors returned as
+`Err(...)` always clean up; a panic mid-execute may leave kernel state (e.g.
+a pushed scope frame) behind. Treat a panicking kernel as poisoned.
 
 ## Quick Start
 
@@ -12,15 +26,23 @@ use kaish_kernel::{Kernel, KernelConfig};
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     // Create a kernel with defaults
-    let kernel = Kernel::transient()?;
+    let kernel = Kernel::new(KernelConfig::transient())?;
 
-    // Execute shell commands
+    // execute() returns Ok(ExecResult) even when the script fails
+    // (nonzero exit code); Err(_) is reserved for kernel faults.
     let result = kernel.execute("echo 'Hello from kaish!'").await?;
-    println!("{}", result.out);
+    if result.code != 0 {
+        eprintln!("script failed: {}", result.err);
+    }
+    println!("{}", result.text_out());
 
     Ok(())
 }
 ```
+
+`ExecResult` exposes stdout via the `text_out()` accessor (it materializes
+structured output when a builtin returned a table or tree); `code`, `err`,
+and `data` are public fields.
 
 ## Architecture
 
@@ -30,300 +52,121 @@ kaish separates concerns into layers:
 ┌─────────────────────────────────────────────────────────┐
 │  Your Application (e.g., kaijutsu)                       │
 ├─────────────────────────────────────────────────────────┤
-│  KernelBackend trait                                     │
-│  - resolve_real_path() → maps VFS paths to real paths   │
-│  - File operations, tool dispatch, mounts               │
+│  KernelClient trait (kaish-client)                       │
+│  - execute / tool_schemas / list_vars / cancel           │
+│  - EmbeddedClient wraps an in-process Kernel             │
 ├─────────────────────────────────────────────────────────┤
-│  Kernel                                                  │
-│  - Lexer/Parser/Interpreter                             │
-│  - Tool Registry (builtins)                              │
-│  - VFS Router                                           │
+│  KernelBackend trait (kaish-tool-api)                    │
+│  - resolve_real_path() → maps VFS paths to real paths    │
+│  - File operations, tool dispatch, mounts                │
+├─────────────────────────────────────────────────────────┤
+│  Kernel (kaish-kernel)                                   │
+│  - Lexer/Parser/Validator/Interpreter                    │
+│  - Tool Registry (builtins + custom tools)               │
+│  - VFS Router                                            │
 └─────────────────────────────────────────────────────────┘
 ```
 
-## Custom Backend for Git Operations
+Two ways in:
 
-The key to getting git operations "for free" is implementing `resolve_real_path()`.
-This method tells kaish how to map VFS paths to real filesystem paths where
-git repositories live.
+- **`Kernel` directly** — full surface, in-process.
+- **`KernelClient`** (`kaish-client` crate) — the frontend trait the REPL
+  drives; implement or reuse `EmbeddedClient::new(kernel)` if your app wants
+  a swappable kernel connection. `EmbeddedClient::shutdown()` is a no-op by
+  design: the embedder owns the kernel lifecycle.
 
-### Example: kaijutsu-style Worktrees
+## Capability Features
 
-```rust
-use std::path::{Path, PathBuf};
-use std::sync::Arc;
-use kaish_kernel::{
-    Kernel, KernelConfig, KernelBackend, LocalBackend,
-    xdg_data_home, GitVfs,
-};
+The default build is deliberately minimal: real-file I/O and the
+copy-on-write overlay, **no** process execution, host introspection, git,
+desktop integration, or tokenizer. Each dangerous surface is a named opt-in
+cargo feature on `kaish-kernel`:
 
-/// Custom backend that maps VFS paths to kaijutsu worktrees
-struct KaijutsuBackend {
-    /// Delegate to LocalBackend for file operations
-    inner: LocalBackend,
-    /// Root of worktrees directory
-    worktrees_root: PathBuf,
-}
+| Feature | Gates | Default |
+|---------|-------|---------|
+| `localfs` | Real local filesystem: `LocalFs`, passthrough/sandboxed VFS modes, spill-to-disk | ✓ |
+| `overlay` | Copy-on-write overlay FS (implies `localfs`) | ✓ |
+| `subprocess` | External commands: exec/spawn/which/bg/fg/kill, PATH, signals, job control | — |
+| `host` | Host introspection: `ps`, `uname --host`, `hostname` | — |
+| `git` | `git` builtin + `GitVfs` (libgit2 stays in `kaish-tools-git`) | — |
+| `os-integration` | Freedesktop trash + XDG base directories | — |
+| `tokens` | BPE tokenization (`tokens` builtin) | — |
+| `full` | All of the above (`native` is an alias) | — |
 
-impl KaijutsuBackend {
-    fn new() -> Self {
-        let worktrees_root = xdg_data_home()
-            .join("kaijutsu")
-            .join("worktrees");
+Consequences for embedders:
 
-        Self {
-            inner: LocalBackend::new(),
-            worktrees_root,
-        }
-    }
-}
+- **External commands need `subprocess`.** Without it, PATH lookup and
+  `exec`/`spawn` don't exist. With it, gate at runtime via
+  `allow_external_commands` (see [Sandboxing](#sandboxing-and-external-commands)).
+- **Everything in [EMBEDDING-GIT.md](EMBEDDING-GIT.md) needs `git`.**
+- A read-only agent shell wants the default features plus a custom backend —
+  see [with_backend hermeticity](#custom-backend-kernelwith_backend).
 
-impl KernelBackend for KaijutsuBackend {
-    // ... delegate most methods to self.inner ...
+## Kernel Construction
 
-    /// Map VFS paths to real worktree paths
-    fn resolve_real_path(&self, path: &Path) -> Option<PathBuf> {
-        // /mnt/repos/kaish/src/main.rs → ~/.local/share/kaijutsu/worktrees/kaish/src/main.rs
-        if let Ok(rest) = path.strip_prefix("/mnt/repos") {
-            return Some(self.worktrees_root.join(rest));
-        }
-
-        // Other mounts...
-        None
-    }
-}
-
-#[tokio::main]
-async fn main() -> anyhow::Result<()> {
-    let backend = Arc::new(KaijutsuBackend::new());
-    let config = KernelConfig::default();
-
-    let kernel = Kernel::with_backend(backend, config, |_| {}, |_| {})?;
-
-    // Git operations now work on worktrees!
-    kernel.execute("cd /mnt/repos/kaish && git status").await?;
-
-    Ok(())
-}
-```
-
-### How Git Operations Work
-
-When you run `git status` in kaish:
-
-1. The `git` builtin receives the current working directory (e.g., `/mnt/repos/kaish`)
-2. It calls `backend.resolve_real_path(&cwd)`
-3. Your backend returns the real path (e.g., `~/.local/share/kaijutsu/worktrees/kaish`)
-4. kaish opens a `GitVfs` at that real path
-5. Git operations work directly on the worktree
-
-## Custom Tools
-
-Register custom builtins using the `configure_tools` callback on `with_backend()`:
+### Modes (`KernelConfig`)
 
 ```rust
-use std::sync::Arc;
-use async_trait::async_trait;
-use kaish_kernel::{
-    Kernel, KernelConfig, KernelBackend, Tool, ToolRegistry, ExecContext,
-};
-use kaish_types::{ExecResult, ToolSchema, ToolArgs};
+use kaish_kernel::{Kernel, KernelConfig, VfsMountMode};
+use std::path::PathBuf;
 
-struct MyTool {
-    state: Arc<MyState>,
-}
+// Throwaway kernel, sandboxed defaults
+let kernel = Kernel::new(KernelConfig::transient())?;
 
-#[async_trait]
-impl Tool for MyTool {
-    fn name(&self) -> &str { "my-tool" }
-
-    fn schema(&self) -> ToolSchema {
-        ToolSchema::new("my-tool", "Does something useful")
-    }
-
-    async fn execute(&self, args: ToolArgs, ctx: &mut ExecContext) -> ExecResult {
-        ExecResult::success("hello from my-tool")
-    }
-}
-
-let kernel = Kernel::with_backend(backend, config, |_| {}, |tools| {
-    tools.register(MyTool { state: my_state.clone() });
-})?;
-```
-
-Custom tools registered this way are available as shell builtins — they
-appear in `tools --json`, have help text, and participate in tab completion.
-
-## Direct GitVfs Access
-
-For lower-level git operations, use `GitVfs` directly:
-
-```rust
-use kaish_kernel::{GitVfs, FileStatus, LogEntry, WorktreeInfo};
-use std::path::Path;
-
-fn inspect_repo() -> anyhow::Result<()> {
-    let repo = GitVfs::open("/path/to/worktree")?;
-
-    // Get current branch
-    if let Some(branch) = repo.current_branch()? {
-        println!("On branch: {}", branch);
-    }
-
-    // Check status
-    let status = repo.status()?;
-    for file in &status {
-        println!("{} {}", file.status_char(), file.path);
-    }
-
-    // Stage and commit
-    repo.add(&["src/*.rs"])?;
-    repo.commit("Update source files", None)?;
-
-    // View log
-    for entry in repo.log(5)? {
-        println!("{} {}", entry.short_id, entry.message.lines().next().unwrap_or(""));
-    }
-
-    Ok(())
-}
-
-fn manage_worktrees() -> anyhow::Result<()> {
-    let repo = GitVfs::open("/path/to/main/repo")?;
-
-    // List all worktrees
-    for wt in repo.worktrees()? {
-        println!("{}: {} ({:?})",
-            wt.name.as_deref().unwrap_or("main"),
-            wt.path.display(),
-            wt.head
-        );
-    }
-
-    // Create a new worktree for a feature branch
-    let wt_info = repo.worktree_add(
-        "feature-work",
-        Path::new("/path/to/feature-worktree"),
-        Some("feature-branch"),  // existing branch, or None for new branch
-    )?;
-    println!("Created worktree at {}", wt_info.path.display());
-
-    // Lock a worktree to prevent accidental pruning
-    repo.worktree_lock("feature-work", Some("work in progress"))?;
-
-    // Later, unlock and remove
-    repo.worktree_unlock("feature-work")?;
-    repo.worktree_remove("feature-work", false)?;  // force=false
-
-    // Clean up stale worktree entries
-    let pruned = repo.worktree_prune()?;
-    println!("Pruned {} stale worktree(s)", pruned);
-
-    Ok(())
-}
-```
-
-## Path Composition with XDG Primitives
-
-kaish exports XDG base directory primitives so embedders can compose
-their own application-specific paths:
-
-```rust
-use kaish_kernel::paths::{
-    xdg_data_home,    // ~/.local/share or $XDG_DATA_HOME
-    xdg_config_home,  // ~/.config or $XDG_CONFIG_HOME
-    xdg_cache_home,   // ~/.cache or $XDG_CACHE_HOME
-    xdg_runtime_dir,  // $XDG_RUNTIME_DIR or /tmp
-    home_dir,         // ~ or $HOME
-};
-
-// Compose your own paths
-fn myapp_data_dir() -> PathBuf {
-    xdg_data_home().join("myapp")
-}
-
-fn myapp_worktrees_dir() -> PathBuf {
-    myapp_data_dir().join("worktrees")
-}
-
-fn myapp_repos_dir() -> PathBuf {
-    myapp_data_dir().join("repos")
-}
-
-// Or use completely custom paths
-fn custom_storage() -> PathBuf {
-    PathBuf::from("/opt/myapp/storage")
-}
-```
-
-## Tilde Expansion
-
-For user-facing path handling, use `expand_tilde`:
-
-```rust
-use kaish_kernel::expand_tilde;
-
-let path = expand_tilde("~/projects/myrepo");
-// → /home/username/projects/myrepo
-```
-
-## Exported Types
-
-The `kaish_kernel` crate exports these types at the crate root for convenience:
-
-### Core Types
-- `Kernel` — The execution engine
-- `KernelConfig` — Configuration options
-- `KernelBackend` — Trait for custom backends
-- `LocalBackend` — Default filesystem backend
-- `Tool` — Trait for implementing custom builtins
-- `ToolRegistry` — Registry for tool registration
-- `ExecContext` — Execution context passed to tools
-
-### Git Types
-- `GitVfs` — Git-aware filesystem
-- `FileStatus` — Status of a single file
-- `StatusSummary` — Aggregate status counts
-- `LogEntry` — A commit in the log
-- `WorktreeInfo` — Information about a worktree
-
-### Job Observability
-- `BoundedStream` — Ring-buffer stream for capturing command output (10MB default)
-- `StreamStats` — Statistics about a bounded stream
-- `drain_to_stream()` — Drain async reader into bounded stream
-- `DEFAULT_STREAM_MAX_SIZE` — Default max size constant (10MB)
-- `JobFs` — VFS backend for observing job state at `/v/jobs`
-
-### Path Primitives
-- `home_dir()` — User's home directory
-- `xdg_data_home()` — XDG data directory
-- `xdg_config_home()` — XDG config directory
-- `xdg_cache_home()` — XDG cache directory
-- `xdg_runtime_dir()` — XDG runtime directory
-
-### Utilities
-- `expand_tilde()` — Expand `~` in paths
-
-## Configuration Options
-
-`KernelConfig` provides these options:
-
-```rust
-// Sandboxed to a specific root (defaults to $HOME)
+// Named kernel sandboxed to a specific root
 let config = KernelConfig::named("my-kernel")
     .with_vfs_mode(VfsMountMode::Sandboxed {
         root: Some(PathBuf::from("/custom/root")),
     })
-    .with_cwd(PathBuf::from("/custom/root"))
-    .with_skip_validation(false);
+    .with_cwd(PathBuf::from("/custom/root"));
+
+// Full host filesystem (what the REPL uses)
+let config = KernelConfig::repl();
+
+// Memory-only VFS, external commands disabled (tests, untrusted scripts)
+let config = KernelConfig::isolated();
+
+// Sandboxed-to-$HOME with a 64 MiB in-memory VFS budget (what the MCP server uses)
+let config = KernelConfig::mcp();
 ```
+
+Other builders: `.with_latch(bool)` / `.with_trash(bool)` (destructive-op
+rails), `.with_vfs_budget(bytes)` / `.without_vfs_budget()` (cap in-memory
+VFS growth), `.with_skip_validation(bool)`, `.with_initial_vars(map)`
+(below).
+
+### Custom Backend (`Kernel::with_backend`)
+
+For full control over file I/O, implement `KernelBackend` (from
+`kaish-tool-api`, re-exported by the kernel) and assemble with:
+
+```rust
+let kernel = Kernel::with_backend(
+    backend,            // Arc<dyn KernelBackend>
+    config,             // KernelConfig
+    |vfs| {             // mount extra filesystems
+        // vfs.mount_arc("/v/docs", docs_fs);
+    },
+    |tools| {           // register custom tools
+        // tools.register(MyTool { ... });
+    },
+)?;
+```
+
+> **Warning:** `with_backend` kernels are **hermetic by construction**:
+> kaish mounts no host filesystem (your backend is the only I/O path),
+> output spill is forced in-memory (no host temp files), and
+> background-job output files are disabled. If your embedder previously
+> relied on disk spill or `/v/jobs` persistence, that data now stays in
+> memory.
 
 ## Initial Variables and Hermetic Subprocess Env
 
-The kernel is **hermetic by default** — it never reads `std::env::vars()`, and
-external commands launched from inside the kernel see only the variables kaish
-has marked as exported. Frontends that want shell-like UX (the bundled REPL,
-the MCP server) opt in to OS-env passthrough by populating `initial_vars`:
+The kernel is **hermetic by default** — it never reads `std::env::vars()`,
+and external commands launched from inside the kernel see only the
+variables kaish has marked as exported. Frontends that want shell-like UX
+(the bundled REPL, the MCP server) opt in to OS-env passthrough by
+populating `initial_vars`:
 
 ```rust
 use kaish_kernel::ast::Value;
@@ -353,58 +196,156 @@ Builders:
 - `with_vars(map)` — extend the existing map (last write wins)
 - `with_initial_vars(map)` — replace the entire map
 
-All entries are marked exported when the kernel boots, so they reach external
-subprocesses (`printenv`, `cargo`, `git`, …) directly.
+All entries are marked exported when the kernel boots, so they reach
+external subprocesses (`printenv`, `cargo`, `git`, …) directly. For
+*per-call* variables, use `ExecuteOptions::with_vars` (next section)
+instead of mutating kernel state.
 
-## Per-Invocation Variable Overlay (`execute_with_vars`)
+## Per-Call Execution: `ExecuteOptions`
 
-Use `Kernel::execute_with_vars(script, vars)` (or
-`KernelClient::execute_with_vars`) when you want variables to be visible to a
-single script invocation only — without polluting the persistent kernel state.
-This matches bash function-local semantics:
-
-- A new scope frame is pushed; each var is set on it and marked exported.
-- The script (and any external commands it spawns) sees the overlay vars.
-- On return, the frame is popped and any names that weren't already exported
-  are removed from the export set.
-- Inner assignments (`FOO=...` inside the script) modify the transient frame
-  and are also gone on return.
-- If a name in `vars` was already exported in an outer frame, the outer value
-  reappears on return; the export bit is preserved.
+`Kernel::execute_with_options` is the canonical per-call surface:
 
 ```rust
-use kaish_kernel::ast::Value;
-use std::collections::HashMap;
+use kaish_kernel::ExecuteOptions;
+use std::time::Duration;
 
-let kernel = Kernel::new(KernelConfig::named("worker"))?;
-
-let mut request_vars = HashMap::new();
-request_vars.insert("REQUEST_ID".to_string(), Value::String("abc123".into()));
-request_vars.insert("USER_TIER".to_string(), Value::String("premium".into()));
-
-let result = kernel
-    .execute_with_vars(
-        r#"echo "[$REQUEST_ID] tier=$USER_TIER"; my-tool"#,
-        request_vars,
-    )
-    .await?;
-
-// REQUEST_ID and USER_TIER are gone here — they did not pollute the kernel.
-assert!(kernel.get_var("REQUEST_ID").await.is_none());
+let result = kernel.execute_with_options(
+    "build-report $REQUEST_ID",
+    ExecuteOptions::new()
+        .with_vars(request_vars)                 // function-local overlay
+        .with_timeout(Duration::from_secs(30))   // per-call deadline
+        .with_cwd("/mnt/repos/kaish".into()),    // per-call working dir
+).await?;
 ```
 
-**Panic safety:** if `execute()` panics inside `execute_with_vars`, the
-transient frame is not popped. This matches every other `push_frame` call site
-in the kernel — kaish makes no panic-safety guarantees today. Errors returned
-as `Err(...)` always trigger cleanup.
+> **Note:** `ExecuteOptions::with_vars` replaces `Kernel::execute_with_vars`,
+> which is **deprecated**.
+
+Fields:
+
+- **`vars`** — per-invocation variable overlay with bash function-local
+  semantics: a scope frame is pushed, each var set and marked exported
+  (visible to the script and any subprocesses it spawns), and the frame is
+  popped on return — inner assignments vanish with it, outer values and
+  export bits are restored.
+- **`timeout`** — per-call deadline; on expiry the result has exit code
+  124. `Some(Duration::ZERO)` is a dry-run: validate and return 124
+  without executing.
+- **`cancel_token`** — an embedder-owned
+  `tokio_util::sync::CancellationToken`, *raced* against the kernel's
+  internal token for the duration of the call (not stored). Cancellation
+  cascades to forks and external children (SIGTERM → grace → SIGKILL on
+  the process group).
+- **`cwd`** — per-call working directory override.
+- **`traceparent` / `tracestate` / `baggage`** — W3C trace context;
+  kaish's execution span parents onto your trace, and baggage merges back
+  out through `ExecResult.baggage`.
+
+## Custom Tools
+
+Register custom builtins using the `configure_tools` callback on
+`with_backend()` (or a `ToolRegistry` you pass to your backend). The `Tool`
+trait lives in `kaish-tool-api` and is re-exported by the kernel:
+
+```rust
+use std::sync::Arc;
+use async_trait::async_trait;
+use kaish_kernel::{Kernel, Tool};
+use kaish_kernel::tools::{ToolArgs, ToolCtx, ToolSchema};
+use kaish_types::ExecResult;
+
+struct MyTool {
+    state: Arc<MyState>,
+}
+
+#[async_trait]
+impl Tool for MyTool {
+    fn name(&self) -> &str { "my-tool" }
+
+    fn schema(&self) -> ToolSchema {
+        ToolSchema::new("my-tool", "Does something useful")
+    }
+
+    async fn execute(&self, args: ToolArgs, ctx: &mut dyn ToolCtx) -> ExecResult {
+        ExecResult::success("hello from my-tool")
+    }
+}
+
+let kernel = Kernel::with_backend(backend, config, |_| {}, |tools| {
+    tools.register(MyTool { state: my_state.clone() });
+})?;
+```
+
+Custom tools registered this way are available as shell builtins — they
+appear in `tools --json`, have help text, and participate in tab
+completion.
+
+Notes:
+
+- `ctx` is `&mut dyn ToolCtx` — a capability trait giving VFS access, cwd,
+  stdin, and cancellation without depending on kernel internals.
+- If your tool renders its own output (including handling `--json`
+  itself), mark the schema `.with_owned_output()` — the kernel then passes
+  `--json` through instead of re-rendering your `ExecResult`.
+
+## Sandboxing and External Commands
+
+Builtins go through the VFS and respect its mounts; **external commands,
+`exec`, and `spawn` access the real filesystem directly** (they're OS
+processes). Two gates:
+
+- Compile-time: build without the `subprocess` feature — the capability
+  doesn't exist.
+- Runtime: `allow_external_commands = false` in `KernelConfig` — PATH
+  lookups return "command not found" and `exec`/`spawn` error.
+  `KernelConfig::isolated()` sets this by default.
+
+## Path Composition with XDG Primitives
+
+kaish exports XDG base directory primitives so embedders can compose their
+own application-specific paths:
+
+```rust
+use kaish_kernel::{
+    xdg_data_home,    // ~/.local/share or $XDG_DATA_HOME
+    xdg_config_home,  // ~/.config or $XDG_CONFIG_HOME
+    xdg_cache_home,   // ~/.cache or $XDG_CACHE_HOME
+    xdg_runtime_dir,  // $XDG_RUNTIME_DIR or /tmp
+    home_dir,         // ~ or $HOME
+};
+
+fn myapp_data_dir() -> PathBuf {
+    xdg_data_home().join("myapp")
+}
+```
+
+For user-facing path handling, use `expand_tilde`:
+
+```rust
+use kaish_kernel::expand_tilde;
+
+let path = expand_tilde("~/projects/myrepo");
+// → /home/username/projects/myrepo
+```
+
+## Programmatic VFS Access
+
+The `Filesystem` trait (from `kaish-vfs`, re-exported as
+`kaish_kernel::vfs::Filesystem`) takes `&Path`, not `&str`:
+
+```rust
+use std::path::Path;
+use kaish_kernel::vfs::Filesystem;
+
+let data = kernel.vfs().read(Path::new("/v/jobs/1/stdout")).await?;
+```
 
 ## Job Output Capture
 
-kaish provides bounded streams for capturing command output without OOM risk.
+kaish provides bounded streams for capturing command output without OOM
+risk.
 
 ### BoundedStream for Custom Output Capture
-
-Use `BoundedStream` when you need to capture process output with memory bounds:
 
 ```rust
 use kaish_kernel::{BoundedStream, drain_to_stream, DEFAULT_STREAM_MAX_SIZE};
@@ -436,19 +377,19 @@ async fn capture_with_bounds() -> anyhow::Result<String> {
 
 ### JobFs for Background Job Observability
 
-The kernel automatically mounts `JobFs` at `/v/jobs`, exposing background job state:
+The kernel automatically mounts `JobFs` at `/v/jobs`, exposing background
+job state:
 
 ```
 /v/jobs/
 ├── 1/
 │   ├── stdout    # Captured stdout (bounded)
 │   ├── stderr    # Captured stderr (bounded)
-│   └── status    # "running", "completed:0", or "failed:1"
+│   ├── status    # "running", "done:0", or "failed:N"
+│   └── command   # Original command string
 ├── 2/
 │   └── ...
 ```
-
-Access job output via shell or VFS:
 
 ```bash
 # In kaish scripts
@@ -458,36 +399,45 @@ cat /v/jobs/1/status    # "running"
 
 # After completion
 cat /v/jobs/1/stdout    # Job's stdout
-cat /v/jobs/1/stderr    # Job's stderr
+cat /v/jobs/1/status    # "done:0" on success, "failed:N" otherwise
 ```
 
-Or programmatically via the kernel's VFS:
+The status strings are exactly `running`, `done:0`, and `failed:{code}` —
+match on those, not on `completed`.
 
-```rust
-let kernel = Kernel::new(KernelConfig::default())?;
+## Exported Types
 
-// Run background job
-kernel.execute("long_running_command &").await?;
+The `kaish_kernel` crate root re-exports the embedding surface:
 
-// Later, check job output via VFS
-let stdout = kernel.vfs().read("/v/jobs/1/stdout").await?;
-let status = kernel.vfs().read("/v/jobs/1/status").await?;
-```
+- **Core**: `Kernel`, `KernelConfig`, `VfsMountMode`, `ExecuteOptions`,
+  `KernelBackend`, `LocalBackend`, `Tool`, `ToolRegistry`, `ExecContext`,
+  `OutputLimitConfig`
+- **Git** (feature `git`): `GitVfs`, `FileStatus`, `StatusSummary`,
+  `LogEntry`, `WorktreeInfo`
+- **Jobs**: `BoundedStream`, `StreamStats`, `drain_to_stream`,
+  `DEFAULT_STREAM_MAX_SIZE`, `JobFs`
+- **Paths**: `home_dir`, `xdg_data_home`, `xdg_config_home`,
+  `xdg_cache_home`, `xdg_runtime_dir`, `expand_tilde`
+- **VFS** (module `kaish_kernel::vfs`): `Filesystem`, `VfsRouter`,
+  `MemoryFs`, `LocalFs`, `MountInfo`
+
+Pure data types (`ExecResult`, `OutputData`, `Value`, `ToolSchema`,
+`ToolArgs`, …) live in the leaf crate `kaish-types`; the tool author API
+(`Tool`, `ToolCtx`, `KernelBackend`) in `kaish-tool-api`. Depend on those
+directly if you're writing tools without linking the whole kernel.
 
 ## Best Practices
 
-1. **Use `resolve_real_path()`** — This is the key abstraction. Map your VFS
-   paths to real paths where git repos live.
+1. **Use `with_backend()` for full control** — implement `KernelBackend`
+   and let the hermeticity guarantees keep I/O inside your storage model.
 
-2. **Compose paths with XDG primitives** — Don't hardcode paths. Use the
-   XDG functions and compose your application-specific paths on top.
+2. **Use `ExecuteOptions` for per-call state** — vars, timeout, cwd,
+   cancellation, trace context. Don't mutate kernel state between calls.
 
-3. **Use `with_backend()`** — For full control, implement `KernelBackend`
-   and create the kernel with `Kernel::with_backend()`.
+3. **Compose paths with XDG primitives** — don't hardcode paths.
 
-4. **Direct `GitVfs` for complex operations** — For operations beyond
-   what the `git` builtin provides, use `GitVfs` directly.
+4. **Start from the minimal feature set** — add `subprocess`/`git`/`host`
+   only when the embedder needs them; the attack surface is named, not
+   inherited.
 
-5. **Handle worktrees vs bare repos** — The `git` builtin works on worktrees
-   (real files). If you use bare repos internally, map VFS paths to worktree
-   paths, not bare repo paths.
+5. **For git integration** — see [EMBEDDING-GIT.md](EMBEDDING-GIT.md).

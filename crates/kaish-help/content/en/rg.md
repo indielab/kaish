@@ -9,7 +9,7 @@ searches across `/v/...` mounts work the same as searches on disk.
 ```bash
 rg pattern .                  # search recursively from cwd
 rg -i hello src/              # case-insensitive
-rg -trust 'fn main'           # only Rust files
+rg -t rust 'fn main'          # only Rust files (glued -trust not accepted)
 rg -Tjs TODO                  # skip JS files
 rg -U '(?s)foo.*bar' src/     # multiline pattern
 rg --hidden secret             # include hidden files
@@ -45,7 +45,7 @@ becomes a structured object:
 }
 ```
 
-`grep --json` returns the same shape. Use `kaish-jq` to filter.
+`grep --json` returns the same shape. Use `jq` to filter.
 
 ## Common flags
 
@@ -79,6 +79,6 @@ becomes a structured object:
 - Parallel walking is currently sequential — the speed is competitive
   with stand-alone rg on small/medium trees, falls behind on very
   large trees. See `docs/issues.md`.
-- WASI builds aren't supported yet (the `grep-searcher` and `ignore`
-  crates pull in `memmap2` / `walkdir` which don't compile on
-  `wasm32-wasip1`). Use the `native` feature, which is the default.
+- Short-flag values need a space: `-t rust`, not `-trust` (stand-alone
+  rg accepts the glued form; kaish's clap parsing does not).
+- `-P` (PCRE2) requires the opt-in `pcre2` cargo feature.
