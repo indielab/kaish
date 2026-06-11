@@ -147,6 +147,9 @@ pcre2 = ["dep:grep-pcre2"]
 chrono = { workspace = true }
 
 [dev-dependencies]
+# `test-util` enables the paused clock (`start_paused`/`advance`) the
+# watchdog unit tests use for deterministic deadline math.
+tokio = { version = "1", features = ["test-util"] }
 proptest = { workspace = true }
 rstest = { workspace = true }
 insta = { workspace = true }

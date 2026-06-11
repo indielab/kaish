@@ -160,6 +160,20 @@ let kernel = Kernel::with_backend(
 > relied on disk spill or `/v/jobs` persistence, that data now stays in
 > memory.
 
+A `with_backend` kernel owns its VFS, so `KernelConfig::with_vfs_budget`
+does not see your mounts — cap them yourself by constructing the backing
+`MemoryFs` with `MemoryFs::with_budget(Arc<ByteBudget>)`. Both types are
+available through `kaish_kernel::vfs`; no direct `kaish-vfs` dependency
+needed:
+
+```rust
+use kaish_kernel::vfs::{ByteBudget, MemoryFs};
+
+let budget = Arc::new(ByteBudget::labeled(16 * 1024 * 1024, "scratch"));
+vfs.mount("/", MemoryFs::with_budget(budget.clone()));
+// budget.used() / budget.remaining() are observable at any time.
+```
+
 ## Initial Variables and Hermetic Subprocess Env
 
 The kernel is **hermetic by default** — it never reads `std::env::vars()`,
@@ -230,7 +244,9 @@ Fields:
   export bits are restored.
 - **`timeout`** — per-call deadline; on expiry the result has exit code
   124. `Some(Duration::ZERO)` is a dry-run: validate and return 124
-  without executing.
+  without executing. A custom tool that legitimately outlives this
+  deadline (a provider call that runs minutes) can suspend it with
+  `ctx.patient(budget)` — see [Patient tools](#patient-tools-suspending-the-script-timeout).
 - **`cancel_token`** — an embedder-owned
   `tokio_util::sync::CancellationToken`, *raced* against the kernel's
   internal token for the duration of the call (not stored). Cancellation
@@ -287,6 +303,46 @@ Notes:
 - If your tool renders its own output (including handling `--json`
   itself), mark the schema `.with_owned_output()` — the kernel then passes
   `--json` through instead of re-rendering your `ExecResult`.
+
+### Patient tools: suspending the script timeout
+
+The script timeout (`ExecuteOptions::timeout` / `KernelConfig::request_timeout`)
+is one budget for the whole script — sized for shell work, not for a
+model-backed tool whose provider call legitimately runs minutes. Stretching
+the script budget to minutes would hand a `while true` loop the same minutes,
+so the two jobs get separate knobs: a tool declares its own budget with
+`ctx.patient`.
+
+```rust
+async fn execute(&self, args: ToolArgs, ctx: &mut dyn ToolCtx) -> ExecResult {
+    let cancel = /* clone ctx.cancel via the ExecContext downcast */;
+
+    // While the guard is held, the script clock is frozen and this hold's
+    // own budget governs; dropping it resumes the script clock with the
+    // remaining time it had at acquire.
+    let _guard = ctx.patient(Duration::from_secs(300));
+
+    tokio::select! {
+        result = call_provider(args) => to_exec_result(result),
+        _ = cancel.cancelled() => ExecResult::failure(130, "interrupted"),
+    }
+}
+```
+
+Semantics:
+
+- **The hold's budget has teeth**: if the tool outlives it, the watchdog
+  fires and the script exits 124 — a hung provider call cannot wait forever.
+- **Cancellation stays live**: `Kernel::cancel()` and the embedder
+  `cancel_token` fire immediately during a hold — only the timer pauses.
+  A patient tool must still `select!` its wait against `ctx.cancel`,
+  as above.
+- **Script code has no path to the guard** — only Rust tool code can be
+  patient, so the script-level budget keeps its teeth against shell loops.
+- **The `timeout` builtin is not suspended**: `timeout 5 my-tool` is an
+  explicit user bound on the command and ignores patient holds.
+- With no script timeout configured the guard is inert (nothing to
+  suspend); holds nest, and the guard may be held across `.await` points.
 
 ## Sandboxing and External Commands
 

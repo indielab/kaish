@@ -5,6 +5,12 @@
 //! token, and overrides the exit code to 124 (coreutils convention) when the
 //! timer fired. The kernel's `try_execute_external` honors the cancelled
 //! token by killing the child process group with SIGTERM/grace/SIGKILL.
+//!
+//! Interaction with `ToolCtx::patient` (the suspendable script watchdog):
+//! none, deliberately. This builtin's timer is a one-shot sleep on its own
+//! child token, independent of the kernel watchdog — a user who writes
+//! `timeout 5 cmd` asked for a hard bound on `cmd`, so a patient hold inside
+//! `cmd` does not stretch it. The hold still suspends the *script* budget.
 
 use async_trait::async_trait;
 use clap::{CommandFactory, Parser};

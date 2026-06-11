@@ -3,10 +3,42 @@
 use std::any::Any;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::Duration;
 
 use kaish_types::{OutputFormat, Value};
 
 use crate::backend::KernelBackend;
+
+/// RAII guard returned by [`ToolCtx::patient`].
+///
+/// While held, the kernel's script-level timeout watchdog is suspended for
+/// this execution: the script clock freezes and the guard's own budget
+/// governs instead. Dropping the guard resumes the script clock with the
+/// remaining time it had at acquire.
+///
+/// The inner box is the kernel's hold object; its `Drop` does the restore.
+/// An *inert* guard (no watchdog running — e.g. the kernel has no script
+/// timeout, or a non-kernel test context) holds nothing and drops as a no-op.
+pub struct PatientGuard {
+    hold: Option<Box<dyn Any + Send>>,
+}
+
+impl PatientGuard {
+    /// A guard that does nothing — for contexts without a watchdog.
+    pub fn inert() -> Self {
+        Self { hold: None }
+    }
+
+    /// Wrap a kernel hold object whose `Drop` restores the watchdog.
+    pub fn held(hold: Box<dyn Any + Send>) -> Self {
+        Self { hold: Some(hold) }
+    }
+
+    /// Whether this guard actually suspended a watchdog.
+    pub fn is_active(&self) -> bool {
+        self.hold.is_some()
+    }
+}
 
 /// The portable execution context a tool sees.
 ///
@@ -46,6 +78,30 @@ pub trait ToolCtx: Send + Sync {
     /// The dispatcher reads this after `execute()` returns and applies the
     /// format to the result.
     fn set_output_format(&mut self, format: OutputFormat);
+
+    /// Suspend the script-level timeout watchdog while the returned guard is
+    /// held, bounding the patient operation by `budget` instead.
+    ///
+    /// For tools that legitimately outlive a script timeout (model/provider
+    /// calls that run minutes): while the guard is held the script clock
+    /// freezes and the watchdog fires only if the hold outlives `budget`.
+    /// On drop the script clock resumes with the remaining time it had at
+    /// acquire. Only Rust tool code can obtain the guard — script code has no
+    /// path to it, so the script-level budget keeps its teeth.
+    ///
+    /// Cancellation stays live while suspended: `Kernel::cancel()` and the
+    /// embedder token fire immediately — only the *timer* pauses. A patient
+    /// tool must still `select!` its wait against the cancellation token.
+    ///
+    /// The explicit `timeout` builtin is **not** suspended: a user-requested
+    /// bound on a command keeps its teeth regardless of patient holds.
+    ///
+    /// The default implementation returns an inert guard (no watchdog to
+    /// suspend); the kernel's context overrides it.
+    fn patient(&self, budget: Duration) -> PatientGuard {
+        let _ = budget;
+        PatientGuard::inert()
+    }
 
     /// Escape hatch for trusted in-tree tools: recover the concrete context.
     ///

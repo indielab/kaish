@@ -143,6 +143,14 @@ pub struct ExecContext {
     /// workers see the same cap as foreground execution.
     pub vfs_budget: Option<Arc<ByteBudget>>,
 
+    /// The per-execute timeout watchdog, when a script timeout is in effect.
+    ///
+    /// Populated by the kernel at execute entry (alongside `cancel`) and
+    /// shared through `child_for_pipeline` so forks and pipeline stages can
+    /// acquire patient holds against the same script clock. `None` when no
+    /// timeout is configured — `ToolCtx::patient` then returns an inert guard.
+    pub watchdog: Option<Arc<crate::watchdog::Watchdog>>,
+
     /// Active overlay handle when the kernel was constructed with `overlay: true`.
     ///
     /// `Arc`-cloned so forks and pipeline stages share the same transaction.
@@ -184,6 +192,7 @@ impl ExecContext {
             cancel: CancellationToken::new(),
             output_format: None,
             vfs_budget: None,
+            watchdog: None,
             #[cfg(all(feature = "localfs", feature = "overlay"))]
             overlay_handle: None,
         }
@@ -221,6 +230,7 @@ impl ExecContext {
             cancel: CancellationToken::new(),
             output_format: None,
             vfs_budget: None,
+            watchdog: None,
             #[cfg(all(feature = "localfs", feature = "overlay"))]
             overlay_handle: None,
         }
@@ -255,6 +265,7 @@ impl ExecContext {
             cancel: CancellationToken::new(),
             output_format: None,
             vfs_budget: None,
+            watchdog: None,
             #[cfg(all(feature = "localfs", feature = "overlay"))]
             overlay_handle: None,
         }
@@ -289,6 +300,7 @@ impl ExecContext {
             cancel: CancellationToken::new(),
             output_format: None,
             vfs_budget: None,
+            watchdog: None,
             #[cfg(all(feature = "localfs", feature = "overlay"))]
             overlay_handle: None,
         }
@@ -326,6 +338,7 @@ impl ExecContext {
             cancel: CancellationToken::new(),
             output_format: None,
             vfs_budget: None,
+            watchdog: None,
             #[cfg(all(feature = "localfs", feature = "overlay"))]
             overlay_handle: None,
         }
@@ -360,6 +373,7 @@ impl ExecContext {
             cancel: CancellationToken::new(),
             output_format: None,
             vfs_budget: None,
+            watchdog: None,
             #[cfg(all(feature = "localfs", feature = "overlay"))]
             overlay_handle: None,
         }
@@ -484,6 +498,9 @@ impl ExecContext {
             output_format: None,
             // Budget is shared: the child draws from the same pool as the parent.
             vfs_budget: self.vfs_budget.clone(),
+            // Watchdog is shared: a patient hold in a pipeline stage or fork
+            // suspends the same script clock as foreground execution.
+            watchdog: self.watchdog.clone(),
             // Overlay handle is shared: pipeline stages share the same transaction.
             #[cfg(all(feature = "localfs", feature = "overlay"))]
             overlay_handle: self.overlay_handle.clone(),
@@ -641,6 +658,13 @@ impl kaish_tool_api::ToolCtx for ExecContext {
 
     fn set_output_format(&mut self, format: OutputFormat) {
         self.output_format = Some(format);
+    }
+
+    fn patient(&self, budget: std::time::Duration) -> kaish_tool_api::PatientGuard {
+        match &self.watchdog {
+            Some(watchdog) => kaish_tool_api::PatientGuard::held(Box::new(watchdog.hold(budget))),
+            None => kaish_tool_api::PatientGuard::inert(),
+        }
     }
 
     fn as_any(&self) -> &dyn std::any::Any {

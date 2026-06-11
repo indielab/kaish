@@ -47,57 +47,6 @@ kaish-vfs builtin status/diff/commit/reset). Residuals:
   commit_into doesn't propagate mtimes. `VirtualOverlayBackend`
   (backend/overlay.rs) is unrelated prefix routing, not CoW.
 
-### Release 0.8.1 for kaibo: ByteBudget is the payload; re-export it from kaish-kernel
-kaibo's scratch-quota fix (its P2 "Unquota'd `/` MemoryFs scratch", proven live
-2026-06-10: a redirect loop wrote 17.4 MB into MemoryFs unbounded) is blocked on
-the registry — kaibo depends on published kaish-kernel 0.8.0, which predates the
-accounting work (`dddc85d`/`d0e0deb`). Everything it needs is already on HEAD:
-kaibo builds its own `MemoryFs` and mounts it via `Kernel::with_backend`
-(kaibo `sandbox.rs:170`), so it attaches its own labeled budget with
-`MemoryFs::with_budget` at construction and never touches
-`KernelConfig.vfs_budget_bytes`. One gap found 2026-06-11: `ByteBudget` is not
-re-exported through kaish-kernel — `kernel/src/vfs/mod.rs:39` re-exports
-`MemoryFs`/`LocalFs` but not the budget type — so a `with_backend` embedder
-needs a direct kaish-vfs dep just to *name* the type it hands to
-`MemoryFs::with_budget`. Add `pub use kaish_vfs::ByteBudget;` (one line) so the
-embedder surface stays one crate, and cut 0.8.1 for the whole `kaish-*` family
-(kaish-kernel pulls kaish-vfs by version). Remember the `kaish-mounts --json`
-breaking shape in the release notes (OverlayFs residual above).
-
-### Watchdog seam: a per-builtin "patient" budget — one fixed script timer can't serve model-backed builtins
-For kaibo (its P1 "Per-builtin timeouts"); targets 0.8.2 — touches the execute
-hot path, wants its own failing-first tests, shouldn't hold up the 0.8.1 train.
-
-Evidence (2026-06-11): timeout enforcement is a kernel-side watchdog, strictly
-per-execute — `execute_with_options_inner` resolves one duration
-(`kernel.rs:1511`, per-call `opts.timeout` over `KernelConfig::request_timeout`)
-and spawns a timer task that sleeps it whole and fires the cancel token
-(`kernel.rs:1618-1625`). Nothing can suspend or extend it mid-script. An
-embedder registering a model-backed builtin (kaibo's planned image2image/tts:
-provider calls that legitimately run minutes) can only resize the *script*
-budget — and stretching 30s to minutes hands a `while true` loop the same
-minutes. The two jobs need separate knobs.
-
-Fix shape — a deadline the watchdog polls instead of a fixed sleep:
-- Replace the one-shot `sleep(d)` with a movable deadline (watch channel or
-  `Arc<Mutex<Instant>>`) the timer task re-arms against.
-- An RAII guard obtained through `ToolCtx` (`kaish-tool-api/src/ctx.rs`) — e.g.
-  `ctx.patient(budget)` — freezes/extends the deadline while held, bounded by
-  its own per-call budget, restored on `Drop` (same discipline as the kernel's
-  `VarsFrameGuard`/`CwdGuard`). Only Rust builtin code can hold it; script code
-  has no path to it, so the script-level budget keeps its teeth.
-- Cancellation stays live while suspended: `Kernel::cancel()` and the embedder
-  token fire immediately — only the *timer* pauses, never the cancel surface.
-  A patient builtin must still `select!` on `ctx.cancel` (cross-ref P3
-  "Long-blocking builtins other than `sleep` may not honor cancellation").
-- Define the interaction with the `timeout` builtin, which re-dispatches and
-  save/restores `ctx.cancel` itself (cross-ref P3 "`dispatch_command` cancel
-  sync is one-way").
-
-Failing-first tests: a patient builtin that sleeps past the script timeout but
-under its own budget completes; a pure-script spin still dies 124 at the script
-budget; cancel during a patient wait still kills promptly.
-
 ### `rg` parallel walking
 The 2026-04-29 rg builtin uses `ignore::WalkBuilder::build()`, which
 yields a sequential iterator. `WalkParallel::run()` is a few lines'
@@ -633,6 +582,26 @@ priority; decide whether multi-arg should accumulate per-path errors.
 
 Captured here so context from `cleanups-todo.md` / old `issues.md`
 isn't lost when those files are deleted.
+
+- **kaibo P1 pair for 0.8.1 — done 2026-06-11.** (1) `ByteBudget` re-exported
+  through `kaish_kernel::vfs` so a `with_backend` embedder names the type it
+  hands to `MemoryFs::with_budget` without a direct kaish-vfs dep; locked in
+  by `vfs_budget_tests::byte_budget_reexport_serves_with_backend_embedders`.
+  (2) Watchdog seam (`ctx.patient`): the per-execute timer is now a
+  movable-deadline `Watchdog` (`kernel/src/watchdog.rs`, tokio `watch`
+  channel) the timer task re-arms against. `ToolCtx::patient(budget)`
+  (kaish-tool-api, default inert) returns a `PatientGuard`; the kernel's
+  `ExecContext` override acquires a `WatchdogHold` — while held the script
+  clock freezes and the hold's own budget governs (overrun fires 124);
+  Drop restores the frozen remaining (VarsFrameGuard discipline; out-of-order
+  release from forked stages handled). Cancellation stays live throughout —
+  only the timer pauses. The `timeout` builtin is deliberately NOT suspended
+  (a user-requested bound keeps its teeth; doc comment in timeout.rs).
+  Watchdog handle rides `ExecContext.watchdog` alongside `cancel` (execute
+  entry sets, restore block clears, `dispatch_command` syncs, forks share).
+  Tests: 6 paused-clock unit tests in watchdog.rs + 7 kernel-routed
+  integration tests in `tests/patient_watchdog_tests.rs` (failing-first).
+  Pulled into 0.8.1 by Amy 2026-06-11 (originally penciled for 0.8.2).
 
 - **Documentation truth slate — fixed 2026-06-11.** Every verified falsehood
   from the 2026-06-09 accuracy sweep corrected, re-probed against the live

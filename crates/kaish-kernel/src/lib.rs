@@ -36,6 +36,7 @@ pub mod trash;
 pub mod trash_system;
 pub mod validator;
 pub mod vfs;
+pub mod watchdog;
 #[cfg(all(unix, feature = "subprocess"))]
 pub mod terminal;
 

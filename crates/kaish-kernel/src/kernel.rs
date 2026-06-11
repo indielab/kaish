@@ -1606,7 +1606,17 @@ impl Kernel {
             *cur = effective_cancel.clone();
         }
 
-        // Run inner with optional timeout. The timer task cancels our token
+        // The movable-deadline watchdog for this call (None without a timeout),
+        // mirrored into exec_ctx — like the cancel token — so builtins can
+        // suspend the script clock via `ctx.patient`. Assigned unconditionally
+        // (clearing any stale handle) and reset to None in the restore block.
+        let watchdog = timeout.map(|d| Arc::new(crate::watchdog::Watchdog::new(d)));
+        {
+            let mut ec = self.exec_ctx.write().await;
+            ec.watchdog = watchdog.clone();
+        }
+
+        // Run inner with optional timeout. The watchdog task cancels our token
         // on elapsed; the cascade fires SIGTERM/SIGKILL on any external
         // children via the wait_or_kill discipline in try_execute_external.
         let mut noop_cb: Box<dyn FnMut(&ExecResult) + Send> = Box::new(|_| {});
@@ -1616,14 +1626,10 @@ impl Kernel {
         };
 
         let result = if let Some(d) = timeout {
+            #[allow(clippy::expect_used)]
+            let watchdog = watchdog.clone().expect("watchdog constructed when timeout is set");
             let elapsed = Arc::new(std::sync::atomic::AtomicBool::new(false));
-            let elapsed_writer = elapsed.clone();
-            let timer_token = effective_cancel.clone();
-            let timer = tokio::spawn(async move {
-                tokio::time::sleep(d).await;
-                elapsed_writer.store(true, std::sync::atomic::Ordering::SeqCst);
-                timer_token.cancel();
-            });
+            let timer = tokio::spawn(watchdog.run(elapsed.clone(), effective_cancel.clone()));
             let r = self.execute_streaming_inner(input, cb_ref).await;
             timer.abort();
             match r {
@@ -1650,6 +1656,14 @@ impl Kernel {
             #[allow(clippy::expect_used)]
             let mut cur = self.cancel_token.lock().expect("cancel_token poisoned");
             *cur = tokio_util::sync::CancellationToken::new();
+        }
+
+        // Drop the watchdog handle from exec_ctx — its timer task is gone
+        // (fired or aborted above); a patient hold acquired against a stale
+        // handle would silently suspend nothing.
+        {
+            let mut ec = self.exec_ctx.write().await;
+            ec.watchdog = None;
         }
 
         // Tear down the embedder-token race watcher (if any). Leaving it
@@ -2303,6 +2317,7 @@ impl Kernel {
                 },
                 output_format: None,
                 vfs_budget: self.vfs_budget.clone(),
+                watchdog: ec.watchdog.clone(),
                 #[cfg(all(feature = "localfs", feature = "overlay"))]
                 overlay_handle: self.overlay_handle.clone(),
             }
@@ -2660,6 +2675,7 @@ impl Kernel {
                 cancel: ec.cancel.clone(),
                 output_format: None,
                 vfs_budget: self.vfs_budget.clone(),
+                watchdog: ec.watchdog.clone(),
                 #[cfg(all(feature = "localfs", feature = "overlay"))]
                 overlay_handle: self.overlay_handle.clone(),
             }
@@ -4482,6 +4498,10 @@ impl Kernel {
             // execute_command's snapshot reads ec.cancel (kept aligned by
             // this sync), so try_execute_external sees the right token.
             ec.cancel = ctx.cancel.clone();
+            // Same alignment for the watchdog: a fork dispatching through its
+            // own kernel must hand the shared script clock to the snapshot so
+            // patient holds in forked stages suspend the right timer.
+            ec.watchdog = ctx.watchdog.clone();
         }
 
         // 2. Execute via the full dispatch chain
