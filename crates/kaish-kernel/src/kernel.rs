@@ -6613,12 +6613,24 @@ AFTER="yes"'"#)
         assert_eq!(result.text_out().trim(), "hello world");
     }
 
+    /// A transient kernel paired with a real, auto-cleaning tempdir. The
+    /// transient (Sandboxed) kernel mounts `/tmp` as a real `LocalFs`, so glob
+    /// tests need actual files on disk. Hold the returned `TempDir` for the
+    /// test's lifetime: it removes the directory tree on drop — including on
+    /// panic — so no test scratch leaks into `/tmp` (the project's tmp-builder
+    /// convention; never hardcode `/tmp/...` paths). Returns the absolute path
+    /// as a string for interpolation into scripts.
+    fn transient_with_tempdir() -> (Kernel, tempfile::TempDir, String) {
+        let kernel = Kernel::transient().expect("kernel");
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let dir = tmp.path().display().to_string();
+        (kernel, tmp, dir)
+    }
+
     #[tokio::test]
     async fn test_for_loop_glob_iterates() {
         // Bug 1: for F in $(glob ...) should iterate per file, not once
-        let kernel = Kernel::transient().expect("kernel");
-        let dir = format!("/tmp/kaish_test_glob_{}", std::process::id());
-        kernel.execute(&format!("mkdir -p {dir}")).await.unwrap();
+        let (kernel, _tmp, dir) = transient_with_tempdir();
         kernel.execute(&format!("echo a > {dir}/a.txt")).await.unwrap();
         kernel.execute(&format!("echo b > {dir}/b.txt")).await.unwrap();
         let result = kernel.execute(&format!(r#"
@@ -6630,15 +6642,11 @@ AFTER="yes"'"#)
         "#)).await.unwrap();
         assert!(result.ok(), "for glob failed: {}", result.err);
         assert_eq!(result.text_out().trim(), "2", "Should iterate 2 files, got: {}", result.text_out());
-        kernel.execute(&format!("rm {dir}/a.txt")).await.unwrap();
-        kernel.execute(&format!("rm {dir}/b.txt")).await.unwrap();
     }
 
     #[tokio::test]
     async fn test_bare_glob_expansion_echo() {
-        let kernel = Kernel::transient().expect("kernel");
-        let dir = format!("/tmp/kaish_test_bareglob_{}", std::process::id());
-        kernel.execute(&format!("mkdir -p {dir}")).await.unwrap();
+        let (kernel, _tmp, dir) = transient_with_tempdir();
         kernel.execute(&format!("echo a > {dir}/a.txt")).await.unwrap();
         kernel.execute(&format!("echo b > {dir}/b.txt")).await.unwrap();
         kernel.execute(&format!("echo c > {dir}/c.rs")).await.unwrap();
@@ -6651,17 +6659,11 @@ AFTER="yes"'"#)
         assert!(out.contains("a.txt"), "missing a.txt in: {}", out);
         assert!(out.contains("b.txt"), "missing b.txt in: {}", out);
         assert!(!out.contains("c.rs"), "should not contain c.rs in: {}", out);
-        // cleanup
-        kernel.execute(&format!("rm {dir}/a.txt")).await.unwrap();
-        kernel.execute(&format!("rm {dir}/b.txt")).await.unwrap();
-        kernel.execute(&format!("rm {dir}/c.rs")).await.unwrap();
     }
 
     #[tokio::test]
     async fn test_bare_glob_no_matches_errors() {
-        let kernel = Kernel::transient().expect("kernel");
-        let dir = format!("/tmp/kaish_test_bareglob_nomatch_{}", std::process::id());
-        kernel.execute(&format!("mkdir -p {dir}")).await.unwrap();
+        let (kernel, _tmp, dir) = transient_with_tempdir();
         kernel.execute(&format!("cd {dir}")).await.unwrap();
         let result = kernel.execute("echo *.nonexistent").await;
         match &result {
@@ -6678,9 +6680,7 @@ AFTER="yes"'"#)
 
     #[tokio::test]
     async fn test_bare_glob_disabled_with_set() {
-        let kernel = Kernel::transient().expect("kernel");
-        let dir = format!("/tmp/kaish_test_bareglob_noglob_{}", std::process::id());
-        kernel.execute(&format!("mkdir -p {dir}")).await.unwrap();
+        let (kernel, _tmp, dir) = transient_with_tempdir();
         kernel.execute(&format!("echo a > {dir}/a.txt")).await.unwrap();
         kernel.execute(&format!("cd {dir}")).await.unwrap();
         // Disable glob expansion
@@ -6689,31 +6689,22 @@ AFTER="yes"'"#)
         // With glob disabled, *.txt should be passed as literal string
         assert!(result.ok(), "echo should succeed: {}", result.err);
         assert_eq!(result.text_out().trim(), "*.txt", "should be literal: {}", result.text_out());
-        // cleanup
-        kernel.execute("set -o glob").await.unwrap();
-        kernel.execute(&format!("rm {dir}/a.txt")).await.unwrap();
     }
 
     #[tokio::test]
     async fn test_bare_glob_quoted_not_expanded() {
-        let kernel = Kernel::transient().expect("kernel");
-        let dir = format!("/tmp/kaish_test_bareglob_quoted_{}", std::process::id());
-        kernel.execute(&format!("mkdir -p {dir}")).await.unwrap();
+        let (kernel, _tmp, dir) = transient_with_tempdir();
         kernel.execute(&format!("echo a > {dir}/a.txt")).await.unwrap();
         kernel.execute(&format!("cd {dir}")).await.unwrap();
         // Quoted globs should NOT expand
         let result = kernel.execute("echo \"*.txt\"").await.unwrap();
         assert!(result.ok(), "echo should succeed: {}", result.err);
         assert_eq!(result.text_out().trim(), "*.txt", "quoted should be literal: {}", result.text_out());
-        // cleanup
-        kernel.execute(&format!("rm {dir}/a.txt")).await.unwrap();
     }
 
     #[tokio::test]
     async fn test_bare_glob_for_loop() {
-        let kernel = Kernel::transient().expect("kernel");
-        let dir = format!("/tmp/kaish_test_bareglob_forloop_{}", std::process::id());
-        kernel.execute(&format!("mkdir -p {dir}")).await.unwrap();
+        let (kernel, _tmp, dir) = transient_with_tempdir();
         kernel.execute(&format!("echo a > {dir}/a.txt")).await.unwrap();
         kernel.execute(&format!("echo b > {dir}/b.txt")).await.unwrap();
         kernel.execute(&format!("cd {dir}")).await.unwrap();
@@ -6726,9 +6717,6 @@ AFTER="yes"'"#)
         "#).await.unwrap();
         assert!(result.ok(), "for loop failed: {}", result.err);
         assert_eq!(result.text_out().trim(), "2", "should iterate 2 files: {}", result.text_out());
-        // cleanup
-        kernel.execute(&format!("rm {dir}/a.txt")).await.unwrap();
-        kernel.execute(&format!("rm {dir}/b.txt")).await.unwrap();
     }
 
     #[tokio::test]
