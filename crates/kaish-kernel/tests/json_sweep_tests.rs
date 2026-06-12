@@ -37,6 +37,8 @@ enum Expect {
     Object,
     /// exit 0; stdout parses as a JSON string
     String,
+    /// exit 0; stdout parses as a JSON number (structured `.data` preserved)
+    Number,
     /// exit 0; stdout empty (`--json` leaves an empty success untouched)
     Empty,
     /// given nonzero exit; stdout empty (clean failure stays unwrapped)
@@ -77,10 +79,16 @@ const CASES: &[Case] = &[
     Case { name: "base64", setup: &[], cmd: "echo hi | base64 --json", expect: Expect::String },
     Case { name: "basename", setup: &[], cmd: "basename /a/b.txt --json", expect: Expect::String },
     Case { name: "cat", setup: &[], cmd: "cat tmp/data.json --json", expect: Expect::String },
+    // Pins the error-envelope contract: a failure carrying a diagnostic still
+    // honors --json, emitting {"error","code"} rather than leaking plain text.
+    Case { name: "cat", setup: &[], cmd: "cat tmp/nope.json --json", expect: Expect::FailsEnvelope(1) },
     Case { name: "cd", setup: &[], cmd: "cd src --json", expect: Expect::Empty },
     Case { name: "checksum", setup: &[], cmd: "checksum tmp/data.json --json", expect: Expect::Array },
     Case { name: "cp", setup: &[], cmd: "cp tmp/data.json tmp/copy.json --json", expect: Expect::Empty },
-    Case { name: "cut", setup: &[], cmd: r#"printf 'a,b\n' | cut -d ',' -f 1 --json"#, expect: Expect::String },
+    // cut populates `.data` with a per-line array (the same structure that
+    // drives `for v in $(cut …)`), so `--json` surfaces that array, not the
+    // text-flattened scalar.
+    Case { name: "cut", setup: &[], cmd: r#"printf 'a,b\n' | cut -d ',' -f 1 --json"#, expect: Expect::Array },
     Case { name: "date", setup: &[], cmd: "date --json", expect: Expect::String },
     Case { name: "diff", setup: &[], cmd: "diff tmp/data.json tmp/data.json --json", expect: Expect::Empty },
     Case { name: "dirname", setup: &[], cmd: "dirname /a/b.txt --json", expect: Expect::String },
@@ -100,10 +108,10 @@ const CASES: &[Case] = &[
     Case { name: "help", setup: &[], cmd: "help cat --json", expect: Expect::String },
     Case { name: "hostname", setup: &[], cmd: "hostname --json", expect: Expect::String },
     Case { name: "jobs", setup: &["sleep 0.2 &"], cmd: "jobs --json", expect: Expect::Array },
-    // WART: jq's stdout is already JSON text, so `--json` double-encodes it
-    // as a JSON *string* ("1\n", not 1); the real value rides `.data`.
-    // Tracked in docs/issues.md (P4).
-    Case { name: "jq", setup: &[], cmd: r#"echo '{"a":1}' | jq '.a' --json"#, expect: Expect::String },
+    // jq's `.data` already carries the structured value, so `--json` serializes
+    // that (the number 1), not the rendered text re-wrapped as a string.
+    // apply_output_format prefers `.data` over text when both are present.
+    Case { name: "jq", setup: &[], cmd: r#"echo '{"a":1}' | jq '.a' --json"#, expect: Expect::Number },
     Case { name: "kaish-ast", setup: &[], cmd: "kaish-ast 'echo hi' --json", expect: Expect::String },
     Case { name: "kaish-clear", setup: &[], cmd: "kaish-clear --json", expect: Expect::String },
     Case { name: "kaish-ignore", setup: &[], cmd: "kaish-ignore --json", expect: Expect::Array },
@@ -148,10 +156,10 @@ const CASES: &[Case] = &[
     Case { name: "tac", setup: &[], cmd: r#"printf 'a\nb\n' | tac --json"#, expect: Expect::String },
     Case { name: "tail", setup: &[], cmd: "tail -n 1 tmp/app.log --json", expect: Expect::Array },
     Case { name: "tee", setup: &[], cmd: "echo hi | tee out.txt --json", expect: Expect::String },
-    // KNOWN WART: `--json` is not stripped before `test` parses its operands
-    // (test evaluates raw argv), so it errors — but the error honors the
-    // JSON envelope contract. Tracked in docs/issues.md (P4).
-    Case { name: "test", setup: &[], cmd: "test -n hello --json", expect: Expect::FailsEnvelope(2) },
+    // `test` is a predicate: the result is the exit code (0 true / 1 false /
+    // 2 error). `--json` is consumed for format selection and dropped from the
+    // POSIX operand stream, so a true predicate exits 0 with empty stdout.
+    Case { name: "test", setup: &[], cmd: "test -n hello --json", expect: Expect::Empty },
     Case { name: "timeout", setup: &[], cmd: "timeout 5 echo hi --json", expect: Expect::String },
     Case { name: "tokens", setup: &[], cmd: "echo hello | tokens --json", expect: Expect::Array },
     Case { name: "touch", setup: &[], cmd: "touch new.txt --json", expect: Expect::Empty },
@@ -244,6 +252,13 @@ async fn check_case(case: &Case) -> Result<(), String> {
             match parse()? {
                 serde_json::Value::String(_) => Ok(()),
                 other => Err(format!("{}: expected JSON string, got: {other}", case.name)),
+            }
+        }
+        Expect::Number => {
+            expect_code(0)?;
+            match parse()? {
+                serde_json::Value::Number(_) => Ok(()),
+                other => Err(format!("{}: expected JSON number, got: {other}", case.name)),
             }
         }
         Expect::Empty => {

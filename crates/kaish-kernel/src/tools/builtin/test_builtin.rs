@@ -120,6 +120,12 @@ async fn evaluate_test(args: ToolArgs, ctx: &mut ExecContext, bracket_mode: bool
     // it as a positional operator. Prepend flags as "-{flag}" tokens.
     let mut tokens: Vec<String> = Vec::new();
     for flag in &args.flags {
+        // `json` is a global format flag, already consumed by
+        // apply_json_if_present. It is not a POSIX predicate operator — feeding
+        // it back as `-json` makes the evaluator reject "unknown binary operator".
+        if flag == "json" {
+            continue;
+        }
         tokens.push(format!("-{flag}"));
     }
     for v in &args.positional {

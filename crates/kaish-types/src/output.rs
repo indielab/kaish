@@ -550,6 +550,14 @@ pub fn apply_output_format(mut result: ExecResult, format: OutputFormat) -> Exec
                 result.set_out(serde_json::to_string(&json_value)
                     .unwrap_or_else(|_| "null".to_string()));
                 result.data = Some(crate::result::json_to_value(json_value));
+            } else if let Some(data) = &result.data {
+                // Structured data already present (e.g. jq, any `success_with_data`
+                // builtin): serialize that, not the rendered text. Re-wrapping the
+                // text as a JSON string would double-encode it (`"1"` not `1`) and
+                // clobber the real value. `.data` is the structured truth.
+                let json_out = serde_json::to_string(&crate::result::value_to_json(data))
+                    .unwrap_or_else(|_| "null".to_string());
+                result.set_out(json_out);
             } else {
                 // Text-only: wrap as JSON string. .data mirrors the same string.
                 let text = result.text_out().into_owned();
@@ -694,6 +702,23 @@ mod tests {
         if let crate::value::Value::Json(json) = data {
             assert_eq!(json, serde_json::json!(["file1", "file2"]));
         }
+    }
+
+    #[test]
+    fn apply_output_format_prefers_structured_data_over_text() {
+        // A `success_with_data` result (e.g. jq '.a' on {"a":1}) carries the
+        // structured scalar in `.data` and the rendered text in stdout. --json
+        // must serialize the structured value (1), not re-wrap the text ("1").
+        use crate::value::Value;
+        let result = ExecResult::success_with_data("1", Value::Int(1));
+        assert!(!result.has_output(), "no OutputData sentinel on this path");
+
+        let formatted = apply_output_format(result, OutputFormat::Json);
+        let json_out = formatted.text_out().into_owned();
+        let parsed: serde_json::Value = serde_json::from_str(&json_out).expect("valid JSON");
+        assert_eq!(parsed, serde_json::json!(1), "number, not the string \"1\"");
+        // The structured `.data` is preserved, not clobbered down to a string.
+        assert_eq!(formatted.data, Some(Value::Int(1)));
     }
 
     #[test]
