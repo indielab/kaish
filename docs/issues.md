@@ -76,7 +76,7 @@ every top-level statement's result via `push_out(text_out())` — lossy-decoding
 standalone came back mangled, independent of external commands). Now concatenates
 raw bytes when binary is involved.
 
-### Binary-data path — typed `Bytes`, `dd`, and `/dev/urandom`
+### Binary-data path — typed `Bytes`, `dd`, `/dev/urandom` — LANDED (residuals only)
 Surfaced 2026-06-13 while adding the synthetic `/dev` (DevFs: `/dev/null`,
 `/dev/zero` shipped). kaish is UTF-8 text end to end (`ExecResult.out: String`,
 `OutputData` string-shaped, pipe consumed as text), so raw bytes can't transit
@@ -86,27 +86,26 @@ through pipes, nushell-style** — full plan in
 that flows through pipes, **coerces to text iff valid UTF-8 (else loud error)**,
 and renders at the boundary (REPL hex dump, `--json`/MCP structured base64).
 
-Phases (each independently shippable):
-1. **DONE** — Value + boundary: `Value::Bytes` (single binary type; the dead
-   `Value::Blob`/`BlobRef` were deleted), `ExecResult.out` as an
-   `OutputPayload::{Text,Bytes}` enum (wire-compatible serde), coercion rule
-   (`text_out` infallible + lossy / `try_text_out` loud guard), base64 +
-   `hex_dump` helpers, boundary rendering (REPL hex dump, `--json` envelope).
-   `OutputData::Bytes` deferred to Phase 2.
-2. Transit: the pipe ring buffer is already `VecDeque<u8>` — the work is at
-   *consumption*: a `read_stdin_to_bytes` sibling (26 `…_to_string` callers), a
-   `bytes_out()` pipe-write path, and killing `from_utf8` in `head`/`cat`/`<`.
-3. **dd + urandom DONE** — `dd` builtin (`if=`/`of=`/`bs=`/`count=`/`skip=`,
-   256 MiB cap, reads via `read_range`) + `/dev/urandom`/`/dev/random` in `DevFs`
-   (`getrandom`). Parser `if=` blocker fixed. North-star green. Remaining:
-   `encode`/`decode`, realign `base64`, a `random` builtin.
-4. As demand appears: `gzip`/`gunzip`, blob helpers.
+All phases LANDED (commits `e612d69` → `818a22e`):
+1. **Value + boundary** — `Value::Bytes` (single binary type; dead
+   `Value::Blob`/`BlobRef` deleted), `ExecResult.out` as `OutputPayload::{Text,
+   Bytes}` (wire-compatible serde), coercion rule (`text_out` lossy /
+   `try_text_out` loud guard / `success_text_or_bytes` at producers), base64
+   envelope + `hex_dump`, boundary rendering (REPL hex dump, `--json` envelope).
+2. **Transit** — `read_stdin_to_bytes`; byte-clean pipe-write + `>`/`>>`/`&>`
+   redirects; `accumulate_result` concats raw bytes (it was lossy-decoding every
+   binary final result). `1>&2` of binary is a loud error.
+3. **dd + devices** — `dd` (`if=…` parser fix), `/dev/urandom`/`/dev/random`.
+   North-star green.
+4. **Movers byte-aware** — cat, head -c, tail -c, base64, xxd, checksum, wc -c,
+   tee, `cmp` (new). Text tools (grep/sed/awk/…) loud-error on binary, no lossy.
+5. **External commands** — capture → Bytes, stdin forwarded raw (`818a22e`).
 
-**North-star test PASSES** (`sandbox_mode_tests`): `dd if=/dev/urandom
-of=/dev/null bs=1024 count=10` copies exactly 10240 B; file round-trip readback
-is exact; two draws' checksums differ. Remaining Phase-2 transit work (byte-clean
-pipe consumption: `cat blob | xxd`) is still open. DeepSeek review notes
-(`OutputPayload`/`Blob`/coercion) in binary-data.md.
+**Decision: no generic `encode`/`decode`** (2026-06-13) — `base64` + `xxd`
+already bridge text↔bytes; a generic pair would duplicate them and invite a
+basenc-style format×flag matrix. Add a flagless `urlencode`/`urldecode` only if
+web work needs it. **No `random` builtin** (Amy): `dd if=/dev/urandom` covers it.
+Residual: buffered-`String` stdin (`take_stdin`, binary heredocs — rare).
 
 **Definition of done (north-star test):** `dd if=/dev/urandom of=/dev/null
 bs=1024 count=10` exits 0 having copied exactly 10240 bytes; the same into a

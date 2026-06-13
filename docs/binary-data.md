@@ -5,7 +5,12 @@ Status: **Phases 1–3 landed + binary plumbed end to end.** value/carrier/bound
 decode); external commands keep binary intact (capture → Bytes, stdin forwarded
 raw). Binary survives pipes, redirects, and external I/O:
 `dd if=/dev/urandom | base64 | base64 -d | wc -c` == 16; `curl url > file.bin`;
-`printf … | base64`. Remaining: `encode`/`decode` builtins; buffered-String stdin
+`printf … | base64`. **Effort essentially complete.** Decision 2026-06-13: a
+generic `encode`/`decode` was **dropped** — `base64` and `xxd` (`-p`/`-r`) already
+bridge text↔bytes, so a generic pair would only duplicate them and invite a
+basenc-style "tons of formats × weird flags" surface that's easy for an agent to
+misuse. The one real gap is URL/percent encoding; add a focused
+`urlencode`/`urldecode` only if web work needs it. Residual: buffered-String stdin
 (`take_stdin`) for the rare binary-heredoc case.
 
 ### Producer coercion is content-sniffing — an accepted tradeoff
@@ -189,12 +194,19 @@ A *top-level* bytes result is displayed (not coerced):
   the hex dump and the base64 envelope both honor the cap and report `len` so
   truncation is never silent.
 
-## Conversions — the only text↔bytes bridges
+## Conversions — the text↔bytes bridges
 
-- `encode <hex|base64> [input]` — bytes → text.
-- `decode <hex|base64|utf-8> [input]` — text → bytes (`utf-8` validates text → bytes).
-- The existing `base64` builtin is realigned to produce/consume `Bytes` rather
-  than smuggling binary through strings.
+**Decision 2026-06-13: no generic `encode`/`decode`.** The bridges already exist
+as byte-aware builtins and that's enough:
+- **`base64`** — bytes → base64 text (encode) and base64 text → bytes (`-d`).
+- **`xxd`** — bytes → hex (`-p`) and hex → bytes (`-r`).
+
+A generic `encode <fmt>`/`decode <fmt>` would only duplicate those and pull in a
+`basenc`-style matrix of formats × formatting flags (`--wrap`/`--ignore-garbage`/
+base64url/no-pad) — surface that's easy for an agent to pick wrong, for little
+gain. The one genuine gap is URL/percent encoding (query strings, `%20` decode);
+if web work needs it, add a small flagless `urlencode`/`urldecode`, not a
+framework. Revisit a unified pair only if the format count ever justifies it.
 
 ## `dd` — the binary mover
 
