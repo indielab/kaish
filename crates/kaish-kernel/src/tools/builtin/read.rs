@@ -93,9 +93,9 @@ impl Tool for Read {
         let prompt_output = prompt.as_deref().unwrap_or("");
 
         // Get input from stdin
-        let input = match ctx.read_stdin_to_string().await {
-            Some(s) => s,
-            None => {
+        let input = match ctx.read_stdin_to_text().await {
+            Ok(Some(s)) => s,
+            Ok(None) => {
                 // No stdin provided - return failure (no data to read)
                 // Include the prompt in the error so it's visible
                 let mut result = ExecResult::failure(1, "read: no input available");
@@ -104,6 +104,7 @@ impl Tool for Read {
                 }
                 return result;
             }
+            Err(e) => return ExecResult::failure(2, format!("read: {e}")),
         };
 
         // Process the input

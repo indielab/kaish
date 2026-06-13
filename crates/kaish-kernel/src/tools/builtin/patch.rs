@@ -136,9 +136,18 @@ impl Tool for Patch {
             let resolved_path = ctx.resolve_path(&target_path);
             let path = Path::new(&resolved_path);
 
-            // Read current file content
+            // Read current file content — patch is a text operation; a binary
+            // target is a loud error, not a lossy decode.
             let current_content = match ctx.backend.read(path, None).await {
-                Ok(data) => String::from_utf8_lossy(&data).into_owned(),
+                Ok(data) => match String::from_utf8(data) {
+                    Ok(s) => s,
+                    Err(_) => {
+                        return ExecResult::failure(
+                            1,
+                            format!("patch: '{}': binary data, cannot patch", target_path),
+                        )
+                    }
+                },
                 Err(e) => {
                     return ExecResult::failure(
                         1,

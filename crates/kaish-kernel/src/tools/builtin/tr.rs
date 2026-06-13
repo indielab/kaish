@@ -67,7 +67,10 @@ impl Tool for Tr {
         let delete = parsed.delete;
         let squeeze = parsed.squeeze;
 
-        let input = ctx.read_stdin_to_string().await.unwrap_or_default();
+        let input = match ctx.read_stdin_to_text().await {
+            Ok(s) => s.unwrap_or_default(),
+            Err(e) => return ExecResult::failure(2, format!("tr: {e}")),
+        };
 
         // Expand character classes and ranges
         let chars1 = expand_char_set(&set1);

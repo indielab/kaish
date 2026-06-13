@@ -80,7 +80,10 @@ impl Tool for Gather {
         let opts = parse_gather_options(&args);
 
         // Get input (in standalone mode, just pass through)
-        let input = ctx.read_stdin_to_string().await.unwrap_or_default();
+        let input = match ctx.read_stdin_to_text().await {
+            Ok(s) => s.unwrap_or_default(),
+            Err(e) => return ExecResult::failure(2, format!("gather: {e}")),
+        };
 
         if input.is_empty() {
             return ExecResult::success("");

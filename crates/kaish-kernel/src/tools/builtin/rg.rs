@@ -242,7 +242,10 @@ async fn run_with_matcher<M: Matcher>(
 
     let stdin_available = ctx.pipe_stdin.is_some() || ctx.stdin.is_some();
     if positional_paths.is_empty() && stdin_available {
-        let stdin = ctx.read_stdin_to_string().await.unwrap_or_default();
+        let stdin = match ctx.read_stdin_to_text().await {
+            Ok(s) => s.unwrap_or_default(),
+            Err(e) => return ExecResult::failure(2, format!("rg: {e}")),
+        };
         return run_stdin_search(matcher, stdin.as_bytes(), opts);
     }
 

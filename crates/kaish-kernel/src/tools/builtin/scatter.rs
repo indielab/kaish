@@ -84,7 +84,10 @@ impl Tool for Scatter {
 
         // Get structured data and text from stdin
         let data = ctx.take_stdin_data();
-        let text = ctx.read_stdin_to_string().await.unwrap_or_default();
+        let text = match ctx.read_stdin_to_text().await {
+            Ok(s) => s.unwrap_or_default(),
+            Err(e) => return ExecResult::failure(2, format!("scatter: {e}")),
+        };
 
         let items = match extract_items(data.as_ref(), &text) {
             Ok(items) => items,

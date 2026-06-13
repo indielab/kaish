@@ -378,14 +378,23 @@ impl Tool for Grep {
                     Err(e) => return ExecResult::failure(1, format!("grep: {}: {}", path, e)),
                 }
             }
-            None => (
-                ctx.read_stdin_to_string()
-                    .await
-                    .unwrap_or_default()
-                    .into_bytes(),
-                None,
-            ),
+            None => {
+                let text = match ctx.read_stdin_to_text().await {
+                    Ok(s) => s.unwrap_or_default(),
+                    Err(e) => return ExecResult::failure(2, format!("grep: {e}")),
+                };
+                (text.into_bytes(), None)
+            }
         };
+
+        // grep is a text tool: a binary file is a loud error, not a lossy match.
+        if std::str::from_utf8(&bytes).is_err() {
+            let where_ = filename.as_deref().unwrap_or("(standard input)");
+            return ExecResult::failure(
+                2,
+                format!("grep: {where_}: binary data — pipe through base64/xxd or use cmp"),
+            );
+        }
 
         let render = match grep_lines_structured(
             &bytes,

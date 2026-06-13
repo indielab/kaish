@@ -464,6 +464,25 @@ impl ExecContext {
         }
     }
 
+    /// Read stdin as text, erroring on non-UTF-8 instead of silently
+    /// lossy-decoding it (which corrupts binary with `U+FFFD`).
+    ///
+    /// The strict counterpart to [`Self::read_stdin_to_string`], for text-only
+    /// builtins (`grep`, `sed`, `awk`, `cut`, `sort`, `jq`, …): a binary stream
+    /// is a loud error, not a mangle. Returns `Ok(None)` when there is no stdin
+    /// at all. The `Err` is a ready-to-use message; callers prefix their name.
+    /// See `docs/binary-data.md` and `docs/issues.md`.
+    pub async fn read_stdin_to_text(&mut self) -> Result<Option<String>, String> {
+        match self.read_stdin_to_bytes().await {
+            None => Ok(None),
+            Some(bytes) => String::from_utf8(bytes).map(Some).map_err(|_| {
+                "input is not valid UTF-8 (binary data?) — pipe through base64/xxd \
+                 or use a binary-aware tool (cat, dd, cmp, wc -c)"
+                    .to_string()
+            }),
+        }
+    }
+
     /// Read all of stdin as raw bytes, preserving binary intact.
     ///
     /// The byte-clean counterpart to [`Self::read_stdin_to_string`], for

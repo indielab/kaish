@@ -79,7 +79,10 @@ impl Tool for Sort {
         // POSIX: sort accepts multiple files and merge-sorts their contents.
         // When no file is given, read stdin.
         let input = if args.positional.is_empty() {
-            ctx.read_stdin_to_string().await.unwrap_or_default()
+            match ctx.read_stdin_to_text().await {
+                Ok(s) => s.unwrap_or_default(),
+                Err(e) => return ExecResult::failure(2, format!("sort: {e}")),
+            }
         } else {
             let mut acc = String::new();
             for value in &args.positional {

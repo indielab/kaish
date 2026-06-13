@@ -405,6 +405,35 @@ async fn sandbox_binary_survives_pipe_roundtrip() {
 }
 
 #[tokio::test]
+async fn sandbox_text_tool_loud_errors_on_binary_stdin() {
+    let k = sandbox_kernel().await;
+    // 0xFF is always invalid UTF-8. A text tool handed it must fail loud, not
+    // silently lossy-decode (corruption). `xxd -r -p` produces the raw byte.
+    for cmd in [
+        "echo ff | xxd -r -p | grep x",
+        "echo ff | xxd -r -p | sed 's/a/b/'",
+        "echo ff | xxd -r -p | sort",
+        "echo ff | xxd -r -p | jq .",
+    ] {
+        let r = k.execute(cmd).await.expect("execute failed");
+        assert!(!r.ok(), "`{cmd}` should fail loud on binary, got out={:?}", r.text_out());
+    }
+}
+
+#[tokio::test]
+async fn sandbox_binary_aware_tools_accept_binary_stdin() {
+    let k = sandbox_kernel().await;
+    // The byte-aware tools still consume the same 0xFF byte fine.
+    let r = k.execute("echo ff | xxd -r -p | base64").await.expect("execute failed");
+    assert!(r.ok(), "base64 should accept binary: {}", r.err);
+    assert_eq!(r.text_out().trim(), "/w==", "base64 of 0xFF");
+
+    let r = k.execute("echo ff | xxd -r -p | wc -c").await.expect("execute failed");
+    assert!(r.ok());
+    assert_eq!(r.text_out().trim(), "1");
+}
+
+#[tokio::test]
 async fn sandbox_head_c_on_piped_binary() {
     let k = sandbox_kernel().await;
     // `head -c 4` on a piped binary stream must keep exactly 4 raw bytes — not

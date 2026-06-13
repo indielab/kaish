@@ -92,14 +92,21 @@ impl Tool for Diff {
         let path1 = ctx.resolve_path(&file1);
         let path2 = ctx.resolve_path(&file2);
 
-        // Read file contents
+        // Read file contents — diff is a text tool; binary is a loud error
+        // (use `cmp` for byte comparison), not a lossy decode.
         let content1 = match ctx.backend.read(Path::new(&path1), None).await {
-            Ok(data) => String::from_utf8_lossy(&data).into_owned(),
+            Ok(data) => match String::from_utf8(data) {
+                Ok(s) => s,
+                Err(_) => return ExecResult::failure(2, format!("diff: {}: binary data — use cmp", file1)),
+            },
             Err(e) => return ExecResult::failure(2, format!("diff: {}: {}", file1, e)),
         };
 
         let content2 = match ctx.backend.read(Path::new(&path2), None).await {
-            Ok(data) => String::from_utf8_lossy(&data).into_owned(),
+            Ok(data) => match String::from_utf8(data) {
+                Ok(s) => s,
+                Err(_) => return ExecResult::failure(2, format!("diff: {}: binary data — use cmp", file2)),
+            },
             Err(e) => return ExecResult::failure(2, format!("diff: {}: {}", file2, e)),
         };
 

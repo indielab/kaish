@@ -404,26 +404,36 @@ impl Tool for JqNative {
             } else if let Some(data) = ctx.take_stdin_data() {
                 // Fast path: use pre-parsed structured data from pipeline
                 ast_value_to_json(&data)
-            } else if let Some(text) = ctx.read_stdin_to_string().await {
+            } else {
+                let text = match ctx.read_stdin_to_text().await {
+                    Ok(s) => s.unwrap_or_default(),
+                    Err(e) => return ExecResult::failure(2, format!("jq: {e}")),
+                };
+                if text.is_empty() {
+                    return ExecResult::failure(1, "jq: no input provided");
+                }
                 // Fallback: parse stdin text as JSON
                 match serde_json::from_str(&text) {
                     Ok(json) => json,
                     Err(e) => return ExecResult::failure(1, format!("jq: invalid JSON input: {}", e)),
                 }
-            } else {
-                return ExecResult::failure(1, "jq: no input provided");
             }
         } else if let Some(data) = ctx.take_stdin_data() {
             // Fast path: use pre-parsed structured data from pipeline
             ast_value_to_json(&data)
-        } else if let Some(text) = ctx.read_stdin_to_string().await {
+        } else {
+            let text = match ctx.read_stdin_to_text().await {
+                Ok(s) => s.unwrap_or_default(),
+                Err(e) => return ExecResult::failure(2, format!("jq: {e}")),
+            };
+            if text.is_empty() {
+                return ExecResult::failure(1, "jq: no input provided");
+            }
             // Fallback: parse stdin text as JSON
             match serde_json::from_str(&text) {
                 Ok(json) => json,
                 Err(e) => return ExecResult::failure(1, format!("jq: invalid JSON input: {}", e)),
             }
-        } else {
-            return ExecResult::failure(1, "jq: no input provided");
         };
 
         // Execute filter with the JSON input

@@ -82,7 +82,31 @@ impl Tool for Tail {
             return self.tail_files(ctx, &args, &paths).await;
         }
 
-        // Get input: from single file or stdin
+        // Byte mode (-c) resolved up front: it reads raw bytes so binary tails
+        // to a Bytes result instead of being rejected or lossy-decoded.
+        let bytes = args.get("bytes", usize::MAX).and_then(|v| match v {
+            Value::Int(i) => Some(*i as usize),
+            Value::String(s) => s.parse().ok(),
+            _ => None,
+        });
+
+        if let Some(byte_count) = bytes {
+            let data: Vec<u8> = match paths.first() {
+                Some(path) => {
+                    let resolved = ctx.resolve_path(path);
+                    match ctx.backend.read(Path::new(&resolved), None).await {
+                        Ok(d) => d,
+                        Err(e) => return ExecResult::failure(1, format!("tail: {}: {}", path, e)),
+                    }
+                }
+                None => ctx.read_stdin_to_bytes().await.unwrap_or_default(),
+            };
+            // Last N bytes; valid UTF-8 stays text, otherwise a Bytes result.
+            let start = data.len().saturating_sub(byte_count);
+            return ExecResult::success_text_or_bytes(data[start..].to_vec());
+        }
+
+        // Line mode: text input (a binary file/stream is a loud error).
         let input = match paths.first() {
             Some(path) => {
                 let resolved = ctx.resolve_path(path);
@@ -99,22 +123,11 @@ impl Tool for Tail {
                     Err(e) => return ExecResult::failure(1, format!("tail: {}: {}", path, e)),
                 }
             }
-            None => ctx.read_stdin_to_string().await.unwrap_or_default(),
+            None => match ctx.read_stdin_to_text().await {
+                Ok(s) => s.unwrap_or_default(),
+                Err(e) => return ExecResult::failure(2, format!("tail: {e}")),
+            },
         };
-
-        // Check for byte mode (-c)
-        let bytes = args.get("bytes", usize::MAX).and_then(|v| match v {
-            Value::Int(i) => Some(*i as usize),
-            Value::String(s) => s.parse().ok(),
-            _ => None,
-        });
-
-        if let Some(byte_count) = bytes {
-            // Byte mode: output last N bytes (POSIX tail -c counts bytes, not chars)
-            let start = input.len().saturating_sub(byte_count);
-            let output = String::from_utf8_lossy(&input.as_bytes()[start..]).into_owned();
-            return ExecResult::with_output(OutputData::text(output));
-        }
 
         // Line mode: output last N lines
         let lines = args
