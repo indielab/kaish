@@ -80,7 +80,7 @@ impl Tool for Glob {
         };
         // Tests poke args.named.insert("no-ignore", Value::Bool(true)); promote
         // such bool-typed named entries to flag form so clap accepts them.
-        args.flagify_bool_named();
+        args.flagify_bool_named(&self.schema());
 
         let parsed = match GlobArgs::try_parse_from(
             std::iter::once("glob".to_string()).chain(args.to_argv()),

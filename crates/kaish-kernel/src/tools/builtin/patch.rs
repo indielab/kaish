@@ -79,7 +79,7 @@ impl Tool for Patch {
         // `-R` flag and `--dry-run` flag work directly. The `p=1` form lands as
         // a single-char named entry which to_argv renders as `-p=1`; clap's
         // `Option<i64>` with short='p' handles that natively.
-        args.flagify_bool_named();
+        args.flagify_bool_named(&self.schema());
 
         let parsed = match PatchArgs::try_parse_from(
             std::iter::once("patch".to_string()).chain(args.to_argv()),

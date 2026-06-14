@@ -379,12 +379,31 @@ impl ToolArgs {
     ///   the same; preserving it would only resurface as `--K=false` and break
     ///   the same parser).
     ///
+    /// A `Value::Bool` parked under a key the `schema` declares as a *value-taking*
+    /// flag is the flag's literal value, not a bare bool flag — `spawn --command
+    /// true` binds `command = Bool(true)`. Those keys are left in `named` so
+    /// `to_argv()` renders `--command=true` and clap's `Option<String>` field
+    /// accepts it; collapsing them to a bare `--command` drops the value and
+    /// makes clap error "a value is required". (See docs/issues.md.)
+    ///
     /// Idempotent. Non-bool named entries are left alone.
-    pub fn flagify_bool_named(&mut self) {
+    pub fn flagify_bool_named(&mut self, schema: &ToolSchema) {
+        // Keys (param names + aliases) the schema declares as non-bool, non-positional
+        // flags — i.e. flags that take a value.
+        let value_keys: HashSet<&str> = schema
+            .params
+            .iter()
+            .filter(|p| !p.positional && !is_bool_param_type(&p.param_type))
+            .flat_map(|p| {
+                std::iter::once(p.name.as_str())
+                    .chain(p.aliases.iter().map(|a| a.trim_start_matches('-')))
+            })
+            .collect();
+
         let bool_keys: Vec<String> = self
             .named
             .iter()
-            .filter(|(_, v)| matches!(v, Value::Bool(_)))
+            .filter(|(k, v)| matches!(v, Value::Bool(_)) && !value_keys.contains(k.as_str()))
             .map(|(k, _)| k.clone())
             .collect();
         for k in bool_keys {
@@ -453,6 +472,11 @@ fn flag_token(name: &str) -> String {
     } else {
         format!("--{name}")
     }
+}
+
+/// Whether a `ParamSchema::param_type` names a boolean flag.
+fn is_bool_param_type(param_type: &str) -> bool {
+    param_type.eq_ignore_ascii_case("bool") || param_type.eq_ignore_ascii_case("boolean")
 }
 
 fn render_named_value(value: &Value) -> Vec<String> {
@@ -665,7 +689,7 @@ mod to_argv_tests {
         args.named.insert("recursive".into(), Value::Bool(true));
         args.named.insert("limit".into(), Value::Int(5));
 
-        args.flagify_bool_named();
+        args.flagify_bool_named(&ToolSchema::new("t", ""));
 
         assert!(args.flags.contains("recursive"));
         assert!(!args.named.contains_key("recursive"));
@@ -678,7 +702,7 @@ mod to_argv_tests {
         let mut args = ToolArgs::new();
         args.named.insert("recursive".into(), Value::Bool(false));
 
-        args.flagify_bool_named();
+        args.flagify_bool_named(&ToolSchema::new("t", ""));
 
         assert!(!args.flags.contains("recursive"));
         assert!(!args.named.contains_key("recursive"));
@@ -688,8 +712,8 @@ mod to_argv_tests {
     fn flagify_bool_named_is_idempotent() {
         let mut args = ToolArgs::new();
         args.named.insert("recursive".into(), Value::Bool(true));
-        args.flagify_bool_named();
-        args.flagify_bool_named();
+        args.flagify_bool_named(&ToolSchema::new("t", ""));
+        args.flagify_bool_named(&ToolSchema::new("t", ""));
         assert!(args.flags.contains("recursive"));
     }
 
@@ -699,9 +723,54 @@ mod to_argv_tests {
     fn flagify_bool_named_round_trips_through_to_argv() {
         let mut args = ToolArgs::new();
         args.named.insert("R".into(), Value::Bool(true));
-        args.flagify_bool_named();
+        args.flagify_bool_named(&ToolSchema::new("t", ""));
         let argv = args.to_argv();
         assert!(argv.contains(&"-R".to_string()), "expected -R, got {:?}", argv);
         assert!(!argv.iter().any(|s| s.contains('=')), "no =value should appear, got {:?}", argv);
+    }
+
+    /// A `Bool(true)` parked under a schema-declared value-taking flag is the
+    /// flag's literal value (`spawn --command true`), not a bare bool flag — it
+    /// stays in `named` and renders as `--K=true`, not a value-less `--K`.
+    #[test]
+    fn flagify_bool_named_keeps_value_flag_value() {
+        let mut schema = ToolSchema::new("spawn", "");
+        schema.params.push(ParamSchema::new("command", "string"));
+
+        let mut args = ToolArgs::new();
+        args.named.insert("command".into(), Value::Bool(true));
+        args.flagify_bool_named(&schema);
+
+        assert!(!args.flags.contains("command"), "value flag must not collapse to a bare flag");
+        assert_eq!(args.named.get("command"), Some(&Value::Bool(true)));
+        let argv = args.to_argv();
+        assert!(
+            argv.iter().any(|s| s == "--command=true"),
+            "expected --command=true, got {:?}",
+            argv
+        );
+    }
+
+    /// One schema carrying both a bool flag and a value-taking flag: the bool
+    /// flag still flagifies, the value flag keeps its value. Proves
+    /// `is_bool_param_type` actually distinguishes the two (an empty-schema test
+    /// can't — it flagifies everything regardless).
+    #[test]
+    fn flagify_bool_named_distinguishes_bool_from_value_param() {
+        let mut schema = ToolSchema::new("t", "");
+        schema.params.push(ParamSchema::new("verbose", "bool"));
+        schema.params.push(ParamSchema::new("command", "string"));
+
+        let mut args = ToolArgs::new();
+        args.named.insert("verbose".into(), Value::Bool(true));
+        args.named.insert("command".into(), Value::Bool(true));
+        args.flagify_bool_named(&schema);
+
+        // Bool flag → promoted to a bare flag.
+        assert!(args.flags.contains("verbose"));
+        assert!(!args.named.contains_key("verbose"));
+        // Value flag → value retained.
+        assert!(!args.flags.contains("command"));
+        assert_eq!(args.named.get("command"), Some(&Value::Bool(true)));
     }
 }

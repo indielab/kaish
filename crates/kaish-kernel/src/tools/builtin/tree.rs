@@ -166,7 +166,7 @@ impl Tool for Tree {
         let Some(ctx) = ctx.as_any_mut().downcast_mut::<ExecContext>() else {
             return ExecResult::failure(1, "internal error: kernel builtin requires ExecContext");
         };
-        args.flagify_bool_named();
+        args.flagify_bool_named(&self.schema());
 
         let parsed = match TreeArgs::try_parse_from(
             std::iter::once("tree".to_string()).chain(args.to_argv()),

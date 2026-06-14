@@ -54,7 +54,7 @@ impl Tool for Cmp {
         let Some(ctx) = ctx.as_any_mut().downcast_mut::<ExecContext>() else {
             return ExecResult::failure(1, "internal error: kernel builtin requires ExecContext");
         };
-        args.flagify_bool_named();
+        args.flagify_bool_named(&self.schema());
         let parsed = match CmpArgs::try_parse_from(
             std::iter::once("cmp".to_string()).chain(args.to_argv()),
         ) {

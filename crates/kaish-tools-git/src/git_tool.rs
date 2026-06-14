@@ -108,7 +108,7 @@ impl Tool for Git {
     }
 
     async fn execute(&self, mut args: ToolArgs, ctx: &mut dyn ToolCtx) -> ExecResult {
-        args.flagify_bool_named();
+        args.flagify_bool_named(&self.schema());
 
         let parsed = match GitArgs::try_parse_from(
             std::iter::once("git".to_string()).chain(args.to_argv()),

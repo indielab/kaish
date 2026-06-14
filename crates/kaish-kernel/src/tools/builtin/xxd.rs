@@ -64,7 +64,7 @@ impl Tool for Xxd {
         // Tests poke args.named.insert("plain", Value::Bool(true)); to_argv would
         // produce `--plain=true` which clap rejects for a bool field. Promote
         // bool-typed named entries into flag form.
-        args.flagify_bool_named();
+        args.flagify_bool_named(&self.schema());
 
         let parsed = match XxdArgs::try_parse_from(
             std::iter::once("xxd".to_string()).chain(args.to_argv()),

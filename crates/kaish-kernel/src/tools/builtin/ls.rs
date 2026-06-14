@@ -88,7 +88,7 @@ impl Tool for Ls {
         // Tests poke args.named.insert("long", Value::Bool(true)); to_argv would
         // emit `--long=true` which clap rejects for bool fields. Promote bool
         // named entries to flag form before clap parsing.
-        args.flagify_bool_named();
+        args.flagify_bool_named(&self.schema());
 
         let parsed = match LsArgs::try_parse_from(
             std::iter::once("ls".to_string()).chain(args.to_argv()),

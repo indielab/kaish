@@ -84,7 +84,7 @@ impl Tool for Spawn {
         let Some(ctx) = ctx.as_any_mut().downcast_mut::<ExecContext>() else {
             return ExecResult::failure(1, "internal error: kernel builtin requires ExecContext");
         };
-        args.flagify_bool_named();
+        args.flagify_bool_named(&self.schema());
 
         let parsed = match SpawnArgs::try_parse_from(
             std::iter::once("spawn".to_string()).chain(args.to_argv()),

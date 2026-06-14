@@ -60,7 +60,7 @@ impl Tool for Base64Tool {
         // to_argv would render that as `--decode=true` which clap won't accept
         // for a bool field. Promote any Bool-typed named entries to flags so
         // they hit the clap struct via the natural short/long form.
-        args.flagify_bool_named();
+        args.flagify_bool_named(&self.schema());
 
         let parsed = match Base64Args::try_parse_from(
             std::iter::once("base64".to_string()).chain(args.to_argv()),

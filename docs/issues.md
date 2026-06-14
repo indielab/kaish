@@ -664,14 +664,27 @@ path and errors `not found`. A multi-file `stat` would make a one-shot metadata
 rip (`stat --json $(find DIR -type f)`) possible without the per-file loop.
 Surfaced 2026-06-14. (P3)
 
-### `spawn --command true` — bool-shaped values vanish from named args
-`true`/`false` as a named-arg value lex as `Value::Bool`, and
-`flagify_bool_named` converts `Bool(true)` into bare flag presence — so
-`spawn --command true` errors with "a value is required for '--command'".
-Quoting works (`--command 'true'`). Documented flagify behavior colliding
-with a literal command named `true`; a did-you-mean hint (or exempting
-declared value-taking params from flagify) would smooth it. Surfaced by the
-`--json` sweep probes 2026-06-11.
+### `spawn --command true` — bool-shaped values vanish from named args — FIXED 2026-06-14
+`flagify_bool_named` is now schema-aware: it skips keys the schema declares as
+value-taking (non-bool, non-positional) flags, so a `Value::Bool` parked under
+`--command` stays in `named` and renders as `--command=true` instead of
+collapsing to a value-less `--command`. `spawn --command true` works unquoted.
+DeepSeek-reviewed. Pinned by `spawn_bool_value_tests.rs` + the
+`flagify_bool_named_*` unit tests. See Resolved.
+
+### `--flag=true` on bool flags rejected for builtins that skip flagify
+Sibling of the `spawn --command true` fix above, surfaced by the DeepSeek
+review. The explicit `seq --json=true` / `find --type=…`-style `=true` form on a
+**bool** flag binds into `named` as `Bool(true)` (the `Arg::Named` branch, which
+skips the `LongFlag` bool check), and the ~20 builtins that never call
+`flagify_bool_named` (seq, find, stat, cp, mkdir, pwd, basename, …) hand clap a
+`--json=true` their plain-`bool` field rejects (`seq --json=true` → exit 2
+"unexpected value 'true'"). The bare `seq --json` form works. Two routes: call
+`flagify_bool_named(&schema)` in every clap builtin (tedious, easy to forget —
+this is exactly how the gap arose), or — better — flagify **once in the kernel**
+before dispatch (the kernel already builds the schema at `kernel.rs:~2699`) and
+drop the per-builtin calls, giving one path. The global `--json` stripper also
+misses the `=true` form because it scans `flags`, not `named`. (P3)
 
 ### Bare `,` / numeric ranges parse oddly — `cut -d,`, `tr -d 0-9` — FIXED 2026-06-14
 Both resolved (see Resolved). A standalone comma now parses as the literal
@@ -733,6 +746,22 @@ expansion keep their benign skip-on-race tolerance. Pinned by
 
 Captured here so context from `cleanups-todo.md` / old `issues.md`
 isn't lost when those files are deleted.
+
+- **`spawn --command true` — bool value no longer swallowed — done 2026-06-14.**
+  `ToolArgs::flagify_bool_named` became schema-aware: it builds the set of
+  value-taking keys (non-bool, non-positional params + their dash-stripped
+  aliases) and skips them, so a `Value::Bool` bound to a value flag (`spawn
+  --command true` → `named["command"] = Bool(true)`) stays in `named` and renders
+  `--command=true` for clap instead of collapsing to a value-less `--command`.
+  Bool *flags* still flagify. All 13 production call sites pass `&self.schema()`;
+  the 4 unit tests pass a minimal schema and a new test pins the
+  bool-vs-value-param distinction. DeepSeek-reviewed (deepseek cast via kaibo):
+  confirmed no `Option<bool>` clap fields exist, so no value flag both takes a
+  bool and is declared bool; the one behavior change it flagged — `xxd
+  --length true` / `base64 --wrap false` (i64 value flags) now loud-error on a
+  bool literal instead of silently dropping it — is an improvement under
+  fail-loud. The review also surfaced the `--flag=true`-on-bool-flag gap, filed
+  P3. Tests: `spawn_bool_value_tests.rs` (subprocess-gated), `flagify_bool_named_*`.
 
 - **Argv ergonomics: glued short-flag values + bare comma — done 2026-06-14.**
   Two coreutils idioms agents reflexively type now work.
