@@ -151,7 +151,8 @@ impl Tool for Ls {
                         names.push(path.clone());
                     }
                 }
-                self.render_names(ctx, names, &opts).await
+                // Explicit operands: an inaccessible one is reported, not dropped.
+                self.render_names(ctx, names, &opts, true).await
             }
         }
     }
@@ -220,7 +221,8 @@ impl Ls {
             Ok(n) => n,
             Err(e) => return ExecResult::failure(1, format!("ls: {}", e)),
         };
-        self.render_names(ctx, names, opts).await
+        // Glob matches were just walked; a stat race is benign → skip, don't error.
+        self.render_names(ctx, names, opts, false).await
     }
 
     /// Single-target listing: glob expansion, a file shown as its own name,
@@ -250,13 +252,19 @@ impl Ls {
     }
 
     /// Stat each named path, sort, and render one node per name. Shared by
-    /// glob expansion and the multi-argument path. Names that fail to stat
-    /// (e.g. removed between walk and stat) are skipped.
+    /// glob expansion and the multi-argument path.
+    ///
+    /// `report_missing` splits the two callers: an explicit operand
+    /// (`ls real.txt gone.txt`) that fails to stat is `ls: cannot access` on
+    /// stderr and a nonzero exit, like POSIX ls — dropping it silently would
+    /// hide a typo. Glob expansion passes `false`: a match removed between the
+    /// walk and the stat is a benign race, not a user error.
     async fn render_names(
         &self,
         ctx: &mut ExecContext,
         names: Vec<String>,
         opts: &ListOptions,
+        report_missing: bool,
     ) -> ExecResult {
         if names.is_empty() {
             return ExecResult::with_output(OutputData::new());
@@ -264,12 +272,16 @@ impl Ls {
 
         // Stat each match and build DirEntry list for sorting/formatting
         let mut entries: Vec<(String, DirEntry)> = Vec::new();
+        let mut error_text = String::new();
         for name in &names {
             let abs = ctx.resolve_path(name);
             match ctx.backend.stat(Path::new(&abs)).await {
                 Ok(info) => entries.push((name.clone(), info)),
-                Err(_) => {
-                    // File disappeared between walk and stat; skip it
+                Err(e) => {
+                    if report_missing {
+                        error_text.push_str(&format!("ls: cannot access '{}': {}\n", name, e));
+                    }
+                    // else: file disappeared between walk and stat; skip it
                 }
             }
         }
@@ -333,7 +345,15 @@ impl Ls {
             OutputData::nodes(nodes)
         };
 
-        ExecResult::with_output(output)
+        let mut result = ExecResult::with_output(output);
+        // An inaccessible explicit operand is a loud error: stderr message plus
+        // a nonzero exit (matching the single-arg `list_single` path's exit 1),
+        // even though the readable operands still list successfully.
+        if !error_text.is_empty() {
+            result.err.push_str(&error_text);
+            result.code = 1;
+        }
+        result
     }
 
     async fn list_single(

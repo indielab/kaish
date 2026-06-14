@@ -324,7 +324,7 @@ impl Tool for Grep {
             };
 
             return self
-                .grep_multiple_files(ctx, &files, &root, &matcher, &grep_opts, quiet, files_only, count_only)
+                .grep_multiple_files(ctx, &files, &root, &matcher, &grep_opts, quiet, files_only, count_only, false)
                 .await;
         }
 
@@ -348,7 +348,7 @@ impl Tool for Grep {
                 .collect();
             return self
                 .grep_multiple_files(
-                    ctx, &resolved, &root, &matcher, &grep_opts, quiet, files_only, count_only,
+                    ctx, &resolved, &root, &matcher, &grep_opts, quiet, files_only, count_only, true,
                 )
                 .await;
         }
@@ -575,6 +575,13 @@ impl Grep {
         }
     }
 
+    /// Search several files, prefixing each match with its filename.
+    ///
+    /// `report_missing` distinguishes the two callers: explicit file operands
+    /// (`grep p a.txt b.txt`) must report an unreadable operand on stderr and
+    /// exit 2, like POSIX grep — silently skipping it would hide a typo. The
+    /// recursive walk (`grep -r`) passes `false`: a file vanishing between the
+    /// directory walk and the read is a benign race, not a user error.
     #[allow(clippy::too_many_arguments)]
     async fn grep_multiple_files(
         &self,
@@ -586,12 +593,14 @@ impl Grep {
         quiet: bool,
         files_only: bool,
         count_only: bool,
+        report_missing: bool,
     ) -> ExecResult {
         let mut total_output = String::new();
         let mut total_nodes: Vec<OutputNode> = Vec::new();
         let mut total_rich: Vec<serde_json::Value> = Vec::new();
         let mut total_matches: usize = 0;
         let mut files_with_matches = Vec::new();
+        let mut error_text = String::new();
 
         let opts = GrepOptions {
             show_filename: true,
@@ -599,11 +608,6 @@ impl Grep {
         };
 
         for file_path in files {
-            let bytes = match ctx.backend.read(file_path, None).await {
-                Ok(data) => data,
-                Err(_) => continue,
-            };
-
             // Create relative filename for display
             let display_name = file_path
                 .strip_prefix(root)
@@ -611,9 +615,24 @@ impl Grep {
                 .to_string_lossy()
                 .to_string();
 
+            let bytes = match ctx.backend.read(file_path, None).await {
+                Ok(data) => data,
+                Err(e) => {
+                    if report_missing {
+                        error_text.push_str(&format!("grep: {}: {}\n", display_name, e));
+                    }
+                    continue;
+                }
+            };
+
             let render = match grep_lines_structured(&bytes, matcher, &opts, Some(&display_name)) {
                 Ok(t) => t,
-                Err(_) => continue,
+                Err(e) => {
+                    if report_missing {
+                        error_text.push_str(&format!("grep: {}: {}\n", display_name, e));
+                    }
+                    continue;
+                }
             };
 
             if render.match_count > 0 {
@@ -628,23 +647,19 @@ impl Grep {
             }
         }
 
-        if quiet {
-            return if total_matches > 0 {
+        let mut result = if quiet {
+            if total_matches > 0 {
                 ExecResult::success("")
             } else {
                 ExecResult::from_output(1, "", "")
-            };
-        }
-
-        if files_only {
-            return if files_with_matches.is_empty() {
+            }
+        } else if files_only {
+            if files_with_matches.is_empty() {
                 ExecResult::from_output(1, "", "")
             } else {
                 ExecResult::with_output(OutputData::text(files_with_matches.join("\n") + "\n"))
-            };
-        }
-
-        if count_only {
+            }
+        } else if count_only {
             ExecResult::with_output(OutputData::text(format!("{}\n", total_matches)))
         } else if total_matches == 0 {
             ExecResult::from_output(1, total_output, "")
@@ -658,7 +673,19 @@ impl Grep {
             let output = OutputData::table(headers, total_nodes)
                 .with_rich_json(serde_json::Value::Array(total_rich));
             ExecResult::with_output_and_text(output, total_output)
+        };
+
+        // A read/parse error on an explicit operand is exit 2 and stderr,
+        // overriding the match-based code — the error must not be swallowed by
+        // matches found in the readable files. (`quiet` keeps a 0 on a match
+        // per POSIX; everything else surfaces the trouble.)
+        if !error_text.is_empty() {
+            result.err.push_str(&error_text);
+            if !(quiet && total_matches > 0) {
+                result.code = 2;
+            }
         }
+        result
     }
 }
 
