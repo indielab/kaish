@@ -7,7 +7,7 @@
 
 use crate::budget::ByteBudget;
 use crate::paths::normalize;
-use crate::traits::{DirEntry, DirEntryKind, Filesystem};
+use crate::traits::{DirEntry, DirEntryKind, Filesystem, ReadRange};
 use async_trait::async_trait;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::io;
@@ -795,6 +795,21 @@ impl Filesystem for OverlayFs {
         }
         match self.upper.read(&path).await {
             Err(error) if is_not_found(&error) => self.lower.read(&path).await,
+            other => other,
+        }
+    }
+
+    async fn read_range(&self, path: &Path, range: Option<ReadRange>) -> io::Result<Vec<u8>> {
+        // Delegate the slice to whichever layer holds the file so a byte range
+        // rides on that backend's own `read_range` (e.g. MemoryFs slices its
+        // stored bytes) instead of the default whole-file-read+slice. Without
+        // this, chunked streaming over an overlay would be O(n²).
+        let path = normalize(path);
+        if self.state.read().await.whiteouts.contains(&path) {
+            return Err(not_found(&path));
+        }
+        match self.upper.read_range(&path, range.clone()).await {
+            Err(error) if is_not_found(&error) => self.lower.read_range(&path, range).await,
             other => other,
         }
     }
@@ -1904,6 +1919,34 @@ mod tests {
         assert_eq!(changes[0].kind, ChangeKind::Modified);
         assert_eq!(changes[0].base.as_deref(), Some(b"original" as &[u8]));
         assert_eq!(changes[0].current.as_deref(), Some(b"replaced" as &[u8]));
+    }
+
+    #[tokio::test]
+    async fn test_read_range_byte_slice_through_layers() {
+        // Lower file, read a mid slice (served from lower).
+        let lower = Arc::new(MemoryFs::new());
+        lower.write(Path::new("f.txt"), b"0123456789").await.unwrap();
+        let overlay = OverlayFs::over(lower);
+        let from_lower = overlay
+            .read_range(Path::new("f.txt"), Some(ReadRange::bytes(2, 4)))
+            .await
+            .unwrap();
+        assert_eq!(from_lower, b"2345");
+
+        // Overwrite in the upper; the slice now comes from the upper copy.
+        overlay.write(Path::new("f.txt"), b"ABCDEFGHIJ").await.unwrap();
+        let from_upper = overlay
+            .read_range(Path::new("f.txt"), Some(ReadRange::bytes(2, 4)))
+            .await
+            .unwrap();
+        assert_eq!(from_upper, b"CDEF");
+
+        // Whiteout: a removed file is not found, even for a ranged read.
+        overlay.remove(Path::new("f.txt")).await.unwrap();
+        let removed = overlay
+            .read_range(Path::new("f.txt"), Some(ReadRange::bytes(0, 4)))
+            .await;
+        assert!(removed.is_err());
     }
 
     // is_dirty() false for a mkdir-only session.

@@ -3,7 +3,7 @@
 //! Used for `/v` and testing. All data is ephemeral.
 
 use crate::budget::ByteBudget;
-use crate::traits::{DirEntry, DirEntryKind, Filesystem};
+use crate::traits::{DirEntry, DirEntryKind, Filesystem, ReadRange};
 use async_trait::async_trait;
 use std::collections::HashMap;
 use std::io;
@@ -137,6 +137,51 @@ impl MemoryFs {
                     let target = target.clone();
                     drop(entries);
                     self.read_inner(&target, depth + 1).await
+                }
+                None => Err(io::Error::new(
+                    io::ErrorKind::NotFound,
+                    format!("not found: {}", path.display()),
+                )),
+            }
+        })
+    }
+
+    /// Like [`read_inner`](Self::read_inner) but returns only
+    /// `data[offset..offset+limit]`, slicing under the lock so a chunked read
+    /// never clones the whole file.
+    fn read_range_inner(
+        &self,
+        path: &Path,
+        offset: usize,
+        limit: Option<usize>,
+        depth: usize,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = io::Result<Vec<u8>>> + Send + '_>> {
+        let path = path.to_path_buf();
+        Box::pin(async move {
+            if depth > Self::MAX_SYMLINK_DEPTH {
+                return Err(io::Error::other("too many levels of symbolic links"));
+            }
+            let normalized = Self::normalize(&path);
+            let entries = self.entries.read().await;
+
+            match entries.get(&normalized) {
+                Some(Entry::File { data, .. }) => {
+                    let end = match limit {
+                        Some(l) => offset.saturating_add(l).min(data.len()),
+                        None => data.len(),
+                    };
+                    // Slicing at/past EOF yields an empty Vec — the streaming
+                    // loops rely on that as the EOF signal.
+                    Ok(data.get(offset..end).unwrap_or(&[]).to_vec())
+                }
+                Some(Entry::Directory { .. }) => Err(io::Error::new(
+                    io::ErrorKind::IsADirectory,
+                    format!("is a directory: {}", path.display()),
+                )),
+                Some(Entry::Symlink { target, .. }) => {
+                    let target = target.clone();
+                    drop(entries);
+                    self.read_range_inner(&target, offset, limit, depth + 1).await
                 }
                 None => Err(io::Error::new(
                     io::ErrorKind::NotFound,
@@ -280,6 +325,24 @@ impl Drop for MemoryFs {
 impl Filesystem for MemoryFs {
     async fn read(&self, path: &Path) -> io::Result<Vec<u8>> {
         self.read_inner(path, 0).await
+    }
+
+    async fn read_range(&self, path: &Path, range: Option<ReadRange>) -> io::Result<Vec<u8>> {
+        // A pure byte range slices the stored bytes directly instead of cloning
+        // the whole file (what the trait default does via `read` + `apply`).
+        // This keeps chunked/streaming scans over a MemoryFs O(total) rather
+        // than O(n²). Line ranges and a bare `None` still need the full text.
+        let Some(r) = range else {
+            return self.read(path).await;
+        };
+        let pure_byte_range =
+            (r.offset.is_some() || r.limit.is_some()) && r.start_line.is_none() && r.end_line.is_none();
+        if !pure_byte_range {
+            return Ok(r.apply(&self.read(path).await?));
+        }
+        let offset = r.offset.unwrap_or(0) as usize;
+        let limit = r.limit.map(|l| l as usize);
+        self.read_range_inner(path, offset, limit, 0).await
     }
 
     async fn write(&self, path: &Path, data: &[u8]) -> io::Result<()> {
@@ -1126,6 +1189,66 @@ mod tests {
             "expected symlink loop error, got: {}",
             err
         );
+    }
+
+    #[tokio::test]
+    async fn test_read_range_slices_without_whole_clone() {
+        let fs = MemoryFs::new();
+        fs.write(Path::new("data.bin"), b"0123456789abcdef")
+            .await
+            .unwrap();
+
+        // Mid-file slice.
+        let mid = fs
+            .read_range(Path::new("data.bin"), Some(ReadRange::bytes(4, 5)))
+            .await
+            .unwrap();
+        assert_eq!(mid, b"45678");
+        // Offset to end, limit past EOF clamps.
+        let tail = fs
+            .read_range(Path::new("data.bin"), Some(ReadRange::bytes(10, 999)))
+            .await
+            .unwrap();
+        assert_eq!(tail, b"abcdef");
+        // Offset past EOF yields empty — the streaming loops' EOF signal.
+        let past = fs
+            .read_range(Path::new("data.bin"), Some(ReadRange::bytes(100, 8)))
+            .await
+            .unwrap();
+        assert!(past.is_empty());
+        // None is still the whole file.
+        let whole = fs.read_range(Path::new("data.bin"), None).await.unwrap();
+        assert_eq!(whole, b"0123456789abcdef");
+
+        // Sequential chunks reconstruct the file exactly.
+        let mut rebuilt = Vec::new();
+        let mut offset = 0u64;
+        loop {
+            let chunk = fs
+                .read_range(Path::new("data.bin"), Some(ReadRange::bytes(offset, 3)))
+                .await
+                .unwrap();
+            if chunk.is_empty() {
+                break;
+            }
+            offset += chunk.len() as u64;
+            rebuilt.extend_from_slice(&chunk);
+        }
+        assert_eq!(rebuilt, b"0123456789abcdef");
+    }
+
+    #[tokio::test]
+    async fn test_read_range_follows_symlink() {
+        let fs = MemoryFs::new();
+        fs.write(Path::new("target.bin"), b"abcdef").await.unwrap();
+        fs.symlink(Path::new("target.bin"), Path::new("link.bin"))
+            .await
+            .unwrap();
+        let slice = fs
+            .read_range(Path::new("link.bin"), Some(ReadRange::bytes(2, 3)))
+            .await
+            .unwrap();
+        assert_eq!(slice, b"cde");
     }
 
     #[tokio::test]
