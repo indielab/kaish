@@ -402,6 +402,50 @@ impl Job {
 /// mix in the OS pid to stay unique across processes — see `write_output_file`.
 static NEXT_SESSION_ID: AtomicU64 = AtomicU64::new(0);
 
+/// Remove job output files in `/tmp/kaish/jobs/` that were written by processes
+/// which are no longer running. Called once at [`JobManager::new`] time.
+///
+/// Strategy: filenames follow `session_S_job_J.PID.txt`. We parse the PID
+/// component and skip files whose PID matches the current process (those
+/// belong to live sessions in this very process). For other PIDs we check
+/// `/proc/{pid}` on Linux; on non-Linux platforms we skip the prune entirely
+/// since there is no cheap cross-platform liveness check.
+///
+/// All errors are intentionally ignored — this is opportunistic cleanup only.
+fn prune_orphaned_job_files() {
+    // Only prune on Linux where /proc/{pid} is a reliable liveness check.
+    #[cfg(target_os = "linux")]
+    {
+        let jobs_dir = std::env::temp_dir().join("kaish").join("jobs");
+        let Ok(entries) = std::fs::read_dir(&jobs_dir) else {
+            return; // directory doesn't exist yet — nothing to prune
+        };
+        let current_pid = std::process::id();
+        for entry in entries.flatten() {
+            let name = entry.file_name();
+            let name_str = name.to_string_lossy();
+            // Expected format: session_S_job_J.PID.txt
+            // The PID sits between the last '.' before ".txt" and the preceding '.'.
+            let file_pid: Option<u32> = name_str
+                .strip_suffix(".txt")
+                .and_then(|s| s.rsplit_once('.'))
+                .and_then(|(_, pid_str)| pid_str.parse().ok());
+            let Some(pid) = file_pid else {
+                continue; // not a job output file — skip
+            };
+            if pid == current_pid {
+                continue; // belongs to the current process — leave it alone
+            }
+            // Check if the owning process is still alive via /proc.
+            if std::path::Path::new(&format!("/proc/{}", pid)).exists() {
+                continue; // process is still running — leave it alone
+            }
+            // Process is gone: remove the stale file. Error intentionally ignored.
+            let _ = std::fs::remove_file(entry.path());
+        }
+    }
+}
+
 /// Manager for background jobs.
 pub struct JobManager {
     /// Process-unique ID for this manager, mixed into job output file paths.
@@ -420,7 +464,21 @@ pub struct JobManager {
 
 impl JobManager {
     /// Create a new job manager.
+    ///
+    /// On construction, best-effort prunes stale job output files left by
+    /// previously crashed kaish processes. All errors are intentionally ignored
+    /// — startup cleanup is opportunistic and must never prevent the manager
+    /// from being created (silent-fallback rule: the only case where silent is
+    /// correct is read-only / cleanup-only paths with no data loss risk).
+    ///
+    /// # Scoping decision
+    /// All sessions share a single `/tmp/kaish/jobs/` directory. Filenames embed
+    /// the OS PID that wrote them (`session_S_job_J.PID.txt`). Files from the
+    /// current process are never touched here — only files whose embedded PID
+    /// refers to a dead process are removed. On Linux we check `/proc/{pid}` for
+    /// existence; on other platforms we skip the prune rather than guess.
     pub fn new() -> Self {
+        prune_orphaned_job_files();
         Self {
             session_id: NEXT_SESSION_ID.fetch_add(1, Ordering::SeqCst),
             next_id: AtomicU64::new(1),

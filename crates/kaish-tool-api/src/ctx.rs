@@ -109,8 +109,14 @@ pub trait ToolCtx: Send + Sync {
     /// is exactly the coupling this trait exists to avoid. It is here so
     /// in-tree builtins needing job control / pipes / the dispatcher can keep
     /// full access without those internals leaking into the public surface.
+    ///
+    /// `#[doc(hidden)]`: present for in-tree use but deliberately kept off the
+    /// documented public surface so it doesn't advertise itself as a supported
+    /// downcast hatch.
+    #[doc(hidden)]
     fn as_any(&self) -> &dyn Any;
 
     /// Mutable counterpart to [`ToolCtx::as_any`].
+    #[doc(hidden)]
     fn as_any_mut(&mut self) -> &mut dyn Any;
 }

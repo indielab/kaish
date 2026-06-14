@@ -68,6 +68,9 @@ pub struct KaishServerHandler {
     /// `kaish-vfs commit` must run in the SAME call as the writes, or the
     /// transaction is discarded when the kernel is dropped at call exit.
     overlay: bool,
+    /// Last-sent resource-list snapshot (sorted URIs). Used to diff before
+    /// sending `notify_resource_list_changed` so no-op calls are suppressed.
+    last_resource_uris: Arc<RwLock<Vec<String>>>,
 }
 
 /// The client-facing description of the `execute` tool, composed at runtime.
@@ -157,6 +160,7 @@ impl KaishServerHandler {
             nonce_store: NonceStore::new(),
             init_paths,
             overlay: false,
+            last_resource_uris: Arc::new(RwLock::new(Vec::new())),
         })
     }
 
@@ -652,10 +656,29 @@ impl rmcp::ServerHandler for KaishServerHandler {
             }
         }
 
-        // Notify resource list changed — scripts may create/delete files
+        // Notify resource list changed only when the list actually changed.
+        // Diffing suppresses spurious notifications when scripts don't touch the VFS.
         if let Some(peer) = self.peer.get() {
-            // Explicitly ignored: notification is best-effort
-            let _ = peer.notify_resource_list_changed().await;
+            let current_uris = {
+                let vfs = self.vfs.read().await;
+                match resources::list_resources(&vfs, std::path::Path::new("/")).await {
+                    Ok(list) => {
+                        let mut uris: Vec<String> = list.into_iter().map(|r| r.uri).collect();
+                        uris.sort_unstable();
+                        uris
+                    }
+                    Err(_) => Vec::new(),
+                }
+            };
+            let changed = {
+                let last = self.last_resource_uris.read().await;
+                *last != current_uris
+            };
+            if changed {
+                *self.last_resource_uris.write().await = current_uris;
+                // Explicitly ignored: notification is best-effort
+                let _ = peer.notify_resource_list_changed().await;
+            }
         }
 
         // Send completion progress notification
