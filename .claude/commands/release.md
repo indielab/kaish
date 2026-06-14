@@ -153,7 +153,14 @@ and retry once.
 
 ## Known Issues
 
-- `kaish-glob` uses standalone `version = "X.Y.Z"` instead
-  of `version.workspace = true` and must be bumped manually.
+- All crates use `version.workspace = true`, so Phase 4 is just the root
+  workspace version plus the inter-crate `path + version` pins (20 strings as of
+  0.8.3). `kaish-glob` is no longer special-cased.
 - All inter-crate deps pin exact versions. These must match what's being published.
-- crates.io has a propagation delay — the 15s waits handle this.
+- crates.io has a propagation delay — `cargo publish` blocks until the crate is
+  available at the registry before returning, which covers it (the 15s waits are
+  belt-and-suspenders; foreground `sleep` is blocked in some harnesses anyway).
+- The crates.io token needs the **`publish-new`** scope for first-time crate
+  publishes; a publish-update-only token 403s on a brand-new crate.
+- `kaish-wasi` is deliberately **not published** (wasm binary target, no library
+  consumers) — it is absent from the Phase 7 publish list on purpose.
