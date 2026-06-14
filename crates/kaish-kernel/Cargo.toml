@@ -64,6 +64,7 @@ sha1 = { workspace = true }
 md-5 = { workspace = true }
 regex = { workspace = true }
 chrono = { workspace = true }
+chrono-tz = { workspace = true }
 similar = { workspace = true }
 
 # ripgrep family — `ignore` provides global-gitignore lookup and (later)

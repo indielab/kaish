@@ -590,7 +590,21 @@ cargo test 2>&1 | grep FAILED      # external | builtin
 
 # Format strings work (+ and - followed by non-letter are bare words)
 date +%s                           # unix timestamp
+date +%s%N                         # nanoseconds (%N is translated for you)
 date +%Y-%m-%d                     # formatted date
+
+# `date` follows the GNU dialect (-d, -I, -R, -r) and emits --json.
+# An unknown specifier fails loud (exit 2), never panics.
+date -u                            # UTC
+date -I                            # ISO 8601 date (2026-06-14)
+date -R                            # RFC 2822
+date -d "2 days ago" +%Y-%m-%d     # relative dates
+date -d "next friday"              # weekdays
+date -d "@1700000000"             # decode an epoch (quote the @)
+date -d "2026-06-01 -1 day"        # absolute date + offset
+date --tz Asia/Tokyo               # honor an IANA timezone (also reads $TZ)
+date -r file.txt                   # the file's last-modified time
+date --json                        # {"iso":…,"epoch":…,"weekday":…, …}
 ```
 
 **How it works:**

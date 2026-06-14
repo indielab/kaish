@@ -713,6 +713,44 @@ priority; decide whether multi-arg should accumulate per-path errors.
 Captured here so context from `cleanups-todo.md` / old `issues.md`
 isn't lost when those files are deleted.
 
+- **`date` builtin rewritten against the empirical spec — done 2026-06-14.**
+  Full disposable-rewrite of `builtin/date.rs` per [date-upgrades.md](date-upgrades.md)
+  (GNU dialect, the forms a 9-model fleet actually types). All three footguns
+  closed: **(1)** the format path translates GNU `%N`/`%3N`/`%6N`/`%9N` →
+  chrono `%9f`/… so `date +%s%N` *works*, and validates against `Item::Error`
+  up front so any genuinely-unknown specifier (`%Q`) is `exit 2`, never a worker
+  panic; **(2)** `@N` epoch-decodes (positional or `-d "@N"`), and a malformed
+  `@` is a loud error, never an echo; **(3)** `TZ` is honored — effective zone is
+  `-u` → UTC, else `--tz ZONE`, else exported `$TZ`, else host local, resolved
+  via the new `chrono-tz` dep; an unknown zone errors loudly. New surface:
+  `-d`/`--date` hand-rolled parser over the convergent subset (`now`/`today`/
+  `yesterday`/`tomorrow`, `±N units` / `N units ago`, `next`/`last <weekday>`,
+  absolute ISO, and the nested `<absolute> ± <offset>` idiom `2026-06-01 -1 day`);
+  `-I`/`--iso-8601[=FMT]`, `-R`/`--rfc-2822`, `--rfc-3339=FMT`; `-r FILE` mtime
+  through the VFS; `--json` field bundle (Amy chose to ship it now despite §6's
+  defer-pending-probe recommendation). `--unix`/`--iso`/`--format` demoted to
+  hidden aliases. Wall clock injected via a `Clock` trait (real `Utc::now` in
+  prod, `FixedClock` in tests) so every new path has an exact, fail-able
+  assertion. **DeepSeek-reviewed (deepseek-v4-pro via kaibo) post-landing**,
+  findings actioned. Headline was a real **DST correctness bug**: calendar math
+  ran on a `FixedOffset` collapsed *before* the shift, so `+N days`/`months`
+  across a DST transition in a named/local zone silently moved the wall clock by
+  an hour. Fixed by making the whole `-d` parser generic over `TimeZone` (math in
+  the concrete zone, collapse to `FixedOffset` only at render); `day`/`week`/
+  `month`/`year` now use calendar `Days`/`Months` (DST-aware), sub-day units use
+  a physical `Duration`. Coverage hardened 27→48 in-module + 7 kernel-routed:
+  added `--rfc-3339` (was a naked path), `-d`+`-r` conflict, `%3N`/`%6N`/`%9N`/
+  `%%N`/trailing-`%`, bad `-I`/`--rfc-3339` FMT, `-I hours/minutes/ns`, all unit
+  spellings/abbreviations, `in N units`/multi-term/explicit-negative offsets,
+  absolute-with-time, full weekday names, legacy hidden aliases, empty `-d`, bad
+  weekday, year overflow, `-u` overrides `$TZ`, a DST-crossing assertion, and
+  zone-carrying `--json` (all 7 fields pinned); the two tautological kernel tests
+  tightened to exact assertions. json-sweep `date` flipped String→Object;
+  LANGUAGE.md examples expanded. Documented limitations (not bugs): bare `@` is
+  lexer-rejected so the epoch form must be quoted (`date -d "@N"`); `%Z` on a
+  named zone renders the numeric offset, not the abbreviation (fixed-offset
+  render drops the IANA name).
+
 - **`ls -lR --json` silently dropped every file and size — fixed 2026-06-14.**
   Recursive long listing builds an `OutputData::table` whose root nodes are
   directory *groups* and whose actual entries (carrying the type/size cells)

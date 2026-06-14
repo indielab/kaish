@@ -91,7 +91,7 @@ const CASES: &[Case] = &[
     // drives `for v in $(cut …)`), so `--json` surfaces that array, not the
     // text-flattened scalar.
     Case { name: "cut", setup: &[], cmd: r#"printf 'a,b\n' | cut -d ',' -f 1 --json"#, expect: Expect::Array },
-    Case { name: "date", setup: &[], cmd: "date --json", expect: Expect::String },
+    Case { name: "date", setup: &[], cmd: "date --json", expect: Expect::Object },
     // dd with no of= emits a Bytes result; --json renders the base64 envelope
     // (an object). Reads a finite fixture — never a real /dev device, which
     // would hang here in passthrough mode.

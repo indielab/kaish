@@ -94,6 +94,7 @@ git2 = "0.20"
 
 # Date/time (date)
 chrono = "0.4"
+chrono-tz = "0.10"
 
 # jq (native implementation via jaq v2)
 jaq-core = "2.2"

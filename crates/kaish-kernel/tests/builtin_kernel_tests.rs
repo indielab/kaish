@@ -488,3 +488,88 @@ async fn printf_formats_int_and_string() {
     assert_eq!(code, 0, "printf should succeed: {out:?}");
     assert_eq!(out, "42-hi", "printf format: {out:?}");
 }
+
+// --- date: production binding + footgun regressions ------------------------
+//
+// These go through the full kernel (lex → parse → schema-bound argv → clap), so
+// they lock in behaviors the in-module unit tests (clean argv) can't: the
+// schema binding of a spaces-bearing `-d` value, and that the three documented
+// footguns stay closed. Only clock-independent forms are asserted exactly; the
+// kernel uses the real system clock.
+
+#[tokio::test]
+async fn date_at_epoch_decodes_through_kernel() {
+    let dir = tempdir().unwrap();
+    let kernel = kernel_at(dir.path());
+    let (out, code) = run(&kernel, "date -u -d \"@1700000000\"").await;
+    assert_eq!(code, 0, "@N decode should succeed: {out:?}");
+    assert_eq!(out, "2023-11-14 22:13:20", "@N should decode, not echo: {out:?}");
+}
+
+#[tokio::test]
+async fn date_nanos_specifier_translates_through_kernel() {
+    let dir = tempdir().unwrap();
+    let kernel = kernel_at(dir.path());
+    let (out, code) = run(&kernel, "date -u -d \"@1700000000\" +%s%N").await;
+    assert_eq!(code, 0, "%N should work, not panic: {out:?}");
+    assert_eq!(out, "1700000000000000000", "%N → nanoseconds: {out:?}");
+}
+
+#[tokio::test]
+async fn date_unknown_specifier_is_loud_not_panic() {
+    let dir = tempdir().unwrap();
+    let kernel = kernel_at(dir.path());
+    let (_out, code) = run(&kernel, "date +%Q").await;
+    assert_eq!(code, 2, "unknown specifier must exit 2, never panic");
+}
+
+#[tokio::test]
+async fn date_tz_is_honored_through_kernel() {
+    let dir = tempdir().unwrap();
+    let kernel = kernel_at(dir.path());
+    let (out, code) = run(&kernel, "date --tz Asia/Tokyo -d \"@1700000000\" +%H:%M").await;
+    assert_eq!(code, 0, "tz date should succeed: {out:?}");
+    assert_eq!(out, "07:13", "Tokyo is +09:00 from 22:13Z: {out:?}");
+}
+
+#[tokio::test]
+async fn date_relative_with_spaces_binds_through_kernel() {
+    // The schema-driven binding risk: a quoted `-d` value with spaces must
+    // reach clap as one argument. The kernel path can't inject a fixed clock,
+    // so pin the answer to an independently-computed expected value — a
+    // length/dash-count check would pass even if "2 weeks ago" silently
+    // degraded to "today".
+    let dir = tempdir().unwrap();
+    let kernel = kernel_at(dir.path());
+    let (out, code) = run(&kernel, "date -u -d \"2 weeks ago\" +%Y-%m-%d").await;
+    assert_eq!(code, 0, "spaces in -d must bind as one value: {out:?}");
+    let expected = (chrono::Utc::now() - chrono::Duration::weeks(2))
+        .format("%Y-%m-%d")
+        .to_string();
+    assert_eq!(out, expected, "should be exactly two weeks before today: {out:?}");
+}
+
+#[tokio::test]
+async fn date_absolute_plus_offset_through_kernel() {
+    let dir = tempdir().unwrap();
+    let kernel = kernel_at(dir.path());
+    let (out, code) = run(&kernel, "date -u -d \"2026-06-01 -1 day\" +%Y-%m-%d").await;
+    assert_eq!(code, 0, "absolute+offset should succeed: {out:?}");
+    assert_eq!(out, "2026-05-31", "last day of previous month: {out:?}");
+}
+
+#[tokio::test]
+async fn date_json_emits_fields_through_kernel() {
+    let dir = tempdir().unwrap();
+    let kernel = kernel_at(dir.path());
+    // Pin epoch↔iso↔utc consistency at one instant rather than just checking
+    // field types (which would pass with epoch:0 / a wrong weekday).
+    let (out, code) = run(&kernel, "date -u -d \"@1700000000\" --json").await;
+    assert_eq!(code, 0, "date --json should succeed: {out:?}");
+    let parsed: serde_json::Value = serde_json::from_str(&out).expect("date --json is JSON");
+    assert_eq!(parsed["epoch"], 1_700_000_000_i64, "{out:?}");
+    assert_eq!(parsed["iso"], "2023-11-14T22:13:20+00:00", "{out:?}");
+    assert_eq!(parsed["utc"], "2023-11-14T22:13:20Z", "{out:?}");
+    assert_eq!(parsed["weekday"], "Tuesday", "{out:?}");
+    assert_eq!(parsed["offset_seconds"], 0, "{out:?}");
+}
