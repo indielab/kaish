@@ -182,35 +182,51 @@ Remaining open work:
 
 ## P2 — Focused refactors & real bugs
 
-### Streaming file reads — `wc` landed 2026-06-14; spread to the other scanners
-First slice shipped: scan-oriented builtins no longer read whole files into
-memory. Mechanism (chosen to respect kaish-vfs's runtime-free trait — no
-`AsyncRead`/tokio in the `Filesystem` trait, so WASI stays clean):
-- `LocalFs::read_range` now does a true positional `seek + take` for byte ranges
+### Streaming file reads — wc/checksum/grep/cmp/cat landed 2026-06-14; residuals
+Scan-oriented builtins no longer read whole files into memory. Mechanism
+(chosen to respect kaish-vfs's runtime-free trait — no `AsyncRead`/tokio in the
+`Filesystem` trait, so WASI stays clean):
+- `LocalFs::read_range` does a true positional `seek + take` for byte ranges
   instead of read-whole-then-slice. Bonus: this also fixed `head -c bigfile`,
   which previously slurped the whole file before slicing.
 - `ExecContext::read_file_chunked(path, chunk_size, f)` pulls a file forward in
   `STREAM_CHUNK_SIZE` (256 KiB) windows via `read_range(bytes)` and feeds each
-  chunk to a closure; bounded memory, EOF on first empty chunk.
-- `wc` converted to an incremental line-buffered `WcCounter` (exact parity with
-  `str::lines`/`split_whitespace`/`chars`/`len`, proven by a split-at-every-byte
-  test incl. multibyte). A `RecordingFs` test proves the reads are chunk-bounded
-  and never a whole-file read.
+  chunk to a sync closure; bounded memory, EOF on first empty chunk. Builtins
+  whose sink is async (cmp's lockstep, cat→pipe) can't use the closure form and
+  run their own offset loop over `read_range(bytes)` instead.
+
+Landed:
+- `wc` — incremental line-buffered `WcCounter` (`a610044`).
+- `checksum` — incremental `StreamHasher` (`770766c`).
+- `grep` (single-file simple path) — `GrepLineScanner`, incremental UTF-8/binary
+  detection, byte-identical to the whole-buffer path incl. rich `--json`
+  (`0fce8c4`). Complex flags (-A/-B/-C/-c/-q/-l/-o) stay whole-buffer.
+- `cmp` — lockstep two-file streaming with early exit on first difference
+  (`dcb806c`); a `-` stdin operand keeps the whole-buffer path.
+- `cat` (single-file, piped) — streams raw bytes to `pipe_stdout`, early-exits on
+  broken pipe (`e220767`); terminal `cat` still materialises (must, to return).
+
+Each landed conversion has a parity test against the **production whole-buffer
+path** (not a self-comparison) across chunk-split points, plus a `RecordingFs`
+bounded-read proof. The compare-against-production lesson came from a grep draft
+that hardcoded `byte_offset=0`/`path=null` in `--json` and still passed a
+text-only self-comparison.
 
 Remaining:
-- **Convert the other forward scanners**: `grep` (file path; `stream_grep`
-  already does the stdin→stdout case), `cat` (single-file path), `checksum`,
-  `base64`. Each can reuse `read_file_chunked` + a per-line/per-chunk fold.
+- **`base64`** — deferred. Only a pipe-case win (output grows with input), the
+  3-byte/4-char carry is the fiddliest of the set, and big-file base64 is
+  unlikely in kaish. Revisit if a workload needs it.
 - **Deliberately NOT streamed** (need all input or random access — leave whole-
-  buffer): `sort`, `uniq` (global dedup), `diff`, `cmp`, `jq`, anything emitting
+  buffer): `sort`, `uniq` (global dedup), `diff`, `jq`, anything emitting
   structured `.data`. The `.data`/`OutputData` channel is whole-value by design
   (it powers `--json` and `for x in $(cmd)`); streaming only ever applies to the
   raw-byte path.
-- **`read_file_chunked` re-opens the file per chunk** on LocalFs (open+seek per
-  256 KiB). Cheap relative to the read, but a stateful streaming handle would cut
-  the syscalls. Deferred — would mean an `AsyncRead`-returning method, which
-  reintroduces the tokio-in-trait problem the chunk approach avoided. Revisit
-  only if a profile shows the re-opens matter.
+- **`read_range` re-opens the file per chunk** on LocalFs (open+seek per 256 KiB
+  — affects `read_file_chunked` and the cmp/cat offset loops). Cheap relative to
+  the read, but a stateful streaming handle would cut the syscalls. Deferred —
+  would mean an `AsyncRead`-returning method, which reintroduces the
+  tokio-in-trait problem the chunk approach avoided. Revisit only if a profile
+  shows the re-opens matter.
 
 ### Kernel-routed port residuals: `read`, `env`, `exec` deep coverage
 The realworld port is **done 2026-06-11** (see Resolved) — 48 tests through
