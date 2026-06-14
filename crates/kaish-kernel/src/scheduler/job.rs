@@ -403,7 +403,8 @@ impl Job {
 static NEXT_SESSION_ID: AtomicU64 = AtomicU64::new(0);
 
 /// Remove job output files in `/tmp/kaish/jobs/` that were written by processes
-/// which are no longer running. Called once at [`JobManager::new`] time.
+/// which are no longer running. Run once per process (guarded by a `Once` in
+/// [`JobManager::new`]).
 ///
 /// Strategy: filenames follow `session_S_job_J.PID.txt`. We parse the PID
 /// component and skip files whose PID matches the current process (those
@@ -478,7 +479,12 @@ impl JobManager {
     /// refers to a dead process are removed. On Linux we check `/proc/{pid}` for
     /// existence; on other platforms we skip the prune rather than guess.
     pub fn new() -> Self {
-        prune_orphaned_job_files();
+        // Orphans from dead sessions only need pruning once per process, not on
+        // every JobManager (kernels + every fork build one). The `Once` keeps
+        // the dir scan / `/proc` checks off the hot path of background jobs,
+        // scatter workers, and pipeline stages.
+        static PRUNE_ONCE: std::sync::Once = std::sync::Once::new();
+        PRUNE_ONCE.call_once(prune_orphaned_job_files);
         Self {
             session_id: NEXT_SESSION_ID.fetch_add(1, Ordering::SeqCst),
             next_id: AtomicU64::new(1),
