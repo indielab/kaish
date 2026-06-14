@@ -259,8 +259,16 @@ impl<'a, F: WalkerFs> FileWalker<'a, F> {
             for (entry_name, entry_is_dir, entry_is_symlink) in entries {
                 let full_path = dir.join(&entry_name);
 
-                // Check hidden files
-                if !self.options.include_hidden && entry_name.starts_with('.') {
+                // Hidden-file rule (bash, no `dotglob`). With a glob pattern the
+                // leading-dot decision is made per-component by `matches_pattern`
+                // (yield) and `could_descend` (traversal) below: `*` skips
+                // dotfiles while `.*`/`.github`/`**/.env` reach them. With no
+                // pattern — a plain recursive walk — hide dot entries unless
+                // `include_hidden`.
+                if !self.options.include_hidden
+                    && self.pattern.is_none()
+                    && entry_name.starts_with('.')
+                {
                     continue;
                 }
 
@@ -352,17 +360,15 @@ impl<'a, F: WalkerFs> FileWalker<'a, F> {
                         current_filter.clone()
                     };
 
-                    // Only recurse if the pattern requires it
+                    // Only recurse if some entry beneath this directory could
+                    // still match. `could_descend` honours the leading-dot rule,
+                    // so `**` enters visible dirs but not hidden ones (without
+                    // dotglob), while an explicitly named `.github` is entered.
                     let should_recurse = match &self.pattern {
                         None => true,
                         Some(pat) => {
-                            if pat.has_globstar() {
-                                true
-                            } else if let Some(fixed) = pat.fixed_depth() {
-                                depth + 1 < fixed
-                            } else {
-                                true
-                            }
+                            let relative = self.relative_path(&full_path);
+                            pat.could_descend(&relative, self.options.include_hidden)
                         }
                     };
 
@@ -409,7 +415,7 @@ impl<'a, F: WalkerFs> FileWalker<'a, F> {
         match &self.pattern {
             Some(pattern) => {
                 let relative = self.relative_path(path);
-                pattern.matches(&relative)
+                pattern.matches_walk(&relative, self.options.include_hidden)
             }
             None => true,
         }
@@ -703,6 +709,166 @@ mod tests {
 
         assert!(!files.iter().any(|p| p.ends_with(".hidden")));
         assert!(files.iter().any(|p| p.ends_with("main.rs")));
+    }
+
+    #[tokio::test]
+    async fn test_dot_pattern_matches_dotfiles() {
+        // `.*` explicitly names a leading dot, so it matches dotfiles (bash).
+        let fs = MemoryFs::new();
+        fs.add_file("/.gitignore", b"x").await;
+        fs.add_file("/.env", b"x").await;
+        fs.add_file("/visible.txt", b"x").await;
+
+        let walker = FileWalker::new(&fs, "/")
+            .with_pattern(GlobPath::new(".*").unwrap())
+            .with_options(WalkOptions {
+                respect_gitignore: false,
+                ..Default::default()
+            });
+        let files = walker.collect().await.unwrap();
+
+        assert!(files.iter().any(|p| p.ends_with(".gitignore")));
+        assert!(files.iter().any(|p| p.ends_with(".env")));
+        assert!(!files.iter().any(|p| p.ends_with("visible.txt")));
+    }
+
+    #[tokio::test]
+    async fn test_star_skips_dotfiles() {
+        // A bare `*` never matches a leading dot without dotglob.
+        let fs = MemoryFs::new();
+        fs.add_file("/.env", b"x").await;
+        fs.add_file("/visible.txt", b"x").await;
+
+        let walker = FileWalker::new(&fs, "/")
+            .with_pattern(GlobPath::new("*").unwrap())
+            .with_options(WalkOptions {
+                respect_gitignore: false,
+                entry_types: EntryTypes::all(),
+                ..Default::default()
+            });
+        let files = walker.collect().await.unwrap();
+
+        assert!(!files.iter().any(|p| p.ends_with(".env")));
+        assert!(files.iter().any(|p| p.ends_with("visible.txt")));
+    }
+
+    #[tokio::test]
+    async fn test_literal_dotdir_is_traversed() {
+        // An explicitly named `.github` directory is descended into.
+        let fs = MemoryFs::new();
+        fs.add_file("/.github/workflows/ci.yml", b"x").await;
+        fs.add_file("/.github/.secret", b"x").await;
+
+        let walker = FileWalker::new(&fs, "/")
+            .with_pattern(GlobPath::new(".github/**/*.yml").unwrap())
+            .with_options(WalkOptions {
+                respect_gitignore: false,
+                ..Default::default()
+            });
+        let files = walker.collect().await.unwrap();
+
+        assert!(files.iter().any(|p| p.ends_with("ci.yml")));
+    }
+
+    #[tokio::test]
+    async fn test_dotdir_star_excludes_nested_dotfiles() {
+        // `.github/*` reaches into the named dot dir, but `*` still skips the
+        // dot-prefixed children inside it.
+        let fs = MemoryFs::new();
+        fs.add_file("/.github/config.yml", b"x").await;
+        fs.add_file("/.github/.secret", b"x").await;
+
+        let walker = FileWalker::new(&fs, "/")
+            .with_pattern(GlobPath::new(".github/*").unwrap())
+            .with_options(WalkOptions {
+                respect_gitignore: false,
+                entry_types: EntryTypes::all(),
+                ..Default::default()
+            });
+        let files = walker.collect().await.unwrap();
+
+        assert!(files.iter().any(|p| p.ends_with("config.yml")));
+        assert!(!files.iter().any(|p| p.ends_with(".secret")));
+    }
+
+    #[tokio::test]
+    async fn test_globstar_skips_dotdirs_without_dotglob() {
+        // `**` does not descend into hidden directories without dotglob.
+        let fs = MemoryFs::new();
+        fs.add_file("/.github/buried.rs", b"x").await;
+        fs.add_file("/top.rs", b"x").await;
+
+        let walker = FileWalker::new(&fs, "/")
+            .with_pattern(GlobPath::new("**/*.rs").unwrap())
+            .with_options(WalkOptions {
+                respect_gitignore: false,
+                ..Default::default()
+            });
+        let files = walker.collect().await.unwrap();
+
+        assert!(files.iter().any(|p| p.ends_with("top.rs")));
+        assert!(!files.iter().any(|p| p.ends_with("buried.rs")));
+    }
+
+    #[tokio::test]
+    async fn test_globstar_then_explicit_dotfile() {
+        // `**/.env` reaches a dotfile at the root and inside visible dirs, but
+        // not inside a hidden dir (which `**` cannot traverse without dotglob).
+        let fs = MemoryFs::new();
+        fs.add_file("/.env", b"x").await;
+        fs.add_file("/sub/.env", b"x").await;
+        fs.add_file("/.hidden/.env", b"x").await;
+        fs.add_file("/sub/visible.txt", b"x").await;
+
+        let walker = FileWalker::new(&fs, "/")
+            .with_pattern(GlobPath::new("**/.env").unwrap())
+            .with_options(WalkOptions {
+                respect_gitignore: false,
+                ..Default::default()
+            });
+        let files = walker.collect().await.unwrap();
+
+        assert_eq!(files.iter().filter(|p| p.ends_with(".env")).count(), 2, "{files:?}");
+        assert!(files.iter().any(|p| p == &PathBuf::from("/.env")));
+        assert!(files.iter().any(|p| p == &PathBuf::from("/sub/.env")));
+        assert!(!files.iter().any(|p| p.starts_with("/.hidden")));
+    }
+
+    #[tokio::test]
+    async fn test_globstar_then_explicit_dotdir() {
+        // `**/.github/*.yml` enters the named dot dir at any depth.
+        let fs = MemoryFs::new();
+        fs.add_file("/.github/ci.yml", b"x").await;
+        fs.add_file("/sub/.github/release.yml", b"x").await;
+
+        let walker = FileWalker::new(&fs, "/")
+            .with_pattern(GlobPath::new("**/.github/*.yml").unwrap())
+            .with_options(WalkOptions {
+                respect_gitignore: false,
+                ..Default::default()
+            });
+        let files = walker.collect().await.unwrap();
+
+        assert!(files.iter().any(|p| p.ends_with("ci.yml")), "{files:?}");
+        assert!(files.iter().any(|p| p.ends_with("release.yml")), "{files:?}");
+    }
+
+    #[tokio::test]
+    async fn test_include_hidden_acts_like_dotglob() {
+        // include_hidden == dotglob: `**` then reaches hidden directories.
+        let fs = MemoryFs::new();
+        fs.add_file("/.github/buried.rs", b"x").await;
+
+        let walker = FileWalker::new(&fs, "/")
+            .with_pattern(GlobPath::new("**/*.rs").unwrap())
+            .with_options(WalkOptions {
+                respect_gitignore: false,
+                include_hidden: true,
+                ..Default::default()
+            });
+        let files = walker.collect().await.unwrap();
+
+        assert!(files.iter().any(|p| p.ends_with("buried.rs")));
     }
 
     #[tokio::test]

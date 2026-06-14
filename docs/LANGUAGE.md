@@ -498,6 +498,25 @@ The `glob` builtin still works for advanced options like `--exclude` and recursi
 glob "**/*.rs" --exclude="*_test.rs"
 ```
 
+### Hidden files (dotfiles)
+
+kaish follows bash's default (no `dotglob`) rule for entries whose name begins
+with `.`: a leading dot is matched **only** by a pattern segment that explicitly
+begins with a literal `.`. Bare wildcards never match a leading dot, and `**`
+does not descend into hidden directories.
+
+```bash
+ls *                # visible entries only — .env, .github are skipped
+ls .*               # the dotfiles: .env, .gitignore, …
+cat .github/*       # reaches into a named dot dir (but `*` still skips .secret inside)
+glob "**/.env"      # every .env, at root or under any *visible* directory
+glob "**/*.rs"      # never matches .hidden.rs or files under .git/
+```
+
+The `glob` builtin's `-a`/`--hidden` flag (and any hidden-inclusive walk) acts
+like `shopt -s dotglob`: bare wildcards then match dotfiles too. `find` includes
+hidden entries by default.
+
 ## Error Handling
 
 ```bash

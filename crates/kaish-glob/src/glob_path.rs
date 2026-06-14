@@ -214,6 +214,107 @@ impl GlobPath {
         }
     }
 
+    /// Match a path under file-walk semantics, honouring the leading-dot rule.
+    ///
+    /// When `dotglob` is false (the default) a leading `.` in a path component
+    /// is matched only by a segment that explicitly begins with a literal `.`:
+    /// bare wildcards (`*`, `?`, `[…]`) and globstar (`**`) skip dot entries, so
+    /// `*` hides dotfiles while `.*`, `.github`, and `**/.env` reach them.
+    /// `dotglob == true` disables the rule (bash `shopt -s dotglob`).
+    ///
+    /// This differs from [`matches`](Self::matches), which is dotfile-agnostic
+    /// and used for include/exclude filtering of already-walked paths.
+    pub fn matches_walk(&self, path: &Path, dotglob: bool) -> bool {
+        let components: Vec<&str> = path
+            .components()
+            .filter_map(|c| c.as_os_str().to_str())
+            .collect();
+        self.walk_match(&components, 0, 0, dotglob, false)
+    }
+
+    /// Whether the walker should descend into the directory at relative path
+    /// `dir` — i.e. whether some entry beneath it could still match.
+    ///
+    /// Honours the same leading-dot rule as [`matches_walk`](Self::matches_walk):
+    /// `**` does not descend into hidden directories without `dotglob`, while an
+    /// explicitly named dot directory (`.github`, or a `.foo` segment reached
+    /// through a zero-width `**`) is entered.
+    pub fn could_descend(&self, dir: &Path, dotglob: bool) -> bool {
+        let components: Vec<&str> = dir
+            .components()
+            .filter_map(|c| c.as_os_str().to_str())
+            .collect();
+        self.walk_match(&components, 0, 0, dotglob, true)
+    }
+
+    /// Shared engine for [`matches_walk`] and [`could_descend`].
+    ///
+    /// In full-match mode (`prefix == false`) it answers "does this complete
+    /// path match?". In prefix mode (`prefix == true`) `components` are a
+    /// directory's path and it answers "could a deeper entry match?", which the
+    /// walker uses to decide descent.
+    fn walk_match(
+        &self,
+        components: &[&str],
+        seg_idx: usize,
+        comp_idx: usize,
+        dotglob: bool,
+        prefix: bool,
+    ) -> bool {
+        if comp_idx >= components.len() {
+            return if prefix {
+                // Directory prefix fully consumed: descend if any segment
+                // remains for a child component to match.
+                seg_idx < self.segments.len()
+            } else {
+                // Full match: only trailing globstars may match zero components.
+                self.segments[seg_idx..]
+                    .iter()
+                    .all(|s| matches!(s, PathSegment::Globstar))
+            };
+        }
+        if seg_idx >= self.segments.len() {
+            return false;
+        }
+
+        match &self.segments[seg_idx] {
+            PathSegment::Globstar => {
+                // Match zero components...
+                if self.walk_match(components, seg_idx + 1, comp_idx, dotglob, prefix) {
+                    return true;
+                }
+                // ...or consume one component and stay on the globstar. Without
+                // dotglob, `**` never traverses a hidden component.
+                if dotglob || !components[comp_idx].starts_with('.') {
+                    self.walk_match(components, seg_idx, comp_idx + 1, dotglob, prefix)
+                } else {
+                    false
+                }
+            }
+
+            PathSegment::Literal(lit) => {
+                if components[comp_idx] == *lit {
+                    self.walk_match(components, seg_idx + 1, comp_idx + 1, dotglob, prefix)
+                } else {
+                    false
+                }
+            }
+
+            PathSegment::Pattern(pat) => {
+                let comp = components[comp_idx];
+                // A bare wildcard segment does not match a leading dot.
+                if comp.starts_with('.') && !dotglob && !pattern_leads_with_dot(pat) {
+                    return false;
+                }
+                if self.matches_component(pat, comp) {
+                    self.walk_match(components, seg_idx + 1, comp_idx + 1, dotglob, prefix)
+                } else {
+                    false
+                }
+            }
+        }
+    }
+
     /// Check if a string is a literal (no wildcards).
     fn is_literal(s: &str) -> bool {
         !s.contains('*') && !s.contains('?') && !s.contains('[') && !s.contains('{')
@@ -278,6 +379,17 @@ impl GlobPath {
     fn matches_component(&self, pattern: &str, component: &str) -> bool {
         glob_match(pattern, component)
     }
+}
+
+/// Whether a wildcard segment explicitly names a leading dot — i.e. some brace
+/// alternative begins with a literal `.` (`.*`, `.[bg]it`, `{.,}config`). A
+/// leading wildcard (`*`, `?`, `[…]`) does not count — matching bash, even a
+/// character class that *could* match `.` (`[.]foo`) does not, because the
+/// first pattern character is `[`, not a literal `.`.
+fn pattern_leads_with_dot(pattern: &str) -> bool {
+    crate::glob::expand_braces(pattern)
+        .iter()
+        .any(|alt| alt.starts_with('.'))
 }
 
 #[cfg(test)]
@@ -430,6 +542,62 @@ mod tests {
         let pat = GlobPath::new("**/*.rs").unwrap();
         assert!(pat.matches(Path::new(".hidden.rs")));
         assert!(pat.matches(Path::new(".config/settings.rs")));
+    }
+
+    #[test]
+    fn test_matches_walk_leading_dot_rule() {
+        let no = false; // dotglob off
+
+        // Bare wildcard skips dotfiles; explicit dot segment matches them.
+        assert!(!GlobPath::new("*").unwrap().matches_walk(Path::new(".env"), no));
+        assert!(GlobPath::new("*").unwrap().matches_walk(Path::new("visible"), no));
+        assert!(GlobPath::new(".*").unwrap().matches_walk(Path::new(".env"), no));
+        assert!(!GlobPath::new(".*").unwrap().matches_walk(Path::new("visible"), no));
+
+        // Explicit dot directory, and the `*` inside still hides dotfiles.
+        assert!(GlobPath::new(".github/*").unwrap().matches_walk(Path::new(".github/ci.yml"), no));
+        assert!(!GlobPath::new(".github/*").unwrap().matches_walk(Path::new(".github/.secret"), no));
+
+        // Globstar does not match or traverse hidden components without dotglob.
+        assert!(!GlobPath::new("**/*.rs").unwrap().matches_walk(Path::new(".hidden.rs"), no));
+        assert!(!GlobPath::new("**/*.rs").unwrap().matches_walk(Path::new(".git/config.rs"), no));
+        assert!(GlobPath::new("**/*.rs").unwrap().matches_walk(Path::new("src/main.rs"), no));
+
+        // Explicit dot segment AFTER a globstar (the regression DeepSeek found).
+        assert!(GlobPath::new("**/.env").unwrap().matches_walk(Path::new(".env"), no));
+        assert!(GlobPath::new("**/.env").unwrap().matches_walk(Path::new("sub/.env"), no));
+        assert!(!GlobPath::new("**/.env").unwrap().matches_walk(Path::new(".hidden/.env"), no));
+        assert!(GlobPath::new("**/.github/*.yml").unwrap()
+            .matches_walk(Path::new(".github/ci.yml"), no));
+        assert!(GlobPath::new("**/.github/*.yml").unwrap()
+            .matches_walk(Path::new("sub/.github/ci.yml"), no));
+
+        // dotglob disables the rule (bash `shopt -s dotglob`).
+        assert!(GlobPath::new("*").unwrap().matches_walk(Path::new(".env"), true));
+        assert!(GlobPath::new("**/*.rs").unwrap().matches_walk(Path::new(".git/config.rs"), true));
+    }
+
+    #[test]
+    fn test_could_descend_leading_dot_rule() {
+        let no = false;
+
+        // `**` descends into visible dirs but not hidden ones.
+        assert!(GlobPath::new("**/.env").unwrap().could_descend(Path::new("sub"), no));
+        assert!(!GlobPath::new("**/.env").unwrap().could_descend(Path::new(".hidden"), no));
+
+        // An explicitly named dot dir is entered, including through zero-width `**`.
+        assert!(GlobPath::new(".github/*").unwrap().could_descend(Path::new(".github"), no));
+        assert!(GlobPath::new("**/.github/*.yml").unwrap()
+            .could_descend(Path::new(".github"), no));
+
+        // Bare `*` (fixed depth 1) needs no descent; `**` enters visible dirs.
+        assert!(!GlobPath::new("*").unwrap().could_descend(Path::new("sub"), no));
+        assert!(GlobPath::new("src/*.rs").unwrap().could_descend(Path::new("src"), no));
+        assert!(!GlobPath::new("src/*.rs").unwrap().could_descend(Path::new("other"), no));
+
+        // dotglob lets `**` descend into hidden dirs.
+        assert!(GlobPath::new("**/*.rs").unwrap().could_descend(Path::new(".git"), true));
+        assert!(!GlobPath::new("**/*.rs").unwrap().could_descend(Path::new(".git"), no));
     }
 
     #[test]

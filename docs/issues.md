@@ -328,6 +328,18 @@ targets.
 
 ## P3 — Scheduler and infra
 
+### `GlobPath::walk_match` globstar recursion has no work bound
+`walk_match` (and the older `match_segments` it parallels) backtrack on globstar
+with no `MAX_MATCH_CALLS` guard — unlike the single-component `match_bounded` in
+`glob.rs`, which caps at 100_000 calls for ReDoS safety. Calls are bounded by
+`C(n+g-1, g)` for `g` collapsed globstars and `n` path components: polynomial in
+real filesystem depth, but an adversarial pattern (`a/**/b/**/c/**/…`) against a
+deep path could blow up. Practical risk is low today — the walker only matches
+against real FS paths, and this is **not a regression** (`match_segments`/`matches()`
+already share the unbounded shape). If kaish ever matches user-supplied patterns
+against user-supplied path *strings*, add a call counter to `walk_match`.
+Surfaced by DeepSeek review of the dotfile-glob fix (2026-06-14).
+
 ### `kill -<sig>` bash shorthand (`kill -9 %1`, `kill -STOP %1`) isn't accepted
 `kill` takes the signal via `--signal NAME` / `-s NAME` only; the bash idioms
 `kill -9 %1`, `kill -KILL %1`, `kill -STOP %1` fail at clap arg parsing (`-9`
