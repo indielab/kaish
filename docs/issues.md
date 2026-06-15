@@ -294,6 +294,35 @@ targets.
 
 ---
 
+### v0.8.4 review residuals (Gemini Pro, 2026-06-14)
+
+Three genuine findings from the v0.8.4 release review that are **pre-existing or
+low-impact**, deferred out of the release. (A fourth — jq `--arg=NAME` falsely
+E007-ing — was investigated and rejected: the equals form is not a legal jq
+invocation, real jq exits 2 "Unknown option", so rejecting it before execution
+is correct. Pinned by `jq_equals_form_arg_is_rejected_not_silently_run`.)
+
+- **`sed -e EXPR -e EXPR` silently keeps only the last expression** (real bug,
+  pre-existing — `SedArgs::expression` is `Option<String>` and
+  `collect_expressions` does single-key `args.named` lookups, so the kernel's
+  `consumes<=1` HashMap overwrite drops earlier `-e`s). The `help` example
+  `sed -e 's/a/b/' -e 's/c/d/' file.txt` advertises a feature that doesn't fully
+  work — a "never silently corrupt" violation. Fix: `expression: Vec<String>`
+  with `ArgAction::Append`, plus kernel accumulation of repeated 1-value flags
+  into a `Value::Json(Array)`. Same class likely affects other repeatable flags.
+- **Combined short flags only bind a glued value when the value-flag is first**
+  (feature gap, pre-existing — `cut -f1` works, but `grep -ivC 3` treats `C` as a
+  bool because the leading `i`/`v` are bool flags, leaving `3` as a stray
+  positional → runtime arity error). Fix: in `build_args_async`'s multi-char
+  short-flag arm, walk the chars and consume the tail/next positional once a
+  value-taking flag is reached.
+- **`diff -C 3 -C 4` (redundant context flags) miscounts arity** (P4-trivial —
+  `context_steals_positional` subtracts 1 for a `HashSet`-deduped `-C`, so two
+  occurrences leave a surplus positional and false E011). Redundant usage; fix
+  only if it ever bites.
+
+---
+
 ## P3 — Scheduler and infra
 
 ### Code formatting (rustfmt) — considered and declined 2026-06-14

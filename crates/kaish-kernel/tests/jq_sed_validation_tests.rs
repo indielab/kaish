@@ -58,6 +58,24 @@ async fn jq_bound_var_filter_does_not_false_error() {
     assert!(result.ok(), "should succeed at runtime: {:?}", result.err);
 }
 
+/// The `--arg=NAME` equals form is not a legal jq invocation (real jq rejects it
+/// as "Unknown option"), so kaish does not special-case it: the command is
+/// rejected before execution rather than slipping through to a runtime error.
+#[tokio::test]
+async fn jq_equals_form_arg_is_rejected_not_silently_run() {
+    let tmp = tempfile::tempdir().unwrap();
+    let kernel = kernel_at(tmp.path());
+
+    let err = kernel
+        .execute(r#"echo '{"foo":1}' | jq --arg=x hello '$x'"#)
+        .await
+        .expect_err("illegal --arg=NAME form should not succeed");
+    assert!(
+        err.to_string().contains("E007"),
+        "rejected at validation: {err}"
+    );
+}
+
 /// A filter stored in a variable expands to `<dynamic>` at validation time —
 /// the validator must skip and let runtime handle it.
 #[tokio::test]

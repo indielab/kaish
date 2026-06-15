@@ -365,6 +365,8 @@ impl Tool for JqNative {
         // At validation time `--arg` appears as `Arg::LongFlag("arg")` → stored in
         // `args.flags`; the execute-time Array-of-pairs form (`consumes=2` result
         // in `args.named`) is not available until the kernel's runtime pre-parser runs.
+        // (The `--arg=NAME` equals form is not a legal jq invocation — real jq
+        // rejects it as "Unknown option" — so we deliberately do not skip on it.)
         if args.flags.contains("arg") || args.flags.contains("argjson") {
             return issues;
         }
