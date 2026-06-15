@@ -52,7 +52,35 @@ Report any mismatches: ghost entries (listed but don't exist), missing entries
 
 If no builtins changed since the last tag, skip this phase.
 
-## Phase 3: Code Review
+## Phase 3: Changelog Consistency Check
+
+The `## [Unreleased]` section of `CHANGELOG.md` must account for every
+user/agent/embedder-facing change since the last tag — not just the ones whose
+commits happened to touch the changelog. Reconcile it against git before
+releasing:
+
+1. List commits since the last tag (oldest first):
+   `git log <prev-tag>..HEAD --oneline --reverse`
+2. For each commit that changes observable behavior, confirm an `Unreleased`
+   bullet exists in the right group (`Added`/`Changed`/`Deprecated`/`Removed`/
+   `Fixed`/`Security`). Read the commit diff (`git show <sha>`) when the message
+   alone doesn't make the user-facing effect clear.
+3. Skip pure internal churn — `docs(issues)` punch-list edits, `test:`-only
+   commits, `chore(clippy)`/lint cleanups, refactors with no observable effect,
+   and version bumps. Everything else needs a bullet.
+4. Write any missing bullets: one concise scannable line each, mark breaking
+   changes with a leading `**BREAKING:**`, and verify the behavior from the diff
+   rather than paraphrasing the commit subject.
+
+Note: a commit's own diff touching `CHANGELOG.md` is **not** proof of coverage —
+a feature batch is often documented under the version it shipped in, while
+later fixes to it land post-tag and are easy to miss. Trust the commit list,
+not the changelog's git history.
+
+Report what you added, then continue. (The release-time rename of `Unreleased`
+to the dated version section happens in Phase 5.)
+
+## Phase 4: Code Review
 
 Before releasing, get a second opinion on changes since the last release tag.
 
@@ -66,7 +94,7 @@ Before releasing, get a second opinion on changes since the last release tag.
 4. Report the review summary to the user
 5. Ask the user to confirm proceeding with the release
 
-## Phase 4: Version Bump
+## Phase 5: Version Bump
 
 All crates use `version.workspace = true`, so the crate versions come from one
 place — but every `path + version` inter-crate dependency pin must be bumped
@@ -101,19 +129,30 @@ crates/kaish-repl/Cargo.toml       → kaish-kernel, kaish-client
 
 After editing, run `cargo check --all` to verify the versions resolve correctly.
 
-## Phase 5: Commit and Tag
+### Stamp the changelog
 
-1. Stage all modified Cargo.toml files by name (never `git add -A`)
+Now rename the changelog's `Unreleased` section to this release:
+
+1. In `CHANGELOG.md`, rename `## [Unreleased]` to `## [$ARGUMENTS] - YYYY-MM-DD`
+   (today's date).
+2. Add a fresh empty `## [Unreleased]` heading above it.
+3. Add the `[$ARGUMENTS]` compare link at the bottom of the file, following the
+   existing pattern (`[$ARGUMENTS]: https://…/compare/v<prev>...v$ARGUMENTS`),
+   and update the `[Unreleased]` compare link to point at `v$ARGUMENTS...HEAD`.
+
+## Phase 6: Commit and Tag
+
+1. Stage all modified Cargo.toml files **and `CHANGELOG.md`** by name (never `git add -A`)
 2. Commit with message: `chore: bump to v$ARGUMENTS`
 3. Create annotated tag: `git tag -a v$ARGUMENTS -m "Release v$ARGUMENTS"`
 4. Run `git status` to verify clean tree
 
-## Phase 6: Push
+## Phase 7: Push
 
 1. Ask the user to confirm pushing to origin
 2. Push commit and tag: `git push origin main && git push origin v$ARGUMENTS`
 
-## Phase 7: Publish to crates.io
+## Phase 8: Publish to crates.io
 
 Publish in dependency order. Each crate must be available on crates.io before
 its dependents can be published. Wait 15 seconds between publishes.
@@ -145,7 +184,7 @@ already published — skip it and continue with the next one.
 If a publish fails because a dependency isn't available yet, wait 30 seconds
 and retry once.
 
-## Phase 8: Verify
+## Phase 9: Verify
 
 1. Check the release is visible: `cargo search kaish-repl`
 2. Report the published versions to the user
@@ -153,7 +192,7 @@ and retry once.
 
 ## Known Issues
 
-- All crates use `version.workspace = true`, so Phase 4 is just the root
+- All crates use `version.workspace = true`, so Phase 5 is just the root
   workspace version plus the inter-crate `path + version` pins (20 strings as of
   0.8.3). `kaish-glob` is no longer special-cased.
 - All inter-crate deps pin exact versions. These must match what's being published.
@@ -163,4 +202,4 @@ and retry once.
 - The crates.io token needs the **`publish-new`** scope for first-time crate
   publishes; a publish-update-only token 403s on a brand-new crate.
 - `kaish-wasi` is deliberately **not published** (wasm binary target, no library
-  consumers) — it is absent from the Phase 7 publish list on purpose.
+  consumers) — it is absent from the Phase 8 publish list on purpose.
