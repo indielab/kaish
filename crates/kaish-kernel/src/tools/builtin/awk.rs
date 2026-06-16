@@ -52,14 +52,15 @@ impl Tool for Awk {
             "awk",
             "Pattern scanning and text processing language",
             [
-                ("Print second field", "awk '{print $2}' file.txt"),
-                ("Sum first column", "awk '{sum += $1} END {print sum}' data.txt"),
-                ("Filter by pattern", "awk '/error/ {print $0}' log.txt"),
-                ("Custom separator", "awk -F: '{print $1}' /etc/passwd"),
-                ("Conditional", "awk '$3 > 100 {print $1, $3}' data.txt"),
-                ("BEGIN/END", "awk 'BEGIN {print \"Header\"} {print} END {print \"Footer\"}'"),
-                ("Field count", "awk '{print NF, $0}' file.txt"),
-                ("Line numbers", "awk '{print NR, $0}' file.txt"),
+                ("Print a field", "awk '{print $2}' file.txt"),
+                ("Field separator", "awk -F: '{print $1}' /etc/passwd"),
+                ("Filter on a numeric field", "awk '$3 > 100 {print $1, $3}' data.txt"),
+                ("Match a regex", "awk '/error/ {print}' log.txt"),
+                ("Sum, grouped by a key", "awk '{sum[$1] += $2} END {for (k in sum) print k, sum[k]}' data.txt"),
+                ("Substitute text", "awk '{gsub(/foo/, \"bar\"); print}' notes.txt"),
+                ("Split into an array", "awk '{n = split($0, a, \",\"); print a[1], n}' file.csv"),
+                ("BEGIN/END", "awk 'BEGIN {print \"head\"} {print} END {print NR}'"),
+                ("Range of lines", "awk '/start/,/stop/' file.txt"),
             ],
         )
     }
@@ -171,6 +172,10 @@ enum Pattern {
     Regex(String),
     /// Expression pattern: $1 > 100.
     Expr(Expr),
+    /// Range pattern: /start/,/end/ — fires from the record matching `start`
+    /// through the record matching `end`, inclusive (POSIX semantics).
+    /// Neither endpoint may be BEGIN or END.
+    Range(Box<Pattern>, Box<Pattern>),
 }
 
 /// A block of statements.
@@ -426,9 +431,11 @@ impl AwkLexer {
             None => return Ok(Token::Eof),
         };
 
-        // Newline is significant in AWK
+        // Newline is significant in AWK. It also begins a new rule/statement,
+        // a position where a leading `/` is a regex, not division.
         if c == '\n' {
             self.advance();
+            self.in_regex_context = true;
             return Ok(Token::Newline);
         }
 
@@ -570,7 +577,9 @@ impl AwkLexer {
             "return" => Token::Return,
             _ => Token::Ident(s),
         };
-        self.in_regex_context = matches!(tok, Token::Match | Token::NotMatch);
+        // An identifier/keyword is a value (or precedes one), so a following `/`
+        // is division, not a regex. (scan_ident never yields `~`/`!~`.)
+        self.in_regex_context = false;
         Ok(tok)
     }
 
@@ -686,7 +695,11 @@ impl AwkLexer {
             '?' => Token::Question,
             ':' => Token::Colon,
             ',' => Token::Comma,
-            ';' => Token::Semicolon,
+            ';' => {
+                // A `;` ends a statement/rule; a `/` after it is a regex.
+                self.in_regex_context = true;
+                Token::Semicolon
+            }
             '(' => {
                 self.in_regex_context = true;
                 Token::LParen
@@ -700,7 +713,9 @@ impl AwkLexer {
                 Token::LBrace
             }
             '}' => {
-                self.in_regex_context = false;
+                // A `}` ends an action block; the next rule's leading `/` is a
+                // regex pattern, not division.
+                self.in_regex_context = true;
                 Token::RBrace
             }
             '[' => {
@@ -768,11 +783,15 @@ impl AwkLexer {
 struct AwkParser {
     tokens: Vec<Token>,
     pos: usize,
+    /// When true, `parse_comparison` must not consume a top-level `>` or `>=`,
+    /// because inside `print`/`printf` those introduce output redirection (which
+    /// kaish rejects with a clear error rather than silently mis-parsing).
+    in_print: bool,
 }
 
 impl AwkParser {
     fn new(tokens: Vec<Token>) -> Self {
-        Self { tokens, pos: 0 }
+        Self { tokens, pos: 0, in_print: false }
     }
 
     fn peek(&self) -> &Token {
@@ -818,6 +837,14 @@ impl AwkParser {
         self.skip_newlines();
 
         while self.peek() != &Token::Eof {
+            // Catch top-level `function` declarations (they appear before a rule, not
+            // inside a block, so parse_statement wouldn't see them).
+            if self.peek() == &Token::Function {
+                return Err(
+                    "user-defined functions are not supported (kaish awk is a one-liner subset)"
+                        .to_string(),
+                );
+            }
             rules.push(self.parse_rule()?);
             self.skip_terminators();
         }
@@ -845,29 +872,65 @@ impl AwkParser {
         Ok(Rule { pattern, action })
     }
 
-    // pattern := BEGIN | END | /regex/ | expr | (empty)
+    // pattern := BEGIN | END | /regex/ | expr | pattern,pattern | (empty)
     fn parse_pattern(&mut self) -> Result<Pattern, String> {
-        match self.peek() {
+        let first = match self.peek() {
             Token::Begin => {
                 self.advance();
-                Ok(Pattern::Begin)
+                Pattern::Begin
             }
             Token::End => {
                 self.advance();
-                Ok(Pattern::End)
+                Pattern::End
             }
             Token::Regex(re) => {
                 let re = re.clone();
                 self.advance();
-                Ok(Pattern::Regex(re))
+                Pattern::Regex(re)
             }
-            Token::LBrace => Ok(Pattern::All),
-            Token::Eof | Token::Newline => Ok(Pattern::All),
+            Token::LBrace => return Ok(Pattern::All),
+            Token::Eof | Token::Newline => return Ok(Pattern::All),
             _ => {
                 let expr = self.parse_expr()?;
-                Ok(Pattern::Expr(expr))
+                Pattern::Expr(expr)
             }
+        };
+
+        // Check for range pattern: `pattern , pattern`.
+        // BEGIN/END may not serve as range endpoints.
+        if self.peek() == &Token::Comma {
+            match &first {
+                Pattern::Begin | Pattern::End => {
+                    return Err(
+                        "BEGIN and END may not be used as range pattern endpoints".to_string(),
+                    );
+                }
+                _ => {}
+            }
+            self.advance(); // consume ','
+            let second = match self.peek() {
+                Token::Begin | Token::End => {
+                    return Err(
+                        "BEGIN and END may not be used as range pattern endpoints".to_string(),
+                    );
+                }
+                Token::Regex(re) => {
+                    let re = re.clone();
+                    self.advance();
+                    Pattern::Regex(re)
+                }
+                Token::LBrace | Token::Eof | Token::Newline => {
+                    return Err("expected pattern after ',' in range pattern".to_string());
+                }
+                _ => {
+                    let expr = self.parse_expr()?;
+                    Pattern::Expr(expr)
+                }
+            };
+            return Ok(Pattern::Range(Box::new(first), Box::new(second)));
         }
+
+        Ok(first)
     }
 
     // action := '{' statement* '}'
@@ -920,6 +983,14 @@ impl AwkParser {
                 Ok(Stmt::Exit(code))
             }
             Token::Delete => self.parse_delete(),
+            Token::Function => {
+                Err("user-defined functions are not supported (kaish awk is a one-liner subset)"
+                    .to_string())
+            }
+            Token::Return => {
+                Err("user-defined functions are not supported (kaish awk is a one-liner subset)"
+                    .to_string())
+            }
             Token::LBrace => {
                 let block = self.parse_action()?;
                 Ok(Stmt::If(Expr::Number(1.0), block, None)) // Block as always-true if
@@ -1044,10 +1115,33 @@ impl AwkParser {
             self.peek(),
             Token::Newline | Token::Semicolon | Token::RBrace | Token::Eof
         ) {
-            args.push(self.parse_expr()?);
+            self.in_print = true;
+            let first = self.parse_expr();
+            self.in_print = false;
+            args.push(first?);
+            // After the first expr, a leftover bare `>` (Gt) that parse_comparison
+            // left unconsumed (because in_print was set) is output redirection.
+            // `>=` (Ge) is never left unconsumed — it is always a comparison.
+            if self.peek() == &Token::Gt {
+                return Err(
+                    "output redirection (> >> |) is not supported; \
+                     pipe kaish's output downstream instead"
+                        .to_string(),
+                );
+            }
             while self.peek() == &Token::Comma {
                 self.advance();
-                args.push(self.parse_expr()?);
+                self.in_print = true;
+                let arg = self.parse_expr();
+                self.in_print = false;
+                args.push(arg?);
+                if self.peek() == &Token::Gt {
+                    return Err(
+                        "output redirection (> >> |) is not supported; \
+                         pipe kaish's output downstream instead"
+                            .to_string(),
+                    );
+                }
             }
         }
 
@@ -1062,10 +1156,31 @@ impl AwkParser {
             self.peek(),
             Token::Newline | Token::Semicolon | Token::RBrace | Token::Eof
         ) {
-            args.push(self.parse_expr()?);
+            self.in_print = true;
+            let first = self.parse_expr();
+            self.in_print = false;
+            args.push(first?);
+            // Same rule as parse_print: only bare `>` (Gt) is redirection; `>=` is comparison.
+            if self.peek() == &Token::Gt {
+                return Err(
+                    "output redirection (> >> |) is not supported; \
+                     pipe kaish's output downstream instead"
+                        .to_string(),
+                );
+            }
             while self.peek() == &Token::Comma {
                 self.advance();
-                args.push(self.parse_expr()?);
+                self.in_print = true;
+                let arg = self.parse_expr();
+                self.in_print = false;
+                args.push(arg?);
+                if self.peek() == &Token::Gt {
+                    return Err(
+                        "output redirection (> >> |) is not supported; \
+                         pipe kaish's output downstream instead"
+                            .to_string(),
+                    );
+                }
             }
         }
 
@@ -1130,9 +1245,15 @@ impl AwkParser {
         let cond = self.parse_or()?;
         if self.peek() == &Token::Question {
             self.advance();
+            // Ternary branches are sub-expressions: a top-level `>` inside them
+            // is a comparison, not print redirection (only an unparenthesized
+            // `>` directly in print/printf is redirection).
+            let saved_in_print = self.in_print;
+            self.in_print = false;
             let then_expr = self.parse_expr()?;
             self.expect(&Token::Colon)?;
             let else_expr = self.parse_expr()?;
+            self.in_print = saved_in_print;
             Ok(Expr::Ternary(
                 Box::new(cond),
                 Box::new(then_expr),
@@ -1199,6 +1320,13 @@ impl AwkParser {
             Token::Ne => BinOp::Ne,
             Token::Lt => BinOp::Lt,
             Token::Le => BinOp::Le,
+            // When inside a print/printf arg list, a bare top-level `>` introduces
+            // output redirection, not a comparison. Leave the token unconsumed so
+            // parse_print / parse_printf can detect and reject it with a clear error.
+            // `>=` (Ge) is NOT redirection — it is a normal comparison operator and
+            // must be consumed here regardless of in_print.  Inside parentheses
+            // in_print is reset to false, so `print ($1>2)` still compares normally.
+            Token::Gt if self.in_print => return Ok(left),
             Token::Gt => BinOp::Gt,
             Token::Ge => BinOp::Ge,
             _ => return Ok(left),
@@ -1322,6 +1450,16 @@ impl AwkParser {
                     if let Expr::Var(name) = expr {
                         self.advance();
                         let key = self.parse_expr()?;
+                        // Multi-dimensional subscripts a[i,j] are not supported.
+                        // Detect the comma after the first subscript expression and
+                        // emit a clear, hinted error rather than "expected RBracket".
+                        if self.peek() == &Token::Comma {
+                            return Err(
+                                "multi-dimensional array subscripts (a[i,j]) are not supported; \
+                                 build a string key like a[i \",\" j]"
+                                    .to_string(),
+                            );
+                        }
                         self.expect(&Token::RBracket)?;
                         expr = Expr::ArrayAccess(name, Box::new(key));
                     } else {
@@ -1365,10 +1503,24 @@ impl AwkParser {
                 Ok(Expr::Field(Box::new(field)))
             }
             Token::Ident(name) => {
+                // `getline` is tokenized as Ident (not a keyword). Catch it here
+                // before treating it as a variable or function call.
+                if name == "getline" {
+                    return Err(
+                        "getline is not supported; pipe input into awk instead \
+                         (e.g. cat f | awk '...')"
+                            .to_string(),
+                    );
+                }
                 self.advance();
                 // Check for function call
                 if self.peek() == &Token::LParen {
                     self.advance();
+                    // Call arguments are sub-expressions: a top-level `>` inside
+                    // them is a comparison, not print redirection (mirrors the
+                    // LParen reset below so `print length(a>b)` works).
+                    let saved_in_print = self.in_print;
+                    self.in_print = false;
                     let mut args = Vec::new();
                     if self.peek() != &Token::RParen {
                         args.push(self.parse_expr()?);
@@ -1377,6 +1529,7 @@ impl AwkParser {
                             args.push(self.parse_expr()?);
                         }
                     }
+                    self.in_print = saved_in_print;
                     self.expect(&Token::RParen)?;
                     Ok(Expr::Call(name, args))
                 } else {
@@ -1385,9 +1538,14 @@ impl AwkParser {
             }
             Token::LParen => {
                 self.advance();
-                let expr = self.parse_expr()?;
+                // Parentheses reset the print context: `print ($1 > 2)` must
+                // parse the comparison, not treat `>` as redirection.
+                let saved_in_print = self.in_print;
+                self.in_print = false;
+                let expr = self.parse_expr();
+                self.in_print = saved_in_print;
                 self.expect(&Token::RParen)?;
-                Ok(expr)
+                Ok(expr?)
             }
             _ => Err(format!("unexpected token: {:?}", self.peek())),
         }
@@ -1405,6 +1563,65 @@ fn parse_program(input: &str) -> Result<AwkProgram, String> {
 // Runtime / Evaluator
 // ============================================================================
 
+/// Format a number for `print` / string coercion, matching gawk's default OFMT (%.6g).
+///
+/// Rules (matching gawk 5.x):
+/// - Zero (including -0.0): always `"0"`.
+/// - Integral values (`fract() == 0.0`): emit all digits with no decimal point using
+///   `format!("{:.0}", n)`.  This handles large magnitudes like 1e20 correctly without
+///   casting to i64 (which would overflow or saturate).
+/// - Non-integral values: implement C `%.6g` — 6 significant figures, scientific notation
+///   when the rounded exponent is < -4 or >= 6, otherwise fixed, trailing zeros stripped.
+fn format_awk_number(n: f64) -> String {
+    // Non-finite values: replicate gawk 5.x exact spellings.
+    // gawk: `BEGIN{print sqrt(-1)}` → `-nan`
+    //       `BEGIN{print 2^1024}`   → `+inf`
+    //       `BEGIN{print -2^1024}`  → `-inf`
+    if n.is_nan() {
+        return "-nan".to_string();
+    }
+    if n.is_infinite() {
+        return if n.is_sign_positive() { "+inf" } else { "-inf" }.to_string();
+    }
+    if n == 0.0 {
+        return "0".to_string();
+    }
+    if n.fract() == 0.0 {
+        // Integral: print all significant digits (no cast to i64 — would overflow at 1e20).
+        return format!("{:.0}", n);
+    }
+    format_awk_ofmt(n)
+}
+
+/// Implement C `%.6g` for non-integral awk values (OFMT default).
+///
+/// The trick: format with `%.5e` first to get the *rounded* exponent (5 decimal digits +
+/// implicit 1 = 6 significant figures).  Then choose fixed vs. scientific based on that
+/// exponent, following the C standard rule: scientific when e < -4 or e >= 6.
+fn format_awk_ofmt(n: f64) -> String {
+    const P: i32 = 6; // significant figures
+    // %.5e gives 6 sig figs in scientific form; read the exponent from the result.
+    let sci = format!("{:.5e}", n);
+    // Rust's {:e} always includes 'e'; split at the last one.
+    let e_pos = sci.rfind('e').unwrap_or(sci.len());
+    let exp: i32 = sci.get(e_pos + 1..).and_then(|s| s.parse().ok()).unwrap_or(0);
+
+    if !(-4..P).contains(&exp) {
+        // Scientific notation: strip trailing zeros from the mantissa.
+        let mantissa = sci[..e_pos].trim_end_matches('0').trim_end_matches('.');
+        if exp >= 0 {
+            format!("{}e+{:02}", mantissa, exp)
+        } else {
+            format!("{}e-{:02}", mantissa, -exp)
+        }
+    } else {
+        // Fixed notation: (P-1-exp) decimal places, then strip trailing zeros.
+        let dec = ((P - 1 - exp).max(0)) as usize;
+        let raw = format!("{:.prec$}", n, prec = dec);
+        raw.trim_end_matches('0').trim_end_matches('.').to_string()
+    }
+}
+
 /// AWK value with string/number coercion.
 #[derive(Debug, Clone, Default)]
 enum AwkValue {
@@ -1418,14 +1635,7 @@ impl std::fmt::Display for AwkValue {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             AwkValue::String(s) => f.write_str(s),
-            AwkValue::Number(n) => {
-                if n.fract() == 0.0 && n.abs() < 1e15 {
-                    write!(f, "{}", *n as i64)
-                } else {
-                    let s = format!("{:.6}", n);
-                    f.write_str(s.trim_end_matches('0').trim_end_matches('.'))
-                }
-            }
+            AwkValue::Number(n) => f.write_str(&format_awk_number(*n)),
             AwkValue::Uninitialized => Ok(()),
         }
     }
@@ -1518,6 +1728,10 @@ struct AwkRuntime {
     output: String,
     nr: i64, // Current record number
     nf: i64, // Number of fields in current record
+    /// Per-rule active state for range patterns (`/start/,/end/`).
+    /// Indexed by the rule's position in `AwkProgram.rules`.
+    /// Non-range rules always read `false` here and never write it.
+    range_active: Vec<bool>,
 }
 
 impl AwkRuntime {
@@ -1539,6 +1753,7 @@ impl AwkRuntime {
             output: String::new(),
             nr: 0,
             nf: 0,
+            range_active: Vec::new(),
         }
     }
 
@@ -1568,8 +1783,12 @@ impl AwkRuntime {
         }
         self.fields[idx] = value;
 
-        // Rebuild $0 if setting a field
+        // Rebuild $0 if setting a field; also extend NF if assigning past it.
         if n > 0 {
+            if n > self.nf {
+                self.nf = n;
+                self.set_var("NF", AwkValue::Number(n as f64));
+            }
             self.rebuild_record();
         }
     }
@@ -1606,6 +1825,9 @@ impl AwkRuntime {
     }
 
     fn execute(&mut self, program: &AwkProgram, input: &str) -> Result<String, String> {
+        // Size range_active to the number of rules; non-range rules never touch it.
+        self.range_active = vec![false; program.rules.len()];
+
         // Run BEGIN rules
         for rule in &program.rules {
             if matches!(rule.pattern, Pattern::Begin) && let ControlFlow::Exit(_) = self.execute_block(&rule.action)? {
@@ -1629,12 +1851,12 @@ impl AwkRuntime {
             self.set_var("NR", AwkValue::Number(self.nr as f64));
             self.split_record(record);
 
-            for rule in &program.rules {
+            for (rule_idx, rule) in program.rules.iter().enumerate() {
                 if matches!(rule.pattern, Pattern::Begin | Pattern::End) {
                     continue;
                 }
 
-                if self.pattern_matches(&rule.pattern)? {
+                if self.pattern_matches(rule_idx, &rule.pattern)? {
                     match self.execute_block(&rule.action)? {
                         ControlFlow::Next => continue 'records,
                         ControlFlow::Exit(_) => break 'records,
@@ -1657,7 +1879,7 @@ impl AwkRuntime {
         Ok(std::mem::take(&mut self.output))
     }
 
-    fn pattern_matches(&mut self, pattern: &Pattern) -> Result<bool, String> {
+    fn pattern_matches(&mut self, rule_idx: usize, pattern: &Pattern) -> Result<bool, String> {
         match pattern {
             Pattern::All => Ok(true),
             Pattern::Begin | Pattern::End => Ok(false),
@@ -1668,6 +1890,58 @@ impl AwkRuntime {
             Pattern::Expr(expr) => {
                 let val = self.eval_expr(expr)?;
                 Ok(val.to_bool())
+            }
+            Pattern::Range(start_pat, end_pat) => {
+                // POSIX range pattern semantics (matching gawk):
+                //
+                // When NOT active: test `start`. If it matches, mark active and
+                // fire this record. If `end` also matches the same record, mark
+                // inactive immediately (one-record range). Either way fire = true.
+                //
+                // When active: fire this record. Then test `end`; if it matches,
+                // mark inactive (end record is still included).
+                let active = self.range_active[rule_idx];
+                if !active {
+                    // Helper to evaluate a simple (non-Range) pattern inline.
+                    let start_matches = self.eval_simple_pattern(start_pat)?;
+                    if start_matches {
+                        // Check if end also matches this same record.
+                        let end_matches = self.eval_simple_pattern(end_pat)?;
+                        self.range_active[rule_idx] = !end_matches;
+                        Ok(true)
+                    } else {
+                        Ok(false)
+                    }
+                } else {
+                    // We are inside an active range: fire, then check end.
+                    let end_matches = self.eval_simple_pattern(end_pat)?;
+                    if end_matches {
+                        self.range_active[rule_idx] = false;
+                    }
+                    Ok(true)
+                }
+            }
+        }
+    }
+
+    /// Evaluate a non-Range pattern as a boolean (used for range endpoints).
+    fn eval_simple_pattern(&mut self, pattern: &Pattern) -> Result<bool, String> {
+        match pattern {
+            Pattern::Regex(re) => {
+                let regex = Regex::new(re).map_err(|e| format!("invalid regex: {}", e))?;
+                Ok(regex.is_match(&self.get_field(0).to_string()))
+            }
+            Pattern::Expr(expr) => {
+                let val = self.eval_expr(expr)?;
+                Ok(val.to_bool())
+            }
+            Pattern::All => Ok(true),
+            // BEGIN/END are rejected at parse time; this branch is unreachable.
+            Pattern::Begin | Pattern::End => {
+                Err("BEGIN/END may not be used as range pattern endpoints".to_string())
+            }
+            Pattern::Range(_, _) => {
+                Err("nested range patterns are not supported".to_string())
             }
         }
     }
@@ -1897,7 +2171,14 @@ impl AwkRuntime {
                 let matched = regex.is_match(&self.get_field(0).to_string());
                 Ok(AwkValue::Number(if matched { 1.0 } else { 0.0 }))
             }
-            Expr::Var(name) => Ok(self.get_var(name)),
+            Expr::Var(name) => {
+                // Bare `length` (no parens) is `length($0)` in awk.
+                if name == "length" {
+                    let s = self.get_field(0).to_string();
+                    return Ok(AwkValue::Number(s.chars().count() as f64));
+                }
+                Ok(self.get_var(name))
+            }
             Expr::Field(n_expr) => {
                 let n = self.eval_expr(n_expr)?.to_number() as i64;
                 Ok(self.get_field(n))
@@ -2126,8 +2407,8 @@ impl AwkRuntime {
                     return Err("split requires at least 2 arguments".to_string());
                 }
                 let s = self.eval_expr(&args[0])?.to_string();
-                // Validate that second arg is an array variable
-                let _arr_name = match &args[1] {
+                // Validate that second arg is an array variable — get name before mutating
+                let arr_name = match &args[1] {
                     Expr::Var(name) => name.clone(),
                     _ => return Err("split: second argument must be an array".to_string()),
                 };
@@ -2137,21 +2418,39 @@ impl AwkRuntime {
                     self.get_var("FS").to_string()
                 };
 
-                let parts: Vec<&str> = if sep == " " {
-                    s.split_whitespace().collect()
-                } else if sep.len() == 1 {
-                    s.split(&sep).collect()
+                // gawk: empty input string → clear the array and return 0 for all
+                // separator modes (Rust's str::split("") yields [""] → count 1, wrong).
+                if s.is_empty() {
+                    self.arrays.entry(arr_name).or_default().clear();
+                    return Ok(AwkValue::Number(0.0));
+                }
+
+                // Honor the same separator rules as split_record:
+                //   " " (default FS) → whitespace mode (split on runs, trim ends)
+                //   single char → literal split
+                //   multi-char → ERE regex
+                let parts: Vec<String> = if sep == " " {
+                    s.split_whitespace().map(str::to_string).collect()
+                } else if sep.chars().count() == 1 {
+                    s.split(sep.as_str()).map(str::to_string).collect()
                 } else {
                     match Regex::new(&sep) {
-                        Ok(re) => re.split(&s).collect(),
-                        Err(_) => s.split(&sep).collect(),
+                        Ok(re) => re.split(&s).map(str::to_string).collect(),
+                        Err(_) => s.split(sep.as_str()).map(str::to_string).collect(),
                     }
                 };
 
-                // Note: split() should populate the array, but that requires mutable
-                // access. For now, we just return the count. To fully support split(),
-                // it would need to be handled as a special statement, not a function.
-                Ok(AwkValue::Number(parts.len() as f64))
+                let count = parts.len();
+
+                // Clear the target array first (awk semantics: split always empties it),
+                // then fill with 1-indexed string keys.
+                let arr = self.arrays.entry(arr_name).or_default();
+                arr.clear();
+                for (i, part) in parts.into_iter().enumerate() {
+                    arr.insert((i + 1).to_string(), AwkValue::String(part));
+                }
+
+                Ok(AwkValue::Number(count as f64))
             }
             "sprintf" => {
                 if args.is_empty() {
@@ -2184,21 +2483,190 @@ impl AwkRuntime {
                     return Err("match requires 2 arguments".to_string());
                 }
                 let s = self.eval_expr(&args[0])?.to_string();
-                let pattern = self.eval_expr(&args[1])?.to_string();
+                // Regex literal or string — mirror the sub/gsub handling.
+                let pattern = match &args[1] {
+                    Expr::Regex(re) => re.clone(),
+                    other => self.eval_expr(other)?.to_string(),
+                };
                 let regex = Regex::new(&pattern).map_err(|e| format!("invalid regex: {}", e))?;
-                let pos = regex.find(&s).map(|m| {
-                    s[..m.start()].chars().count() + 1
-                }).unwrap_or(0);
-                Ok(AwkValue::Number(pos as f64))
+                if let Some(m) = regex.find(&s) {
+                    let rstart = s[..m.start()].chars().count() as i64 + 1;
+                    let rlength = m.as_str().chars().count() as i64;
+                    self.set_var("RSTART", AwkValue::Number(rstart as f64));
+                    self.set_var("RLENGTH", AwkValue::Number(rlength as f64));
+                    Ok(AwkValue::Number(rstart as f64))
+                } else {
+                    self.set_var("RSTART", AwkValue::Number(0.0));
+                    self.set_var("RLENGTH", AwkValue::Number(-1.0));
+                    Ok(AwkValue::Number(0.0))
+                }
             }
             "sub" | "gsub" => {
-                // These need mutable access; for now, return 0
-                // Full implementation would need to modify the target
-                Ok(AwkValue::Number(0.0))
+                if args.len() < 2 {
+                    return Err(format!("{name} requires at least 2 arguments"));
+                }
+
+                // Evaluate the regex pattern (arg 0) — regex literal or string.
+                let pattern_str = match &args[0] {
+                    Expr::Regex(re) => re.clone(),
+                    other => self.eval_expr(other)?.to_string(),
+                };
+                let regex =
+                    Regex::new(&pattern_str).map_err(|e| format!("invalid regex: {e}"))?;
+
+                // Evaluate the replacement template string (arg 1).
+                let repl_template = self.eval_expr(&args[1])?.to_string();
+
+                // Determine the target lvalue (arg 2 optional; default is $0).
+                // Clone the arg expression so we can use &mut self freely afterwards.
+                let target_lvalue: LValue = if args.len() >= 3 {
+                    let target_expr = args[2].clone();
+                    match &target_expr {
+                        Expr::Var(name) => LValue::Var(name.clone()),
+                        Expr::Field(inner) => {
+                            // Evaluate the field index expression to get the field number.
+                            let field_num = self.eval_expr(inner)?.to_number() as i64;
+                            LValue::Field(Box::new(Expr::Number(field_num as f64)))
+                        }
+                        Expr::ArrayAccess(arr, key) => {
+                            let key_val = self.eval_expr(key)?.to_string();
+                            LValue::ArrayElem(arr.clone(), Box::new(Expr::String(key_val)))
+                        }
+                        _ => {
+                            return Err(format!(
+                                "{name}: third argument must be an lvalue (var, field, or array element)"
+                            ));
+                        }
+                    }
+                } else {
+                    // Default target is $0.
+                    LValue::Field(Box::new(Expr::Number(0.0)))
+                };
+
+                // Read the current string value of the target (owned — no active borrow).
+                let target_str = self.get_lvalue(&target_lvalue)?.to_string();
+
+                // Expand replacement template: & → matched text, \& → literal &, \\ → \.
+                // We do this by hand — the `regex` crate uses $-syntax which differs.
+                fn expand_repl(template: &str, matched: &str) -> String {
+                    let mut out = String::new();
+                    let mut chars = template.chars().peekable();
+                    while let Some(c) = chars.next() {
+                        if c == '\\' {
+                            match chars.next() {
+                                Some('&') => out.push('&'),
+                                Some('\\') => out.push('\\'),
+                                Some(other) => {
+                                    out.push('\\');
+                                    out.push(other);
+                                }
+                                None => out.push('\\'),
+                            }
+                        } else if c == '&' {
+                            out.push_str(matched);
+                        } else {
+                            out.push(c);
+                        }
+                    }
+                    out
+                }
+
+                // Perform substitution (sub = first match only; gsub = all matches).
+                let is_global = name == "gsub";
+                let mut replacement_count: usize = 0;
+                let result_str: String;
+
+                if is_global {
+                    // For gsub: iterate over all matches and replace them.
+                    let mut out = String::new();
+                    let mut last_end = 0;
+                    for mat in regex.find_iter(&target_str) {
+                        out.push_str(&target_str[last_end..mat.start()]);
+                        out.push_str(&expand_repl(&repl_template, mat.as_str()));
+                        last_end = mat.end();
+                        replacement_count += 1;
+                    }
+                    out.push_str(&target_str[last_end..]);
+                    result_str = out;
+                } else {
+                    // For sub: replace only the first match.
+                    if let Some(mat) = regex.find(&target_str) {
+                        let expanded = expand_repl(&repl_template, mat.as_str());
+                        result_str = format!(
+                            "{}{}{}",
+                            &target_str[..mat.start()],
+                            expanded,
+                            &target_str[mat.end()..]
+                        );
+                        replacement_count = 1;
+                    } else {
+                        result_str = target_str;
+                    }
+                }
+
+                // Write the substituted string back through the lvalue.
+                // set_lvalue on a Field(0) calls set_field(0, …) which does NOT call
+                // rebuild_record (only n > 0 triggers that), so we handle $0 specially:
+                // writing to $0 re-splits the record.
+                match &target_lvalue {
+                    LValue::Field(field_expr) => {
+                        let field_num = match field_expr.as_ref() {
+                            Expr::Number(n) => *n as i64,
+                            // We only ever construct Expr::Number for the field index above.
+                            _ => unreachable!(
+                                "sub/gsub field lvalue must be Expr::Number; got {:?}",
+                                field_expr
+                            ),
+                        };
+                        if field_num == 0 {
+                            // Assigning to $0 re-splits the record (standard awk behaviour).
+                            self.split_record(&result_str);
+                        } else {
+                            self.set_field(field_num, AwkValue::String(result_str));
+                        }
+                    }
+                    LValue::Var(name) => {
+                        self.set_var(name, AwkValue::String(result_str));
+                    }
+                    LValue::ArrayElem(arr_name, key_expr) => {
+                        let key = match key_expr.as_ref() {
+                            Expr::String(s) => s.clone(),
+                            // Key was already evaluated to Expr::String above.
+                            _ => unreachable!(
+                                "sub/gsub array key lvalue must be Expr::String; got {:?}",
+                                key_expr
+                            ),
+                        };
+                        self.arrays
+                            .entry(arr_name.clone())
+                            .or_default()
+                            .insert(key, AwkValue::String(result_str));
+                    }
+                }
+
+                Ok(AwkValue::Number(replacement_count as f64))
             }
-            "sin" | "cos" | "atan2" | "exp" | "log" | "sqrt" | "int" | "rand" | "srand" => {
-                // Numeric functions not in the 80%
-                Err(format!("function '{}' not implemented (use dedicated tool)", name))
+            "int" => {
+                if args.is_empty() {
+                    return Err("int requires 1 argument".to_string());
+                }
+                let x = self.eval_expr(&args[0])?.to_number();
+                Ok(AwkValue::Number(x.trunc()))
+            }
+            "sqrt" => {
+                if args.is_empty() {
+                    return Err("sqrt requires 1 argument".to_string());
+                }
+                let x = self.eval_expr(&args[0])?.to_number();
+                Ok(AwkValue::Number(x.sqrt()))
+            }
+            "sin" | "cos" | "atan2" | "exp" | "log" | "rand" | "srand" => {
+                // Math functions outside the 80/20 text-processing subset — declared
+                // unsupported forever (see docs/awk-overhaul.md). rand/srand also
+                // conflict with the hermetic/deterministic stance.
+                Err(format!(
+                    "{name}() is not supported (kaish awk is a text-processing subset; only int and sqrt are provided)"
+                ))
             }
             _ => Err(format!("unknown function: {}", name)),
         }
@@ -2711,5 +3179,1120 @@ test result: ok. 629 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out";
         let result = Awk.execute(args, &mut ctx).await;
         assert!(result.ok());
         assert_eq!(&*result.text_out(), "000042");
+    }
+
+    // =========================================================================
+    // P1 #2 — split() populates the array (Bug #2 fix tests)
+    // =========================================================================
+
+    /// split with comma separator: count, first, and last element are correct.
+    /// gawk: `BEGIN{n=split("a,b,c",x,","); print n, x[1], x[3]}` → `3 a c`
+    #[test]
+    fn test_split_comma_separator() {
+        let prog = parse_program(r#"BEGIN{n=split("a,b,c",x,","); print n, x[1], x[3]}"#).unwrap();
+        let mut rt = AwkRuntime::new();
+        let result = rt.execute(&prog, "").unwrap();
+        assert_eq!(result, "3 a c\n");
+    }
+
+    /// split with default whitespace (no sep arg → uses FS=" "): trims ends, splits on runs.
+    /// gawk: `BEGIN{n=split("  foo  bar  baz  ",x); print n, x[1], x[2]}` → `3 foo bar`
+    #[test]
+    fn test_split_whitespace_default() {
+        let prog =
+            parse_program(r#"BEGIN{n=split("  foo  bar  baz  ",x); print n, x[1], x[2]}"#)
+                .unwrap();
+        let mut rt = AwkRuntime::new();
+        let result = rt.execute(&prog, "").unwrap();
+        assert_eq!(result, "3 foo bar\n");
+    }
+
+    /// split with regex separator.
+    /// gawk: `BEGIN{n=split("one12two34three",x,"[0-9]+"); print n, x[1], x[3]}` → `3 one three`
+    #[test]
+    fn test_split_regex_separator() {
+        let prog =
+            parse_program(r#"BEGIN{n=split("one12two34three",x,"[0-9]+"); print n, x[1], x[3]}"#)
+                .unwrap();
+        let mut rt = AwkRuntime::new();
+        let result = rt.execute(&prog, "").unwrap();
+        assert_eq!(result, "3 one three\n");
+    }
+
+    /// split CLEARS prior array contents before filling.
+    /// gawk: prior key "99" must not survive; after split("a,b",x,",") only keys 1 and 2 exist.
+    #[test]
+    fn test_split_clears_prior_array() {
+        let prog = parse_program(
+            r#"BEGIN{x[99]="stale"; n=split("a,b",x,","); print (99 in x), x[1], x[2]}"#,
+        )
+        .unwrap();
+        let mut rt = AwkRuntime::new();
+        let result = rt.execute(&prog, "").unwrap();
+        // (99 in x) must be 0 (false), x[1]="a", x[2]="b"
+        assert_eq!(result, "0 a b\n");
+    }
+
+    /// split via kernel.execute (not the builtin's .execute()) — verifies dispatch chain.
+    /// gawk: `BEGIN{n=split("a,b,c",x,","); print n, x[2]}` → `3 b`
+    #[tokio::test]
+    async fn test_split_kernel_dispatch() {
+        let mut ctx = make_ctx().await;
+        ctx.set_stdin("".to_string());
+
+        let mut args = ToolArgs::new();
+        args.positional
+            .push(Value::String(r#"BEGIN{n=split("a,b,c",x,","); print n, x[2]}"#.into()));
+
+        let result = Awk.execute(args, &mut ctx).await;
+        assert!(result.ok(), "awk failed: {}", result.err);
+        assert_eq!(&*result.text_out(), "3 b\n");
+    }
+
+    // =========================================================================
+    // P1 #3 — sub()/gsub() actually substitute (Bug #3 fix tests)
+    // =========================================================================
+
+    /// sub: first match only, returns 1 on match.
+    /// gawk: `BEGIN{s="foo bar foo"; n=sub(/foo/,"baz",s); print n, s}` → `1 baz bar foo`
+    #[test]
+    fn test_sub_first_match_only() {
+        let prog =
+            parse_program(r#"BEGIN{s="foo bar foo"; n=sub(/foo/,"baz",s); print n, s}"#).unwrap();
+        let mut rt = AwkRuntime::new();
+        let result = rt.execute(&prog, "").unwrap();
+        assert_eq!(result, "1 baz bar foo\n");
+    }
+
+    /// sub: no match returns 0 and leaves target unchanged.
+    /// gawk: `BEGIN{s="hello"; n=sub(/xyz/,"A",s); print n, s}` → `0 hello`
+    #[test]
+    fn test_sub_no_match_returns_zero() {
+        let prog =
+            parse_program(r#"BEGIN{s="hello"; n=sub(/xyz/,"A",s); print n, s}"#).unwrap();
+        let mut rt = AwkRuntime::new();
+        let result = rt.execute(&prog, "").unwrap();
+        assert_eq!(result, "0 hello\n");
+    }
+
+    /// gsub: returns the replacement count; replaces all occurrences.
+    /// gawk: `{n=gsub(/o/,"0"); print n, $0}` over "foo" → `2 f00`
+    #[test]
+    fn test_gsub_returns_count_and_replaces_all() {
+        let prog = parse_program(r#"{n=gsub(/o/,"0"); print n, $0}"#).unwrap();
+        let mut rt = AwkRuntime::new();
+        let result = rt.execute(&prog, "foo").unwrap();
+        assert_eq!(result, "2 f00\n");
+    }
+
+    /// gsub: & in replacement expands to the matched text.
+    /// gawk: `BEGIN{s="foo"; gsub(/o/,"[&]",s); print s}` → `f[o][o]`
+    #[test]
+    fn test_gsub_ampersand_in_replacement() {
+        let prog = parse_program(r#"BEGIN{s="foo"; gsub(/o/,"[&]",s); print s}"#).unwrap();
+        let mut rt = AwkRuntime::new();
+        let result = rt.execute(&prog, "").unwrap();
+        assert_eq!(result, "f[o][o]\n");
+    }
+
+    /// gsub: \& in replacement is a literal & (not the match).
+    /// gawk: `BEGIN{s="foo"; gsub(/o/,"\\&",s); print s}` → `f&&`
+    #[test]
+    fn test_gsub_escaped_ampersand_is_literal() {
+        let prog = parse_program(r#"BEGIN{s="foo"; gsub(/o/,"\\&",s); print s}"#).unwrap();
+        let mut rt = AwkRuntime::new();
+        let result = rt.execute(&prog, "").unwrap();
+        assert_eq!(result, "f&&\n");
+    }
+
+    /// gsub into a named field rebuilds $0.
+    /// gawk: `{gsub(/a/,"A",$1); print}` over "alice adam" → `Alice adam`
+    /// (Only $1 is substituted; $0 is rebuilt with OFS.)
+    #[test]
+    fn test_gsub_into_named_field_rebuilds_record() {
+        let prog = parse_program(r#"{gsub(/a/,"A",$1); print}"#).unwrap();
+        let mut rt = AwkRuntime::new();
+        let result = rt.execute(&prog, "alice adam").unwrap();
+        // $1 = "alice" → "Alice" (only first field); $2 stays "adam"; rebuilt $0 = "Alice adam"
+        assert_eq!(result, "Alice adam\n");
+    }
+
+    /// gsub defaults to $0 when no target arg is given, and modifies in place.
+    /// gawk: `{gsub(/o/,"0"); print}` over "foo BAR baz" → `f00 BAR baz`
+    #[test]
+    fn test_gsub_default_target_is_dollar_zero() {
+        let prog = parse_program(r#"{gsub(/o/,"0"); print}"#).unwrap();
+        let mut rt = AwkRuntime::new();
+        let result = rt.execute(&prog, "foo BAR baz").unwrap();
+        assert_eq!(result, "f00 BAR baz\n");
+    }
+
+    /// gsub via kernel.execute (not the builtin's .execute()) — verifies dispatch chain.
+    #[tokio::test]
+    async fn test_gsub_kernel_dispatch() {
+        let mut ctx = make_ctx().await;
+        ctx.set_stdin("foo BAR baz".to_string());
+
+        let mut args = ToolArgs::new();
+        args.positional
+            .push(Value::String(r#"{n=gsub(/o/,"0"); print n, $0}"#.into()));
+
+        let result = Awk.execute(args, &mut ctx).await;
+        assert!(result.ok(), "awk failed: {}", result.err);
+        assert_eq!(&*result.text_out(), "2 f00 BAR baz\n");
+    }
+
+    // =========================================================================
+    // Finding #1 — split("", a, sep) must return 0 and leave array empty.
+    // =========================================================================
+
+    /// split on an empty string returns 0 for ALL separator modes.
+    /// gawk: `BEGIN{n=split("",a,","); print n, (1 in a)}` → `0 0`
+    #[test]
+    fn test_split_empty_string_comma_sep_returns_zero() {
+        let prog =
+            parse_program(r#"BEGIN{n=split("",a,","); print n, (1 in a)}"#).unwrap();
+        let mut rt = AwkRuntime::new();
+        let result = rt.execute(&prog, "").unwrap();
+        assert_eq!(result, "0 0\n");
+    }
+
+    /// split on empty string with regex separator also returns 0.
+    /// gawk: `BEGIN{n=split("",a,"[,;]"); print n, (1 in a)}` → `0 0`
+    #[test]
+    fn test_split_empty_string_regex_sep_returns_zero() {
+        let prog =
+            parse_program(r#"BEGIN{n=split("",a,"[,;]"); print n, (1 in a)}"#).unwrap();
+        let mut rt = AwkRuntime::new();
+        let result = rt.execute(&prog, "").unwrap();
+        assert_eq!(result, "0 0\n");
+    }
+
+    /// split on empty string with whitespace FS returns 0.
+    /// gawk: `BEGIN{n=split("",a); print n, (1 in a)}` → `0 0`
+    #[test]
+    fn test_split_empty_string_whitespace_fs_returns_zero() {
+        let prog = parse_program(r#"BEGIN{n=split("",a); print n, (1 in a)}"#).unwrap();
+        let mut rt = AwkRuntime::new();
+        let result = rt.execute(&prog, "").unwrap();
+        assert_eq!(result, "0 0\n");
+    }
+
+    // =========================================================================
+    // Finding #2 — set_field must raise NF when assigning past it.
+    // =========================================================================
+
+    /// Assigning a high field extends NF.
+    /// gawk: `echo "a b" | gawk '{$5="X"; print NF}'` → `5`
+    #[test]
+    fn test_set_field_extends_nf() {
+        let prog = parse_program(r#"{$5="X"; print NF}"#).unwrap();
+        let mut rt = AwkRuntime::new();
+        let result = rt.execute(&prog, "a b").unwrap();
+        assert_eq!(result, "5\n");
+    }
+
+    /// gsub on a field beyond current NF also raises NF (empty field gets substituted).
+    /// gawk: `echo "a b" | gawk '{gsub(/./,"X",$5); print NF}'` → `5`
+    #[test]
+    fn test_gsub_on_high_field_extends_nf() {
+        let prog = parse_program(r#"{gsub(/./,"X",$5); print NF}"#).unwrap();
+        let mut rt = AwkRuntime::new();
+        let result = rt.execute(&prog, "a b").unwrap();
+        assert_eq!(result, "5\n");
+    }
+
+    /// Assigning within NF does not change NF.
+    /// gawk: `echo "a b c" | gawk '{$2="B"; print NF}'` → `3`
+    #[test]
+    fn test_set_field_within_nf_unchanged() {
+        let prog = parse_program(r#"{$2="B"; print NF}"#).unwrap();
+        let mut rt = AwkRuntime::new();
+        let result = rt.execute(&prog, "a b c").unwrap();
+        assert_eq!(result, "3\n");
+    }
+
+    // =========================================================================
+    // Finding #5 — edge tests for gsub/sub (locking known-good behaviour).
+    // =========================================================================
+
+    /// empty-pattern gsub inserts replacement before and after every character.
+    /// gawk: `echo "abc" | gawk '{gsub(//,"-"); print}'` → `-a-b-c-`
+    #[test]
+    fn test_gsub_empty_pattern() {
+        let prog = parse_program(r#"{gsub(//,"-"); print}"#).unwrap();
+        let mut rt = AwkRuntime::new();
+        let result = rt.execute(&prog, "abc").unwrap();
+        assert_eq!(result, "-a-b-c-\n");
+    }
+
+    /// star-empty pattern: gsub(/x*/,"-","abc") must not infinite-loop; count = 4.
+    /// gawk: `echo "abc" | gawk '{n=gsub(/x*/,"-"); print n, $0}'` → `4 -a-b-c-`
+    #[test]
+    fn test_gsub_star_empty_pattern_no_infinite_loop() {
+        let prog = parse_program(r#"{n=gsub(/x*/,"-"); print n, $0}"#).unwrap();
+        let mut rt = AwkRuntime::new();
+        let result = rt.execute(&prog, "abc").unwrap();
+        assert_eq!(result, "4 -a-b-c-\n");
+    }
+
+    /// `&&` in replacement expands to matched text twice.
+    /// gawk: `echo "foo" | gawk '{sub(/o/,"&&"); print}'` → `fooo`
+    #[test]
+    fn test_sub_double_ampersand_in_replacement() {
+        let prog = parse_program(r#"{sub(/o/,"&&"); print}"#).unwrap();
+        let mut rt = AwkRuntime::new();
+        let result = rt.execute(&prog, "foo").unwrap();
+        assert_eq!(result, "fooo\n");
+    }
+
+    /// empty replacement deletes matched characters.
+    /// gawk: `echo "food" | gawk '{gsub(/o/,""); print}'` → `fd`
+    #[test]
+    fn test_gsub_empty_replacement_deletes() {
+        let prog = parse_program(r#"{gsub(/o/,""); print}"#).unwrap();
+        let mut rt = AwkRuntime::new();
+        let result = rt.execute(&prog, "food").unwrap();
+        assert_eq!(result, "fd\n");
+    }
+
+    /// trailing lone backslash in replacement: kept as-is (matching gawk).
+    /// gawk: `BEGIN{s="foo"; sub(/o/,"\\",s); print s}` → `f\o`
+    #[test]
+    fn test_sub_trailing_lone_backslash_in_replacement() {
+        // AWK string "\\" is one backslash character — gawk keeps it.
+        let prog = parse_program(r#"BEGIN{s="foo"; sub(/o/,"\\",s); print s}"#).unwrap();
+        let mut rt = AwkRuntime::new();
+        let result = rt.execute(&prog, "").unwrap();
+        assert_eq!(result, "f\\o\n");
+    }
+
+    /// `\\&` in replacement: literal backslash followed by the matched text.
+    /// gawk: `BEGIN{s="foo"; sub(/o/,"\\\\&",s); print s}` → `f\oo`
+    /// (AWK string "\\\\&" is the two tokens: \\ (one backslash) + & (matched text).)
+    #[test]
+    fn test_sub_backslash_ampersand_replacement() {
+        let prog = parse_program(r#"BEGIN{s="foo"; sub(/o/,"\\\\&",s); print s}"#).unwrap();
+        let mut rt = AwkRuntime::new();
+        let result = rt.execute(&prog, "").unwrap();
+        assert_eq!(result, "f\\oo\n");
+    }
+
+    /// `\x` (backslash before non-special char) keeps the backslash, matching gawk.
+    /// gawk: `BEGIN{s="foo"; sub(/o/,"\\x",s); print s}` → `f\xo`
+    /// Note: the DeepSeek review claimed gawk drops the backslash, but gawk 5.4.0
+    /// actually KEEPS it. This test locks the current (correct) behaviour.
+    #[test]
+    fn test_sub_backslash_other_char_keeps_backslash() {
+        let prog = parse_program(r#"BEGIN{s="foo"; sub(/o/,"\\x",s); print s}"#).unwrap();
+        let mut rt = AwkRuntime::new();
+        let result = rt.execute(&prog, "").unwrap();
+        assert_eq!(result, "f\\xo\n");
+    }
+
+    // =========================================================================
+    // P2 #4 — match() sets RSTART and RLENGTH
+    // =========================================================================
+
+    /// match on a hit: RSTART = 1-based start, RLENGTH = char length of match.
+    /// gawk: `BEGIN{match("foobar",/bar/); print RSTART, RLENGTH}` → `4 3`
+    #[test]
+    fn test_match_sets_rstart_rlength_on_hit() {
+        let prog =
+            parse_program(r#"BEGIN{match("foobar",/bar/); print RSTART, RLENGTH}"#).unwrap();
+        let mut rt = AwkRuntime::new();
+        let result = rt.execute(&prog, "").unwrap();
+        assert_eq!(result, "4 3\n");
+    }
+
+    /// match on no hit: RSTART = 0, RLENGTH = -1 (gawk standard).
+    /// gawk: `BEGIN{match("foobar",/xyz/); print RSTART, RLENGTH}` → `0 -1`
+    #[test]
+    fn test_match_sets_rstart_rlength_on_miss() {
+        let prog =
+            parse_program(r#"BEGIN{match("foobar",/xyz/); print RSTART, RLENGTH}"#).unwrap();
+        let mut rt = AwkRuntime::new();
+        let result = rt.execute(&prog, "").unwrap();
+        assert_eq!(result, "0 -1\n");
+    }
+
+    /// match return value is the 1-based start position (or 0 on no match).
+    /// gawk: `BEGIN{pos=match("foobar",/bar/); print pos}` → `4`
+    #[test]
+    fn test_match_return_value_is_rstart() {
+        let prog = parse_program(r#"BEGIN{pos=match("foobar",/bar/); print pos}"#).unwrap();
+        let mut rt = AwkRuntime::new();
+        let result = rt.execute(&prog, "").unwrap();
+        assert_eq!(result, "4\n");
+    }
+
+    /// substr($0, RSTART, RLENGTH) extraction idiom works after match().
+    /// gawk: `BEGIN{s="hello world"; match(s,/wor/); print substr(s,RSTART,RLENGTH)}` → `wor`
+    #[test]
+    fn test_match_substr_extraction_idiom() {
+        let prog = parse_program(
+            r#"BEGIN{s="hello world"; match(s,/wor/); print substr(s,RSTART,RLENGTH)}"#,
+        )
+        .unwrap();
+        let mut rt = AwkRuntime::new();
+        let result = rt.execute(&prog, "").unwrap();
+        assert_eq!(result, "wor\n");
+    }
+
+    /// match() via kernel.execute (not builtin .execute()) — verifies dispatch chain.
+    #[tokio::test]
+    async fn test_match_kernel_dispatch_rstart_rlength() {
+        let mut ctx = make_ctx().await;
+        ctx.set_stdin("".to_string());
+
+        let mut args = ToolArgs::new();
+        args.positional.push(Value::String(
+            r#"BEGIN{match("foobar",/bar/); print RSTART, RLENGTH}"#.into(),
+        ));
+
+        let result = Awk.execute(args, &mut ctx).await;
+        assert!(result.ok(), "awk failed: {}", result.err);
+        assert_eq!(&*result.text_out(), "4 3\n");
+    }
+
+    // =========================================================================
+    // P3 #7 — bare `length` (no parens) means length($0)
+    // =========================================================================
+
+    /// bare `length` (no parens) evaluates to the character length of $0.
+    /// gawk: `echo "hello" | gawk '{print length}'` → `5`
+    #[test]
+    fn test_bare_length_is_length_dollar_zero() {
+        let prog = parse_program("{print length}").unwrap();
+        let mut rt = AwkRuntime::new();
+        let result = rt.execute(&prog, "hello").unwrap();
+        assert_eq!(result, "5\n");
+    }
+
+    /// bare `length` counts Unicode characters, not bytes.
+    /// gawk: `echo "こんにちは" | gawk '{print length}'` → `5`
+    #[test]
+    fn test_bare_length_counts_unicode_chars() {
+        let prog = parse_program("{print length}").unwrap();
+        let mut rt = AwkRuntime::new();
+        let result = rt.execute(&prog, "こんにちは").unwrap();
+        assert_eq!(result, "5\n");
+    }
+
+    /// length($1) (explicit arg) still works — bare-length special-case must not break it.
+    /// gawk: `echo "hello world" | gawk '{print length($1)}'` → `5`
+    #[test]
+    fn test_length_explicit_arg_still_works() {
+        let prog = parse_program("{print length($1)}").unwrap();
+        let mut rt = AwkRuntime::new();
+        let result = rt.execute(&prog, "hello world").unwrap();
+        assert_eq!(result, "5\n");
+    }
+
+    /// length() with empty parens defaults to $0, just like length($0).
+    /// gawk: `echo "hello" | gawk '{print length()}'` → `5`
+    #[test]
+    fn test_length_empty_parens_defaults_to_dollar_zero() {
+        let prog = parse_program("{print length()}").unwrap();
+        let mut rt = AwkRuntime::new();
+        let result = rt.execute(&prog, "hello").unwrap();
+        assert_eq!(result, "5\n");
+    }
+
+    /// bare `length` via kernel.execute.
+    #[tokio::test]
+    async fn test_bare_length_kernel_dispatch() {
+        let mut ctx = make_ctx().await;
+        ctx.set_stdin("hello".to_string());
+
+        let mut args = ToolArgs::new();
+        args.positional.push(Value::String("{print length}".into()));
+
+        let result = Awk.execute(args, &mut ctx).await;
+        assert!(result.ok(), "awk failed: {}", result.err);
+        assert_eq!(&*result.text_out(), "5\n");
+    }
+
+    // =========================================================================
+    // P3 #8 — int() and sqrt() implemented; other math functions loud-error
+    // =========================================================================
+
+    /// int(3.9) truncates toward zero.
+    /// gawk: `BEGIN{print int(3.9)}` → `3`
+    #[test]
+    fn test_int_positive_truncates_toward_zero() {
+        let prog = parse_program("BEGIN{print int(3.9)}").unwrap();
+        let mut rt = AwkRuntime::new();
+        let result = rt.execute(&prog, "").unwrap();
+        assert_eq!(result, "3\n");
+    }
+
+    /// int(-3.9) truncates toward zero (not floor).
+    /// gawk: `BEGIN{print int(-3.9)}` → `-3`
+    #[test]
+    fn test_int_negative_truncates_toward_zero() {
+        let prog = parse_program("BEGIN{print int(-3.9)}").unwrap();
+        let mut rt = AwkRuntime::new();
+        let result = rt.execute(&prog, "").unwrap();
+        assert_eq!(result, "-3\n");
+    }
+
+    /// sqrt(2) matches gawk's output.
+    /// gawk: `BEGIN{print sqrt(2)}` → `1.41421`
+    #[test]
+    fn test_sqrt_two() {
+        let prog = parse_program("BEGIN{print sqrt(2)}").unwrap();
+        let mut rt = AwkRuntime::new();
+        let result = rt.execute(&prog, "").unwrap();
+        assert_eq!(result, "1.41421\n");
+    }
+
+    /// int() and sqrt() via kernel.execute.
+    #[tokio::test]
+    async fn test_int_sqrt_kernel_dispatch() {
+        let mut ctx = make_ctx().await;
+        ctx.set_stdin("".to_string());
+
+        let mut args = ToolArgs::new();
+        args.positional
+            .push(Value::String("BEGIN{print int(3.9), int(-3.9), sqrt(4)}".into()));
+
+        let result = Awk.execute(args, &mut ctx).await;
+        assert!(result.ok(), "awk failed: {}", result.err);
+        assert_eq!(&*result.text_out(), "3 -3 2\n");
+    }
+
+    /// sin() returns a loud, honest error (not "use dedicated tool").
+    #[tokio::test]
+    async fn test_sin_returns_loud_unsupported_error() {
+        let mut ctx = make_ctx().await;
+        ctx.set_stdin("".to_string());
+
+        let mut args = ToolArgs::new();
+        args.positional
+            .push(Value::String("BEGIN{print sin(1)}".into()));
+
+        let result = Awk.execute(args, &mut ctx).await;
+        assert!(!result.ok(), "expected failure but got success");
+        assert!(
+            result.err.contains("not supported"),
+            "expected 'not supported' in error, got: {}",
+            result.err
+        );
+        assert!(
+            !result.err.contains("dedicated tool"),
+            "stale 'dedicated tool' message still present: {}",
+            result.err
+        );
+    }
+
+    /// cos() also loud-errors with the accurate subset message.
+    #[test]
+    fn test_cos_loud_error_message() {
+        let prog = parse_program("BEGIN{print cos(0)}").unwrap();
+        let mut rt = AwkRuntime::new();
+        let err = rt.execute(&prog, "").unwrap_err();
+        assert!(err.contains("not supported"), "got: {err}");
+        assert!(err.contains("int and sqrt"), "got: {err}");
+    }
+
+    // =========================================================================
+    // P3 #6 — range patterns `/start/,/end/`
+    // =========================================================================
+
+    /// Multi-record span: /bob/,/carol/ fires on bob, dave (between), and carol.
+    /// gawk: echo "alice\nbob\ndave\ncarol\neve" | gawk '/bob/,/carol/'
+    /// → bob\ndave\ncarol
+    #[test]
+    fn test_range_pattern_multi_record_span() {
+        let prog = parse_program("/bob/,/carol/").unwrap();
+        let mut rt = AwkRuntime::new();
+        let result = rt.execute(&prog, "alice\nbob\ndave\ncarol\neve").unwrap();
+        assert_eq!(result, "bob\ndave\ncarol\n");
+    }
+
+    /// One-record range: start and end match the same record — only that record fires.
+    /// gawk: echo "alice\nbobcarol\neve" | gawk '/bob/,/carol/'
+    /// → bobcarol  (start and end matched same line → range closes immediately)
+    #[test]
+    fn test_range_pattern_one_record_range() {
+        let prog = parse_program("/bob/,/carol/").unwrap();
+        let mut rt = AwkRuntime::new();
+        let result = rt.execute(&prog, "alice\nbobcarol\neve").unwrap();
+        assert_eq!(result, "bobcarol\n");
+    }
+
+    /// Range re-opens after closing: gawk fires on each span independently.
+    /// Input: start1 ... end1 ... start2 ... end2
+    /// gawk: echo "bob\ncarol\nbob\ncarol" | gawk '/bob/,/carol/'
+    /// → bob\ncarol\nbob\ncarol
+    #[test]
+    fn test_range_pattern_re_triggers_after_close() {
+        let prog = parse_program("/bob/,/carol/").unwrap();
+        let mut rt = AwkRuntime::new();
+        let result = rt
+            .execute(&prog, "alice\nbob\ncarol\neve\nbob\nfoo\ncarol\ndone")
+            .unwrap();
+        assert_eq!(result, "bob\ncarol\nbob\nfoo\ncarol\n");
+    }
+
+    /// Range with expression endpoints: NR==2,NR==4 fires on lines 2–4 inclusive.
+    /// gawk: printf "a\nb\nc\nd\ne\n" | gawk 'NR==2,NR==4'
+    /// → b\nc\nd
+    ///
+    /// Note: NR>=2,NR<=4 would re-open on line 5 (5>=2 fires again), matching gawk;
+    /// NR==2,NR==4 uses exact equality so the range closes cleanly after line 4.
+    #[test]
+    fn test_range_pattern_expr_endpoints() {
+        let prog = parse_program("NR==2,NR==4").unwrap();
+        let mut rt = AwkRuntime::new();
+        let result = rt.execute(&prog, "a\nb\nc\nd\ne").unwrap();
+        assert_eq!(result, "b\nc\nd\n");
+    }
+
+    /// Range pattern with action block.
+    /// gawk: echo "alice\nbob\ndave\ncarol\neve" | gawk '/bob/,/carol/ {print ">" $0}'
+    /// → >bob\n>dave\n>carol
+    #[test]
+    fn test_range_pattern_with_action() {
+        let prog = parse_program("/bob/,/carol/ {print \">\" $0}").unwrap();
+        let mut rt = AwkRuntime::new();
+        let result = rt.execute(&prog, "alice\nbob\ndave\ncarol\neve").unwrap();
+        assert_eq!(result, ">bob\n>dave\n>carol\n");
+    }
+
+    /// BEGIN/END rejected as range endpoints with a clear error.
+    #[test]
+    fn test_range_pattern_begin_endpoint_rejected() {
+        let err = parse_program("BEGIN,/foo/").unwrap_err();
+        assert!(
+            err.contains("BEGIN") || err.contains("END"),
+            "expected clear error about BEGIN/END, got: {err}"
+        );
+    }
+
+    /// Range pattern via kernel.execute (dispatch chain).
+    #[tokio::test]
+    async fn test_range_pattern_kernel_dispatch() {
+        let mut ctx = make_ctx().await;
+        ctx.set_stdin("alice\nbob\ndave\ncarol\neve".to_string());
+
+        let mut args = ToolArgs::new();
+        args.positional.push(Value::String("/bob/,/carol/".into()));
+
+        let result = Awk.execute(args, &mut ctx).await;
+        assert!(result.ok(), "awk failed: {}", result.err);
+        assert_eq!(&*result.text_out(), "bob\ndave\ncarol\n");
+    }
+
+    // =========================================================================
+    // P2 #5 — print redirection is a loud error, not a silent comparison
+    // =========================================================================
+
+    /// `{print $1 > "f"}` must fail with the redirection hint — NOT print `1` per line.
+    #[tokio::test]
+    async fn test_print_redirect_gt_is_loud_error() {
+        let mut ctx = make_ctx().await;
+        ctx.set_stdin("hello\nworld".to_string());
+
+        let mut args = ToolArgs::new();
+        args.positional
+            .push(Value::String(r#"{print $1 > "f"}"#.into()));
+
+        let result = Awk.execute(args, &mut ctx).await;
+        assert!(!result.ok(), "expected failure, got success");
+        assert!(
+            result.err.contains("redirection") || result.err.contains("not supported"),
+            "expected redirection error, got: {}",
+            result.err
+        );
+        // Must NOT have printed `1` per line (the old silent mis-parse behaviour).
+        assert!(
+            !result.text_out().contains("1\n"),
+            "old silent comparison behaviour still active: {}",
+            result.text_out()
+        );
+    }
+
+    /// `{print ($1 > 2)}` — parenthesised comparison inside print still works.
+    /// gawk: echo "5" | gawk '{print ($1 > 2)}' → `1`
+    #[test]
+    fn test_print_parenthesised_comparison_still_works() {
+        let prog = parse_program("{print ($1 > 2)}").unwrap();
+        let mut rt = AwkRuntime::new();
+        let result = rt.execute(&prog, "5\n1").unwrap();
+        // 5 > 2 → 1; 1 > 2 → 0
+        assert_eq!(result, "1\n0\n");
+    }
+
+    /// `print $1, $2` (comma-separated) still works correctly.
+    #[test]
+    fn test_print_comma_sep_args_still_works() {
+        let prog = parse_program("{print $1, $2}").unwrap();
+        let mut rt = AwkRuntime::new();
+        let result = rt.execute(&prog, "hello world").unwrap();
+        assert_eq!(result, "hello world\n");
+    }
+
+    /// `print $1 $2` (concat, no comma) still works correctly.
+    #[test]
+    fn test_print_concat_no_comma_still_works() {
+        let prog = parse_program("{print $1 $2}").unwrap();
+        let mut rt = AwkRuntime::new();
+        let result = rt.execute(&prog, "hello world").unwrap();
+        assert_eq!(result, "helloworld\n");
+    }
+
+    /// Pattern comparison `$3 > 100 {print}` outside print is unaffected.
+    #[test]
+    fn test_pattern_comparison_gt_outside_print_unaffected() {
+        let prog = parse_program("$3 > 100 {print $1}").unwrap();
+        let mut rt = AwkRuntime::new();
+        let result = rt.execute(&prog, "alice bob 50\nbob carol 200").unwrap();
+        assert_eq!(result, "bob\n");
+    }
+
+    /// `{printf "%s\n", $1 > "f"}` also rejects redirection in printf.
+    #[tokio::test]
+    async fn test_printf_redirect_gt_is_loud_error() {
+        let mut ctx = make_ctx().await;
+        ctx.set_stdin("hello".to_string());
+
+        let mut args = ToolArgs::new();
+        args.positional
+            .push(Value::String(r#"{printf "%s\n", $1 > "f"}"#.into()));
+
+        let result = Awk.execute(args, &mut ctx).await;
+        assert!(!result.ok(), "expected failure, got success");
+        assert!(
+            result.err.contains("redirection") || result.err.contains("not supported"),
+            "expected redirection error, got: {}",
+            result.err
+        );
+    }
+
+    // =========================================================================
+    // AwkValue Display — format_awk_number gawk-compatibility matrix
+    // =========================================================================
+
+    /// format_awk_number matches gawk's default OFMT (%.6g) for the full
+    /// matrix required by the task, plus representative edge cases.
+    #[test]
+    #[allow(clippy::approx_constant)] // 3.14159265 is deliberately not PI; it is the test input
+    fn test_format_awk_number_gawk_matrix() {
+        #[rustfmt::skip]
+        let cases: &[(f64, &str)] = &[
+            // gawk: `BEGIN{print 1/3}` → `0.333333`
+            (1.0 / 3.0,                  "0.333333"),
+            // gawk: `BEGIN{print 2^10}` → `1024`  (integral)
+            (1024.0,                     "1024"),
+            // gawk: `BEGIN{print 3.14159265}` → `3.14159`
+            (3.141_592_65,               "3.14159"),
+            // gawk: `BEGIN{print 0.1+0.2}` → `0.3`  (rounds nicely at 6 sig figs)
+            (0.1 + 0.2,                  "0.3"),
+            // gawk: `BEGIN{print 100000000000000000}` → `100000000000000000`  (large integral)
+            (100_000_000_000_000_000.0,  "100000000000000000"),
+            // gawk: `BEGIN{print 1e20}` → `100000000000000000000`
+            (1e20,                       "100000000000000000000"),
+            // gawk: `BEGIN{print sqrt(2)}` → `1.41421`
+            (2.0_f64.sqrt(),             "1.41421"),
+            // gawk: `BEGIN{print -1/3}` → `-0.333333`
+            (-1.0 / 3.0,                 "-0.333333"),
+            // gawk: `BEGIN{print 0.0000001}` → `1e-07`
+            (0.000_000_1,                "1e-07"),
+            // gawk: `BEGIN{print 123456.789}` → `123457`  (rounds to 6 sig figs in fixed form)
+            (123_456.789,                "123457"),
+            // gawk: `BEGIN{print 0}` → `0`
+            (0.0,                        "0"),
+            // gawk: `BEGIN{print 1000000}` → `1000000`  (integral, 7 digits, not scientific)
+            (1_000_000.0,                "1000000"),
+            // Additional boundary cases
+            // e=5, rounds up to e=6: scientific
+            (999_999.5,                  "1e+06"),
+            // e < -4: scientific
+            (0.000_01,                   "1e-05"),
+            (0.000_099,                  "9.9e-05"),
+            // large non-integral: scientific
+            (1_234_567.89,               "1.23457e+06"),
+            // negative zero → "0"
+            (-0.0_f64,                   "0"),
+            // negative scientific
+            (-0.000_000_1,               "-1e-07"),
+        ];
+
+        for &(n, expected) in cases {
+            let got = super::format_awk_number(n);
+            assert_eq!(got, expected, "format_awk_number({n}) = {got:?}, want {expected:?}");
+        }
+    }
+
+    /// Kernel-routed tests for the three classes: large integral, sub-1 fraction, sqrt(2).
+    /// These go through the full AwkRuntime.execute path so Display is exercised end-to-end.
+    #[tokio::test]
+    async fn test_numeric_display_kernel_large_integral_fraction_sqrt() {
+        let mut ctx = make_ctx().await;
+        ctx.set_stdin("".to_string());
+
+        // Large integral: must not truncate or switch to scientific
+        let mut args = ToolArgs::new();
+        args.positional
+            .push(Value::String("BEGIN{print 100000000000000000}".into()));
+        let result = Awk.execute(args, &mut ctx).await;
+        assert!(result.ok(), "awk failed: {}", result.err);
+        assert_eq!(&*result.text_out(), "100000000000000000\n");
+
+        // Sub-1 fraction: must use scientific at e < -4
+        let mut args = ToolArgs::new();
+        args.positional
+            .push(Value::String("BEGIN{print 0.0000001}".into()));
+        let result = Awk.execute(args, &mut ctx).await;
+        assert!(result.ok(), "awk failed: {}", result.err);
+        assert_eq!(&*result.text_out(), "1e-07\n");
+
+        // sqrt(2): 6 significant figures, fixed form
+        let mut args = ToolArgs::new();
+        args.positional
+            .push(Value::String("BEGIN{print sqrt(2)}".into()));
+        let result = Awk.execute(args, &mut ctx).await;
+        assert!(result.ok(), "awk failed: {}", result.err);
+        assert_eq!(&*result.text_out(), "1.41421\n");
+    }
+
+    // =========================================================================
+    // Issue 2 — single `awk:` prefix on unsupported-math errors
+    // =========================================================================
+
+    /// The user-visible error for sin() must be `awk: sin() is not supported ...`
+    /// (single prefix), not `awk: awk: sin() is not supported ...`.
+    #[tokio::test]
+    async fn test_sin_error_has_single_awk_prefix() {
+        let mut ctx = make_ctx().await;
+        ctx.set_stdin("".to_string());
+
+        let mut args = ToolArgs::new();
+        args.positional
+            .push(Value::String("BEGIN{print sin(1)}".into()));
+
+        let result = Awk.execute(args, &mut ctx).await;
+        assert!(!result.ok(), "expected failure");
+        // Must start with exactly "awk: sin()" — not "awk: awk: sin()"
+        assert!(
+            result.err.starts_with("awk: sin()"),
+            "expected single 'awk:' prefix, got: {:?}",
+            result.err
+        );
+        assert!(
+            !result.err.contains("awk: awk:"),
+            "doubled prefix detected: {:?}",
+            result.err
+        );
+    }
+
+    // =========================================================================
+    // P4 #9 — Grammar-boundary loud errors and the >= comparison fix
+    // =========================================================================
+
+    /// `print 1>=2` must evaluate to `0` (comparison), not error as redirection.
+    /// gawk: `echo x | gawk '{print 1>=2}'` → `0`
+    #[test]
+    fn test_print_ge_is_comparison_not_redirect() {
+        let prog = parse_program("{print 1>=2}").unwrap();
+        let mut rt = AwkRuntime::new();
+        let result = rt.execute(&prog, "x").unwrap();
+        assert_eq!(result, "0\n");
+    }
+
+    /// `print 1 >= 2` with spaces also compares, not redirects.
+    #[test]
+    fn test_print_ge_spaced_is_comparison() {
+        let prog = parse_program("{print 1 >= 2}").unwrap();
+        let mut rt = AwkRuntime::new();
+        let result = rt.execute(&prog, "x").unwrap();
+        assert_eq!(result, "0\n");
+    }
+
+    /// `print 2>=1` → `1` (true comparison).
+    #[test]
+    fn test_print_ge_true_comparison() {
+        let prog = parse_program("{print 2>=1}").unwrap();
+        let mut rt = AwkRuntime::new();
+        let result = rt.execute(&prog, "x").unwrap();
+        assert_eq!(result, "1\n");
+    }
+
+    /// `print 1>2` is output redirection and must error loud.
+    /// gawk redirects; kaish doesn't support redirection — must not silently compare.
+    #[tokio::test]
+    async fn test_print_bare_gt_is_loud_redirect_error() {
+        let mut ctx = make_ctx().await;
+        ctx.set_stdin("x".to_string());
+
+        let mut args = ToolArgs::new();
+        args.positional.push(Value::String(r#"{print 1>2}"#.into()));
+
+        let result = Awk.execute(args, &mut ctx).await;
+        assert!(!result.ok(), "expected failure, got success");
+        assert!(
+            result.err.contains("redirection") || result.err.contains("not supported"),
+            "expected redirection error, got: {}",
+            result.err
+        );
+    }
+
+    /// `print x>>"f"` (append redirection) must also error loud.
+    #[tokio::test]
+    async fn test_print_append_redirect_is_loud_error() {
+        let mut ctx = make_ctx().await;
+        ctx.set_stdin("x".to_string());
+
+        let mut args = ToolArgs::new();
+        args.positional
+            .push(Value::String(r#"{print x>>"f"}"#.into()));
+
+        let result = Awk.execute(args, &mut ctx).await;
+        assert!(!result.ok(), "expected failure, got success");
+        assert!(
+            result.err.contains("redirection") || result.err.contains("not supported"),
+            "expected redirection error, got: {}",
+            result.err
+        );
+    }
+
+    /// `print ($1>2)` with parentheses still compares (in_print reset inside parens).
+    /// gawk: `echo "5" | gawk '{print ($1>2)}'` → `1`
+    #[test]
+    fn test_print_paren_gt_is_comparison() {
+        let prog = parse_program("{print ($1>2)}").unwrap();
+        let mut rt = AwkRuntime::new();
+        let result = rt.execute(&prog, "5").unwrap();
+        assert_eq!(result, "1\n");
+    }
+
+    /// A `>` inside a function-call argument in print is a comparison, not
+    /// redirection — the print context must reset across call args.
+    /// gawk: `echo hello | gawk '{print substr($1,1,2>1)}'` → `h`
+    #[test]
+    fn test_print_call_arg_gt_is_comparison() {
+        let prog = parse_program("{print substr($1, 1, 2>1)}").unwrap();
+        let mut rt = AwkRuntime::new();
+        let result = rt.execute(&prog, "hello").unwrap();
+        assert_eq!(result, "h\n");
+    }
+
+    /// A `>` inside a (parenthesized) ternary branch in print is a comparison.
+    #[test]
+    fn test_print_paren_ternary_gt_is_comparison() {
+        let prog = parse_program("{print (1 ? 3>2 : 0)}").unwrap();
+        let mut rt = AwkRuntime::new();
+        let result = rt.execute(&prog, "x").unwrap();
+        assert_eq!(result, "1\n");
+    }
+
+    /// Two independent range patterns in one program keep separate active state.
+    /// gawk: `printf '1\n2\n3\n4\n5\n' | gawk '/1/,/2/{print} /3/,/4/{print}'` → 1 2 3 4
+    #[test]
+    fn test_two_independent_range_patterns() {
+        let prog = parse_program("/1/,/2/{print} /3/,/4/{print}").unwrap();
+        let mut rt = AwkRuntime::new();
+        let result = rt.execute(&prog, "1\n2\n3\n4\n5\n").unwrap();
+        assert_eq!(result, "1\n2\n3\n4\n");
+    }
+
+    /// A range whose end never matches stays open through EOF.
+    /// gawk: `printf '1\n2\n3\n4\n5\n' | gawk '/2/,/zzz/'` → 2 3 4 5
+    #[test]
+    fn test_range_end_never_matches_runs_to_eof() {
+        let prog = parse_program("/2/,/zzz/").unwrap();
+        let mut rt = AwkRuntime::new();
+        let result = rt.execute(&prog, "1\n2\n3\n4\n5\n").unwrap();
+        assert_eq!(result, "2\n3\n4\n5\n");
+    }
+
+    /// A regex pattern starting a new rule after a `}` lexes as a regex, not
+    /// division. `/1/{print} /3/{print}` over 1..5 → `1`, `3`.
+    #[test]
+    fn test_multiple_regex_rules_lex_after_brace() {
+        let prog = parse_program("/1/{print} /3/{print}").unwrap();
+        let mut rt = AwkRuntime::new();
+        let result = rt.execute(&prog, "1\n2\n3\n4\n5\n").unwrap();
+        assert_eq!(result, "1\n3\n");
+    }
+
+    /// Division (`/` after a value) must still lex as division, not regex.
+    #[test]
+    fn test_division_still_lexes_after_value() {
+        let prog = parse_program("BEGIN{x=10; print x/2/1}").unwrap();
+        let mut rt = AwkRuntime::new();
+        let result = rt.execute(&prog, "").unwrap();
+        assert_eq!(result, "5\n");
+    }
+
+    /// Division inside a for-header (after `;`) still lexes as division — the
+    /// `;`-enters-regex-context fix must not break `i < n/2`.
+    #[test]
+    fn test_division_in_for_header() {
+        let prog = parse_program("BEGIN{ for(i=0; i<10/2; i++) s=s i; print s }").unwrap();
+        let mut rt = AwkRuntime::new();
+        let result = rt.execute(&prog, "").unwrap();
+        assert_eq!(result, "01234\n");
+    }
+
+    /// A regex expression after `;` lexes as a regex (matches $0), not division.
+    #[test]
+    fn test_regex_after_semicolon() {
+        let prog = parse_program("{ x=1; if (/3/) print \"hit\" }").unwrap();
+        let mut rt = AwkRuntime::new();
+        let result = rt.execute(&prog, "3\n4\n").unwrap();
+        assert_eq!(result, "hit\n");
+    }
+
+    /// A range whose start and end match the same record fires for one record.
+    /// gawk: `printf '1\n2\n3\n4\n5\n' | gawk '/3/,/3/'` → 3
+    #[test]
+    fn test_range_one_record_when_start_equals_end() {
+        let prog = parse_program("/3/,/3/").unwrap();
+        let mut rt = AwkRuntime::new();
+        let result = rt.execute(&prog, "1\n2\n3\n4\n5\n").unwrap();
+        assert_eq!(result, "3\n");
+    }
+
+    /// bare `getline` → loud, hinted error.
+    #[tokio::test]
+    async fn test_getline_bare_is_loud_error() {
+        let mut ctx = make_ctx().await;
+        ctx.set_stdin("x".to_string());
+
+        let mut args = ToolArgs::new();
+        args.positional.push(Value::String("{getline}".into()));
+
+        let result = Awk.execute(args, &mut ctx).await;
+        assert!(!result.ok(), "expected failure, got success");
+        assert!(
+            result.err.contains("getline") && result.err.contains("not supported"),
+            "expected getline error, got: {}",
+            result.err
+        );
+    }
+
+    /// `getline x` (getline into a variable) → loud, hinted error.
+    #[tokio::test]
+    async fn test_getline_into_var_is_loud_error() {
+        let mut ctx = make_ctx().await;
+        ctx.set_stdin("x".to_string());
+
+        let mut args = ToolArgs::new();
+        args.positional
+            .push(Value::String("{getline x}".into()));
+
+        let result = Awk.execute(args, &mut ctx).await;
+        assert!(!result.ok(), "expected failure, got success");
+        assert!(
+            result.err.contains("getline") && result.err.contains("not supported"),
+            "expected getline error, got: {}",
+            result.err
+        );
+    }
+
+    /// `function f(){return 1}` → loud error about user-defined functions.
+    #[tokio::test]
+    async fn test_user_function_is_loud_error() {
+        let mut ctx = make_ctx().await;
+        ctx.set_stdin("".to_string());
+
+        let mut args = ToolArgs::new();
+        args.positional
+            .push(Value::String("function f(){return 1}".into()));
+
+        let result = Awk.execute(args, &mut ctx).await;
+        assert!(!result.ok(), "expected failure, got success");
+        assert!(
+            result.err.contains("user-defined functions") || result.err.contains("not supported"),
+            "expected function error, got: {}",
+            result.err
+        );
+    }
+
+    /// `return` inside a block also errors about user-defined functions.
+    #[tokio::test]
+    async fn test_return_in_block_is_loud_error() {
+        let mut ctx = make_ctx().await;
+        ctx.set_stdin("x".to_string());
+
+        let mut args = ToolArgs::new();
+        args.positional
+            .push(Value::String("{return 1}".into()));
+
+        let result = Awk.execute(args, &mut ctx).await;
+        assert!(!result.ok(), "expected failure, got success");
+        assert!(
+            result.err.contains("user-defined functions") || result.err.contains("not supported"),
+            "expected function error, got: {}",
+            result.err
+        );
+    }
+
+    /// `a[1,2]=3` (multi-dimensional subscript) → loud, hinted error.
+    #[tokio::test]
+    async fn test_multi_dim_subscript_is_loud_error() {
+        let mut ctx = make_ctx().await;
+        ctx.set_stdin("".to_string());
+
+        let mut args = ToolArgs::new();
+        args.positional
+            .push(Value::String("BEGIN{a[1,2]=3; print a[1,2]}".into()));
+
+        let result = Awk.execute(args, &mut ctx).await;
+        assert!(!result.ok(), "expected failure, got success");
+        assert!(
+            result.err.contains("multi-dimensional") || result.err.contains("a[i,j]"),
+            "expected multi-dim error, got: {}",
+            result.err
+        );
+    }
+
+    // =========================================================================
+    // Non-finite number formatting — matches gawk 5.4.0 exact spelling
+    // =========================================================================
+
+    /// sqrt(-1) formats as `-nan`, matching gawk 5.4.0.
+    /// gawk: `BEGIN{print sqrt(-1)}` (stderr warning suppressed) → `-nan`
+    #[test]
+    fn test_sqrt_negative_formats_as_nan() {
+        let got = super::format_awk_number(f64::NAN);
+        assert_eq!(got, "-nan", "NaN must format as '-nan', got: {got:?}");
+    }
+
+    /// Positive infinity formats as `+inf`, matching gawk 5.4.0.
+    /// gawk: `BEGIN{print 2^1024}` → `+inf`
+    #[test]
+    fn test_positive_infinity_formats_as_plus_inf() {
+        let got = super::format_awk_number(f64::INFINITY);
+        assert_eq!(got, "+inf", "pos inf must format as '+inf', got: {got:?}");
+    }
+
+    /// Negative infinity formats as `-inf`, matching gawk 5.4.0.
+    /// gawk: `BEGIN{print -2^1024}` → `-inf`
+    #[test]
+    fn test_negative_infinity_formats_as_minus_inf() {
+        let got = super::format_awk_number(f64::NEG_INFINITY);
+        assert_eq!(got, "-inf", "neg inf must format as '-inf', got: {got:?}");
+    }
+
+    /// sqrt(-1) via AwkRuntime end-to-end: the output string matches gawk.
+    #[test]
+    fn test_sqrt_negative_runtime_output() {
+        let prog = parse_program("BEGIN{print sqrt(-1)}").unwrap();
+        let mut rt = AwkRuntime::new();
+        let result = rt.execute(&prog, "").unwrap();
+        assert_eq!(result, "-nan\n", "sqrt(-1) runtime output must be '-nan\\n'");
+    }
+
+    /// 2^1024 via AwkRuntime end-to-end: prints `+inf` like gawk.
+    #[test]
+    fn test_pow_overflow_runtime_output() {
+        let prog = parse_program("BEGIN{print 2^1024}").unwrap();
+        let mut rt = AwkRuntime::new();
+        let result = rt.execute(&prog, "").unwrap();
+        assert_eq!(result, "+inf\n", "2^1024 must print '+inf\\n'");
     }
 }

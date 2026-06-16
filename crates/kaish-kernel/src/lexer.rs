@@ -1760,6 +1760,80 @@ fn glob_mergeable_text(token: &Token) -> Option<String> {
     }
 }
 
+/// Merge a span-adjacent metacharacter onto a flag token.
+///
+/// Handles the `awk -F:` idiom: the kaish lexer emits `-F` as `ShortFlag("F")` and
+/// `:` as `Token::Colon` (an operator). When the two tokens are span-adjacent (no
+/// whitespace between them), the `:` is part of the flag value, not a shell operator.
+/// This pass fuses them so `ShortFlag("F:")` reaches the arg-binding layer, which
+/// already handles the glued-value form (the same mechanism used for `cut -f1`).
+///
+/// Metachars handled: `:` (Colon) only.
+///
+/// `;` (Semi) and `|` (Pipe) are shell operators and must NOT be fused even when
+/// span-adjacent — `cmd -p; cmd2` and `ls -l|cat` must produce real Semi/Pipe
+/// tokens so the shell grammar can treat them as statement separators and pipes.
+/// In bash, `-F;` and `-F|` require quoting (`-F';'`), so kaish matches that
+/// contract.
+///
+/// **Safety**: the fuse is guarded by span adjacency (`last.span.end == token.span.start`),
+/// which is only true when there is no whitespace between the flag and the metachar.
+/// A space-separated `cmd -F :` leaves a gap and never reaches this merge.
+///
+/// **Colon-run fusion**: consecutive span-adjacent colons after the flag are all
+/// absorbed in one pass, so `-F::` becomes `ShortFlag("F::")` rather than
+/// `ShortFlag("F:") + Colon`.
+///
+/// Only `ShortFlag` is handled here. `LongFlag` with a bare `=:` form (e.g.
+/// `--field-separator=:`) is handled by the parser's `long_flag_with_value` rule
+/// via `primary_expr_parser`, which accepts the merged `Ident` that
+/// `merge_colon_adjacent` already produces from `=:` runs.
+fn merge_flag_metachar_adjacent(tokens: Vec<Spanned<Token>>) -> Vec<Spanned<Token>> {
+    if tokens.len() < 2 {
+        return tokens;
+    }
+
+    let mut result = Vec::with_capacity(tokens.len());
+    let mut i = 0;
+
+    while i < tokens.len() {
+        let token = &tokens[i];
+
+        // Only short flags can be followed by a glued colon.
+        if let Token::ShortFlag(flag_name) = &token.token {
+            // Absorb a run of span-adjacent colons into the flag name.
+            let mut fused = flag_name.clone();
+            let mut end_span = token.span.end;
+            let mut j = i + 1;
+
+            while let Some(next) = tokens.get(j) {
+                if next.span.start == end_span {
+                    if let Token::Colon = &next.token {
+                        fused.push(':');
+                        end_span = next.span.end;
+                        j += 1;
+                        continue;
+                    }
+                }
+                break;
+            }
+
+            if j > i + 1 {
+                // At least one colon was absorbed.
+                let span = token.span.start..end_span;
+                result.push(Spanned::new(Token::ShortFlag(fused), span));
+                i = j;
+                continue;
+            }
+        }
+
+        result.push(token.clone());
+        i += 1;
+    }
+
+    result
+}
+
 /// Merge span-adjacent token runs containing glob metacharacters into `GlobWord` tokens.
 ///
 /// A run is merged into `GlobWord` when it contains at least one `Star`, `Question`,
@@ -1965,7 +2039,9 @@ pub fn tokenize(source: &str) -> Result<Vec<Spanned<Token>>, Vec<Spanned<LexerEr
         i += 1;
     }
 
-    Ok(merge_glob_adjacent(merge_colon_adjacent(final_tokens)))
+    Ok(merge_glob_adjacent(merge_colon_adjacent(
+        merge_flag_metachar_adjacent(final_tokens),
+    )))
 }
 
 /// Tokenize source code, preserving comments.
