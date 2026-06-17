@@ -2974,19 +2974,39 @@ impl Kernel {
         let home = self.scope_home().await;
         let mut collected: Vec<Value> = Vec::with_capacity(consumes.max(1));
         for _ in 0..consumes.max(1) {
+            // A `key=value` (WordAssign) token is consumable only by a
+            // single-value flag (`-v a=1`). For a multi-value flag (`jq --arg
+            // NAME VAL`, consumes>1) it is NOT eligible — otherwise `--arg x=1
+            // filter` would reassemble `x=1` into the first slot and steal the
+            // filter into the second. Multi-value flags take plain positionals.
+            let allow_word_assign = consumes <= 1;
             let next_pos = positional_indices
                 .iter()
-                .find(|idx| **idx > current_idx && !consumed.contains(idx))
+                .find(|idx| {
+                    **idx > current_idx
+                        && !consumed.contains(idx)
+                        && (allow_word_assign || matches!(args[**idx], Arg::Positional(_)))
+                })
                 .copied();
             match next_pos {
-                Some(pos_idx) => {
-                    if let Arg::Positional(expr) = &args[pos_idx] {
+                Some(pos_idx) => match &args[pos_idx] {
+                    Arg::Positional(expr) => {
                         let value = self.eval_expr_async(expr).await?;
                         let value = apply_tilde_expansion(value, home.as_deref());
                         collected.push(value);
                         consumed.insert(pos_idx);
                     }
-                }
+                    // `-v a=1`: reassemble the `key=value` token as the flag's
+                    // scalar value (see `positional_indices` construction).
+                    Arg::WordAssign { key, value } => {
+                        let val = self.eval_expr_async(value).await?;
+                        let val = apply_tilde_expansion(val, home.as_deref());
+                        let val_str = crate::interpreter::value_to_string(&val);
+                        collected.push(Value::String(format!("{key}={val_str}")));
+                        consumed.insert(pos_idx);
+                    }
+                    _ => {}
+                },
                 None => {
                     if consumes <= 1 && collected.is_empty() {
                         // Back-compat: a flag with no follow-up positional
@@ -3069,9 +3089,19 @@ impl Kernel {
         let mut consumed: std::collections::HashSet<usize> = std::collections::HashSet::new();
         let mut past_double_dash = false;
 
-        // Find positional arg indices for flag value consumption
+        // Indices a value-flag may consume as its value. Positionals always
+        // qualify. A `WordAssign` (`a=1`) also qualifies when the tool does not
+        // itself treat `key=value` as an assignment (everything but
+        // export/alias/unalias) — getopt semantics: `awk -v a=1` binds `a=1` to
+        // `-v`, rather than skipping it and grabbing the next positional (the
+        // program). Without this, the natural `-F`/`-v NAME=VALUE` form silently
+        // mis-binds. The main-loop `WordAssign` arm skips consumed indices.
         let positional_indices: Vec<usize> = args.iter().enumerate()
-            .filter_map(|(i, a)| matches!(a, Arg::Positional(_)).then_some(i))
+            .filter_map(|(i, a)| {
+                let consumable = matches!(a, Arg::Positional(_))
+                    || (!accepts_word_assign && matches!(a, Arg::WordAssign { .. }));
+                consumable.then_some(i)
+            })
             .collect();
 
         let mut i = 0;
@@ -3133,6 +3163,12 @@ impl Kernel {
                     }
                 }
                 Arg::WordAssign { key, value } => {
+                    // Already pulled in as a preceding value-flag's argument
+                    // (`awk -v a=1`); don't also emit it as a positional.
+                    if consumed.contains(&i) {
+                        i += 1;
+                        continue;
+                    }
                     let val = self.eval_expr_async(value).await?;
                     let val = apply_tilde_expansion(val, home.as_deref());
                     if accepts_word_assign {
