@@ -1379,7 +1379,7 @@ impl Kernel {
     /// Equivalent to `execute_with_options(input, ExecuteOptions::default())`.
     /// Returns the result of the last statement executed.
     pub async fn execute(&self, input: &str) -> Result<ExecResult> {
-        self.run_inner(input, ExecuteOptions::default(), None).await
+        self.run_inner(input, ExecuteOptions::default(), None, None).await
     }
 
     /// Execute with per-call options. The primary entry point for embedders
@@ -1406,7 +1406,7 @@ impl Kernel {
         input: &str,
         opts: ExecuteOptions,
     ) -> Result<ExecResult> {
-        self.run_inner(input, opts, None).await
+        self.run_inner(input, opts, None, None).await
     }
 
     /// Same as [`Self::execute_with_options`] but with a per-statement output
@@ -1418,7 +1418,40 @@ impl Kernel {
         opts: ExecuteOptions,
         on_output: &mut (dyn FnMut(&ExecResult) + Send),
     ) -> Result<ExecResult> {
-        self.run_inner(input, opts, Some(on_output)).await
+        self.run_inner(input, opts, None, Some(on_output)).await
+    }
+
+    /// Execute with a **lazy** standard input fed as a [`PipeReader`].
+    ///
+    /// Unlike [`ExecuteOptions::with_stdin`] (a pre-read `String`), this never
+    /// forces the input to be drained before execution: the reader seeds the
+    /// first top-level command's `pipe_stdin`, and a command that does not read
+    /// stdin (`echo`) returns without touching it. This is the seam a
+    /// non-interactive frontend uses to forward an *open* process stdin without
+    /// hanging on a pipe that never sends EOF (`sleep 10 | kaish -c 'echo hi'`).
+    ///
+    /// Embedders that already hold a complete buffer should prefer the simpler
+    /// [`ExecuteOptions::with_stdin`] String path.
+    pub async fn execute_with_pipe_stdin(
+        &self,
+        input: &str,
+        opts: ExecuteOptions,
+        pipe_stdin: crate::scheduler::PipeReader,
+    ) -> Result<ExecResult> {
+        self.run_inner(input, opts, Some(pipe_stdin), None).await
+    }
+
+    /// Streaming counterpart to [`Self::execute_with_pipe_stdin`] — the REPL
+    /// `-c`/script frontend uses this to print output incrementally while
+    /// feeding a lazy process-stdin pipe.
+    pub async fn execute_with_pipe_stdin_streaming(
+        &self,
+        input: &str,
+        opts: ExecuteOptions,
+        pipe_stdin: crate::scheduler::PipeReader,
+        on_output: &mut (dyn FnMut(&ExecResult) + Send),
+    ) -> Result<ExecResult> {
+        self.run_inner(input, opts, Some(pipe_stdin), Some(on_output)).await
     }
 
     /// Execute kaish source code with a transient overlay of exported variables.
@@ -1432,7 +1465,7 @@ impl Kernel {
         input: &str,
         vars: HashMap<String, Value>,
     ) -> Result<ExecResult> {
-        self.run_inner(input, ExecuteOptions::new().with_vars(vars), None).await
+        self.run_inner(input, ExecuteOptions::new().with_vars(vars), None, None).await
     }
 
     /// Execute kaish source code with a per-statement callback.
@@ -1445,7 +1478,7 @@ impl Kernel {
         input: &str,
         on_output: &mut (dyn FnMut(&ExecResult) + Send),
     ) -> Result<ExecResult> {
-        self.run_inner(input, ExecuteOptions::default(), Some(on_output)).await
+        self.run_inner(input, ExecuteOptions::default(), None, Some(on_output)).await
     }
 
     /// Link embedder trace context, then run [`Self::execute_with_options_inner`].
@@ -1462,6 +1495,7 @@ impl Kernel {
         &self,
         input: &str,
         opts: ExecuteOptions,
+        pipe_stdin: Option<crate::scheduler::PipeReader>,
         on_output: Option<&mut (dyn FnMut(&ExecResult) + Send)>,
     ) -> Result<ExecResult> {
         use opentelemetry::context::FutureExt;
@@ -1472,10 +1506,10 @@ impl Kernel {
 
         let result = match crate::telemetry::extract_parent(&opts) {
             Some(parent) => self
-                .execute_with_options_inner(input, opts, on_output)
+                .execute_with_options_inner(input, opts, pipe_stdin, on_output)
                 .with_context(parent)
                 .await,
-            None => self.execute_with_options_inner(input, opts, on_output).await,
+            None => self.execute_with_options_inner(input, opts, pipe_stdin, on_output).await,
         };
 
         result.map(|mut r| {
@@ -1487,11 +1521,12 @@ impl Kernel {
     /// Shared body for `execute`, `execute_with_options(_streaming)`, and
     /// the deprecated wrappers. Owns the per-call cancel token, vars overlay,
     /// cwd override, and timeout race.
-    #[tracing::instrument(level = "info", skip(self, opts, on_output), fields(input_len = input.len()))]
+    #[tracing::instrument(level = "info", skip(self, opts, pipe_stdin, on_output), fields(input_len = input.len()))]
     async fn execute_with_options_inner(
         &self,
         input: &str,
         opts: ExecuteOptions,
+        pipe_stdin: Option<crate::scheduler::PipeReader>,
         on_output: Option<&mut (dyn FnMut(&ExecResult) + Send)>,
     ) -> Result<ExecResult> {
         let _guard = self.acquire_execute_lock().await;
@@ -1593,6 +1628,66 @@ impl Kernel {
             let saved = std::mem::replace(&mut ec.cwd, new_cwd);
             drop(ec);
             Some(CwdGuard { kernel: self, saved })
+        } else {
+            None
+        };
+
+        // Per-call stdin: seed the persistent exec_ctx so the first top-level
+        // command that reads stdin consumes it (it's `take()`n at dispatch).
+        // Restore the prior value on Drop — normally `None`, so this also drops
+        // any residual seed an stdin-less program never consumed, keeping it
+        // from bleeding into the next call. Same RAII pattern as CwdGuard.
+        struct StdinGuard<'a> {
+            kernel: &'a Kernel,
+            saved: Option<String>,
+        }
+        impl Drop for StdinGuard<'_> {
+            fn drop(&mut self) {
+                let Ok(mut ec) = self.kernel.exec_ctx.try_write() else {
+                    tracing::error!(
+                        "stdin guard: exec_ctx lock unexpectedly busy; \
+                         skipping stdin restore — stale stdin may leak to next call"
+                    );
+                    return;
+                };
+                ec.stdin = self.saved.take();
+            }
+        }
+        let _stdin_guard: Option<StdinGuard<'_>> = if let Some(stdin) = opts.stdin {
+            let mut ec = self.exec_ctx.write().await;
+            let saved = ec.stdin.replace(stdin);
+            drop(ec);
+            Some(StdinGuard { kernel: self, saved })
+        } else {
+            None
+        };
+
+        // Per-call *lazy* stdin: a frontend-supplied `PipeReader` seeds the
+        // persistent exec_ctx so the first stdin-reading command drains it (it's
+        // `take()`n at pipeline build). The RAII guard restores the prior value
+        // on Drop (normally `None`), so an unread reader doesn't bleed into the
+        // next call. Mirrors `StdinGuard`; the reader is non-Clone, so it moves.
+        struct PipeStdinGuard<'a> {
+            kernel: &'a Kernel,
+            saved: Option<crate::scheduler::PipeReader>,
+        }
+        impl Drop for PipeStdinGuard<'_> {
+            fn drop(&mut self) {
+                let Ok(mut ec) = self.kernel.exec_ctx.try_write() else {
+                    tracing::error!(
+                        "pipe stdin guard: exec_ctx lock unexpectedly busy; \
+                         skipping restore — stale pipe stdin may leak to next call"
+                    );
+                    return;
+                };
+                ec.pipe_stdin = self.saved.take();
+            }
+        }
+        let _pipe_stdin_guard: Option<PipeStdinGuard<'_>> = if let Some(reader) = pipe_stdin {
+            let mut ec = self.exec_ctx.write().await;
+            let saved = ec.pipe_stdin.replace(reader);
+            drop(ec);
+            Some(PipeStdinGuard { kernel: self, saved })
         } else {
             None
         };
@@ -2362,16 +2457,24 @@ impl Kernel {
         // lock before running. This prevents deadlocks when dispatch_command
         // is called from within the pipeline and recursively triggers another
         // pipeline (e.g., via user-defined tools).
-        let mut ctx = {
+        let (mut ctx, has_pipe_stdin) = {
             let ec = self.exec_ctx.read().await;
             let scope = self.scope.read().await;
-            ExecContext {
+            // A frontend-seeded lazy stdin (`execute_with_pipe_stdin`) lives in
+            // the persistent exec_ctx; it's moved (non-Clone) into this ctx in
+            // the consume-once block below, so note its presence here.
+            let has_pipe_stdin = ec.pipe_stdin.is_some();
+            (ExecContext {
                 backend: ec.backend.clone(),
                 scope: scope.clone(),
                 cwd: ec.cwd.clone(),
                 prev_cwd: ec.prev_cwd.clone(),
-                stdin: None,
-                stdin_data: None,
+                // Seed the first stage's stdin from any frontend-supplied input
+                // (`ExecuteOptions::stdin`, e.g. `printf … | kaish -c sort`). The
+                // runner forwards `ctx.stdin` to stage 0 unless a redirect
+                // (`< file`/heredoc) already set it, so redirect precedence holds.
+                stdin: ec.stdin.clone(),
+                stdin_data: ec.stdin_data.clone(),
                 pipe_stdin: None,
                 pipe_stdout: None,
                 stderr: ec.stderr.clone(),
@@ -2399,8 +2502,20 @@ impl Kernel {
                 watchdog: ec.watchdog.clone(),
                 #[cfg(all(feature = "localfs", feature = "overlay"))]
                 overlay_handle: self.overlay_handle.clone(),
-            }
+            }, has_pipe_stdin)
         }; // locks released
+
+        // Consume-once: move/clear the seeded stdin sources from the persistent
+        // exec_ctx now that this pipeline's ctx owns them, so a later statement
+        // in the same call (`cat ; cat`) does not re-receive them — matching
+        // shell stdin draining. `pipe_stdin` is non-Clone, so it's *moved* here
+        // (the ctx above was built with `pipe_stdin: None`).
+        if ctx.stdin.is_some() || ctx.stdin_data.is_some() || has_pipe_stdin {
+            let mut ec = self.exec_ctx.write().await;
+            ctx.pipe_stdin = ec.pipe_stdin.take();
+            ec.stdin = None;
+            ec.stdin_data = None;
+        }
 
         let mut result = self.runner.run(&pipeline.commands, &mut ctx, self).await;
 
@@ -4173,11 +4288,19 @@ impl Kernel {
         // Build flat argv (preserves flag format)
         let argv = self.build_args_flat(args).await?;
 
-        // Get stdin if available
-        let stdin_data = {
+        // Get stdin sources: a streaming `pipe_stdin` (an inter-stage pipeline
+        // pipe, or a frontend-seeded process-stdin pipe) and/or a buffered
+        // `String`. Take both out under the lock but do NOT drain here — a pipe
+        // read can block on its producer (a still-running upstream stage), so
+        // draining before spawn would serialize the pipeline (deadlocking
+        // `sleep 60 | extern`). The pipe is streamed to the child *after* spawn.
+        // `set_stdin` clears `pipe_stdin`, so a redirect-set String and a pipe
+        // are mutually exclusive in practice; prefer the pipe.
+        let (pipe_stdin, stdin_string) = {
             let mut ctx = self.exec_ctx.write().await;
-            ctx.take_stdin()
+            (ctx.pipe_stdin.take(), ctx.take_stdin())
         };
+        let has_stdin = pipe_stdin.is_some() || stdin_string.is_some();
 
         // Build and spawn the command
         use tokio::process::Command;
@@ -4198,7 +4321,7 @@ impl Kernel {
         }
 
         // Handle stdin
-        cmd.stdin(if stdin_data.is_some() {
+        cmd.stdin(if has_stdin {
             std::process::Stdio::piped()
         } else if self.interactive {
             std::process::Stdio::inherit()
@@ -4297,8 +4420,32 @@ impl Kernel {
             self.jobs.add_pgid(job_id, pid).await;
         }
 
-        // Write stdin if present
-        if let Some(data) = stdin_data
+        // Feed stdin. A streaming `pipe_stdin` is copied to the child by a
+        // detached task (bounded memory, no pre-drain) so an upstream stage and
+        // this child run concurrently — and a child that never reads stdin (or
+        // is killed) just breaks the copy, which stops. A buffered `String` is
+        // written inline and stdin dropped to signal EOF. Bytes are copied
+        // verbatim, so binary stdin survives.
+        let stdin_task: Option<tokio::task::JoinHandle<()>> = if let Some(mut pipe_in) = pipe_stdin {
+            child.stdin.take().map(|mut child_stdin| {
+                tokio::spawn(async move {
+                    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+                    let mut buf = [0u8; 8192];
+                    loop {
+                        match pipe_in.read(&mut buf).await {
+                            Ok(0) => break, // EOF
+                            Ok(n) => {
+                                if child_stdin.write_all(&buf[..n]).await.is_err() {
+                                    break; // child closed stdin
+                                }
+                            }
+                            Err(_) => break,
+                        }
+                    }
+                    // Dropping child_stdin signals EOF to the child.
+                })
+            })
+        } else if let Some(data) = stdin_string
             && let Some(mut stdin) = child.stdin.take()
         {
             use tokio::io::AsyncWriteExt;
@@ -4309,7 +4456,27 @@ impl Kernel {
                 )));
             }
             // Drop stdin to signal EOF
+            None
+        } else {
+            None
+        };
+
+        // Abort the stdin-copy task on EVERY exit path (the capture path, both
+        // interactive `inherit_output` returns, and any early error return).
+        // Once the child is reaped the copy has nothing left to deliver; if it
+        // were left parked on `pipe_in.read()` it would leak and hold the
+        // upstream pipe reader open. A drop guard is the single place that
+        // covers all returns — explicit per-return aborts were error-prone (an
+        // earlier version missed the two inherit_output returns).
+        struct AbortStdinCopyOnDrop(Option<tokio::task::JoinHandle<()>>);
+        impl Drop for AbortStdinCopyOnDrop {
+            fn drop(&mut self) {
+                if let Some(t) = self.0.take() {
+                    t.abort();
+                }
+            }
         }
+        let _stdin_copy_guard = AbortStdinCopyOnDrop(stdin_task);
 
         if inherit_output {
             // Job control path: use waitpid with WUNTRACED for Ctrl-Z support
@@ -4484,6 +4651,7 @@ impl Kernel {
             let status = match wait_or_kill(&mut child, kill_target.as_ref(), &cancel, kill_grace).await {
                 Ok(s) => s,
                 Err(e) => {
+                    // stdin-copy task is aborted by `_stdin_copy_guard` on return.
                     if let Some(task) = stdout_task { task.abort(); let _ = task.await; }
                     if let Some(task) = stderr_task { task.abort(); let _ = task.await; }
                     return Ok(Some(ExecResult::failure(

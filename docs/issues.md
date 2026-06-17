@@ -140,22 +140,22 @@ checksums (entropy is real). Home: a NoLocal kernel-routed test beside the
 DevFs tests in `tests/sandbox_mode_tests.rs`. DevFs:
 `crates/kaish-vfs/src/dev.rs`; range plumbing: `Filesystem::read_range`.
 
-### `rg` parallel walking
-The 2026-04-29 rg builtin uses `ignore::WalkBuilder::build()`, which
-yields a sequential iterator. `WalkParallel::run()` is a few lines'
-diff plus careful synchronization (work-stealing crossbeam deques,
-results merged across workers). High value on large trees — rg's
-real-world advantage. Skipped this round to ship the feature; revisit
-when single-thread perf bites.
-
-### `rg` async stdin streaming
-`rg.rs::run_with_matcher` reads stdin via `ctx.read_stdin_to_string()`
-into a `String` and uses `Searcher::search_slice` on the bytes. Fine
-for small/medium pipes; blocks the runtime worker on large pipes.
-A `SyncPipeReader` adapter (sync `std::io::Read` over async
-`PipeReader` via `Handle::block_on`) plus `Searcher::search_reader`
-would stream chunks. Expected modest payoff; defer until a real
-workload pushes against the buffer.
+### Port useful `rg`-only features into `kaish-glob` / `grep` (Amy, 2026-06-17)
+The `rg` builtin was removed 2026-06-17 (builtin-sweep Decision #1; 80%-rule:
+one search builtin). Some of its dropped flags are genuinely useful and could
+be re-homed in `kaish-glob` (which already depends on `ignore` and wraps
+`ignore::types::Types`/`TypesBuilder`) and surfaced through `grep`/`glob`/`find`
+rather than a second search builtin:
+- **`--type`/`-t`/`-T`** (file-type filters, e.g. `-t rust`) — the strongest
+  candidate; `kaish-glob` already has the `Types` machinery, so this is mostly
+  surface wiring on the existing walkers.
+- **`--hidden`** — kaish-glob already has dotglob-style hidden handling
+  (`[[project_dotfile_glob_fix]]`); a `grep --hidden` could thread it through.
+- **`--no-ignore`** (bypass gitignore), **`--max-count`** (early-stop; the
+  `grep_engine` sink had the hook, removed with rg — re-add on demand).
+Design first: decide whether these live on `grep` flags or on the file-walking
+layer (`find`/`glob`) so search and listing share one type/hidden/ignore model.
+Not urgent; pick up when an agent reaches for `-t`.
 
 ### Output disk-spill — runtime read-only residuals (core fix done 2026-06-06)
 **Core fix landed 2026-06-06** (full narrative now in git history). `OutputLimitConfig`
@@ -218,6 +218,37 @@ latch nonce like `rm`? `-i.bak` backup suffix?), not a parser tweak. Today `sed`
 loud-errors on `-i` rather than pretending. Revisit when an embedder (kaibo/kj)
 actually needs agent-driven in-place edits; until then `s/…/…/ … > file` via a
 real external `sed`, or the overlay, covers it.
+
+### `tee` / `patch` bypass the latch + trash machinery (write-model design)
+From the builtin sweep (was punch-list P1.2; deferred here 2026-06-17 to keep the
+release scoped). `tee` and `patch` mutate files through the VFS (overlay-safe)
+but do **not** honor `set -o latch` (confirmation nonce) or trash-on-overwrite the
+way `rm` does — same hazard class as the deferred `sed -i` above. An agent can
+silently overwrite a file via `tee` with no confirm and no recoverable prior copy.
+
+**NOT a reuse of `rm`'s path:** `decide_rm_action → {Trash,Delete,Latch}` means
+"trash IS the op." tee/patch need a *pre-write safety copy then overwrite* — a new
+`decide_mutation_action → {TrashFirst(path), Latch, Proceed}` (same priority chain
++ `/tmp`,`/v` excludes). tee can create a nonexistent file (no trash, just write)
+where rm requires existence.
+
+**Amy decisions (2026-06-17):**
+- **Latch + trash stay ON consistently, even in overlay mode** — the protections
+  are about agent-operation safety, not just real-FS data; latch guards a
+  dangerous op even in virtual space. So a tee/patch overwrite gates regardless of
+  `--overlay`. (Don't skip the confirm just because the overlay is reversible.)
+- **Truncating overwrite gates (trash + latch); `tee -a` append does NOT gate —
+  for now.** Append is non-destructive; keep the first cut simple and revisit
+  latch/trash-on-append when a concrete use case appears. New file (no prior
+  content) → just write, no trash.
+
+**Open impl detail (resolve when building):** the `decide_mutation_action` shape,
+the `--confirm` flag name (tee/patch have none today), and how trash physically
+captures prior content in overlay mode (overlay preserves the original via
+`reset`, so it may be a copy-within-overlay vs real-trash). Pairs naturally with
+the `sed -i` write-model work — do them together. Tests: tee/patch over an
+existing file under `set -o latch` → exit 2 + nonce, applies on `--confirm`; trash
+captures prior content; `/tmp`,`/v` excluded.
 
 ### Streaming file reads — wc/checksum/grep/cmp/cat landed 2026-06-14; residuals
 Scan-oriented builtins no longer read whole files into memory. Mechanism
@@ -566,6 +597,50 @@ of LocalSet workers + mpsc channel. Benchmark first to confirm the win.
 ### MCP resource watcher channel fixed at 256
 `subscriptions.rs:33` bounds the file-watch channel; high-churn
 environments drop events silently.
+
+### MCP `execute` has no `stdin` param (frontend stdin gap)
+`ExecuteOptions::stdin` + `with_stdin()` landed 2026-06-16 (the `kaish -c`
+piped-stdin fix); `kaish-repl` forwards its *open* process stdin via the lazy
+`Kernel::execute_with_pipe_stdin_streaming(PipeReader)` seam added 2026-06-17,
+while the eager `with_stdin(String)` path remains for embedders with a ready
+buffer. The MCP server (`crates/kaish-mcp/src/server/execute.rs:264`) builds
+`ExecuteOptions` without either, and `ExecuteParams` has no `stdin` field — so an
+MCP client cannot feed a program's stdin (it must use a heredoc/here-string in
+the script, or files/VFS). Low-effort follow-up: add `stdin: Option<String>` to
+`ExecuteParams` (+ schema doc), then `if let Some(s) = params.stdin { opts =
+opts.with_stdin(s) }` (the buffered path fits MCP — a request body is already a
+ready buffer). Deferred because kaibo/kaijutsu feed data via files/VFS, not
+process stdin, so nothing reaches for it today. Surfaced by the DeepSeek review.
+
+### Piped stdin isn't shared across statements in one `kaish -c 'a; b'` call
+From the PR #7 /code-review (2026-06-17). The consume-once logic in
+`execute_pipeline` moves the seeded `pipe_stdin` into the FIRST top-level
+statement's pipeline; if that statement doesn't read stdin, the reader is dropped
+when its pipeline ends, so a later statement that DOES read gets nothing —
+`printf hi | kaish -c 'echo x; cat'` prints only `x`, losing the piped line. A
+real shell leaves fd 0 shared, so `cat` would read it. Pre-existing within the
+branch (the eager `with_stdin(String)` path drained the same way). Fix is a stdin
+lifecycle change — keep the source on the persistent `exec_ctx` and let whichever
+command first reads it take it, rather than moving it into statement 1's snapshot
+eagerly. Niche (multi-statement `-c` with a non-reading first command); defer
+until it bites. (Related vestige: `run_single`'s `stdin` param, below.)
+
+### `head -n -0` / signed-zero line counts can't be distinguished (lexer-level)
+`head -n -0` should mean "all but the last 0 lines" (= whole file) but prints
+nothing, because `-0` lexes as `Int(0)` (the sign is lost at the lexer) and
+`line_spec` only treats a *negative* Int as the all-but-last form. Same root for
+any signed-zero count. Genuinely obscure (who writes `-0`?) and not fixable
+without lexer changes to preserve the sign of zero. Waived; noted for
+completeness from the PR #7 review.
+
+### `PipelineRunner::run_single`'s `stdin` parameter is vestigial
+`crates/kaish-kernel/src/scheduler/pipeline.rs:362` — `run_single(cmd, ctx,
+stdin: Option<String>)` is always called with `stdin: None` from
+`run_sequential` (`pipeline.rs:304`); the real stdin travels through `ctx.stdin`
+set by the `execute_pipeline` snapshot. The override branch (line ~371, "Set
+stdin from pipeline overrides redirect stdin") is dead. Drop the parameter, or
+add a note that it's forward-looking. Pre-existing; surfaced by the DeepSeek
+review of the stdin fix.
 
 ### `ToolCtx::backend()` forces a full `KernelBackend` mock for out-of-tree tests
 `crates/kaish-tool-api/src/ctx.rs`. `backend()` returns a non-optional
