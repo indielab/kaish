@@ -166,44 +166,37 @@ layer so search and listing share one type/hidden/ignore model. Not urgent.
 ## P2 — Focused refactors & real bugs
 
 ### Pre-release sweep — real bugs (2026-06-23, verified local)
-- **POSIX `test` / `[` are unreachable.** `test "a" = "a"`, `test a != b`, and
-  `[ -f x ]` all fail to parse — the parser never routes a bare `=`/`!=` or a single
-  `[` to the registered `test`/`Bracket` builtins (`parser.rs`; the tools exist in
-  `test_builtin.rs`). Only `[[ ]]` works. Breaks a universal sh idiom. (Distinct from
-  the P4 "did-you-mean" guidance below — these builtins are *registered but
-  undispatchable*, a real wiring bug.)
-- **`glob` returns exit 0 on zero matches** — violates kaish's own documented
-  strict-glob guarantee ("zero matches is an error"). `glob '*.none'` → empty, exit 0.
-  (`tools/builtin/glob.rs`)
-- **`env -u` / `env -i` silently ignored when listing** (no positional arg) —
-  `env -u SECRET` still prints `SECRET`; the override path is only taken when a
-  positional exists. Can leak vars meant to be filtered. (`tools/builtin/env.rs`)
-- **`readlink -f` / `realpath` don't resolve symlinks** — they only normalize
-  `.`/`..`, returning the un-canonicalized path (silent wrong location); both also
-  accept nonexistent paths with exit 0. (`tools/builtin/{readlink,realpath}.rs`)
-- **`ls -1` treated as a path**, not a flag (`--one` works). (`tools/builtin/ls.rs`)
-- **`basename //` → `//`** (POSIX `/`); **`dirname //` → `.`** (POSIX `/`).
-  (`tools/builtin/{basename,dirname}.rs`)
-- **`tail -c +N` ignores the `+`** (returns the last N bytes). (`tools/builtin/tail.rs`)
-- **`tree <nonexistent>` exits 0** with a bare root node (silent success).
-  (`tools/builtin/tree.rs`)
-- **`diff --json` emits three different shapes** (identical vs quiet vs full differ in
-  whether `differ`/`hunks` are present) — a `--json` contract bug for consumers.
-  (`tools/builtin/diff.rs`)
+Builtin batch FIXED 2026-06-24 (`fix/p2-verified-bugs`, kernel-routed regression
+tests per fix): **`glob`** exit 1 on zero matches (`glob_no_match_tests`);
+**`env -u`/`-i`** apply when listing (`env_filter_tests`); **`readlink -f`/`realpath`**
+resolve symlinks via the VFS + "not a symbolic link" + nonexistent errors
+(`readlink_realpath_tests`); **`ls -1`** is the flag (`ls1_basename_dirname_tests`);
+**`basename //`/`dirname //`** → `/` (same); **`tail -c +N`** from byte N
+(`tail_c_plus_tree_tests`); **`tree <nonexistent>`** errors (same); **`diff --json`**
+consistent `{old_file,new_file,differ,hunks?}` shape (`diff_json_shape_tests`);
+**`dd skip=`** without `count=` + **`seq -w`** pads negatives (`dd_xxd_seq_tests`);
+**`scatter`** single JSON object/scalar = one item (`scatter_single_json_tests`).
+NOTE: `xxd -r -p` trailing odd nibble was a **false positive** — kaish already
+matches GNU xxd (silently drops it); pinned by a test, not a bug.
+
+Still open (deferred — bigger than a builtin fix, each its own focused PR):
+- **POSIX `test` / `[` are unreachable.** `test "a" = "a"`, `test a != b`,
+  `[ -f x ]` fail to **parse**. Diagnosed 2026-06-24: NOT a routing miss — `=`/`!=`
+  lex as `Token::Eq`/`NotEq` and `[`/`]` as `LBracket`/`RBracket`, and the argv
+  parser rejects these operator tokens in command-arg position (`test -z ""` works;
+  any operator arg fails). A correct fix must let the argv parser accept these as
+  barewords in arg position WITHOUT breaking assignment (`x=y` → IDENT Eq EXPR),
+  glob char-classes (`ls [ab]*`), or `[[ ]]`. Delicate lexer/parser change, broad
+  regression surface — wants dedicated work + review, not a batch fix.
 - **`write`/`tee` write binary-via-`$()` as the literal text `[binary: N bytes]`**
   (silent corruption; the stdin path is safe). Extends the binary-data
   var-interpolation placeholder (P1 binary-data residuals) — here the placeholder
-  reaches a file. (`tools/builtin/write.rs`)
-- **Interpreter:** `export` inside a function is dropped on return (writes the
-  innermost frame, `interpreter/scope.rs`); file tests skip tilde — `[[ -f ~/x ]]`
-  false (`eval.rs`); `<<-` tab-stripping runs *after* interpolation, eating tabs that
-  came from a variable's value (`eval.rs`).
-- **`scatter` silently corrupts a single JSON object/int `.data`** — ignores it and
-  newline-splits the pretty-printed text (`echo '{"k":1}' | jq . | scatter` fans out
-  3 bogus items). (`scheduler/scatter.rs`)
-- **`dd skip=` ignored unless `count=` is also given** (`tools/builtin/dd.rs`);
-  **`xxd -r -p` silently drops a trailing odd hex nibble** (`tools/builtin/xxd.rs`);
-  **`seq -w` doesn't pad negative numbers** (`tools/builtin/seq.rs`).
+  reaches a file. Best folded into the tee/patch write-model work below.
+- **Interpreter trio:** `export` inside a function is dropped on return — needs
+  scope-frame-model work (the single `Scope.exported` set isn't merged back when a
+  function's forked scope returns), `interpreter/scope.rs`; file tests skip tilde —
+  `[[ -f ~/x ]]` false (`eval.rs`); `<<-` tab-stripping runs *after* interpolation,
+  eating tabs that came from a variable's value (`eval.rs`).
 
 ### Repeatable flags: glued short-flag form still overwrites (`-es/a/b/`)
 The `-e A -e B` and `--expression=A --expression=B` forms accumulate correctly,
@@ -332,6 +325,10 @@ Low-frequency sub-cases left after the P1 builtin fixes:
   `b`/`d`/`f`/`i` modifiers are accepted but not implemented. (`tools/builtin/sort.rs`)
 - **`printf`**: `%b` doesn't honor `\c` (stop *all* output) at the whole-format
   level; `%c` ignores width/flags. (`tools/builtin/format_string.rs`)
+- **`ls -1`**: the fix recovers `-1` by stripping a `Value::Int(-1)` positional,
+  so `ls -- -1` (listing a file literally named `-1`) misfires and lists cwd
+  instead. Rare; the real fix is lexing `-1` as a flag, not an int. (`$VAR=-1`
+  is safe — interpolation yields a `String`, not `Int(-1)`.) (`tools/builtin/ls.rs`)
 
 ### `mv` cross-mount copy of a symlink *child* follows it (fidelity, not data loss)
 Surfaced consolidating the rm/mv symlink-safety fix (2026-06-24). The top-level
