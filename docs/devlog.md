@@ -210,6 +210,33 @@ leak — all validated as fixed and were retired from the punch list.
   post-`--` glue — are in issues.md.)
 - **No generic `encode`/`decode`; no `random` builtin (2026-06-13).** See the
   binary-data section above.
+- **No `test` builtin and no `[` command (2026-06-25, Amy).** Conditionals go
+  through `[[ … ]]` only. The old `test`/`[` builtins were removed: `[`
+  (`Bracket`) was effectively dead (it can't be a command name — `[` lexes as
+  `LBracket`, absent from `command_parser`'s `command_name`), and `test`'s
+  binary-operator half (`test a = b`, `-eq`, `<`, `>`) never reached the builtin
+  because `=`/`!=`/`<`/`>` lex as operator tokens the argv parser rejects in
+  argument position — only unary `test -z`/`test -f` actually routed. Rather than
+  do the delicate, broad-blast-radius parser change to accept those operator
+  tokens as barewords (without breaking assignment `x=y`, glob char-classes
+  `ls [ab]*`, or `[[ ]]`), we keep `[[ … ]]` as the single test form. **Why
+  `[[ ]]` wins:** it's real grammar the validator sees, so a malformed test /
+  unknown operator / unquoted expansion is caught *before* runtime; `test`/`[`
+  hide their operators as runtime string args (the late-failure footgun kaish
+  exists to remove). The fully-written `test`/`[` builtin (with passing
+  *direct-`.execute()`* unit tests — the gotcha CLAUDE.md warns about: they
+  bypassed the real lex/parse path) was the tell that this never worked end-to-end.
+  **Guard (gemini-batch review of PR #29):** a bare `test` in a subprocess build
+  falls through to an external `/usr/bin/test` that evaluates against the *real*
+  host FS, bypassing the VFS/overlay — a silent wrong boolean into `if`/`&&`. We
+  added validator advisory **W006** (`IssueCode::PosixTestCommand`) that steers to
+  `[[ … ]]` and *still runs* (Amy chose warn-don't-reject over a poison stub). It's
+  the first agent-surfaced validation warning: warnings were trace-only because
+  every external command fires `UndefinedCommand`, so a code now opts into
+  surfacing via `IssueCode::surfaces_to_agent` — the seam for the broader P4
+  "did-you-mean" pass. Surfacing is dual-path: the streaming frontend gets it via a
+  pre-loop `on_output` emission; `kernel.execute` reads it off the aggregate
+  `result.err` (the two consumers are disjoint, so it prints exactly once each).
 
 ## Accepted risks & waived items (decided, not open work)
 

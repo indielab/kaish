@@ -67,7 +67,6 @@ struct Skip {
 }
 
 const SKIPS: &[Skip] = &[
-    Skip { name: "[", reason: "the `[ expr ]` form doesn't parse (use [[ ]] or test); tool unreachable from scripts" },
     Skip { name: "bg", reason: "requires a stopped job (PTY job control)" },
     Skip { name: "fg", reason: "requires a stopped job (PTY job control)" },
     Skip { name: "exec", reason: "replaces the calling process" },
@@ -166,10 +165,6 @@ const CASES: &[Case] = &[
     Case { name: "tac", setup: &[], cmd: r#"printf 'a\nb\n' | tac --json"#, expect: Expect::String },
     Case { name: "tail", setup: &[], cmd: "tail -n 1 tmp/app.log --json", expect: Expect::Array },
     Case { name: "tee", setup: &[], cmd: "echo hi | tee out.txt --json", expect: Expect::String },
-    // `test` is a predicate: the result is the exit code (0 true / 1 false /
-    // 2 error). `--json` is consumed for format selection and dropped from the
-    // POSIX operand stream, so a true predicate exits 0 with empty stdout.
-    Case { name: "test", setup: &[], cmd: "test -n hello --json", expect: Expect::Empty },
     Case { name: "timeout", setup: &[], cmd: "timeout 5 echo hi --json", expect: Expect::String },
     Case { name: "tokens", setup: &[], cmd: "echo hello | tokens --json", expect: Expect::Array },
     Case { name: "touch", setup: &[], cmd: "touch new.txt --json", expect: Expect::Empty },

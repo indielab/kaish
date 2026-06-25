@@ -10,6 +10,27 @@ breaking entries are marked **BREAKING**.
 
 ## [Unreleased]
 
+### Added
+- **Validator advisory `W006` steers `test` to `[[ … ]]`.** Using a bare `test` as a
+  command now surfaces a one-time stderr note (`use [[ … ]] …`) and still runs. A
+  path-qualified form (`/usr/bin/test`, `./test`) is left alone — it's an explicit
+  external-binary call, not the conditional footgun.
+  This is the first *agent-surfaced* validation warning: most warnings stay
+  trace-only (every external command fires `UndefinedCommand`), but a code can
+  opt into surfacing via `IssueCode::surfaces_to_agent` — the seam for a broader
+  "did-you-mean" guidance pass. The advisory matters because a bare `test` would
+  otherwise resolve to an external `/usr/bin/test` that evaluates against the real
+  host filesystem, bypassing the VFS/overlay (a silent wrong boolean into `if`/`&&`).
+
+### Removed
+- **BREAKING: the `test` builtin and `[` command are gone.** Use `[[ … ]]`, the one
+  supported test form. The removed builtins never worked end-to-end through the
+  parser anyway: `[` could not be a command name and `test`'s comparison operators
+  (`test a = b`, `-eq`, `<`, `>`) were rejected in argument position — only unary
+  `test -z`/`test -f` routed. `[[ … ]]` is preferred because the validator
+  understands it and can catch a malformed test before runtime, where `test`/`[`
+  hide their operators as runtime string arguments.
+
 ## [0.9.1] - 2026-06-25
 
 ### Added
