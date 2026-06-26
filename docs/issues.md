@@ -179,11 +179,27 @@ NOTE: `xxd -r -p` trailing odd nibble was a **false positive** — kaish already
 matches GNU xxd (silently drops it); pinned by a test, not a bug.
 
 Still open (deferred — bigger than a builtin fix, each its own focused PR):
-- **Interpreter trio:** `export` inside a function is dropped on return — needs
-  scope-frame-model work (the single `Scope.exported` set isn't merged back when a
-  function's forked scope returns), `interpreter/scope.rs`; file tests skip tilde —
-  `[[ -f ~/x ]]` false (`eval.rs`); `<<-` tab-stripping runs *after* interpolation,
-  eating tabs that came from a variable's value (`eval.rs`).
+- **Interpreter trio — ALL FIXED** (2026-06-26, `fix/file-test-tilde`):
+  - ~~**`export NAME=VALUE` inside a function is dropped on return.**~~ FIXED: the
+    builtin's assignment form now uses new `Scope::set_exported_global`
+    (`set_global` + export mark) so the value lands in the shared scope and survives
+    the function frame, matching plain assignments and bash. `set_exported`
+    (innermost-frame) stays for the intentional frame-scoped overlays
+    (`execute_with_vars`, `FOO=bar cmd`). Tests: `export_scope_tests.rs`.
+  - ~~**`<<-` tab-stripping runs *after* interpolation**, eating tabs from a
+    variable's value.~~ FIXED 2026-06-26 (`fix/file-test-tilde`): new
+    `HeredocAssembler` (`interpreter/eval.rs`) strips leading tabs from the literal
+    source part-by-part; interpolated values are appended verbatim and terminate the
+    leading-tab run (bash strips source-line tabs before expansion). Wired into all
+    three interpolated-heredoc paths (sync `eval`, async `kernel`, sync `pipeline`
+    redirect-target). Tests in `heredoc_tests.rs`; bash-compat leg green.
+  - ~~**File tests skip tilde** — `[[ -f ~/x ]]` always false.~~ FIXED 2026-06-26
+    (`fix/file-test-tilde`): `eval_test_async` (the kernel path) now expands `~`
+    against the session `HOME` via `apply_tilde_expansion` before stat'ing, matching
+    the argv-positional path. Hermetic kernels (no `HOME`) keep `~` literal. Test:
+    `file_test_tilde_tests.rs` (3, localfs). NOTE: the sync `Executor::eval_test`
+    (`eval.rs`, non-kernel embedders only) still doesn't expand — it has no `HOME`
+    source on the trait; left as-is until an embedder needs the sync `[[ ]]` path.
 
 ### Repeatable flags: glued short-flag form still overwrites (`-es/a/b/`)
 The `-e A -e B` and `--expression=A --expression=B` forms accumulate correctly,
@@ -339,9 +355,22 @@ loses link-ness. Fix: teach `move_dir_recursive` to `lstat` children and
   (empty); setting `NF` doesn't truncate fields/`$0`; `split(s,a,/re/)` evaluates the
   regex as a `$0`-match (wrong count); `sub`/`gsub` replacements lack `\1`..`\9`
   backrefs. (`tools/builtin/awk.rs`)
-- **jq:** `keys_unsorted` returns *sorted* keys; `1e10` serializes as
-  `10000000000.0`; indexing `null` (`null | .a`) errors where real jq returns `null`.
-  (jaq-core / `jq_native.rs`)
+- **jq number formatting** — FIXED 2026-06-26 (`fix/file-test-tilde`): integral
+  results render without `.0` (`6/2`→`3`, `1e10`→`10000000000`) via
+  `jq_float_to_json`/`num_str_to_json` in `jq_native.rs`; fractional values
+  unchanged. Tests in `jq_tests.rs`.
+- **jq `keys_unsorted` returns *sorted* keys (dependency-level, deferred).** Root
+  cause: `serde_json` is built **without** `preserve_order`, so objects parse into a
+  sorted `BTreeMap` and insertion order is lost *at parse* — before jaq's
+  `keys_unsorted` ever runs. This also means *all* jq object output is key-sorted, not
+  insertion-ordered as real jq does. Fixing means enabling `serde_json/preserve_order`
+  (IndexMap) workspace-wide and confirming `jaq_json` preserves order; that flips every
+  object's key order to insertion order — its own change with a snapshot/test sweep, not
+  a one-liner. (`jq_native.rs::json_to_val`, workspace `serde_json` feature)
+- **jq indexing `null` (`null | .a`) errors where real jq returns `null` (jaq-core,
+  deferred).** jaq-core's field access on `null` raises "cannot use null as iterable"
+  rather than yielding `null`. Can't fix without patching/upgrading jaq; revisit on a
+  jaq bump. (jaq-core)
 - **External output via `BoundedStream` keeps only the tail and sets no spill signal**
   in the `output_limit::none()` path (repl/transient/default) — silent truncation,
   head lost. (When output-limit is enabled — agent presets — spill + exit-3 work.)

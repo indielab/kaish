@@ -3542,15 +3542,19 @@ impl Kernel {
                 Ok(Value::String(result))
             }
             Expr::HereDocBody { parts, strip_tabs } => {
-                let mut result = String::new();
+                // Assemble part-by-part so `<<-` tab stripping applies to the
+                // literal source, not to tabs from a `$var` value (bash strips
+                // source-line tabs before parameter expansion).
+                let mut asm = crate::interpreter::HeredocAssembler::new(*strip_tabs);
                 for sp in parts {
-                    result.push_str(&self.eval_string_part_async(&sp.part).await?);
+                    match &sp.part {
+                        StringPart::Literal(s) => asm.push_literal(s),
+                        other => {
+                            asm.push_interpolated(&self.eval_string_part_async(other).await?)
+                        }
+                    }
                 }
-                if *strip_tabs {
-                    Ok(Value::String(crate::interpreter::strip_leading_tabs(&result)))
-                } else {
-                    Ok(Value::String(result))
-                }
+                Ok(Value::String(asm.into_string()))
             }
             Expr::BinaryOp { left, op, right } => match op {
                 BinaryOp::And => {
@@ -3712,6 +3716,11 @@ impl Kernel {
             match test_expr {
                 TestExpr::FileTest { op, path } => {
                     let path_value = self.eval_expr_async(path).await?;
+                    // Expand `~` against the session HOME before stat'ing, the
+                    // same way argv positionals do — otherwise `[[ -f ~/x ]]`
+                    // stats the literal `~/x` and is always false.
+                    let home = self.scope_home().await;
+                    let path_value = apply_tilde_expansion(path_value, home.as_deref());
                     let path_str = value_to_string(&path_value);
                     let backend = self.exec_ctx.read().await.backend.clone();
                     let entry = backend.stat(std::path::Path::new(&path_str)).await.ok();
