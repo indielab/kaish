@@ -11,6 +11,27 @@ breaking entries are marked **BREAKING**.
 ## [Unreleased]
 
 ### Fixed
+- **`sed -e <number>` is a loud error, not a silent drop.** A non-string `-e`
+  expression (e.g. `sed -e 5`) now exits 2 with a usage error instead of being
+  ignored — silently dropping it once let the *filename* be parsed as the program.
+- **Unterminated arithmetic `$(( …` is a lexer error**, not a silent partial
+  evaluation — `$(( 1 + 2` (no closing `))`) no longer evaluates to `3`.
+- **`sed 's/x/y/0'` is a loud error**, matching GNU — the `0` occurrence flag
+  ("replace the 0th match") was silently treated as the first match.
+- **`printf '%c'` honors width and the left-align flag** (`printf '%5c' x` →
+  `␠␠␠␠x`), and a `\c` in a `%b` argument — or in the format literal — now stops
+  *all* output rather than only the rest of that argument, matching GNU `printf`.
+- **File tests expand `~`.** `[[ -f ~/x ]]` resolves the tilde against the session
+  `HOME` before stat'ing (it was always false). Hermetic kernels with no `HOME`
+  keep `~` literal.
+- **`<<-` strips leading tabs from the literal source only**, no longer eating
+  tabs that came from an interpolated variable's value (bash strips source-line
+  tabs before expansion).
+- **`export NAME=VALUE` inside a function persists after the function returns**,
+  matching a plain assignment and bash — it was previously dropped with the
+  function frame.
+- **`jq` no longer errors on indexing `null`** — `null | .a` yields `null` (jq
+  parity), from the jaq-core 3 / jaq-json 2 upgrade.
 - **`write` no longer corrupts binary content from `$(…)`.** `write FILE $(producer)`
   (and `producer | write FILE`) now persists the raw bytes of a `Value::Bytes`
   verbatim instead of stringifying it to the `[binary: N bytes]` placeholder — that
@@ -58,6 +79,13 @@ breaking entries are marked **BREAKING**.
   host filesystem, bypassing the VFS/overlay (a silent wrong boolean into `if`/`&&`).
 
 ### Changed
+- **BREAKING: `cp` no longer accepts `-p`/`--preserve`.** It was parsed and
+  silently discarded (the VFS has no mode, mtime, or ownership to preserve), so
+  `cp -p src dst` used to copy and exit 0; it now exits 2 as an unknown-argument
+  usage error. Drop the flag — plain `cp` performs the same copy.
+- **`jq` renders integral results without a trailing `.0`** — `6/2` → `3`,
+  `1e10` → `10000000000` (were `3.0` / `10000000000.0`), and large integers print
+  exactly on stdout. (jaq-core 3 / jaq-json 2.)
 - **`jq` object keys now preserve insertion order** instead of being sorted
   alphabetically — `echo '{"b":1,"a":2}' | jq .` emits `{"b":1,"a":2}`, matching
   real jq. This comes from upgrading the native jq engine to jaq-core 3 / jaq-json 2
