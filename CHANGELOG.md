@@ -35,49 +35,6 @@ breaking entries are marked **BREAKING**.
   without the lossy `to_argv()` stringification a re-quoted string would force. It
   reuses the full dispatch chain (`--json`, the confirmation latch, command
   resolution), so behavior matches the string door for single commands.
-
-### Fixed
-- **Listing a live directory no longer fails when one entry vanishes mid-scan.**
-  `LocalFs::list` (`ls`, and any walk over a real directory) stats each entry in a
-  step separate from the `read_dir` that yielded it, so a sibling unlinked in that
-  window (a concurrent writer, a build churning `target/`, an editor's temp file)
-  made the whole listing fail with `ENOENT` (`ls: .: not found`). A vanished entry
-  is now skipped, the way `ls(1)` tolerates a file removed mid-scan; a *dangling*
-  symlink still lists (its link stat succeeds), and other stat errors still surface.
-- **`--json` no longer drops the structured payload of an error result.** A
-  non-zero exit that carries both a diagnostic message and structured `.data`
-  — notably the latch confirmation nonce from `rm`/`tee`/`patch`/`sed -i` — kept
-  only `{error, code}` under `--json`, silently clobbering the nonce. The error
-  envelope now nests the payload under `data`: `{error, code, data: {nonce, …}}`.
-- **`sed -e <number>` is a loud error, not a silent drop.** A non-string `-e`
-  expression (e.g. `sed -e 5`) now exits 2 with a usage error instead of being
-  ignored — silently dropping it once let the *filename* be parsed as the program.
-- **Unterminated arithmetic `$(( …` is a lexer error**, not a silent partial
-  evaluation — `$(( 1 + 2` (no closing `))`) no longer evaluates to `3`.
-- **`sed 's/x/y/0'` is a loud error**, matching GNU — the `0` occurrence flag
-  ("replace the 0th match") was silently treated as the first match.
-- **`printf '%c'` honors width and the left-align flag** (`printf '%5c' x` →
-  `␠␠␠␠x`), and a `\c` in a `%b` argument — or in the format literal — now stops
-  *all* output rather than only the rest of that argument, matching GNU `printf`.
-- **File tests expand `~`.** `[[ -f ~/x ]]` resolves the tilde against the session
-  `HOME` before stat'ing (it was always false). Hermetic kernels with no `HOME`
-  keep `~` literal.
-- **`<<-` strips leading tabs from the literal source only**, no longer eating
-  tabs that came from an interpolated variable's value (bash strips source-line
-  tabs before expansion).
-- **`export NAME=VALUE` inside a function persists after the function returns**,
-  matching a plain assignment and bash — it was previously dropped with the
-  function frame.
-- **`jq` no longer errors on indexing `null`** — `null | .a` yields `null` (jq
-  parity), from the jaq-core 3 / jaq-json 2 upgrade.
-- **`write` no longer corrupts binary content from `$(…)`.** `write FILE $(producer)`
-  (and `producer | write FILE`) now persists the raw bytes of a `Value::Bytes`
-  verbatim instead of stringifying it to the `[binary: N bytes]` placeholder — that
-  placeholder reaching a file was silent corruption. Content from a positional,
-  `--content`, or stdin is all read as bytes. (`tee` already read stdin as raw bytes
-  and is unaffected; pinned by a regression test.)
-
-### Added
 - **`file` builtin identifies files by content (magic bytes), not extension.**
   Reports a broad type word plus MIME (`photo: image (image/png)`); `-i`/`--mime`
   prints the MIME alone, `-b`/`--brief` drops the filename, `--json` emits a
@@ -141,6 +98,47 @@ breaking entries are marked **BREAKING**.
   understands it and can catch a malformed test before runtime, where `test`/`[`
   hide their operators as runtime string arguments.
 
+### Fixed
+- **Listing a live directory no longer fails when one entry vanishes mid-scan.**
+  `LocalFs::list` (`ls`, and any walk over a real directory) stats each entry in a
+  step separate from the `read_dir` that yielded it, so a sibling unlinked in that
+  window (a concurrent writer, a build churning `target/`, an editor's temp file)
+  made the whole listing fail with `ENOENT` (`ls: .: not found`). A vanished entry
+  is now skipped, the way `ls(1)` tolerates a file removed mid-scan; a *dangling*
+  symlink still lists (its link stat succeeds), and other stat errors still surface.
+- **`--json` no longer drops the structured payload of an error result.** A
+  non-zero exit that carries both a diagnostic message and structured `.data`
+  — notably the latch confirmation nonce from `rm`/`tee`/`patch`/`sed -i` — kept
+  only `{error, code}` under `--json`, silently clobbering the nonce. The error
+  envelope now nests the payload under `data`: `{error, code, data: {nonce, …}}`.
+- **`sed -e <number>` is a loud error, not a silent drop.** A non-string `-e`
+  expression (e.g. `sed -e 5`) now exits 2 with a usage error instead of being
+  ignored — silently dropping it once let the *filename* be parsed as the program.
+- **Unterminated arithmetic `$(( …` is a lexer error**, not a silent partial
+  evaluation — `$(( 1 + 2` (no closing `))`) no longer evaluates to `3`.
+- **`sed 's/x/y/0'` is a loud error**, matching GNU — the `0` occurrence flag
+  ("replace the 0th match") was silently treated as the first match.
+- **`printf '%c'` honors width and the left-align flag** (`printf '%5c' x` →
+  `␠␠␠␠x`), and a `\c` in a `%b` argument — or in the format literal — now stops
+  *all* output rather than only the rest of that argument, matching GNU `printf`.
+- **File tests expand `~`.** `[[ -f ~/x ]]` resolves the tilde against the session
+  `HOME` before stat'ing (it was always false). Hermetic kernels with no `HOME`
+  keep `~` literal.
+- **`<<-` strips leading tabs from the literal source only**, no longer eating
+  tabs that came from an interpolated variable's value (bash strips source-line
+  tabs before expansion).
+- **`export NAME=VALUE` inside a function persists after the function returns**,
+  matching a plain assignment and bash — it was previously dropped with the
+  function frame.
+- **`jq` no longer errors on indexing `null`** — `null | .a` yields `null` (jq
+  parity), from the jaq-core 3 / jaq-json 2 upgrade.
+- **`write` no longer corrupts binary content from `$(…)`.** `write FILE $(producer)`
+  (and `producer | write FILE`) now persists the raw bytes of a `Value::Bytes`
+  verbatim instead of stringifying it to the `[binary: N bytes]` placeholder — that
+  placeholder reaching a file was silent corruption. Content from a positional,
+  `--content`, or stdin is all read as bytes. (`tee` already read stdin as raw bytes
+  and is unaffected; pinned by a regression test.)
+
 ## [0.9.1] - 2026-06-25
 
 ### Added
@@ -153,12 +151,6 @@ breaking entries are marked **BREAKING**.
 - **Hermeticity: external-command resolution no longer falls back to the OS `PATH`.** `try_execute_external` (and the test-only `BackendDispatcher` spawn site) read `PATH` from kernel scope only — when it's absent they no longer reach into `std::env::var("PATH")`, which contradicted the "kernel never reads OS env" contract. A frontend that wants host `PATH` seeds it via `initial_vars` (the REPL already does, with `os_env_vars()`); an embedder that doesn't gets a kernel that can't resolve external commands at all (the strongest hermetic default). No behavior change for the REPL or any embedder that seeds env.
 
 ### Fixed
-- **`jq` renders integral numbers without a trailing `.0`.** `6/2` → `3` (not `3.0`) and the literal `1e10` → `10000000000`, matching jq's number canonicalization; fractional values like `5/2` → `2.5` are unchanged. (jaq produces a float that the writer would otherwise print with `.0`.)
-- **`jq` indexing `null` returns `null`** (`echo null | jq '.a'` → `null`), instead of erroring "cannot use null as iterable" — matching real jq (via the jaq 3 upgrade).
-- **`jq` handles large integers exactly.** A big integer literal like `9999999999999999999999` round-trips verbatim instead of degrading to `1e+22` (jaq-json 2's bignum-backed numbers).
-- **`export NAME=VALUE` inside a function publishes to the shared scope.** Like a plain assignment (and like bash), the value now persists after the function returns instead of dying with the function's frame. Previously the export *marking* survived but the value was written to the function frame and dropped — leaving an exported name with no value.
-- **`<<-` heredocs strip tabs from the source, not from `$var` values.** POSIX `<<-` removes leading tabs from each *source* line before parameter expansion, so a tab that arrives via a `$var` value (or `$(cmd)` output) at line start is now preserved (bash parity). Previously the body was materialized and *then* tab-stripped, eating tabs that came from a variable.
-- **`[[ -f ~/x ]]` and other `[[ ]]` file tests expand `~`** to the session `HOME` before stat'ing, the same way argv positionals do. Previously the kernel stat'd the literal `~/x`, so every `~`-prefixed file test (`-f`/`-d`/`-e`/`-r`/`-w`/`-x`) was false. Hermetic kernels (no `HOME` in scope) still leave `~` literal.
 - **`grep -c` exits 1 when nothing matched** (GNU parity), instead of always exiting 0. The count is still printed; over multiple files it exits 1 only when no file matched.
 - **`$(…)` command substitution strips only trailing newlines**, not all trailing whitespace — significant trailing spaces/tabs in the captured output now survive (`x=$(printf 'a  ')` keeps the spaces), matching the `"$(…)"` interpolation and for-loop paths. Previously a bare `$()` used `.trim_end()`.
 - **`jq '. / 0'` fails loudly** instead of silently returning `null`. jaq evaluates `n/0` to a non-finite float (`inf`/`NaN`) that JSON can't represent, which was being coerced to `null`; any non-finite numeric result in jq output is now a loud `jq runtime error` (exit 1). (Modulo by zero already errored.)
