@@ -134,6 +134,19 @@ breaking entries are marked **BREAKING**.
     default on a *subscripted* path — `${#u[tags]}`, `${cfg[port]:-8080}` — were
     briefly a loud "bind it first" error; they are now fully path-aware, see
     Added.)
+- **A bare collection reaching an external command's argv or a redirect
+  target silently JSON-serialized** (e.g. `curl -d $cfg` or `echo x > $cfg`);
+  both process-boundary sinks now refuse it with a `$(tojson $x)` hint, closing
+  the last two silent-stringify seams alongside the OS-env-export guard above.
+  A quoted `"$cfg"` is unaffected — string interpolation already renders
+  compact JSON before either sink sees it.
+- **Scalar-only `[[ ]]` test operators silently stringified a collection
+  operand** — `-z`/`-n`, `=~`/`!~`, ordering (`<`/`>`/`<=`/`>=`), and numeric
+  (`-eq`/`-ne`/`-gt`/`-lt`/`-ge`/`-le`) now refuse a list/record operand with a
+  loud Shape error naming the operator (e.g. an empty list no longer reads as
+  `-z`-true via its JSON text `"[]"`). `==`/`!=` already errored; `in`/`not in`
+  are unaffected (the one operator family that legitimately takes a
+  collection).
 - **`${x:-default}` no longer treats JSON `null` as present** — a variable
   holding `null` stringified to the non-empty `"null"`, so `${x:-fallback}`
   returned `null` instead of the default. `:-` now fires on `null` and empty

@@ -117,6 +117,46 @@ async fn exporting_a_structured_value_to_a_subprocess_is_a_loud_error() {
 }
 
 #[tokio::test]
+async fn bare_collection_in_external_argv_is_a_loud_error() {
+    // A live (un-interpolated) collection reaching an external command's argv
+    // is a loud error, never a silent JSON-serialize — the argv-side twin of
+    // the OS-env-export guard above. `printenv` is a real external (no kaish
+    // builtin by that name), so this exercises the production spawn-site
+    // guard in `build_args_flat`.
+    let kernel = repl_kernel();
+    let result = kernel
+        .execute(r#"xs=$(fromjson '[1,2]'); printenv $xs"#)
+        .await;
+    let msg = match result {
+        Ok(r) => {
+            assert_ne!(r.code, 0, "a bare collection argv element must fail: {r:?}");
+            r.err
+        }
+        Err(e) => format!("{e:#}"),
+    };
+    assert!(msg.contains("tojson"), "should hint at serializing with tojson: {msg}");
+}
+
+// Linux-gated + absolute path so the external spawn is unconditionally taken
+// (bypasses PATH lookup entirely), mirroring
+// `external_argv_does_not_split_space_containing_var` above — the exact
+// argv content is what's under test, so we pin it via `printf`.
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn interpolated_collection_is_a_string_arg() {
+    // `"$xs"` interpolates to compact JSON text BEFORE reaching argv (an
+    // ordinary `Value::String`), so it is not a boundary violation — only a
+    // bare, un-interpolated collection value trips the guard above.
+    let kernel = repl_kernel();
+    let result = kernel
+        .execute(r#"xs=$(fromjson '[1,2]'); /usr/bin/printf "[%s]" "$xs""#)
+        .await
+        .unwrap();
+    assert!(result.ok(), "interpolated collection arg must not error: {:?}", result);
+    assert_eq!(result.text_out(), "[[1,2]]");
+}
+
+#[tokio::test]
 async fn external_command_not_found() {
     let kernel = repl_kernel();
     let result = kernel
