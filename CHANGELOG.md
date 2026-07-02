@@ -11,6 +11,11 @@ breaking entries are marked **BREAKING**.
 ## [Unreleased]
 
 ### Changed
+- **Enumeration guidance points at `keys`/`values`** — the `for x in $VAR` error
+  (E012) now leads with `for x in $(values $coll)` / `for k in $(keys $coll)` as
+  the way to iterate a collection, and the help gains a Collections syntax section
+  plus a stronger onboarding line, so agents reach for the `$()` idiom instead of
+  a bare-variable for-head (which stays an error — no implicit word splitting).
 - **Agent onboarding composes in importance order** — the always-on instruction
   block an embedder ships (`Recipe::agent_onboarding`) now renders its Foundations
   fragments by an explicit importance rank (most-critical rules first), so the
@@ -39,6 +44,13 @@ breaking entries are marked **BREAKING**.
   out-of-bounds index, missing record key, a string key on a list, an integer
   index on a record, and subscripting a scalar. Literal construction
   (`xs=[a b c]`) and record iteration are not in this slice.
+- **Collection membership — `[[ e in $coll ]]` / `[[ e not in $coll ]]`** — a
+  list tests element membership with typed equality (`[[ 443 in ${servers[web]}
+  ]]` matches the JSON number 443, not just the string "443"); a record tests
+  key membership. Composes with `&&`/`||`/`!` and works inside a `for` loop like
+  any other `[[ ]]` test. A scalar/string RHS is a loud error (never silently
+  false/true) — use `=~`, glob (`[[ $s == *sub* ]]`), or `case` for substring
+  tests instead.
 - **`fromjson` / `tojson` builtins** — the JSON ingress/egress bridge for the
   value model. `fromjson` parses exactly one JSON document (from an argument or
   stdin) into a structured value in `.data`; empty input or trailing garbage is
@@ -48,6 +60,16 @@ breaking entries are marked **BREAKING**.
   the "serialize explicitly first" escape hatch for `export CFG_JSON=$(tojson
   $cfg)`; binary values are refused loudly. Both are pure data (present in every
   capability build). `fromjson "$(tojson $x)"` round-trips `$x` structurally.
+- **`keys` / `values` builtins** — the native-collections OPS pair, jq
+  semantics over both records and lists: for a **record**, `keys` returns its
+  keys and `values` its values (insertion order, pairwise-aligned); for a
+  **list**, `keys` returns its indices as integers (`0..N-1`) and `values` its
+  elements. This makes `$(keys $c)` / `$(values $c)` the uniform iteration idiom
+  over any collection (`for i in $(keys $xs)`, `for x in $(values $xs)`, `for k
+  in $(keys $r)`). Both accept a collection directly (no nesting), land the
+  result in `.data` for `$()` capture/iteration, and are pure data (present in
+  every capability build). A non-collection argument (scalar, bytes, unset) is a
+  loud error naming the actual type.
 - **`json_to_value_no_envelope` (kaish-types)** — envelope-free JSON→`Value`
   conversion for external JSON, so byte-envelope-shaped objects are never
   silently decoded to `Value::Bytes`.

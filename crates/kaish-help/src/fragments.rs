@@ -68,6 +68,17 @@ pub const FRAGMENTS: &[Fragment] = &[
     ),
     en(
         Concept::Model,
+        "data-model",
+        Variant::Rule,
+        Depth::Summary,
+        None,
+        "Values can be structured JSON — a list or a record — not only strings. \
+         Access is brackets-only (`${r[key]}`, `${xs[0]}`, never dots); iterate with \
+         `$(values $c)` (elements/values) or `$(keys $c)` (indices/keys); `fromjson` / \
+         `tojson` bridge JSON text in and out. See `help syntax` → Collections.",
+    ),
+    en(
+        Concept::Model,
         "welcome",
         Variant::Rule,
         Depth::Summary,
@@ -153,7 +164,9 @@ pub const FRAGMENTS: &[Fragment] = &[
         Depth::Summary,
         None,
         "`$(cmd)` carries structured data: `for i in $(seq 1 5)` iterates five values, \
-         not split text.",
+         not split text. Enumerate a collection the same way — `for x in $(values $c)` \
+         (list elements / record values) or `for k in $(keys $c)` (list indices / record \
+         keys). A bare `for x in $c` is an error: wrap the collection in `$(...)`.",
     )
     .ranked(2),
     en(
@@ -219,7 +232,7 @@ pub const FRAGMENTS: &[Fragment] = &[
     syntax_section(
         "variables",
         "Variables",
-        r#"```bash
+        r#"```sh
 NAME="value"              # assignment (no spaces around =)
 local NAME="value"        # local scope
 COUNT=42                  # integer
@@ -230,7 +243,7 @@ ENABLED=true              # boolean (only true/false)
     syntax_section(
         "expansion",
         "Expansion",
-        r#"```bash
+        r#"```sh
 $VAR                      # simple
 ${VAR}                    # braced
 ${VAR:-default}           # default if unset/empty
@@ -247,9 +260,53 @@ divergence from bash — kaish runs embedded inside long-lived host
 processes, where the host PID is meaningless to the script."#,
     ),
     syntax_section(
+        "collections",
+        "Collections (lists & records)",
+        r#"```sh
+# Values are structured JSON (list or record); fromjson/tojson bridge text.
+u=$(fromjson '{"name":"amy","tags":["rust","shell"]}')
+xs=$(fromjson '[10,20,30]')
+
+# READ ACCESS — brackets only, never dots. Bad access is a loud error.
+${u[name]}                # record key (bareword = literal key)
+${u[$k]}                  # dynamic key ($var)
+${xs[0]}   ${xs[-1]}      # list index; negative counts from the end
+${xs[0:2]}                # slice (end-exclusive) → a list
+${u[tags][0]}             # nested path
+${#xs}   ${#u}            # length: list elements / record keys
+
+# ENUMERATE — always wrap the collection in $(keys ...) or $(values ...).
+# A bare `for x in $xs` is an ERROR (E012): there is no word splitting.
+# keys → indices (list) / keys (record).  values → elements (list) / values (record).
+
+for x in $(values $xs); do echo $x; done          # each list element: 10 20 30
+for i in $(keys $xs);   do echo $i; done          # each list index:   0 1 2
+for k in $(keys $u);    do echo $k; done          # each record key:   name tags
+for v in $(values $u);  do echo $v; done          # each record value
+
+# key + value together — index the record by the loop key:
+for k in $(keys $u); do echo "$k = ${u[$k]}"; done
+
+# nested — a subscript access is still a VarRef, so it needs $() too:
+for t in $(values ${u[tags]}); do echo $t; done   # rust shell
+
+# filter while iterating — test each element, act on the matches:
+for x in $(values $xs); do
+  if [[ $x -gt 15 ]]; then echo "big: $x"; fi      # big: 20  big: 30
+done
+
+# MEMBERSHIP — RHS must be a collection (see Test Expressions):
+[[ rust in $(values ${u[tags]}) ]]                 # element present?
+[[ name in $u ]]                                   # record has key?
+[[ 1 in $(keys $xs) ]]                             # index in bounds?
+
+tojson $u                 # serialize back to JSON text (--pretty to indent)
+```"#,
+    ),
+    syntax_section(
         "paths",
         "Paths",
-        r#"```bash
+        r#"```sh
 /usr/bin/foo              # absolute
 ../parent/file            # relative with ..
 ./script.sh               # dot-slash (explicit relative)
@@ -261,7 +318,7 @@ cd -                      # previous directory
     syntax_section(
         "quoting",
         "Quoting",
-        r#"```bash
+        r#"```sh
 "hello $NAME"             # double quotes — interpolation
 "literal \$X"             # escape $ to prevent expansion
 'hello $NAME'             # single quotes — literal, no interpolation
@@ -282,7 +339,7 @@ cmd > $dir/out.txt        # error — quote "$dir/out.txt"
     syntax_section(
         "pipes-redirects",
         "Pipes & Redirects",
-        r#"```bash
+        r#"```sh
 cmd1 | cmd2 | cmd3        # pipe stdout
 cmd > file                # write stdout
 cmd >> file               # append
@@ -314,7 +371,7 @@ kaish variables directly into the filter."#,
     syntax_section(
         "operators",
         "Operators",
-        r#"```bash
+        r#"```sh
 cmd1 && cmd2              # cmd2 if cmd1 succeeds
 cmd1 || cmd2              # cmd2 if cmd1 fails
 ```"#,
@@ -322,25 +379,30 @@ cmd1 || cmd2              # cmd2 if cmd1 fails
     syntax_section(
         "test-expressions",
         "Test Expressions",
-        r#"```bash
+        r#"```sh
 # File: -f (file) -d (dir) -e (exists) -r (readable) -w (writable) -x (executable)
 # String: -z (empty) -n (non-empty) == != =~ (regex) !~ (not regex)
 # Numeric: -gt -lt -ge -le
 # Logic: && || !
+# Membership: in (list→element, record→key) / not in — RHS must be a collection
 
 [[ -f config.json && -n $NAME ]]
 [[ $N -gt 5 ]]
 [[ $s =~ "\.rs$" ]]
+[[ banana in $fruits ]]
+[[ tmp not in $services ]]
 ```"#,
     ),
     syntax_section(
         "control-flow",
         "Control Flow",
-        r#"```bash
+        r#"```sh
 if [[ -f file ]]; then echo "found"; elif [[ -d dir ]]; then echo "dir"; else echo "none"; fi
 
 for item in "one" "two"; do echo $item; done
 for f in *.txt; do cat "$f"; done
+for x in $(values $list); do echo $x; done            # a collection's elements/values
+for k in $(keys $rec); do echo "$k=${rec[$k]}"; done  # a record's keys (bare $rec is E012)
 
 while [[ $N -gt 0 ]]; do N=$((N - 1)); done
 
@@ -356,7 +418,7 @@ break; continue; return [N]; exit [N]
     syntax_section(
         "command-substitution",
         "Command Substitution",
-        r#"```bash
+        r#"```sh
 NOW=$(date)
 
 # In for-loops, $(cmd) splits on newlines (only):
@@ -388,7 +450,7 @@ DATA=$(kaish-last)                # capture for later use
     syntax_section(
         "arithmetic",
         "Arithmetic",
-        r#"```bash
+        r#"```sh
 X=$((5 + 3))              # 8
 Y=$((X * 2))              # 16
 # Operators: + - * / % > < >= <= == !=
@@ -398,7 +460,7 @@ Y=$((X * 2))              # 16
     syntax_section(
         "functions",
         "Functions",
-        r#"```bash
+        r#"```sh
 greet() { echo "Hello, $1!"; }
 function greet { echo "Hello, $1!"; }
 greet "Amy"
@@ -407,7 +469,7 @@ greet "Amy"
     syntax_section(
         "glob-expansion",
         "Glob Expansion",
-        r#"```bash
+        r#"```sh
 ls *.txt                  # expands to matching .txt files
 cat src/*.rs              # path-prefixed globs work
 for f in *.json; do       # iterates over matches
@@ -422,7 +484,7 @@ Zero matches is an error (exit code 1). The `glob` builtin still works for `--ex
     syntax_section(
         "shell-options",
         "Shell Options",
-        r#"```bash
+        r#"```sh
 set -e                    # exit on first error
 set -o latch              # require nonce confirmation to delete/overwrite (exit code 2)
 set -o trash              # move rm'd / overwritten files to Trash
@@ -456,7 +518,7 @@ nonces persist naturally. Embedders control this via
     syntax_section(
         "error-handling",
         "Error Handling",
-        r#"```bash
+        r#"```sh
 set -e                    # exit on first error
 cmd || { echo "failed"; exit 1; }
 source utils.kai          # load script (shared scope)
@@ -465,7 +527,7 @@ source utils.kai          # load script (shared scope)
     syntax_section(
         "aliases-background-jobs",
         "Aliases & Background Jobs",
-        r#"```bash
+        r#"```sh
 alias ll='ls -la'         # define (first word only, not in pipelines)
 unalias ll                # remove
 

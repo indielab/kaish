@@ -225,11 +225,13 @@ impl<'a> Validator<'a> {
                         "bare variable in for loop iterates once (kaish has no implicit word splitting)",
                     )
                     .with_suggestion(concat!(
-                        "use one of:\n",
-                        "    for i in $(split \"$VAR\")      # split on whitespace\n",
-                        "    for i in $(split \"$VAR\" \":\")  # split on delimiter\n",
+                        "wrap it in $(...) — for a collection use keys/values:\n",
+                        "    for x in $(values $coll)      # list elements / record values\n",
+                        "    for k in $(keys $coll)        # list indices / record keys\n",
+                        "    for i in $(split \"$VAR\")       # split a string on whitespace\n",
+                        "    for i in $(split \"$VAR\" \":\")   # split a string on a delimiter\n",
                         "    for i in $(seq 1 10)          # iterate numbers\n",
-                        "    for i in $(glob \"*.rs\")       # iterate files",
+                        "    for i in $(glob \"*.rs\")        # iterate files",
                     )),
                 );
             }
@@ -393,6 +395,10 @@ impl<'a> Validator<'a> {
                 self.validate_test(right);
             }
             TestExpr::Not { expr } => self.validate_test(expr),
+            TestExpr::In { left, right } | TestExpr::NotIn { left, right } => {
+                self.validate_expr(left);
+                self.validate_expr(right);
+            }
         }
     }
 
