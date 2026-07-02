@@ -91,12 +91,12 @@ enum Step {
 /// error (keys are strings — the design's "integers index lists" rule). The
 /// container is a collection by [`resolve_step`]'s guard, so the scalar arm is
 /// unreachable.
-fn classify_index(json: &serde_json::Value, i: i64, root: &str) -> Result<Step, PathError> {
+fn classify_index(json: &serde_json::Value, i: i64, path: &str) -> Result<Step, PathError> {
     let arr = match json {
         serde_json::Value::Array(a) => a,
         serde_json::Value::Object(_) => {
             return Err(PathError::Shape(format!(
-                "${{{root}[{i}]}}: integer index on a record — record keys are strings, use ${{{root}[\"{i}\"]}}"
+                "${{{path}[{i}]}}: integer index on a record — record keys are strings, use ${{{path}[\"{i}\"]}}"
             )))
         }
         _ => unreachable!("resolve_step guards non-collection containers"),
@@ -105,7 +105,7 @@ fn classify_index(json: &serde_json::Value, i: i64, root: &str) -> Result<Step, 
     let idx = if i < 0 { len + i } else { i };
     if idx < 0 || idx >= len {
         return Err(PathError::Absence(format!(
-            "${{{root}[{i}]}}: index out of bounds (list length {len})"
+            "${{{path}[{i}]}}: index out of bounds (list length {len})"
         )));
     }
     Ok(Step::Index(idx as usize))
@@ -114,11 +114,11 @@ fn classify_index(json: &serde_json::Value, i: i64, root: &str) -> Result<Step, 
 /// Classify a record key against an object. A bareword/string key on a list is
 /// an error; key *presence* is checked when the step is applied ([`descend`]),
 /// not here — the read/write split lives in that leaf policy.
-fn classify_key(json: &serde_json::Value, key: &str, root: &str) -> Result<Step, PathError> {
+fn classify_key(json: &serde_json::Value, key: &str, path: &str) -> Result<Step, PathError> {
     match json {
         serde_json::Value::Object(_) => Ok(Step::Key(key.to_string())),
         serde_json::Value::Array(_) => Err(PathError::Shape(format!(
-            "${{{root}[{key}]}}: string key on a list — use an integer index"
+            "${{{path}[{key}]}}: string key on a list — use an integer index"
         ))),
         _ => unreachable!("resolve_step guards non-collection containers"),
     }
@@ -131,13 +131,13 @@ fn classify_slice(
     json: &serde_json::Value,
     start: Option<i64>,
     end: Option<i64>,
-    root: &str,
+    path: &str,
 ) -> Result<Step, PathError> {
     let arr = match json {
         serde_json::Value::Array(a) => a,
         serde_json::Value::Object(_) => {
             return Err(PathError::Shape(format!(
-                "${{{root}[..]}}: cannot slice a record"
+                "${{{path}[..]}}: cannot slice a record"
             )))
         }
         _ => unreachable!("resolve_step guards non-collection containers"),
@@ -160,10 +160,27 @@ fn classify_slice(
 /// A dotted `.field` access. Brackets-only: always a loud error, with the
 /// bracket fix in the message. Shared by the root pre-check and `resolve_step`
 /// so a dotted segment reports identically at any hop.
-fn dotted_access_error(root: &str, field: &str) -> PathError {
+fn dotted_access_error(path: &str, field: &str) -> PathError {
     PathError::Shape(format!(
-        "${{{root}…}}: kaish uses bracket access, not dots — write the key as a subscript: [{field}]"
+        "${{{path}…}}: kaish uses bracket access, not dots — write the key as a subscript: [{field}]"
     ))
+}
+
+/// Render a subscript as the user wrote it, for building the path prefix that
+/// error messages carry (`a` → `a[b]` → `a[b][0]`) so a nested failure names the
+/// real path, not just the root.
+fn render_segment(seg: &VarSegment) -> String {
+    match seg {
+        VarSegment::Index(i) => format!("[{i}]"),
+        VarSegment::Key(k) => format!("[{k}]"),
+        VarSegment::Dynamic(v) => format!("[${v}]"),
+        VarSegment::Slice(a, b) => format!(
+            "[{}:{}]",
+            a.map(|n| n.to_string()).unwrap_or_default(),
+            b.map(|n| n.to_string()).unwrap_or_default()
+        ),
+        VarSegment::Field(f) => format!(".{f}"),
+    }
 }
 
 /// Classify one subscript against its container — the shared per-hop unit that
@@ -175,13 +192,13 @@ fn resolve_step(
     container: &serde_json::Value,
     seg: &VarSegment,
     scope: &Scope,
-    root: &str,
+    path: &str,
 ) -> Result<Step, PathError> {
     // A non-root `Field` is a dotted `.field` access — checked before the
     // container guard so a dotted segment always wins over a "not a collection"
     // message (the per-hop precedence the old walker had).
     if let VarSegment::Field(name) = seg {
-        return Err(dotted_access_error(root, name));
+        return Err(dotted_access_error(path, name));
     }
 
     // Every remaining subscript needs a collection container.
@@ -190,31 +207,31 @@ fn resolve_step(
         serde_json::Value::Array(_) | serde_json::Value::Object(_)
     ) {
         return Err(PathError::Shape(format!(
-            "${{{root}…}}: cannot subscript {} — it is not a collection",
+            "${{{path}…}}: cannot subscript {} — it is not a collection",
             type_name(&json_to_value_no_envelope(container.clone()))
         )));
     }
 
     match seg {
-        VarSegment::Index(i) => classify_index(container, *i, root),
-        VarSegment::Key(k) => classify_key(container, k, root),
-        VarSegment::Slice(start, end) => classify_slice(container, *start, *end, root),
+        VarSegment::Index(i) => classify_index(container, *i, path),
+        VarSegment::Key(k) => classify_key(container, k, path),
+        VarSegment::Slice(start, end) => classify_slice(container, *start, *end, path),
         VarSegment::Dynamic(var) => {
             // The variable's value is the subscript; the container type decides
             // whether it's an index or a key. An unset `$k` is UndefinedRoot,
             // not Absence — the *variable* is missing, so `${r[$k]:-d}` defaults.
             let key_val = scope.get(var).ok_or_else(|| {
-                PathError::UndefinedRoot(format!("${{{root}[${var}]}}: ${var} is not set"))
+                PathError::UndefinedRoot(format!("${{{path}[${var}]}}: ${var} is not set"))
             })?;
             match container {
                 serde_json::Value::Array(_) => {
                     let idx = value_as_index(key_val).ok_or_else(|| {
                         PathError::Shape(format!(
-                            "${{{root}[${var}]}}: a list index must be an integer, got \"{}\"",
+                            "${{{path}[${var}]}}: a list index must be an integer, got \"{}\"",
                             value_to_string(key_val)
                         ))
                     })?;
-                    classify_index(container, idx, root)
+                    classify_index(container, idx, path)
                 }
                 serde_json::Value::Object(_) => Ok(Step::Key(value_to_string(key_val))),
                 _ => unreachable!("non-collection container guarded above"),
@@ -232,7 +249,7 @@ fn resolve_step(
 fn descend<'a>(
     current: Cow<'a, serde_json::Value>,
     step: Step,
-    root: &str,
+    path: &str,
 ) -> Result<Cow<'a, serde_json::Value>, PathError> {
     match step {
         Step::Slice(s, e) => {
@@ -258,11 +275,11 @@ fn descend<'a>(
         Step::Key(k) => match current {
             Cow::Borrowed(j) => match j.as_object().and_then(|m| m.get(&k)) {
                 Some(child) => Ok(Cow::Borrowed(child)),
-                None => Err(PathError::Absence(format!("${{{root}[{k}]}}: no such key"))),
+                None => Err(PathError::Absence(format!("${{{path}[{k}]}}: no such key"))),
             },
             Cow::Owned(j) => match j.as_object().and_then(|m| m.get(&k)) {
                 Some(child) => Ok(Cow::Owned(child.clone())),
-                None => Err(PathError::Absence(format!("${{{root}[{k}]}}: no such key"))),
+                None => Err(PathError::Absence(format!("${{{path}[{k}]}}: no such key"))),
             },
         },
     }
@@ -670,11 +687,15 @@ impl Scope {
         };
 
         // Walk the subscripts, borrowing into the tree; only a slice (which
-        // builds a new list) and the terminal unwrap allocate.
+        // builds a new list) and the terminal unwrap allocate. `prefix`
+        // accumulates the path walked so far so a nested failure names the real
+        // path (`${a[b][9]}`, not `${a[9]}`).
         let mut current = Cow::Borrowed(root_json);
+        let mut prefix = root_name.clone();
         for seg in subscripts {
-            let step = resolve_step(&current, seg, self, root_name)?;
-            current = descend(current, step, root_name)?;
+            let step = resolve_step(&current, seg, self, &prefix)?;
+            current = descend(current, step, &prefix)?;
+            prefix.push_str(&render_segment(seg));
         }
         Ok(json_to_value_no_envelope(current.into_owned()))
     }

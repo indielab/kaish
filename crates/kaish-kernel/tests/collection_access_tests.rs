@@ -257,6 +257,20 @@ async fn integer_index_on_a_record_is_a_loud_error() {
 }
 
 #[tokio::test]
+async fn nested_error_names_the_full_path() {
+    // A failure deep in a path names the real path (`${s[web][9]}`), not just the
+    // root and failing segment — the walker accumulates the prefix.
+    let k = setup().await;
+    let (_, code, err) = run(
+        &k,
+        r#"s=$(fromjson '{"web":[80,443]}'); echo ${s[web][9]}"#,
+    )
+    .await;
+    assert_ne!(code, 0, "out-of-bounds must be an error");
+    assert!(err.contains("s[web][9]"), "should name the full path: {err}");
+}
+
+#[tokio::test]
 async fn nested_dynamic_key_through_a_path() {
     // `${services[$k][port]}` — a dynamic key mid-path, then a literal key.
     let k = setup().await;
