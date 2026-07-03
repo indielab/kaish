@@ -100,6 +100,15 @@ impl VfsRouter {
         fs.real_path(&relative)
     }
 
+    /// Returns true if some registered mount covers this path.
+    ///
+    /// Used by embedder overlay backends (`VirtualOverlayBackend`) to decide
+    /// whether a path belongs to this router's mounts or should be delegated
+    /// to the embedder's own backend — without hardcoding a mount prefix.
+    pub(crate) fn has_mount(&self, path: &Path) -> bool {
+        self.find_mount(path).is_ok()
+    }
+
     /// Find the mount point for a given path.
     ///
     /// Returns the mount and the path relative to that mount.

@@ -14,6 +14,34 @@ before it ships.
 
 ---
 
+## `/dev` was a no-op under `with_backend` (2026-07-03)
+
+Amy asked a throwaway question — "did we ever add `/dev/null`?" — which turned
+into finding kaijutsu's kernel never had it. kaijutsu builds its kaish kernel
+via `Kernel::with_backend` (custom-storage embedders), which never ran the
+`setup_vfs()` path that mounts `DevFs` at `/dev` for `Kernel::new`/`transient`.
+Checking whether kaijutsu's own read-only host-root mount shadowed `/dev/null`
+surfaced a second, deeper bug: it does, for reads (the real host `/dev/null` is
+empty too), but writes go through `LocalBackend::read_only`'s guard and error
+as read-only instead of discarding — so `cmd > /dev/null` was actively broken,
+not just missing.
+
+Worse: mounting `DevFs` at `/dev` inside `with_backend` alone would have been a
+no-op. `VirtualOverlayBackend::is_virtual_path` hardcoded routing to `/v`/`/v/*`
+only; every other path, including a freshly-mounted `/dev`, fell straight
+through to the embedder's own backend regardless of what the internal
+`VfsRouter` had mounted. Fixed both: `VfsRouter::has_mount` exposes a
+mount-table lookup, `is_virtual_path` became an `&self` method that also
+checks it (keeping the `/v` reservation as an explicit fast path, since that
+whole namespace is reserved even where nothing is mounted), and `with_backend`
+now mounts `/dev` alongside `/v/jobs`/`/v/blobs`. Verified the regression test
+actually catches the bug by reverting the two source files and rerunning it —
+all three cases failed as expected before the fix, passed after.
+
+kaijutsu itself stays broken until it bumps its `kaish-kernel = "0.10"`
+crates.io pin to whatever ships this — tracked as a follow-up, not fixed in
+this PR.
+
 ## `help regex` — waking the ERE weights (2026-07-03)
 
 PR #65's last follow-up: the BRE-superset story lived in four places (grep

@@ -15,8 +15,12 @@
 //!
 //! # Path Routing
 //!
-//! - `/v/*` → Internal VFS (JobFs, MemoryFs for blobs, etc.)
-//! - Everything else → Custom backend
+//! - `/v/*` → always routed to the internal VFS, whether or not anything is
+//!   mounted there (the whole `/v` namespace is reserved, so a miss returns
+//!   `NotFound` from the VFS rather than leaking through to the embedder).
+//! - Any other path actually covered by a mount registered on the internal
+//!   VFS (e.g. `/dev`, added by `Kernel::with_backend`) → also routed there.
+//! - Everything else → custom backend
 
 use async_trait::async_trait;
 use std::path::{Path, PathBuf};
@@ -57,10 +61,17 @@ impl VirtualOverlayBackend {
         Self { inner, vfs }
     }
 
-    /// Check if a path should be handled by the VFS (virtual paths).
-    fn is_virtual_path(path: &Path) -> bool {
+    /// Check if a path should be handled by the VFS rather than the inner backend.
+    ///
+    /// `/v` and `/v/*` are always reserved for the VFS, even where nothing is
+    /// mounted (so callers get `NotFound` from the VFS, not the embedder's
+    /// backend). Any other path is checked against the VFS's actual mount
+    /// table — this is what lets `Kernel::with_backend`'s `/dev` mount (or an
+    /// embedder's own `configure_vfs` mounts outside `/v`) take effect instead
+    /// of being silently swallowed by the inner backend.
+    fn is_virtual_path(&self, path: &Path) -> bool {
         let path_str = path.to_string_lossy();
-        path_str == "/v" || path_str.starts_with("/v/")
+        path_str == "/v" || path_str.starts_with("/v/") || self.vfs.has_mount(path)
     }
 
     /// Get the inner backend.
@@ -90,7 +101,7 @@ impl KernelBackend for VirtualOverlayBackend {
     // ═══════════════════════════════════════════════════════════════════════════
 
     async fn read(&self, path: &Path, range: Option<ReadRange>) -> BackendResult<Vec<u8>> {
-        if Self::is_virtual_path(path) {
+        if self.is_virtual_path(path) {
             Ok(self.vfs.read_range(path, range).await?)
         } else {
             self.inner.read(path, range).await
@@ -98,7 +109,7 @@ impl KernelBackend for VirtualOverlayBackend {
     }
 
     async fn write(&self, path: &Path, content: &[u8], mode: WriteMode) -> BackendResult<()> {
-        if Self::is_virtual_path(path) {
+        if self.is_virtual_path(path) {
             match mode {
                 WriteMode::CreateNew => {
                     if self.vfs.exists(path).await {
@@ -127,7 +138,7 @@ impl KernelBackend for VirtualOverlayBackend {
     }
 
     async fn set_mtime(&self, path: &Path, mtime: std::time::SystemTime) -> BackendResult<()> {
-        if Self::is_virtual_path(path) {
+        if self.is_virtual_path(path) {
             self.vfs.set_mtime(path, mtime).await?;
             Ok(())
         } else {
@@ -136,7 +147,7 @@ impl KernelBackend for VirtualOverlayBackend {
     }
 
     async fn append(&self, path: &Path, content: &[u8]) -> BackendResult<()> {
-        if Self::is_virtual_path(path) {
+        if self.is_virtual_path(path) {
             let mut existing = match self.vfs.read(path).await {
                 Ok(data) => data,
                 Err(e) if e.kind() == std::io::ErrorKind::NotFound => Vec::new(),
@@ -151,7 +162,7 @@ impl KernelBackend for VirtualOverlayBackend {
     }
 
     async fn patch(&self, path: &Path, ops: &[PatchOp]) -> BackendResult<()> {
-        if Self::is_virtual_path(path) {
+        if self.is_virtual_path(path) {
             // Read existing content
             let data = self.vfs.read(path).await?;
             let mut content = String::from_utf8(data)
@@ -175,7 +186,7 @@ impl KernelBackend for VirtualOverlayBackend {
     // ═══════════════════════════════════════════════════════════════════════════
 
     async fn list(&self, path: &Path) -> BackendResult<Vec<DirEntry>> {
-        if Self::is_virtual_path(path) {
+        if self.is_virtual_path(path) {
             Ok(self.vfs.list(path).await?)
         } else if path.to_string_lossy() == "/" || path.to_string_lossy().is_empty() {
             // Root listing: combine inner backend's root with /v
@@ -191,7 +202,7 @@ impl KernelBackend for VirtualOverlayBackend {
     }
 
     async fn stat(&self, path: &Path) -> BackendResult<DirEntry> {
-        if Self::is_virtual_path(path) {
+        if self.is_virtual_path(path) {
             Ok(self.vfs.stat(path).await?)
         } else {
             self.inner.stat(path).await
@@ -199,7 +210,7 @@ impl KernelBackend for VirtualOverlayBackend {
     }
 
     async fn mkdir(&self, path: &Path) -> BackendResult<()> {
-        if Self::is_virtual_path(path) {
+        if self.is_virtual_path(path) {
             self.vfs.mkdir(path).await?;
             Ok(())
         } else {
@@ -208,7 +219,7 @@ impl KernelBackend for VirtualOverlayBackend {
     }
 
     async fn remove(&self, path: &Path, recursive: bool) -> BackendResult<()> {
-        if Self::is_virtual_path(path) {
+        if self.is_virtual_path(path) {
             if recursive
                 && let Ok(entry) = self.vfs.lstat(path).await
                 && entry.is_dir()
@@ -227,8 +238,8 @@ impl KernelBackend for VirtualOverlayBackend {
     }
 
     async fn rename(&self, from: &Path, to: &Path) -> BackendResult<()> {
-        let from_virtual = Self::is_virtual_path(from);
-        let to_virtual = Self::is_virtual_path(to);
+        let from_virtual = self.is_virtual_path(from);
+        let to_virtual = self.is_virtual_path(to);
 
         if from_virtual != to_virtual {
             return Err(BackendError::InvalidOperation(
@@ -245,7 +256,7 @@ impl KernelBackend for VirtualOverlayBackend {
     }
 
     async fn exists(&self, path: &Path) -> bool {
-        if Self::is_virtual_path(path) {
+        if self.is_virtual_path(path) {
             self.vfs.exists(path).await
         } else {
             self.inner.exists(path).await
@@ -257,7 +268,7 @@ impl KernelBackend for VirtualOverlayBackend {
     // ═══════════════════════════════════════════════════════════════════════════
 
     async fn lstat(&self, path: &Path) -> BackendResult<DirEntry> {
-        if Self::is_virtual_path(path) {
+        if self.is_virtual_path(path) {
             Ok(self.vfs.lstat(path).await?)
         } else {
             self.inner.lstat(path).await
@@ -265,7 +276,7 @@ impl KernelBackend for VirtualOverlayBackend {
     }
 
     async fn read_link(&self, path: &Path) -> BackendResult<PathBuf> {
-        if Self::is_virtual_path(path) {
+        if self.is_virtual_path(path) {
             Ok(self.vfs.read_link(path).await?)
         } else {
             self.inner.read_link(path).await
@@ -273,7 +284,7 @@ impl KernelBackend for VirtualOverlayBackend {
     }
 
     async fn symlink(&self, target: &Path, link: &Path) -> BackendResult<()> {
-        if Self::is_virtual_path(link) {
+        if self.is_virtual_path(link) {
             self.vfs.symlink(target, link).await?;
             Ok(())
         } else {
@@ -323,7 +334,7 @@ impl KernelBackend for VirtualOverlayBackend {
     }
 
     fn resolve_real_path(&self, path: &Path) -> Option<PathBuf> {
-        if Self::is_virtual_path(path) {
+        if self.is_virtual_path(path) {
             // Virtual paths don't map to real filesystem
             None
         } else {
@@ -355,15 +366,32 @@ mod tests {
 
     #[tokio::test]
     async fn test_virtual_path_detection() {
-        assert!(VirtualOverlayBackend::is_virtual_path(Path::new("/v")));
-        assert!(VirtualOverlayBackend::is_virtual_path(Path::new("/v/")));
-        assert!(VirtualOverlayBackend::is_virtual_path(Path::new("/v/jobs")));
-        assert!(VirtualOverlayBackend::is_virtual_path(Path::new("/v/blobs/test.bin")));
+        let overlay = make_overlay().await;
+        assert!(overlay.is_virtual_path(Path::new("/v")));
+        assert!(overlay.is_virtual_path(Path::new("/v/")));
+        assert!(overlay.is_virtual_path(Path::new("/v/jobs")));
+        assert!(overlay.is_virtual_path(Path::new("/v/blobs/test.bin")));
 
-        assert!(!VirtualOverlayBackend::is_virtual_path(Path::new("/docs")));
-        assert!(!VirtualOverlayBackend::is_virtual_path(Path::new("/g/repo")));
-        assert!(!VirtualOverlayBackend::is_virtual_path(Path::new("/")));
-        assert!(!VirtualOverlayBackend::is_virtual_path(Path::new("/var")));
+        assert!(!overlay.is_virtual_path(Path::new("/docs")));
+        assert!(!overlay.is_virtual_path(Path::new("/g/repo")));
+        assert!(!overlay.is_virtual_path(Path::new("/")));
+        assert!(!overlay.is_virtual_path(Path::new("/var")));
+    }
+
+    #[tokio::test]
+    async fn test_non_v_mount_is_virtual_path() {
+        // A mount outside /v (e.g. Kernel::with_backend's /dev) must also be
+        // routed to the internal VFS, not silently delegated to the inner
+        // backend — this is the bug that let writes to /dev/null fail as
+        // "read-only filesystem" when the inner backend was read-only.
+        let (mock, _) = MockBackend::new();
+        let inner: Arc<dyn KernelBackend> = Arc::new(mock);
+        let mut vfs = VfsRouter::new();
+        vfs.mount("/dev", MemoryFs::new());
+        let overlay = VirtualOverlayBackend::new(inner, Arc::new(vfs));
+
+        assert!(overlay.is_virtual_path(Path::new("/dev/null")));
+        assert!(!overlay.is_virtual_path(Path::new("/docs")));
     }
 
     #[tokio::test]
