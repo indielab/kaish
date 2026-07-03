@@ -14,6 +14,36 @@ before it ships.
 
 ---
 
+## Collections value-model tests — the cross-model consensus suite (2026-07-03)
+
+With the write half merged (#66/#67), Amy fanned out a coverage question: a
+gemini-pro batch (13 whole files attached) on "the most important few tests for
+design confidence" and a fable deliberation (kaibo dossier → offline max
+thinking) hunting edge cases adversarially. Both independently converged on the
+same hole: the *load-bearing* value model — copy-on-assign, function-scope ×
+mutation, RMW ordering, iteration snapshots, and the round-trip law the design
+doc calls "test-pinned" — had zero integration tests. A future "make clones
+cheap" Rc/Arc refactor would have corrupted both bindings with the whole suite
+green.
+
+`collections_value_model_tests.rs` (30 tests) pins the consensus items; every
+assertion was probed against the live binary first (all behaviors were already
+correct — these are tripwires, not fixes). Notables: `local ys` without an
+initializer turns out to be a parse error, so fable's scariest edge (a local
+declaration silently punching writes through to the caller) is structurally
+impossible — pinned as a guard so it stays that way; bareword digits are
+integer indices even on records (loud, with the quoted-key fix-it), quoted
+numerics are string keys even on lists (loud) — stricter and better than the
+panel's gawk-shaped assumptions. Env-prefix `X=[1 2] /bin/true` gets the
+Decision-D guard test in `external_command_tests.rs` (the guard fires at spawn,
+so it needs a real binary — Linux-gated).
+
+The review also verified two real findings fixed/queued separately (`${#nope[0]}`
+silent zero; `{"$k": …}` literal-key trap) and a ratification list for the
+design doc (RHS-snapshot semantics, iteration materialization timing,
+numeric-key non-normalization, scatter/gather typing) — those ride the PR body
+and the next design-doc pass, not this suite.
+
 ## BRE follow-ups + the stale-`$?` bug (2026-07-03)
 
 Working the PR #65 follow-up comments: awk's invalid-FS/`split()` errors now name
