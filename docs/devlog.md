@@ -14,35 +14,33 @@ before it ships.
 
 ---
 
-## scatter/gather goes typed-JSONL (2026-07-03)
+## `/dev` was a no-op under `with_backend` (2026-07-03)
 
-GH #73's silent conflation (`1`/`"1"` byte-identical inside workers) turned into
-a full redesign once Amy asked "could we lean more into JSON data?" — and the
-answer reshaped both ends. Ingress: items stay typed through the fan-out
-(`${ITEM[id]}` subscripts a record; the binding uses the for-loop's exact
-json→Value conversion). Egress: gather emits one JSONL result record per
-worker, item order, failures included — which deletes the old line mode's
-can't-represent-a-failure short-circuit hack. Same records three ways: JSONL
-text, `--json` array, typed `.data` for `for r in $(… | gather)`. `--format`
-and `--first` died (`--first` was just `head` on JSONL — both hostile reviews
-independently said delete it); `--lines` is the raw escape hatch that keeps the
-old safety property (hard error on any failure, no partial text).
+Amy asked a throwaway question — "did we ever add `/dev/null`?" — which turned
+into finding kaijutsu's kernel never had it. kaijutsu builds its kaish kernel
+via `Kernel::with_backend` (custom-storage embedders), which never ran the
+`setup_vfs()` path that mounts `DevFs` at `/dev` for `Kernel::new`/`transient`.
+Checking whether kaijutsu's own read-only host-root mount shadowed `/dev/null`
+surfaced a second, deeper bug: it does, for reads (the real host `/dev/null` is
+empty too), but writes go through `LocalBackend::read_only`'s guard and error
+as read-only instead of discarding — so `cmd > /dev/null` was actively broken,
+not just missing.
 
-The panel (5 models battery + 2 hostile reviews, raw data gisted on the issue)
-earned its keep twice. First: capability tiers split cleanly on exit-code
-priors — cheap models guessed 0, frontier guessed 123 — and fable caught that
-proposal A *fought the prior it borrowed* (real xargs 123 covers all-failed
-too), which became A′: 0 / 123-any-failure / 2. Second: every model one-shot
-`${ITEM[id]}` correctly, validating typed ingress before a line of code.
+Worse: mounting `DevFs` at `/dev` inside `with_backend` alone would have been a
+no-op. `VirtualOverlayBackend::is_virtual_path` hardcoded routing to `/v`/`/v/*`
+only; every other path, including a freshly-mounted `/dev`, fell straight
+through to the embedder's own backend regardless of what the internal
+`VfsRouter` had mounted. Fixed both: `VfsRouter::has_mount` exposes a
+mount-table lookup, `is_virtual_path` became an `&self` method that also
+checks it (keeping the `/v` reservation as an explicit fast path, since that
+whole namespace is reserved even where nothing is mounted), and `with_backend`
+now mounts `/dev` alongside `/v/jobs`/`/v/blobs`. Verified the regression test
+actually catches the bug by reverting the two source files and rerunning it —
+all three cases failed as expected before the fix, passed after.
 
-One divergence surfaced only at implementation: kaish jq is array-as-document
-(`seq 1 3 | jq add` depends on it), so the gather idiom is
-`jq -r '.[] | select(.ok) | .out'` — NOT the real-jq streaming form all five
-panel models wrote. Docs teach `.[]` prominently; if agents thrash on it in
-practice, a jq streaming affordance is the revisit point. The old
-"single JSON object = one item" pin (P2 sweep) reversed deliberately: an
-object is now a loud error with a select-the-array hint, and the
-pretty-print-splitting regression it guarded stays impossible.
+kaijutsu itself stays broken until it bumps its `kaish-kernel = "0.10"`
+crates.io pin to whatever ships this — tracked as a follow-up, not fixed in
+this PR.
 
 ## `help regex` — waking the ERE weights (2026-07-03)
 

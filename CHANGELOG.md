@@ -193,6 +193,15 @@ breaking entries are marked **BREAKING**.
   demotion of `\|` to plain `|`).
 
 ### Fixed
+- **`Kernel::with_backend` now mounts `/dev` (DevFs) unconditionally** —
+  custom-backend embedders (e.g. kaijutsu) previously had no `/dev/null`,
+  `/dev/zero`, `/dev/random`, or `/dev/urandom` at all, and `VirtualOverlayBackend`
+  hardcoded routing to the `/v/*` namespace only, so even an embedder that
+  mounted its own `/dev` would have the mount silently ignored. The overlay now
+  also routes any path covered by a real VFS mount (not just `/v/*`), and
+  `with_backend` mounts `/dev` by default — a read-only embedder backend (like
+  kaijutsu's read-only host root) no longer turns `cmd > /dev/null` into a
+  filesystem error.
 - **`${#path}` on an undefined subscripted root is now loud** — `${#nope[items]}`
   silently returned `0` (the bash-parity `${#unset}` → 0 rule leaked into
   subscripted paths), so a typo'd name in a length-guarded loop spun zero times

@@ -208,6 +208,12 @@ let kernel = Kernel::with_backend(
 > relied on disk spill or `/v/jobs` persistence, that data now stays in
 > memory.
 
+`with_backend` also mounts `/dev` (`DevFs`: `/dev/null`, `/dev/zero`,
+`/dev/random`, `/dev/urandom`) unconditionally, kernel-owned, alongside
+`/v/jobs` and `/v/blobs` — this holds even if your own backend is read-only,
+so `cmd > /dev/null` always discards rather than failing as a filesystem
+error.
+
 A `with_backend` kernel owns its VFS, so `KernelConfig::with_vfs_budget`
 does not see your mounts — cap them yourself by constructing the backing
 `MemoryFs` with `MemoryFs::with_budget(Arc<ByteBudget>)`. Both types are

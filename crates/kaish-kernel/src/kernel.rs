@@ -954,6 +954,9 @@ impl Kernel {
     ///
     /// A `VirtualOverlayBackend` routes paths automatically:
     /// - `/v/*` → Internal VFS (JobFs at `/v/jobs`, MemoryFs at `/v/blobs`)
+    /// - `/dev` → DevFs (synthetic `/dev/null`, `/dev/zero`, `/dev/random`,
+    ///   `/dev/urandom`) — kernel-owned so it works even when your backend is
+    ///   read-only
     /// - Everything else → Your custom backend
     ///
     /// The optional `configure_vfs` closure lets you add additional virtual mounts
@@ -1015,6 +1018,12 @@ impl Kernel {
             None => MemoryFs::new(),
         };
         vfs.mount("/v/blobs", blobs_fs);
+
+        // /dev/null and friends are software-backed (see DevFs) and must not
+        // depend on the embedder's backend — a read-only embedder backend
+        // (e.g. kaijutsu's read-only host root) would otherwise reject writes
+        // to /dev/null as a filesystem error instead of discarding them.
+        vfs.mount("/dev", DevFs::new());
 
         // Let caller add custom mounts (e.g., /v/docs, /v/g)
         configure_vfs(&mut vfs);
