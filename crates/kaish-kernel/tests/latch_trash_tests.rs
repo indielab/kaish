@@ -49,7 +49,7 @@ async fn run(kernel: &Kernel, script: &str) -> ExecResult {
     kernel.execute(script).await.expect("kernel execute")
 }
 
-/// Pull a string field out of a latch result's structured `.data`.
+/// Pull a string field out of a latch result's typed `.latch` request.
 fn latch_data_str(result: &ExecResult, key: &str) -> String {
     let req = result
         .latch_request()
