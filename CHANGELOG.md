@@ -10,6 +10,8 @@ breaking entries are marked **BREAKING**.
 
 ## [Unreleased]
 
+## [0.11.0] - 2026-07-04
+
 ### Added
 - **`test` builtin** — POSIX condition evaluation as a command, following
   kaish's `[[` semantics (exit `0` true / `1` false / `2` usage-or-type error).
@@ -1043,7 +1045,8 @@ Initial public release of **kaish** (会sh) — a predictable Bourne-like shell 
 - **REPL** (`kaish-repl`) with multi-line input, completion, and history; **MCP server** (`kaish-mcp`) exposing `kaish_execute` with help resources and structured + plain-text content blocks.
 - **`KernelClient` trait** + `EmbeddedClient` for in-process embedding; topic-based help system; `kaish-wasi` `wasm32-wasip1` target.
 
-[Unreleased]: https://github.com/tobert/kaish/compare/v0.10.0...HEAD
+[Unreleased]: https://github.com/tobert/kaish/compare/v0.11.0...HEAD
+[0.11.0]: https://github.com/tobert/kaish/compare/v0.10.0...v0.11.0
 [0.10.0]: https://github.com/tobert/kaish/compare/v0.9.1...v0.10.0
 [0.9.1]: https://github.com/tobert/kaish/compare/v0.9.0...v0.9.1
 [0.9.0]: https://github.com/tobert/kaish/compare/v0.8.4...v0.9.0

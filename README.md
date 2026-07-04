@@ -132,7 +132,7 @@ everywhere, a `jq` that always uses the same filter syntax, an `awk` that never 
 | **JSON** | fromjson, fromjsonl, jq, keys, tojson, tojsonl, typeof, values |
 | **System** | alias, bg, date, echo, env, exec, export, fg, help, hostname, jobs, kill, printf, ps, push, read, seq, set, sleep, spawn, timeout, tokens, uname, unalias, unset, wait, which |
 | **Parallel** | scatter, gather |
-| **Meta** | assert, false, true |
+| **Meta** | assert, false, test, true |
 | **kaish-*** | kaish-ast, kaish-clear, kaish-ignore, kaish-last, kaish-mounts, kaish-output-limit, kaish-status, kaish-tools, kaish-trash, kaish-validate, kaish-vars, kaish-version, kaish-vfs |
 
 ---
