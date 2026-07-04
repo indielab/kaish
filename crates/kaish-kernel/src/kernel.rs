@@ -6231,6 +6231,7 @@ mod tests {
                 output: None,
                 content_type: Some("application/json".to_string()),
                 baggage,
+                latch: None,
             })
         });
         let backend: Arc<dyn crate::backend::KernelBackend> = Arc::new(backend);
