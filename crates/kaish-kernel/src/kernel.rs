@@ -4635,6 +4635,13 @@ impl Kernel {
     /// Unlike regular tool execution, `source` executes in the CURRENT scope,
     /// allowing the sourced script to set variables and modify shell state.
     async fn execute_source(&self, args: &[Arg]) -> Result<ExecResult> {
+        // `source`/`.` is the fourth dynamic re-entry point: it runs the
+        // sourced file's statements inline via `execute_stmt_flow`, so a file
+        // that sources itself recurses unbounded just like a runaway function
+        // (GH #46). It's intercepted as a special form *before* the other
+        // guarded paths, so it needs its own guard.
+        let _depth = self.enter_recursion("source")?;
+
         // Get the file path from the first positional argument
         let tool_args = self.build_args_async(args, None).await?;
         let path = match tool_args.positional.first() {

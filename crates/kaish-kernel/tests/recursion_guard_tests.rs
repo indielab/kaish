@@ -76,6 +76,40 @@ fn bounded_recursion_within_cap_succeeds() {
     assert!(result.text_out().contains("done"), "must reach the base case: {result:?}");
 }
 
+/// `source`/`.` is the fourth re-entry point — a `.kai` file that sources
+/// itself runs its statements inline via the statement engine and recurses
+/// unbounded. It's intercepted as a special form before the other guarded
+/// paths, so it carries its own guard. Uses an in-memory `/v` file the kernel
+/// can source (no host FS).
+#[test]
+fn self_sourcing_script_is_a_loud_error() {
+    let after = std::thread::Builder::new()
+        .stack_size(RECOMMENDED_STACK_SIZE)
+        .spawn(|| {
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("runtime");
+            rt.block_on(async {
+                let kernel = Kernel::new(KernelConfig::isolated()).expect("kernel");
+                // Write a self-sourcing script into the in-memory VFS, then run it.
+                kernel
+                    .execute("echo 'source /v/self.kai' > /v/self.kai")
+                    .await
+                    .expect("seed");
+                kernel.execute("source /v/self.kai").await.expect("execute")
+            })
+        })
+        .expect("spawn")
+        .join()
+        .expect("join");
+    assert_ne!(after.code, 0, "self-sourcing must fail loudly: {after:?}");
+    assert!(
+        after.err.contains("maximum recursion depth"),
+        "expected a recursion-depth error, got: {after:?}"
+    );
+}
+
 /// The RAII guard balances the counter on unwind: after a tripped recursion, a
 /// later command on the same kernel is unaffected — no leaked depth that would
 /// spuriously trip an unrelated, shallow call.

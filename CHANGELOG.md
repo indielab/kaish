@@ -23,8 +23,9 @@ breaking entries are marked **BREAKING**.
   `JobStatus` gains a `Latched` variant (exhaustive matches must handle it) and
   `JobInfo` gains a `latch: Option<LatchRequest>` field.
 - **Recursion is depth-guarded (`MAX_RECURSION_DEPTH` = 32)** (GH #46/#47).
-  Command substitution, shell-function calls, and `.kai` script sourcing all
-  re-enter the statement engine on the native stack; a runaway or mutually
+  Command substitution, shell-function calls, `.kai` script execution, and
+  `source`/`.` all re-enter the statement engine on the native stack; a runaway
+  or mutually
   recursive script now returns a loud `maximum recursion depth exceeded` error
   instead of overflowing the stack (a `SIGSEGV`/abort with no diagnostic). Two
   new `pub const`s let embedders size their runtime: `MAX_RECURSION_DEPTH` and
