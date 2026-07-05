@@ -2710,6 +2710,58 @@ impl Kernel {
         })
     }
 
+    /// Build a boxed per-command `ExecContext` snapshot from the persistent
+    /// kernel state (`ec`/`scope`, both already locked by the caller).
+    ///
+    /// Sync on purpose: the ~30 field clones live in this transient frame rather
+    /// than a coroutine slot, and the result is `Box`ed so only an 8-byte pointer
+    /// — not the 960-byte struct — rides the dispatch await at every recursion
+    /// level (GH #48, item 2). `pipeline_position` and `cancel` are the only
+    /// per-site differences (the pipeline runner uses the kernel's own cancel
+    /// token and forces `Only`; the per-command dispatch inherits `ec`'s), so
+    /// they're parameters; every other field is snapshotted identically.
+    fn snapshot_exec_ctx(
+        &self,
+        ec: &ExecContext,
+        scope: &Scope,
+        pipeline_position: PipelinePosition,
+        cancel: tokio_util::sync::CancellationToken,
+    ) -> Box<ExecContext> {
+        Box::new(ExecContext {
+            backend: ec.backend.clone(),
+            scope: scope.clone(),
+            cwd: ec.cwd.clone(),
+            prev_cwd: ec.prev_cwd.clone(),
+            stdin: ec.stdin.clone(),
+            stdin_data: ec.stdin_data.clone(),
+            stdin_data_rx: None,
+            pipe_stdin: None,
+            pipe_stdout: None,
+            stderr: ec.stderr.clone(),
+            tool_schemas: ec.tool_schemas.clone(),
+            tools: ec.tools.clone(),
+            job_manager: ec.job_manager.clone(),
+            pipeline_position,
+            interactive: self.interactive,
+            aliases: ec.aliases.clone(),
+            ignore_config: ec.ignore_config.clone(),
+            output_limit: ec.output_limit.clone(),
+            allow_external_commands: self.allow_external_commands,
+            nonce_store: ec.nonce_store.clone(),
+            trash_backend: ec.trash_backend.clone(),
+            #[cfg(all(unix, feature = "subprocess"))]
+            terminal_state: ec.terminal_state.clone(),
+            dispatcher: self.dispatcher(),
+            cancel,
+            output_format: None,
+            current_invocation: None,
+            vfs_budget: self.vfs_budget.clone(),
+            watchdog: ec.watchdog.clone(),
+            #[cfg(all(feature = "localfs", feature = "overlay"))]
+            overlay_handle: self.overlay_handle.clone(),
+        })
+    }
+
     /// Execute a pipeline.
     async fn execute_pipeline(&self, pipeline: &crate::ast::Pipeline) -> Result<ExecResult> {
         if pipeline.commands.is_empty() {
@@ -2735,47 +2787,17 @@ impl Kernel {
             // the persistent exec_ctx; it's moved (non-Clone) into this ctx in
             // the consume-once block below, so note its presence here.
             let has_pipe_stdin = ec.pipe_stdin.is_some();
-            (ExecContext {
-                backend: ec.backend.clone(),
-                scope: scope.clone(),
-                cwd: ec.cwd.clone(),
-                prev_cwd: ec.prev_cwd.clone(),
-                // Seed the first stage's stdin from any frontend-supplied input
-                // (`ExecuteOptions::stdin`, e.g. `printf … | kaish -c sort`). The
-                // runner forwards `ctx.stdin` to stage 0 unless a redirect
-                // (`< file`/heredoc) already set it, so redirect precedence holds.
-                stdin: ec.stdin.clone(),
-                stdin_data: ec.stdin_data.clone(),
-                stdin_data_rx: None,
-                pipe_stdin: None,
-                pipe_stdout: None,
-                stderr: ec.stderr.clone(),
-                tool_schemas: ec.tool_schemas.clone(),
-                tools: ec.tools.clone(),
-                job_manager: ec.job_manager.clone(),
-                pipeline_position: PipelinePosition::Only,
-                interactive: self.interactive,
-                aliases: ec.aliases.clone(),
-                ignore_config: ec.ignore_config.clone(),
-                output_limit: ec.output_limit.clone(),
-                allow_external_commands: self.allow_external_commands,
-                nonce_store: ec.nonce_store.clone(),
-                trash_backend: ec.trash_backend.clone(),
-                #[cfg(all(unix, feature = "subprocess"))]
-                terminal_state: ec.terminal_state.clone(),
-                dispatcher: self.dispatcher(),
-                cancel: {
-                    #[allow(clippy::expect_used)]
-                    let token = self.cancel_token.lock().expect("cancel_token poisoned");
-                    token.clone()
-                },
-                output_format: None,
-                current_invocation: None,
-                vfs_budget: self.vfs_budget.clone(),
-                watchdog: ec.watchdog.clone(),
-                #[cfg(all(feature = "localfs", feature = "overlay"))]
-                overlay_handle: self.overlay_handle.clone(),
-            }, has_pipe_stdin)
+            // The pipeline runner drives stage 0 with the first stage's stdin
+            // seeded from any frontend-supplied input (`ExecuteOptions::stdin`,
+            // e.g. `printf … | kaish -c sort`) unless a redirect already set it,
+            // and uses the kernel's own cancel token so a `cancel()` reaches the
+            // stages. See `snapshot_exec_ctx` for why the snapshot is boxed.
+            let cancel = {
+                #[allow(clippy::expect_used)]
+                let token = self.cancel_token.lock().expect("cancel_token poisoned");
+                token.clone()
+            };
+            (self.snapshot_exec_ctx(&ec, &scope, PipelinePosition::Only, cancel), has_pipe_stdin)
         }; // locks released
 
         // Consume-once: move/clear the seeded stdin sources from the persistent
@@ -3159,44 +3181,12 @@ impl Kernel {
         let mut ctx = {
             let ec = self.exec_ctx.write().await;
             let scope = self.scope.read().await;
-            ExecContext {
-                backend: ec.backend.clone(),
-                scope: scope.clone(),
-                cwd: ec.cwd.clone(),
-                prev_cwd: ec.prev_cwd.clone(),
-                stdin: ec.stdin.clone(),
-                stdin_data: ec.stdin_data.clone(),
-                stdin_data_rx: None,
-                pipe_stdin: None, // streaming pipes are per-pipeline; not snapshotted
-                pipe_stdout: None,
-                stderr: ec.stderr.clone(),
-                tool_schemas: ec.tool_schemas.clone(),
-                tools: ec.tools.clone(),
-                job_manager: ec.job_manager.clone(),
-                pipeline_position: ec.pipeline_position,
-                interactive: self.interactive,
-                aliases: ec.aliases.clone(),
-                ignore_config: ec.ignore_config.clone(),
-                output_limit: ec.output_limit.clone(),
-                allow_external_commands: self.allow_external_commands,
-                nonce_store: ec.nonce_store.clone(),
-                trash_backend: ec.trash_backend.clone(),
-                #[cfg(all(unix, feature = "subprocess"))]
-                terminal_state: ec.terminal_state.clone(),
-                dispatcher: self.dispatcher(),
-                // Use ec.cancel (set by dispatch_command from the runner's
-                // ctx.cancel) so any builtin-swapped child token (e.g. timeout's
-                // child token) reaches the spawned external via wait_or_kill.
-                // Falls back to the kernel's own token when ec.cancel is the
-                // default fresh token from a non-dispatch path.
-                cancel: ec.cancel.clone(),
-                output_format: None,
-                current_invocation: None,
-                vfs_budget: self.vfs_budget.clone(),
-                watchdog: ec.watchdog.clone(),
-                #[cfg(all(feature = "localfs", feature = "overlay"))]
-                overlay_handle: self.overlay_handle.clone(),
-            }
+            // Inherit `ec.pipeline_position` and `ec.cancel` (the latter set by
+            // dispatch_command from the runner's ctx.cancel, so a builtin-swapped
+            // child token — e.g. timeout's — reaches the spawned external via
+            // wait_or_kill; it falls back to the kernel's own token on a
+            // non-dispatch path). See `snapshot_exec_ctx` for the boxing rationale.
+            self.snapshot_exec_ctx(&ec, &scope, ec.pipeline_position, ec.cancel.clone())
         }; // both locks released — tool.execute can re-dispatch safely
 
         // Move stdin out of self.exec_ctx into the snapshot (consumed-by-tool
@@ -3215,7 +3205,7 @@ impl Kernel {
         // parse failure (e.g. `cmd --json --bogus-flag` would otherwise drop
         // --json on the floor when `try_parse_from` returns Err early).
         // The builtin's own `parsed.global.apply(ctx)` becomes idempotent.
-        GlobalFlags::apply_from_args(&tool_args, &mut ctx);
+        GlobalFlags::apply_from_args(&tool_args, &mut *ctx);
 
         // Capture the exact invocation at the dispatch seam so a latch producer
         // (`latch_result`/`gate_overwrites`) can stamp it into the LatchRequest
@@ -3233,7 +3223,7 @@ impl Kernel {
         // `tool.execute` below).
         ctx.current_invocation = Some(Box::new((name.to_string(), tool_args.to_argv())));
 
-        let result = tool.execute(tool_args, &mut ctx).await;
+        let result = tool.execute(tool_args, &mut *ctx).await;
 
         // Sync mutations back. Tools may have changed scope (set/cd),
         // cwd/prev_cwd (cd), and aliases (alias). Also return any unused pipe
