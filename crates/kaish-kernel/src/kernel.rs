@@ -3988,7 +3988,10 @@ impl Kernel {
             Expr::CommandSubst(stmts) => {
                 // Snapshot scope+cwd before running — only output escapes,
                 // not side effects like `cd` or variable assignments.
-                let saved_scope = { self.scope.read().await.clone() };
+                // Boxed: this ~470 B scope snapshot is held across the nested
+                // `$(…)` recursion await below, so inlining it grows every
+                // command-substitution level's future (GH #48, item 4).
+                let saved_scope = Box::new(self.scope.read().await.clone());
                 let saved_cwd = {
                     let ec = self.exec_ctx.read().await;
                     (ec.cwd.clone(), ec.prev_cwd.clone())
@@ -4000,7 +4003,7 @@ impl Kernel {
                 // Restore scope and cwd regardless of success/failure
                 {
                     let mut scope = self.scope.write().await;
-                    *scope = saved_scope;
+                    *scope = *saved_scope;
                     if let Ok(ref r) = run_result {
                         scope.set_last_result(r.clone());
                     }
@@ -4350,7 +4353,10 @@ impl Kernel {
             StringPart::CommandSubst(stmts) => {
                 // Snapshot scope+cwd — command substitution in strings must
                 // not leak side effects (e.g., `"dir: $(cd /; pwd)"` must not change cwd).
-                let saved_scope = { self.scope.read().await.clone() };
+                // Boxed: this ~470 B scope snapshot is held across the nested
+                // `$(…)` recursion await below, so inlining it grows every
+                // command-substitution level's future (GH #48, item 4).
+                let saved_scope = Box::new(self.scope.read().await.clone());
                 let saved_cwd = {
                     let ec = self.exec_ctx.read().await;
                     (ec.cwd.clone(), ec.prev_cwd.clone())
@@ -4362,7 +4368,7 @@ impl Kernel {
                 // Restore scope and cwd regardless of success/failure
                 {
                     let mut scope = self.scope.write().await;
-                    *scope = saved_scope;
+                    *scope = *saved_scope;
                     if let Ok(ref r) = run_result {
                         scope.set_last_result(r.clone());
                     }
