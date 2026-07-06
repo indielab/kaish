@@ -118,6 +118,16 @@ breaking entries are marked **BREAKING**.
   a model reads as "not found". `-r` now governs only how *directories* expand:
   files are searched directly, directories walked, and a mixed `grep -r p file
   dir` operand list does both.
+- **A backslash-escaped quote in a `${VAR:-default}` default word no longer
+  corrupts the value** (GH #93 item 5). `${UNSET:-"hello \"world\""}` used to
+  toggle quote-tracking state on the escaped inner `"` (any `"`/`'` flipped
+  state regardless of a preceding `\`), mangling the default to `hello
+  \world\`. Escape handling now tracks context, matching bash: outside any
+  quotes both `\"` and `\'` unescape (so the `'it'\''s'` → `it's` embedding
+  idiom resolves); inside double quotes only `\"` unescapes while `\'` stays
+  literal (`"a\'b"` → `a\'b`, since `'` is an ordinary character there); and
+  single-quoted default words remain a fully literal region (zero escape
+  processing, zero interpolation).
 - **`ToolResult` no longer drops `did_spill`/`original_code` crossing the
   backend seam** (GH #93 item 3). `ExecResult` already tracked whether the
   output limiter capped a result and its pre-spill exit code; `ToolResult` had

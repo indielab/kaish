@@ -14,6 +14,89 @@ before it ships.
 
 ---
 
+## Escaped quotes in `${VAR:-default}` (2026-07-06, GH #93 item 5)
+
+Item 5 of #93's punch list: `unquote_default_word` (the function that strips
+the syntactic quotes off a `${VAR:-"default"}` word before it's parsed for
+interpolation) toggled its `in_single`/`in_double` state on *every* `"`/`'` it
+saw, with no notion of a preceding backslash. So `${UNSET:-"hello
+\"world\""}` — a double-quoted default containing an escaped inner quote —
+had its second `"` prematurely close the quoted region, and the value came
+out as `hello \world\` instead of `hello "world"`.
+
+The fix needed to answer a harder question than "skip escaped quotes": what
+does a *run* of backslashes immediately before a quote mean? Bash's actual
+rule (verified empirically against real bash, not from memory) pairs
+backslashes left-to-right — an even run collapses to half as many literal
+backslashes and leaves the quote as a real, state-toggling delimiter; an odd
+run does the same collapse and additionally escapes the quote (literal
+character, no toggle). A naive one-token lookahead gets this wrong on 2+
+backslash runs (`"a\\"` → `a\` in real bash; a lookahead that treats each
+backslash independently would misjudge the second backslash as escaping the
+closing quote instead of pairing with the first). The fix buffers the
+contiguous backslash run and decides once it hits the terminating character.
+
+Backslashes *not* adjacent to a quote were left untouched on purpose — real
+bash also collapses `\\` inside double quotes when it's followed by an
+ordinary character (verified: `"foo\\bar"` → `foo\bar` in bash), but
+`unquote_default_word` never did general backslash-escape processing before
+this fix (confirmed by reading `parse_interpolated_string`, its downstream
+consumer, which has no backslash handling at all), and this PR is scoped to
+the reported quote-toggle bug, not a full escape-processing rewrite. Recorded
+as a known gap in the PR body rather than filed as a separate issue — it's a
+narrow, pre-existing limitation, not a regression.
+
+The single-quote case forced a judgment call, and the *first* answer was
+wrong. The initial pass extended the same backslash-escape rule *into*
+single-quoted default words "for symmetry," reasoning that real bash's
+behavior there (`'hello \'world\''` is a syntax error — unterminated quote —
+not an embedded apostrophe) wasn't a coherent target to match. Amy overruled
+it on review, and correctly: single quotes are a *literal* region in shell,
+full stop. A model relying on shell muscle memory must get **zero** surprises
+inside `'…'` — zero interpolation, zero escape processing. A backslash there
+is a literal byte and a `'` always closes the span; it is never escaped. The
+"symmetry" argument was inventing a dialect where the whole point is fidelity
+to shell's literal-region contract.
+
+So the escape logic is gated to fire only *outside* single quotes (`if ch ==
+'\\' && !in_single`). Nothing is actually lost: the shell-correct way to embed
+a single quote is the `'…'\''…'` idiom — close the span, emit an **unquoted**
+escaped `\'`, reopen — and that unquoted escape still works (it's the same
+code path as the double-quote fix, just outside any quote). `${X:-'it'\''s'}`
+→ `it's`, matching bash exactly. The one behavior that stays inside single
+quotes is the pre-existing `$` → `__KAISH_ESCAPED_DOLLAR__` marking, which is
+what *implements* "zero interpolation" — it isn't escape processing, it's
+suppression.
+
+The delimiter-stripping itself (`${X:-'x'}` → `x`) was double-checked and is
+correct — that's the function's whole purpose, the quotes are syntax not data.
+Only the escape-processing-inside-single-quotes overreach was the bug.
+
+A third round, from a kaibo review of the revision, caught a subtler
+context bug: the escape predicate treated `'` and `"` identically, gated only
+on `!in_single`. So inside a *double*-quoted region a `\'` still escaped —
+`${X:-"a\'b"}` came out `a'b`. Bash disagrees: inside `"…"` a `'` is an
+ordinary character, and only `\"`, `\$`, `\\`, `` \` `` are escapes, so the
+backslash before `'` is literal and bash yields `a\'b` (verified against real
+bash). The fix is a one-line narrowing of the predicate — a `'` only counts as
+escapable when *not* `in_double` — so unquoted `\'` still powers the
+`'it'\''s'` idiom, double-quoted `\'` stays literal, and single-quoted regions
+(already fully literal) are untouched.
+
+Tests in `shell_compat_tests.rs`: the double-quote fix is pinned by
+`default_word_double_quoted_escaped_quotes_literal`,
+`default_word_escaped_backslash_before_quote` (the `"a\\"` → `a\` parity
+case), `default_word_mixed_single_and_escaped_double_quotes`, and
+`default_word_double_quoted_backslash_before_squote_literal` (the kaibo-caught
+`"a\'b"` → `a\'b` case, confirmed red as `a'b` before the predicate fix). The
+shell-literal single-quote contract is pinned by four cases:
+`…_strips_delimiters` (`'x'` → `x`), `…_no_interpolation` (`'$HOME'` →
+`$HOME`), `…_backslash_literal` (`'a\b'` → `a\b`, backslash NOT collapsed),
+and `…_embed_idiom` (`'it'\''s'` → `it's`). All the newly-fixed cases were
+confirmed failing against the pre-fix code; every case — single- and
+double-quoted alike — now passes under `KAISH_BASH_COMPAT=1` against real
+bash, with no recorded divergence, because the shell rule *is* bash's rule.
+
 ## Binary at the remaining text sinks, and `&>` streaming (2026-07-06, GH #93)
 
 0.11.0 made `Value::Bytes` go loud at the three primary text sinks — string
