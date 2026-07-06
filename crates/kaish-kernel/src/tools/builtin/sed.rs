@@ -200,12 +200,11 @@ impl Tool for Sed {
         // it routes through the same latch+trash gate as tee/patch. Editing a
         // stream in place is meaningless, so no operands is a loud error.
         if in_place {
-            let files: Vec<String> = args
-                .positional
-                .iter()
-                .skip(file_pos)
-                .map(crate::interpreter::value_to_string)
-                .collect();
+            let operands = args.positional.get(file_pos..).unwrap_or(&[]);
+            let files: Vec<String> = match crate::interpreter::values_to_text_sink_named(operands, "a path") {
+                Ok(f) => f,
+                Err(e) => return ExecResult::failure(1, format!("sed: {e}")),
+            };
             if files.is_empty() {
                 return ExecResult::failure(
                     1,

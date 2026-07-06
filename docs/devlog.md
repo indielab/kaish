@@ -14,6 +14,110 @@ before it ships.
 
 ---
 
+## Binary at the remaining text sinks, and `&>` streaming (2026-07-06, GH #93)
+
+0.11.0 made `Value::Bytes` go loud at the three primary text sinks — string
+interpolation, bare-word external argv, `echo` — via `value_to_text_sink()`.
+#93 item 1 asked for the rest of the sinks that still fell through to
+`value_to_string`'s infallible `[binary: N bytes]` placeholder. Rather than a
+bespoke fix per sink, added `value_to_text_sink_named(value, sink)` (and a
+`values_to_text_sink_named` for a whole positional list) — same guard,
+parameterized so the error names the actual boundary ("a path", "an exported
+environment variable value", "a redirect target") instead of the generic
+"text", mirroring the `sink` parameter `structured_boundary_error` already
+uses for the collection-vs-process-boundary guard.
+
+**The five named sinks, and one the sweep turned up.** Builtin
+path-positional coercion touched ~17 files (`mkdir`/`cp`/`mv`/`rm`/`touch`/
+`dirname`/`cut`/`stat`/`readlink`/`realpath`/`tee`/`sort`/`find`/`grep`/`sed
+-i`/`ls`) — all the same shape, so `cp`/`mv`/`tee` also got a small cleanup:
+they were stringifying the same source value twice (once for a
+gate-overwrite preview, again in the write loop) — computed once now. Widened
+"path-positional" to cover `[[ -f $x ]]`/`test -f $x` too (kernel.rs's
+`eval_test_async` and the `test` builtin's own separate file-test impl,
+matching in comments) since a binary operand there silently stats a file
+literally named `[binary: N bytes]` — same bug, different entry point.
+Env-var export needed three call sites in sync (kernel.rs's production spawn,
+its `dispatch.rs` test-only twin, and `env`'s own `execute_with_env`), all
+already following the collection guard's precedent of a separate binary
+check after `structured_export_error`. The redirect target
+(`pipeline.rs::eval_redirect_target`) had a private, single-caller
+`value_to_string` shim living in the same file — deleted once its call site
+converted, rather than leaving it as dead code. Sweeping the codebase for the
+"bare-word external argv" pattern (already fixed in `build_args_flat`) turned
+up a fourth spawn site nobody had touched: `exec`'s own argv loop, built
+straight from typed positionals with no shared helper — same class of bug,
+now fixed the same way.
+
+**The semantic ops split three ways on inspection**, not the four the issue
+guessed. `${#…}` on binary was *already* correct (`value_length` special-cases
+`Bytes` to the byte count before ever reaching `value_to_string` — locked in
+with a regression test, no fix needed). `==`/`!=` needed a new guard arm in
+`values_equal` ahead of the generic mixed-scalar fallback: `Value::Bytes`
+against anything but another `Value::Bytes` is now a loud type error, not a
+silent compare-the-placeholder-text. `in` needed the same treatment only for
+the record-key branch of `eval_membership` (a `Value::Bytes` needle stringified
+into a lookup key); the list-membership branch (`element_matches`) keeps
+treating a shape mismatch as "not a match, not an abort" — consistent with how
+it already treats a nested-collection element, and it's what keeps `x in
+$heterogeneous_list` from dying partway through the scan. `case`-glob needed
+one line in `kernel.rs`'s `Stmt::Case` handler.
+
+**Heredoc body and record-key interpolation turned out to be a non-finding
+worth writing down anyway.** The sync `Evaluator`'s `HereDocBody` and
+`RecordKey::Interpolated` arms (`interpreter/eval.rs`) are the ones the issue
+named, but tracing every real call site of the sync `eval_expr` showed
+heredocs and record literals in an actual script always resolve through the
+kernel's *async* evaluator, which already composes through the guarded
+`eval_string_part_async` — the sync arms are unreachable with a live
+`Value::Bytes` in production (only reachable by an embedder driving the sync
+`Evaluator` directly, or by a unit test). Swapped `value_to_string` for
+`value_to_text_sink` there anyway — cheap, correct, and stops the code from
+leaning on a non-local invariant — but it's a defense-in-depth edit with no
+behavior change, not a bug fix; said so plainly rather than overclaiming a
+fourth "fixed" sink. Confirmed by literally reverting just those two lines
+and rerunning the new eval.rs unit tests: both still passed.
+
+**A test-helper trap almost hid a false pass.** The shared `assert_loud_binary`
+helper (from 0.11.0) checked `err.contains("binary")` — true of a real
+"cannot be used as a path" message, but *also* true of `rm`'s ordinary "No such
+file or directory" once the path itself is the literal string `[binary: N
+bytes]` (the placeholder text contains the word "binary"). `rm`'s new test
+silently passed against the *unfixed* code for exactly that reason. Caught it
+by deliberately reverting the whole PR's `src/` diff (keeping the new tests)
+and rerunning — 11 of the 21 new/touched tests failed as expected, but `rm`'s
+didn't. Tightened the helper to `contains("cannot be used as")` — the
+consistent wording all these guards now share (reworded `values_equal`'s
+message to fit) — and added a stderr placeholder-leak check alongside the
+existing stdout one. Reran the full revert to confirm: all 11 fail pre-fix,
+all pass post-fix.
+
+**Item 6 (`&>` streaming) is an honest equivalence test, not a failing one.**
+`RedirectKind::Both` now uses `take_output_for_stream`/`write_canonical`
+like `>`/`>>`, instead of forcing structured output through a full
+`to_canonical_string()` `String` first — a memory-copy optimization, not an
+output-correctness fix, so the file bytes are identical either way and a
+test can't observe the difference by content alone. Wrote it up front as
+that: byte-for-byte equivalence + a large-table completeness check, in
+`pipeline.rs`'s own `apply_redirects` test module (unit-level, not
+`kernel.execute()` — there's no builtin under test, just the redirect
+machinery, and the existing merge-redirect tests already use this pattern).
+Verified honestly by reverting just that hunk: same tests, same pass. Applied
+the identical streaming swap to the inter-stage pipe write next to it
+(`run_pipeline`) since it shares the exact `out_bytes()`/
+`text_out().into_owned().into_bytes()` shape — not `&>`-specific, but the
+same anti-pattern sitting right next to the one the issue named.
+
+**Deferred, tracked in #116, not fixed here:** a `WordAssign`→positional/named
+reconstruction cluster (`dd if=$BIN`, `awk -v a=$BIN`, `cat foo=$BIN`) across
+four call sites in `kernel.rs`/`pipeline.rs` that embeds a value into a
+`key=value` string the same lossy way — real, but a distinct code shape from
+the five named sinks, and out of scope for one PR. Also verified in passing
+that #93's two SUSPECTED findings (S3/S4: binary crossing into `fromjson`/
+`fromjsonl`) are already handled — both already reject a binary positional
+loudly and route stdin through the shared `read_stdin_to_text`, which already
+errors on invalid UTF-8.
+
 ## Interpreter allocation/stack pass (2026-07-05, GH #48)
 
 #46/#47 landed a recursion depth guard sized against a measured ~380 KB of
