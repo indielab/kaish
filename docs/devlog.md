@@ -187,55 +187,38 @@ it is" against the live code rather than trusting the pattern to have been
 applied uniformly. Stopped the loop here rather than keep sweeping
 indefinitely; #116/#120 carry the remaining known-adjacent gaps forward.
 
-## `/v` overlay stops being kaish's private reserve (2026-07-06)
+## The README learns to face the front door (2026-07-06)
 
-`VirtualOverlayBackend` — the shim that lets a `Kernel::with_backend` embedder
-keep kaish's virtual filesystems (`/v/jobs`, `/dev`, …) while owning the rest of
-the namespace — treated the whole `/v` tree as kaish's. `is_virtual_path` grabbed
-anything matching `"/v"` or `"/v/…"` lexically *before* consulting the mount
-table, so an embedder that mounted its own storage under `/v` (kaijutsu wants a
-CAS at `/v/cas` and its CRDT config at `/v/etc/*`) found those paths shadowed to
-`NotFound` — while surfaces that bypass the overlay (SFTP over `kernel.vfs()`)
-saw the real content. Two different `/v/x` depending on the surface, silently.
+Amy asked for a first-time-visitor evaluation of README.md ahead of a rewrite.
+Two stateless outside reads (deepseek and gemini-flash via kaibo `oneshot`,
+given only the README — exactly what a visitor sees) converged with our own
+read almost point-for-point: the project thesis ("Why a shell for agents?")
+was buried as an `####` heading inside Components → Embedding at 85% document
+depth; the doc oscillated between agent-runtime and daily-driver-shell
+identities section by section; and reference-grade material (exit-code table,
+latch/trash mechanics, embedder lifecycle) clogged the middle. The accuracy
+pass found worse: the very first instruction was broken — `cargo install
+kaish` names a crate that doesn't exist (the binary ships in `kaish-repl`) —
+and "still experimental" contradicted the settled-language stance.
 
-The fix was mostly *deletion*. `VfsRouter::has_mount` already routes by longest
-prefix and already governs `/dev` — the lexical `/v` clauses were the vestigial
-half of a migration that was already started. Dropping them (`is_virtual_path`
-is now just `has_mount`) makes one rule: covered by a kaish mount → kaish;
-otherwise → the embedder. An unclaimed `/v/cas` falls through, and its writes hit
-the embedder's *own* gate (a read-only root still rejects them) rather than a
-kaish scratch overlay.
+Decisions:
 
-Coverage-routing alone leaves a listing gap, and chasing it turned up that the
-gap already existed. In the overlay path kaish mounts at `/v/jobs`/`/v/blobs`,
-never at `/v` itself, so `has_mount("/v")` is false — meaning `ls /v` was
-*already* `NotFound` for embedders, and the root merge injected only a synthetic
-`v`, dropping `dev`. So the real work was making an intermediate directory that
-sits *above* mounts behave like a directory. We put that in the router (approach
-C, over doing it only in the overlay): `has_mount_under` + a generalized
-`list_mount_children` (the old `list_root` first-component trick, parameterized),
-so `VfsRouter::list`/`stat`/`lstat` synthesize `/v` from the mount roster instead
-of 404ing. The overlay stays thin — for a shared parent it unions the embedder's
-listing with kaish's (a `NotFound` from the embedder means "nothing here," not an
-error; kaish entries win a name clash) and synthesizes `stat`/`exists` when the
-embedder lacks the dir. The bare router is now self-consistent too, so SFTP over
-`kernel.vfs()` and the shell agree.
-
-One correction worth recording: this is **not** a compile break for kaibo or
-kaijutsu (the initial assumption). No public signature moves — `is_virtual_path`
-is private, the router additions are `pub(crate)`. It's a pure runtime-routing
-change, which is the *more* subtle kind, but benign in practice: kaibo's inner
-backend serves nothing under `/v` (its `ls /v` actually improves), and kaijutsu
-doesn't mount under `/v` *yet* — this is the prerequisite that lets it. Filed as
-`Fixed`, not `**BREAKING:**`: pre-1.0, a visible compile break is expected and
-cheap; a behavior correction toward the obviously-right routing, affecting only
-an embedder that leaned on the reservation (none do), doesn't earn the headline.
-The kaijutsu-side counterpart — its `MountBackend` synthesizing a `/v` listing so
-the union has something to merge — is tracked in that repo; our union tolerating
-its absence (`NotFound` → empty) is what de-risks the rollout ordering. TDD
-throughout: router synthesis and overlay union each went red first (`NotFound`
-`/v`, `["v"]` missing `dev`) before the code, and five `kernel.execute`
-integration tests drive the whole dispatch chain.
+- **Sequence, don't interleave.** The rewrite front-loads the universal pitch
+  (hero with the "skills transfer" line both reviewers independently named the
+  strongest sentence in the file, thesis, differences-from-bash), keeps the
+  Quick Tour, then branches Getting Started into the two real journeys: REPL
+  and embedding. Six crates ship this README as their crates.io page, so the
+  embedder content stays — sequenced, not braided.
+- **Reference material moved to its homes.** Exit-code table + output contract
+  + fresh-kernel-per-request lifecycle → EMBEDDING.md (new "result contract"
+  section; its stale "0.8.x" fixed too). Trash thresholds/exclusions →
+  LANGUAGE.md — they had no home outside the README.
+- **Everything shown is verified.** Every tour example ran against the current
+  binary (including the quote-to-join parse error); the embed example was
+  compiled and run from a scratch crate against the worktree kernel. The tour
+  now shows 0.11 typed collections (`fromjson` + `${r[k]}`) instead of jq —
+  Amy may spin jq out to its own crate, so the README stops showcasing it
+  (it stays in the builtin inventory table, which tracks code).
 
 ## `jq -s` stops being a no-op on the `.data` path (2026-07-06, GH #93 item 2)
 
