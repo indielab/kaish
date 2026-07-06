@@ -62,7 +62,7 @@ syntax checking, easy embedding, and a VFS abstraction to help with sandboxing.
 - **Bare glob expansion** — `ls *.txt` works; opt out with `set +o glob`
 - **Structured iteration** — `for i in $(seq 1 5)` works via structured data, not word splitting
 - **Line iteration in for-loops** — `for line in $(cat file)` splits on `\n` only; whitespace within a line is never split
-- **JSON data model** — kaish values *are* JSON values: strings, numbers, booleans, arrays, records. `fromjson`/`tojson` bridge text; `${xs[0]}`, `${r[key]}`, `keys`, `values` index natively
+- **JSON data model** — kaish's native values are JSON's: strings, numbers, booleans, arrays, records (plus raw bytes for binary data). `fromjson`/`tojson` bridge text; `${xs[0]}`, `${r[key]}`, `keys`, `values` index natively
 - **Explicit splitting** — use `split "$VAR"` for whitespace/delimiter/regex splitting
 - **No backticks** — only `$(cmd)` substitution
 - **Strict booleans** — `TRUE` and `yes` are errors, not truthy
@@ -250,7 +250,7 @@ an `awk` that never surprises.
 
 - Builtins go through the VFS and see only its mounts — the agent preset
   sandboxes to `$HOME` + `/tmp`, with `/v/` as in-memory scratch under a
-  64 MiB per-call budget.
+  64 MiB budget.
 - **External commands resolved via `PATH` run against the real filesystem** —
   the VFS sandbox does not apply to them. Block them at runtime with
   `allow_external_commands=false`, or build without the `subprocess` capability

@@ -55,7 +55,7 @@ code is something agents can branch on:
 | 0 | Success | — |
 | 1 | Failure | Read `err` |
 | 2 | Confirmation required (`set -o latch`) | Re-run with `--confirm="<nonce>"` — embedders read the typed `ExecResult.latch` (or call `Kernel::confirm`); the `To confirm, run:` line shows it for humans |
-| 3 | Output truncated by the output limit | `original_code` holds the real exit code; the message names the spill file — `cat` it, or narrow the query |
+| 3 | Output truncated by the output limit | `original_code` holds the real exit code. With disk spill the message names the spill file — `cat` it, or narrow the query; memory-spill kernels (`with_backend`, `SpillMode::Memory`) truncate in place with no file |
 | 124 | Timeout (`timeout_ms`, default 30 s) | — |
 | 130 | Cancelled | — |
 
