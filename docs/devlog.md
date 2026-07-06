@@ -118,6 +118,61 @@ that #93's two SUSPECTED findings (S3/S4: binary crossing into `fromjson`/
 loudly and route stdin through the shared `read_stdin_to_text`, which already
 errors on invalid UTF-8.
 
+**A kaibo review of the diff (deepseek, whole-file, not just the patch) found
+a second wave the grep-for-`value_to_string` sweep missed entirely**, because
+it's a different anti-pattern: `ExecContext::expand_paths` (the shared path
+list builder behind `cat`/`head`/`tail`/`wc`/`checksum`/`file`/`base64_tool`/
+`tac`/`xxd`) matched non-string positionals with `_ => continue` — a
+`Value::Bytes` operand didn't get stringified into a placeholder, it just
+*vanished* from the list. Worse than the placeholder bug: every one of those
+callers falls back to reading stdin when the path list comes back empty, so
+`head $BIN` (say) silently read whatever was piped in instead of erroring on
+the binary path — confirmed with a test that pipes distinguishable stdin
+content through and asserts it never appears in the output. Same shape at
+`cd` (`get_string`'s silent `None` → falls back to `$HOME`) and `awk`'s input
+operand (→ falls back to stdin); `basename`/`diff` already failed loudly on
+`None`, just with a generic "missing" message, fixed for consistency.
+`get_string` itself lives in the `kaish-types` leaf crate with no
+`EvalError` machinery to explain *why* it saw nothing, so the fix is a
+`get_path_string` helper in `tools/builtin/mod.rs` that checks for
+`Value::Bytes` before falling through to `get_string`, used at each of the
+four call sites — not a change to `get_string`'s own signature, which is used
+far too broadly (for non-path args too) to safely touch here. Same
+revert-and-confirm discipline as the rest of this PR: all 7 new tests fail
+against the pre-fix code, pass after.
+
+**A second kaibo pass over the same `get_path_string`/`expand_paths` fix
+found 10 more builtins with the identical `get_string` shape** — `sed`
+(streaming-mode input) and `uniq` silently fell back to stdin exactly like
+`awk`; `jq`'s `path` positional the same; `tree` silently used `.`; `write`/
+`ln`/`patch`/`validate`/`checksum`/`spawn` already failed loudly on `None`
+(just with a generic "missing" message), converted for consistency. All
+mechanical once `get_path_string` existed: swap `args.get_string` for it, add
+the `Err` arm.
+
+**Two of those ten (`checksum --check=$BIN`, `patch --file=$BIN`) exposed a
+second, deeper bug while writing their tests — the tests kept passing against
+unfixed code, for the wrong reason.** Both builtins check their own
+clap-parsed field (`parsed.check`/`parsed.file`) *before* falling back to
+`args.get_string`, and clap's field is populated from `ToolArgs::to_argv()` —
+which stringifies `Value::Bytes` into the *exact same* `[binary: N bytes]`
+placeholder via its own `value_to_argv_token`, a separate, pre-existing,
+explicitly-commented-as-deferred gap in the `kaish-types` leaf crate. So
+`parsed.check` was never `None` for a binary `--check=$BIN` — it was
+`Some("[binary: N bytes]")`, and the `get_path_string` fallback (only reached
+on `None`) never ran. Fixed by reordering: check the untouched `ToolArgs`
+value first (via `get_path_string`), fall back to the clap field only when
+genuinely absent — correct for both the binary case and the ordinary one
+(the raw `ToolArgs` map already has whatever clap would have parsed, from
+before `to_argv()` ever ran). Audited the rest of the `parsed.foo.clone()
+.or_else(|| args.get_string(...))` sites in the codebase for the same
+ordering hazard — none of the others (`algo`, `template`, `encoding`,
+`separator`, `field_separator`, …) are path-typed, so out of *this* PR's
+reach, but the root cause (`to_argv()`/`value_to_argv_token`) is filed as
+#120 rather than silently left for the next person to rediscover the hard
+way. Every genuinely-fixed builtin (11 new tests this round) verified
+fail-first the same way as the rest of the PR.
+
 ## Interpreter allocation/stack pass (2026-07-05, GH #48)
 
 #46/#47 landed a recursion depth guard sized against a measured ~380 KB of

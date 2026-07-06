@@ -216,6 +216,210 @@ async fn env_export_of_binary_value_is_loud() {
     assert_loud_binary("b=$(cat src.bin); export BIN=$b; /bin/true").await;
 }
 
+// ── `ExecContext::expand_paths` — a second, independent path-coercion sink
+// (found via kaibo review of this PR) ──
+//
+// `cat`/`head`/`tail`/`wc`/`checksum`/`file`/`base64_tool`/`tac`/`xxd` all
+// funnel their path positionals through this one shared helper. It used to
+// silently `continue` (skip) a `Value::Bytes` operand rather than reporting
+// it — worse than the placeholder-stringify bug, since the value just
+// vanished from the list, so most of these builtins fell back to reading
+// STDIN instead of erroring on the binary path the user actually gave.
+
+#[tokio::test]
+async fn cat_binary_path_positional_is_loud() {
+    assert_loud_binary("b=$(cat src.bin); cat $b").await;
+}
+
+#[tokio::test]
+async fn head_binary_path_does_not_silently_fall_back_to_stdin() {
+    // Prove it's not just "loud" but genuinely refuses to substitute stdin:
+    // feed distinguishable stdin content and confirm it never appears.
+    let dir = tempdir().unwrap();
+    fs::write(dir.path().join("src.bin"), BIN).unwrap();
+    let kernel = kernel_at(dir.path());
+    let result = kernel
+        .execute("b=$(cat src.bin); echo from-stdin | head $b")
+        .await
+        .unwrap();
+    assert_ne!(result.code, 0, "err={}", result.err);
+    assert!(result.err.contains("cannot be used as"), "err={:?}", result.err);
+    assert!(
+        !result.text_out().contains("from-stdin"),
+        "must not silently read stdin instead of erroring on the binary path: {:?}",
+        result.text_out()
+    );
+}
+
+#[tokio::test]
+async fn wc_binary_path_positional_is_loud() {
+    assert_loud_binary("b=$(cat src.bin); wc $b").await;
+}
+
+// ── `cd`/`awk`/`basename`/`diff` — `ToolArgs::get_string`-based path reads
+// (found via the same review) ──
+//
+// `get_string` (in the `kaish-types` leaf crate) already silently returns
+// `None` for a `Value::Bytes` operand — not a corruption in itself, but each
+// of these callers treats `None` as "operand absent" and does something
+// silently wrong with a *present* binary operand: `cd` falls back to $HOME,
+// `awk` falls back to reading stdin. `basename`/`diff` already errored loudly
+// (just with a generic "missing" message); fixed for a clearer message and
+// consistency with the rest of this sweep.
+
+#[tokio::test]
+async fn cd_binary_path_does_not_silently_go_to_home() {
+    assert_loud_binary("b=$(cat src.bin); cd $b").await;
+}
+
+#[tokio::test]
+async fn awk_binary_path_does_not_silently_fall_back_to_stdin() {
+    let dir = tempdir().unwrap();
+    fs::write(dir.path().join("src.bin"), BIN).unwrap();
+    let kernel = kernel_at(dir.path());
+    let result = kernel
+        .execute(r#"b=$(cat src.bin); echo from-stdin | awk '{print}' $b"#)
+        .await
+        .unwrap();
+    assert_ne!(result.code, 0, "err={}", result.err);
+    assert!(result.err.contains("cannot be used as"), "err={:?}", result.err);
+    assert!(
+        !result.text_out().contains("from-stdin"),
+        "must not silently read stdin instead of erroring on the binary path: {:?}",
+        result.text_out()
+    );
+}
+
+#[tokio::test]
+async fn basename_binary_path_is_loud() {
+    assert_loud_binary("b=$(cat src.bin); basename $b").await;
+}
+
+#[tokio::test]
+async fn diff_binary_first_file_is_loud() {
+    assert_loud_binary("b=$(cat src.bin); diff $b src.bin").await;
+}
+
+// ── The rest of the `ToolArgs::get_string`-based path readers (same review
+// pass as `cd`/`awk` above) — `get_path_string` threaded through each ──
+
+#[tokio::test]
+async fn sed_binary_path_does_not_silently_fall_back_to_stdin() {
+    let dir = tempdir().unwrap();
+    fs::write(dir.path().join("src.bin"), BIN).unwrap();
+    let kernel = kernel_at(dir.path());
+    let result = kernel
+        .execute("b=$(cat src.bin); echo from-stdin | sed 's/a/b/' $b")
+        .await
+        .unwrap();
+    assert_ne!(result.code, 0, "err={}", result.err);
+    assert!(result.err.contains("cannot be used as"), "err={:?}", result.err);
+    assert!(
+        !result.text_out().contains("from-stdin"),
+        "must not silently read stdin instead of erroring on the binary path: {:?}",
+        result.text_out()
+    );
+}
+
+#[tokio::test]
+async fn uniq_binary_path_does_not_silently_fall_back_to_stdin() {
+    let dir = tempdir().unwrap();
+    fs::write(dir.path().join("src.bin"), BIN).unwrap();
+    let kernel = kernel_at(dir.path());
+    let result = kernel
+        .execute("b=$(cat src.bin); echo from-stdin | uniq $b")
+        .await
+        .unwrap();
+    assert_ne!(result.code, 0, "err={}", result.err);
+    assert!(result.err.contains("cannot be used as"), "err={:?}", result.err);
+    assert!(
+        !result.text_out().contains("from-stdin"),
+        "must not silently read stdin instead of erroring on the binary path: {:?}",
+        result.text_out()
+    );
+}
+
+#[tokio::test]
+async fn jq_binary_path_does_not_silently_fall_back_to_stdin() {
+    let dir = tempdir().unwrap();
+    fs::write(dir.path().join("src.bin"), BIN).unwrap();
+    let kernel = kernel_at(dir.path());
+    let result = kernel
+        .execute(r#"b=$(cat src.bin); echo '{"from":"stdin"}' | jq '.' $b"#)
+        .await
+        .unwrap();
+    assert_ne!(result.code, 0, "err={}", result.err);
+    assert!(result.err.contains("cannot be used as"), "err={:?}", result.err);
+    assert!(
+        !result.text_out().contains("stdin"),
+        "must not silently read stdin instead of erroring on the binary path: {:?}",
+        result.text_out()
+    );
+}
+
+#[tokio::test]
+async fn tree_binary_path_is_loud() {
+    assert_loud_binary("b=$(cat src.bin); tree $b").await;
+}
+
+#[tokio::test]
+async fn write_binary_path_is_loud() {
+    assert_loud_binary(r#"b=$(cat src.bin); write $b "content""#).await;
+}
+
+#[tokio::test]
+async fn ln_binary_target_is_loud() {
+    assert_loud_binary("b=$(cat src.bin); ln -s $b link.txt").await;
+}
+
+#[tokio::test]
+async fn patch_binary_file_override_is_loud() {
+    let dir = tempdir().unwrap();
+    fs::write(dir.path().join("src.bin"), BIN).unwrap();
+    let kernel = kernel_at(dir.path());
+    let result = kernel
+        .execute(r#"b=$(cat src.bin); echo "diff" | patch --file=$b"#)
+        .await
+        .unwrap();
+    assert_ne!(result.code, 0, "err={}", result.err);
+    assert!(result.err.contains("cannot be used as"), "err={:?}", result.err);
+}
+
+#[tokio::test]
+async fn validate_binary_path_does_not_silently_fall_back_to_stdin() {
+    let dir = tempdir().unwrap();
+    fs::write(dir.path().join("src.bin"), BIN).unwrap();
+    let kernel = kernel_at(dir.path());
+    let result = kernel
+        .execute("b=$(cat src.bin); echo 'echo hi' | kaish-validate $b")
+        .await
+        .unwrap();
+    assert_ne!(result.code, 0, "err={}", result.err);
+    assert!(result.err.contains("cannot be used as"), "err={:?}", result.err);
+}
+
+#[tokio::test]
+async fn checksum_binary_check_override_is_loud() {
+    assert_loud_binary("b=$(cat src.bin); checksum --check=$b").await;
+}
+
+// `spawn`'s bareword `command=value` form actually routes through the
+// (separately tracked, #116) WordAssign-reconstruction fallback rather than a
+// named arg — `--command=`/`--cwd=` is the form that reaches `ToolArgs.named`
+// untouched, which is what these two are testing.
+
+#[cfg(feature = "subprocess")]
+#[tokio::test]
+async fn spawn_binary_command_is_loud() {
+    assert_loud_binary("b=$(cat src.bin); spawn --command=$b").await;
+}
+
+#[cfg(all(target_os = "linux", feature = "subprocess"))]
+#[tokio::test]
+async fn spawn_binary_cwd_is_loud() {
+    assert_loud_binary(r#"b=$(cat src.bin); spawn --command="/bin/true" --cwd=$b"#).await;
+}
+
 /// A binary value spliced into a heredoc body. Heredocs in real scripts
 /// resolve through the async evaluator (`kernel.rs`), which already composes
 /// through the guarded `eval_string_part_async` — this locks in that the

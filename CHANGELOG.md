@@ -75,13 +75,16 @@ breaking entries are marked **BREAKING**.
   the behavior no longer depends on how the kernel was constructed.
 - **Binary (`Value::Bytes`) now goes loud at every remaining text sink** (GH
   #93 item 1), not just the primary ones 0.11.0 fixed. A path-coercing builtin
-  positional (`mkdir`/`cp`/`rm`/`ls`/`find`/`grep`/`sed -i`/etc.), a `[[ -f
-  $x ]]`/`test -f $x` file-test path, an exported env var reaching a spawned
-  process, a redirect target (`cmd > $x`), a `case $x in`/`==`/`in` operand,
-  and `exec`'s own argv all used to silently fall back to the `[binary: N
-  bytes]` placeholder — a wrong path, a wrong env var value, or a comparison
-  against the placeholder text instead of the real bytes. All now error
-  clearly instead.
+  positional (`mkdir`/`cp`/`rm`/`ls`/`find`/`grep`/`sed`/`uniq`/`jq`/`tree`/
+  `write`/`ln`/`patch`/`checksum`/`spawn`/`cd`/`awk`/etc.), a `[[ -f $x ]]`/
+  `test -f $x` file-test path, an exported env var reaching a spawned process,
+  a redirect target (`cmd > $x`), a `case $x in`/`==`/`in` operand, and
+  `exec`'s own argv all used to silently mishandle a binary operand instead of
+  erroring — most stringified it into the `[binary: N bytes]` placeholder (a
+  wrong path, a wrong env var value, a comparison against placeholder text
+  instead of the real bytes), and a few (`cat`/`head`/`tail`/`wc`/`sed`/
+  `uniq`/`jq`/`cd`/`awk`) instead silently dropped it and fell back to reading
+  stdin or `$HOME`. All now error clearly instead.
 - **`&>` (`RedirectKind::Both`) streams structured output like `>`/`>>`** (GH
   #93 item 6) instead of building the whole output as one `String` first —
   aligns it with the lazy `take_output_for_stream`/`write_canonical` path the

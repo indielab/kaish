@@ -13,6 +13,7 @@ use std::path::Path;
 
 use crate::ast::Value;
 use crate::backend::PatchOp;
+use crate::tools::builtin::get_path_string;
 use crate::tools::builtin::regex_dialect::{append_dialect_hint, bre_metas_to_ere};
 use crate::interpreter::{ExecResult, OutputData};
 use crate::tools::{schema_from_clap, validate_against_schema, ExecContext, ToolCtx, GlobalFlags, Tool, ToolArgs, ToolSchema};
@@ -275,9 +276,11 @@ impl Tool for Sed {
             };
         }
 
-        // Streaming mode: read one file (or stdin) and write to stdout.
-        let input = match args.get_string("path", file_pos) {
-            Some(path) => {
+        // Streaming mode: read one file (or stdin) and write to stdout. A
+        // binary `path` operand goes loud rather than silently falling
+        // through to the stdin branch below.
+        let input = match get_path_string(&args, "path", file_pos) {
+            Ok(Some(path)) => {
                 let resolved = ctx.resolve_path(&path);
                 match ctx.backend.read(Path::new(&resolved), None).await {
                     Ok(data) => match String::from_utf8(data) {
@@ -289,10 +292,11 @@ impl Tool for Sed {
                     Err(e) => return ExecResult::failure(1, format!("sed: {}: {}", path, e)),
                 }
             }
-            None => match ctx.read_stdin_to_text().await {
+            Ok(None) => match ctx.read_stdin_to_text().await {
                 Ok(s) => s.unwrap_or_default(),
                 Err(e) => return ExecResult::failure(2, format!("sed: {e}")),
             },
+            Err(e) => return ExecResult::failure(1, format!("sed: {e}")),
         };
 
         // Execute
