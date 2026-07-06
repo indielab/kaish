@@ -173,6 +173,20 @@ reach, but the root cause (`to_argv()`/`value_to_argv_token`) is filed as
 way. Every genuinely-fixed builtin (11 new tests this round) verified
 fail-first the same way as the rest of the PR.
 
+**A third pass (gemini, asked specifically to sweep for the same ordering
+hazard in every builtin touched so far) found one more: `cmp.rs`** read its
+two file operands off `parsed.paths` (the clap-parsed field) instead of
+`args.positional` — the exact CLAUDE.md gotcha ("read `Value`-typed
+positionals off `args.positional`, not the clap struct") that the other
+path-positional builtins already followed correctly. Fixed the same way as
+`mkdir`/`cp`/etc.: `values_to_text_sink_named(&args.positional, "a path")`.
+Three review passes, three distinct bug shapes (`_ => continue` drop,
+clap-field-checked-before-raw-value ordering, clap-field-read-directly) —
+each caught because the review asked "is this ACTUALLY the shape you think
+it is" against the live code rather than trusting the pattern to have been
+applied uniformly. Stopped the loop here rather than keep sweeping
+indefinitely; #116/#120 carry the remaining known-adjacent gaps forward.
+
 ## Interpreter allocation/stack pass (2026-07-05, GH #48)
 
 #46/#47 landed a recursion depth guard sized against a measured ~380 KB of

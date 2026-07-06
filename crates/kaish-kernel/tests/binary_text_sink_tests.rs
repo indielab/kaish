@@ -403,6 +403,16 @@ async fn checksum_binary_check_override_is_loud() {
     assert_loud_binary("b=$(cat src.bin); checksum --check=$b").await;
 }
 
+/// `cmp`'s two file operands used to be read off `parsed.paths` (the
+/// clap-parsed, `to_argv()`-serialized field) instead of `args.positional` —
+/// found via a third kaibo pass over this PR. A binary first operand silently
+/// became a "No such file" error for a nonexistent `[binary: N bytes]` path
+/// rather than naming the real problem.
+#[tokio::test]
+async fn cmp_binary_first_operand_is_loud() {
+    assert_loud_binary("b=$(cat src.bin); cmp $b src.bin").await;
+}
+
 // `spawn`'s bareword `command=value` form actually routes through the
 // (separately tracked, #116) WordAssign-reconstruction fallback rather than a
 // named arg — `--command=`/`--cwd=` is the form that reaches `ToolArgs.named`
