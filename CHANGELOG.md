@@ -69,6 +69,39 @@ breaking entries are marked **BREAKING**.
   variants/fields won't break you.
 
 ### Fixed
+- **Embedders can mount their own backends under `/v`.** The overlay that gives
+  a `Kernel::with_backend` embedder kaish's virtual filesystems reserved the
+  *entire* `/v` namespace: any `/v/*` path not backed by a kaish mount returned
+  `NotFound`, silently shadowing an embedder's own content there (e.g. a CAS at
+  `/v/cas`) — and the shadow was surface-dependent, since paths served directly
+  off `kernel.vfs()` (SFTP) still saw the real content. Routing is now purely by
+  mount coverage (longest prefix), the same rule that already governs `/dev`: an
+  unclaimed `/v/*` path **delegates to the embedder's backend** — the blanket
+  reservation is gone *by design*, so `cat`/`ls`/`stat` reach the embedder's
+  storage — while a shared parent like `/v` presents the *union* of kaish's
+  mounts and the embedder's and stats as a directory. Also clears two
+  pre-existing papercuts in that path: `ls /v` returned nothing (kaish mounts sit
+  at `/v/jobs`/`/v/blobs`, not `/v`), and `ls /` dropped `dev`. Not breaking — no
+  API signatures change; the only behavior affected is an embedder that *relied*
+  on the old `/v/*`→`NotFound` reservation. Relatedly, `is_trash_excluded` no
+  longer treats a real `/v/...` path as trash-exempt: with routing delegating
+  unclaimed `/v/*` to the embedder, that predicate would have silently stripped
+  the trash/latch safety net from an embedder's real content under `/v` (the
+  clause was stale anyway — kaish's own in-memory `/v` mounts resolve to no real
+  path and were never matched by it).
+- **Intermediate mount-ancestor directories are navigable.** A directory that
+  has no mount of its own but sits *above* one (e.g. `/v` above `/v/jobs`, or
+  `/home` above a lone `/home/user` mount in a sandboxed kernel) now `stat`s as a
+  directory and `list`s its child mounts, instead of returning `NotFound`. This
+  is a general `VfsRouter` change — it fixes `cd /v`/`ls /v` for embedders and
+  makes the standalone kernel's mount tree navigable the same way. Such a
+  synthesized shared-ancestor directory behaves consistently across every
+  operation: `stat`/`lstat`/`exists`/`list` all agree it is a directory (the
+  union of the embedder's view and kaish's child mounts, preferring the
+  embedder's real metadata for a name it owns), and every direct mutation
+  (`rm`/`mkdir`/`touch`/write) is refused with a clear error instead of the
+  misleading `NotFound` a bare embedder delegation used to produce — `rm -rf /v`
+  can't delete a node that only exists because kaish mounts live beneath it.
 - **`jq -s`/`--slurp` now wraps the `.data` pipeline path in an array-of-one,
   matching real jq** (GH #93 item 2). Real `jq -s` always wraps its input in
   an array, even a single document. On kaish's structured `.data` shortcut
