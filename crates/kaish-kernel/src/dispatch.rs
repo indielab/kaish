@@ -286,6 +286,29 @@ impl BackendDispatcher {
         cmd.stdout(std::process::Stdio::piped());
         cmd.stderr(std::process::Stdio::piped());
 
+        // On Unix, always put the child in its own process group so a
+        // cancel can `killpg` the whole tree (the child plus any
+        // grandchildren) — matching the production spawn site
+        // (kernel.rs::try_execute_external) exactly. Without this, `killpg`
+        // targets a group nobody is actually in (an ESRCH no-op), and a
+        // grandchild spawned by the child survives cancellation — the exact
+        // gap GH #133 item 4 closes. This dispatcher has no job-control
+        // terminal integration (no `terminal_state`), so unlike production
+        // there is no signal-handler restoration to gate here.
+        #[cfg(unix)]
+        {
+            // SAFETY: setpgid is async-signal-safe per POSIX; safe to call
+            // between fork and exec.
+            #[allow(unsafe_code)]
+            unsafe {
+                cmd.pre_exec(|| {
+                    nix::unistd::setpgid(nix::unistd::Pid::from_raw(0), nix::unistd::Pid::from_raw(0))
+                        .map_err(|e| std::io::Error::from_raw_os_error(e as i32))?;
+                    Ok(())
+                });
+            }
+        }
+
         let mut child = match cmd.spawn() {
             Ok(c) => c,
             Err(e) => return Some(ExecResult::failure(127, format!("{}: {}", name, e))),
@@ -565,6 +588,61 @@ mod external_process_tests {
         }
     }
 
+    /// GH #133 item 1: production maps a signal-killed child to `128 + signal`
+    /// (SIGKILL -> 137); the twin used to hardcode `code().unwrap_or(1)` -> 1,
+    /// so a cancel/timeout test run through this dispatcher observed an exit
+    /// code production never actually produces. Fails at `code == 1` pre-fix.
+    #[tokio::test]
+    async fn signal_killed_child_maps_to_128_plus_signal() {
+        let (dispatcher, mut ctx, _dir) = real_cwd_dispatcher();
+        let cmd = sh_cmd("kill -KILL $$");
+        let result = dispatcher.dispatch(&cmd, &mut ctx).await.expect("dispatch");
+        assert_eq!(
+            result.code, 137,
+            "SIGKILL should map to 128+9=137 (production's mapping), got {}",
+            result.code
+        );
+    }
+
+    /// GH #133 item 2: the twin used to call the limit-aware
+    /// `spill_aware_collect` in its non-pipe capture branch, applying
+    /// `ctx.output_limit` inline and setting `did_spill` itself. Production's
+    /// `try_execute_external` never spill-checks its own capture that way —
+    /// spill is a pipeline-level, post-hoc step (`Kernel::execute_pipeline`
+    /// calls `spill_if_needed` AFTER the dispatcher returns). So even with a
+    /// tiny `output_limit` configured, `try_external` itself must return the
+    /// full (up to the 10MB ring) captured output with `did_spill == false`.
+    /// Pre-fix, the twin truncated inline and set `did_spill = true` here.
+    #[tokio::test]
+    async fn output_limit_is_not_applied_inline_matching_production() {
+        let (dispatcher, mut ctx, _dir) = real_cwd_dispatcher();
+        // A tiny in-memory limit (no disk spill file — CLAUDE.md: no real
+        // system paths in tests) — if try_external still spill-checked
+        // inline (the bug), this would trigger truncation right here.
+        ctx.output_limit = crate::output_limit::OutputLimitConfig::agent().in_memory();
+        ctx.output_limit.set_limit(Some(64));
+
+        let cmd = sh_cmd("yes x | head -c 1000");
+        let result = dispatcher.dispatch(&cmd, &mut ctx).await.expect("dispatch");
+
+        assert_eq!(result.code, 0, "err: {}", result.err);
+        assert_eq!(
+            result.text_out().len(),
+            1000,
+            "try_external must return the full captured output — production \
+             defers spill to the post-hoc pipeline step, not its own capture; \
+             got {} bytes: {:?}",
+            result.text_out().len(),
+            result.text_out()
+        );
+        assert!(
+            !result.did_spill,
+            "try_external itself must not set did_spill — that's \
+             Kernel::execute_pipeline's post-hoc spill_if_needed's job, \
+             matching production"
+        );
+    }
+
     /// GH #133 item 3: before this fix, `try_external` special-cased
     /// `ctx.pipe_stdout` — taking it out of the context and hand-streaming
     /// the child's stdout straight into it in 8KB chunks, bypassing the
@@ -703,58 +781,73 @@ mod external_process_tests {
         );
     }
 
-    /// GH #133 item 2: the twin used to call the limit-aware
-    /// `spill_aware_collect` in its non-pipe capture branch, applying
-    /// `ctx.output_limit` inline and setting `did_spill` itself. Production's
-    /// `try_execute_external` never spill-checks its own capture that way —
-    /// spill is a pipeline-level, post-hoc step (`Kernel::execute_pipeline`
-    /// calls `spill_if_needed` AFTER the dispatcher returns). So even with a
-    /// tiny `output_limit` configured, `try_external` itself must return the
-    /// full (up to the 10MB ring) captured output with `did_spill == false`.
-    /// Pre-fix, the twin truncated inline and set `did_spill = true` here.
+    /// GH #133 item 4: production always puts the spawned child in its own
+    /// process group (`setpgid(0,0)` in `pre_exec`) so a cancel's `killpg`
+    /// reaches the whole tree — the direct child AND any grandchildren it
+    /// spawns. Pre-fix, this dispatcher never called `setpgid`, so `killpg`
+    /// targeted a process group nobody was actually in (an ESRCH no-op): a
+    /// grandchild survived cancellation even though the direct child died.
+    /// Any existing test asserting "grandchild cleanup" against this
+    /// dispatcher was passing trivially, verifying nothing real.
+    ///
+    /// # Why this test checks the structural fact, not an end-to-end kill
+    ///
+    /// The most faithful reproduction of the issue would background a
+    /// grandchild (`sleep N &`), cancel mid-flight, and assert the
+    /// grandchild dies too — pinning the exact "existing test passes
+    /// trivially" symptom. That reproduction turned out to be **blocked by a
+    /// separate, pre-existing ordering issue** in this dispatcher, not
+    /// introduced by this PR: `try_external`'s output collection used to run
+    /// to completion BEFORE `wait_or_kill` was even called, so cancellation
+    /// had no observable effect until the child's stdout closed on its own —
+    /// which, for a `sh -c '... & wait'` script producing no stdout, only
+    /// happened once the whole script finished naturally. GH #133 item 2 (PR
+    /// #152, already landed on main alongside this fix) restructured
+    /// collection to run *concurrently* with `wait_or_kill`, matching
+    /// production — an end-to-end grandchild-kill test is now meaningful and
+    /// fast, and remains a natural follow-up. Until then, this test pins the
+    /// concrete, fast, unconfounded consequence of *this* PR's diff: the
+    /// spawned child's own pgid equals its own pid, i.e. `setpgid(0, 0)` in
+    /// `pre_exec` actually took effect. `ps -p $$` runs and exits almost
+    /// immediately, producing no stdout for kaish to block draining — so the
+    /// ordering issue above never enters into it either way.
+    #[cfg(unix)]
     #[tokio::test]
-    async fn output_limit_is_not_applied_inline_matching_production() {
+    async fn spawned_child_becomes_its_own_process_group_leader() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let out_file = tmp.path().join("pgid_info");
+
         let (dispatcher, mut ctx, _dir) = real_cwd_dispatcher();
-        // A tiny in-memory limit (no disk spill file — CLAUDE.md: no real
-        // system paths in tests) — if try_external still spill-checked
-        // inline (the bug), this would trigger truncation right here.
-        ctx.output_limit = crate::output_limit::OutputLimitConfig::agent().in_memory();
-        ctx.output_limit.set_limit(Some(64));
 
-        let cmd = sh_cmd("yes x | head -c 1000");
-        let result = dispatcher.dispatch(&cmd, &mut ctx).await.expect("dispatch");
+        // `$$` is the running shell's own PID; `ps -o pid=,pgid= -p $$`
+        // reports that shell's pid and process-group id. If setpgid(0,0)
+        // took effect in pre_exec (before `ps` even execs), the two must be
+        // equal. Redirected straight to a file — sh's own captured stdout
+        // (what kaish pipes) stays empty, so collection returns immediately.
+        let script = format!("ps -o pid=,pgid= -p $$ > {}", out_file.display());
+        let cmd = sh_cmd(&script);
 
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(10),
+            dispatcher.dispatch(&cmd, &mut ctx),
+        )
+        .await
+        .expect("dispatch timed out")
+        .expect("dispatch");
         assert_eq!(result.code, 0, "err: {}", result.err);
-        assert_eq!(
-            result.text_out().len(),
-            1000,
-            "try_external must return the full captured output — production \
-             defers spill to the post-hoc pipeline step, not its own capture; \
-             got {} bytes: {:?}",
-            result.text_out().len(),
-            result.text_out()
-        );
-        assert!(
-            !result.did_spill,
-            "try_external itself must not set did_spill — that's \
-             Kernel::execute_pipeline's post-hoc spill_if_needed's job, \
-             matching production"
-        );
-    }
 
-    /// GH #133 item 1: production maps a signal-killed child to `128 + signal`
-    /// (SIGKILL -> 137); the twin used to hardcode `code().unwrap_or(1)` -> 1,
-    /// so a cancel/timeout test run through this dispatcher observed an exit
-    /// code production never actually produces. Fails at `code == 1` pre-fix.
-    #[tokio::test]
-    async fn signal_killed_child_maps_to_128_plus_signal() {
-        let (dispatcher, mut ctx, _dir) = real_cwd_dispatcher();
-        let cmd = sh_cmd("kill -KILL $$");
-        let result = dispatcher.dispatch(&cmd, &mut ctx).await.expect("dispatch");
+        let contents = std::fs::read_to_string(&out_file).expect("read pgid info");
+        let mut fields = contents.split_whitespace();
+        let pid: i32 = fields.next().expect("pid field").parse().expect("pid parse");
+        let pgid: i32 = fields.next().expect("pgid field").parse().expect("pgid parse");
+
         assert_eq!(
-            result.code, 137,
-            "SIGKILL should map to 128+9=137 (production's mapping), got {}",
-            result.code
+            pid, pgid,
+            "the spawned child's pgid must equal its own pid — setpgid(0,0) \
+             in pre_exec should make it its own process-group leader (so a \
+             later killpg reaches it and any of its own children), matching \
+             production (kernel.rs::try_execute_external); got pid={pid} \
+             pgid={pgid}"
         );
     }
 }
