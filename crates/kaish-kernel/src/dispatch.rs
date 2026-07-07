@@ -402,25 +402,70 @@ impl BackendDispatcher {
             Some(ExecResult::from_output(code, String::new(), stderr))
         } else {
             // No pipe_stdout — last stage or non-pipeline.
-            // Use spill-aware collection if output limits are configured.
+            //
+            // Capture stdout into a fixed 10MB tail-evicting ring
+            // (`BoundedStream` + `drain_to_stream`) — the SAME capture
+            // primitive the production spawn site uses
+            // (kernel.rs::try_execute_external), not the limit-aware
+            // `spill_aware_collect` this used to call. Production does not
+            // spill-check an external command's own capture inline; the
+            // pipeline-level post-hoc `spill_if_needed`
+            // (`Kernel::execute_pipeline`) is what applies `ctx.output_limit`
+            // afterward. Collecting via `spill_aware_collect` here made this
+            // test-only dispatcher exercise a materially nicer (and
+            // different) spill/limit semantics than production actually has
+            // — GH #133 item 2. `did_spill` is intentionally left `false`;
+            // a caller wanting the post-hoc behavior applies it separately,
+            // same as the real pipeline path.
             let Some(child_stdout) = child.stdout.take() else {
                 return Some(ExecResult::failure(1, "internal: stdout not available"));
             };
-            let Some(child_stderr) = child.stderr.take() else {
+            let Some(mut child_stderr) = child.stderr.take() else {
                 return Some(ExecResult::failure(1, "internal: stderr not available"));
             };
 
-            // Always use spill_aware_collect — it handles both limited and
-            // unlimited modes, and correctly streams stderr to ctx.stderr.
-            // (wait_with_output would bypass stderr streaming.)
-            let (stdout, stderr, did_spill) = crate::output_limit::spill_aware_collect(
-                child_stdout,
-                child_stderr,
-                ctx.stderr.clone(),
-                &ctx.output_limit,
-            ).await;
+            let stdout_stream = Arc::new(crate::scheduler::BoundedStream::new(
+                crate::scheduler::DEFAULT_STREAM_MAX_SIZE,
+            ));
+            let stdout_clone = stdout_stream.clone();
+            let stdout_task = tokio::spawn(async move {
+                crate::scheduler::drain_to_stream(child_stdout, stdout_clone).await;
+            });
+
+            // Stderr streaming is intentionally left as-is (live to
+            // `ctx.stderr` when present, else buffered) — production instead
+            // caps stderr into its own 10MB ring with no live streaming. That
+            // divergence is out of scope for this PR; see GH #133 follow-ups.
+            let stderr_stream_handle = ctx.stderr.clone();
+            let stderr_task = tokio::spawn(async move {
+                let mut buf = Vec::new();
+                let mut chunk = [0u8; 8192];
+                loop {
+                    match child_stderr.read(&mut chunk).await {
+                        Ok(0) => break,
+                        Ok(n) => {
+                            if let Some(ref stream) = stderr_stream_handle {
+                                stream.write(&chunk[..n]);
+                            } else {
+                                buf.extend_from_slice(&chunk[..n]);
+                            }
+                        }
+                        Err(_) => break,
+                    }
+                }
+                if stderr_stream_handle.is_some() {
+                    String::new()
+                } else {
+                    String::from_utf8_lossy(&buf).into_owned()
+                }
+            });
 
             let cancel = ctx.cancel.clone();
+            // Mirror production's cancel-aware drain handling: spawn the
+            // drains concurrently with the wait (not after collection
+            // completes) so a cancel can actually interrupt a still-running,
+            // still-silent child instead of blocking until it produces EOF.
+            let cancelled_before_wait = cancel.is_cancelled();
             let status = crate::kernel::wait_or_kill(
                 &mut child,
                 kill_target.as_ref(),
@@ -428,12 +473,25 @@ impl BackendDispatcher {
                 std::time::Duration::from_secs(2),
             ).await;
             if let Some(task) = stdin_task { task.abort(); }
+
+            let stderr = if cancelled_before_wait || cancel.is_cancelled() {
+                // The child's pipes are gone; late output is lost but
+                // predictable death beats partial capture (same tradeoff
+                // production makes).
+                stdout_task.abort();
+                stderr_task.abort();
+                String::new()
+            } else {
+                let _ = stdout_task.await;
+                stderr_task.await.unwrap_or_default()
+            };
+
             let code = status.map(|s| s.code().unwrap_or(1) as i64).unwrap_or(1);
+            let stdout = stdout_stream.read().await;
             // stdout came back as raw bytes: text if valid UTF-8, else a Bytes
             // result (so `curl url`, `curl url > file.bin`, etc. keep binary intact).
             let mut result = ExecResult::success_text_or_bytes(stdout).with_code(code);
             result.err = stderr;
-            result.did_spill = did_spill;
             Some(result)
         }
     }
@@ -506,5 +564,100 @@ impl CommandDispatcher for BackendDispatcher {
     /// BackendDispatcher is stateless, so a fork is just a clone.
     async fn fork(&self) -> Arc<dyn CommandDispatcher> {
         Arc::new(Self { tools: Arc::clone(&self.tools) })
+    }
+}
+
+/// Tests that spawn real external processes through `try_external`, to catch
+/// behavioral drift from the production spawn site (`kernel.rs::try_execute_external`)
+/// — GH #133. Unlike the `BackendDispatcher` tests in `scheduler::pipeline`,
+/// which exercise builtins over a `MemoryFs` (virtual cwd, so `try_external`
+/// never spawns), these give the dispatcher a real tempdir cwd + PATH so the
+/// external fallback actually runs a child process.
+#[cfg(all(test, feature = "subprocess"))]
+mod external_process_tests {
+    // Test-fixture helpers (not `#[test]` bodies themselves), so the
+    // workspace's usual allow-in-tests clippy.toml carve-out doesn't cover
+    // them — see CLAUDE.md's "clap builtin gotchas" / test-code conventions.
+    #![allow(clippy::unwrap_used, clippy::expect_used)]
+    use super::*;
+    use crate::ast::{Arg, Command, Expr, Value};
+    use crate::tools::{ExecContext, ToolRegistry};
+    use crate::vfs::{LocalFs, VfsRouter};
+
+    /// A `BackendDispatcher` + `ExecContext` rooted at a real tempdir, with an
+    /// empty tool registry (every command name falls through to
+    /// `try_external`, exactly like a real external command with no matching
+    /// builtin/user tool) and PATH seeded from the test process's own OS env.
+    /// Reading OS env here is fixture code, not kaish's hermetic runtime — see
+    /// CLAUDE.md and `external_command_tests.rs::repl_kernel`.
+    fn real_cwd_dispatcher() -> (BackendDispatcher, ExecContext, tempfile::TempDir) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut vfs = VfsRouter::new();
+        vfs.mount("/", LocalFs::new(dir.path().to_path_buf()));
+        let tools = Arc::new(ToolRegistry::new());
+        let mut ctx = ExecContext::with_vfs_and_tools(Arc::new(vfs), tools.clone());
+        // Exported (not just set): try_external's own PATH lookup reads
+        // ctx.scope directly, but the CHILD process only inherits exported
+        // vars (cmd.env_clear() + exported_vars()) — a script that shells
+        // out further (`sh -c "yes | head"`) needs PATH in ITS env too,
+        // not just kaish's resolver.
+        ctx.scope.set_exported(
+            "PATH",
+            Value::String(std::env::var("PATH").unwrap_or_default()),
+        );
+        let dispatcher = BackendDispatcher::new(tools);
+        (dispatcher, ctx, dir)
+    }
+
+    /// `sh -c <script>` as a `Command`, matching how the parser would build it
+    /// from `sh -c 'script'` (a short flag, then a positional literal).
+    fn sh_cmd(script: &str) -> Command {
+        Command {
+            name: "sh".to_string(),
+            args: vec![
+                Arg::ShortFlag("c".to_string()),
+                Arg::Positional(Expr::Literal(Value::String(script.to_string()))),
+            ],
+            redirects: vec![],
+        }
+    }
+
+    /// GH #133 item 2: the twin used to call the limit-aware
+    /// `spill_aware_collect` in its non-pipe capture branch, applying
+    /// `ctx.output_limit` inline and setting `did_spill` itself. Production's
+    /// `try_execute_external` never spill-checks its own capture that way —
+    /// spill is a pipeline-level, post-hoc step (`Kernel::execute_pipeline`
+    /// calls `spill_if_needed` AFTER the dispatcher returns). So even with a
+    /// tiny `output_limit` configured, `try_external` itself must return the
+    /// full (up to the 10MB ring) captured output with `did_spill == false`.
+    /// Pre-fix, the twin truncated inline and set `did_spill = true` here.
+    #[tokio::test]
+    async fn output_limit_is_not_applied_inline_matching_production() {
+        let (dispatcher, mut ctx, _dir) = real_cwd_dispatcher();
+        // A tiny in-memory limit (no disk spill file — CLAUDE.md: no real
+        // system paths in tests) — if try_external still spill-checked
+        // inline (the bug), this would trigger truncation right here.
+        ctx.output_limit = crate::output_limit::OutputLimitConfig::agent().in_memory();
+        ctx.output_limit.set_limit(Some(64));
+
+        let cmd = sh_cmd("yes x | head -c 1000");
+        let result = dispatcher.dispatch(&cmd, &mut ctx).await.expect("dispatch");
+
+        assert_eq!(result.code, 0, "err: {}", result.err);
+        assert_eq!(
+            result.text_out().len(),
+            1000,
+            "try_external must return the full captured output — production \
+             defers spill to the post-hoc pipeline step, not its own capture; \
+             got {} bytes: {:?}",
+            result.text_out().len(),
+            result.text_out()
+        );
+        assert!(
+            !result.did_spill,
+            "try_external itself must not set did_spill — that's \
+             Kernel::execute_pipeline's post-hoc spill_if_needed's job, \
+             matching production"
+        );
     }
 }
