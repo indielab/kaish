@@ -1194,6 +1194,71 @@ async fn backgrounded_latch_is_reachable_and_confirmable() {
     assert!(!precious.exists(), "file removed after confirm");
 }
 
+/// GH #124 part 4: a successful `confirm` of a *backgrounded* latch retires
+/// the originating job — it no longer lingers in `jobs` forever as `Latched`,
+/// disconnected from the fact its gate was just fulfilled. Mirrors the
+/// existing manual `kill --discard %N` path, automated.
+#[tokio::test]
+async fn confirm_retires_the_originating_backgrounded_job() {
+    use kaish_kernel::scheduler::JobId;
+
+    let dir = tempdir();
+    let kernel = kernel_at(dir.path());
+    let precious = dir.path().join("precious.txt");
+    std::fs::write(&precious, "keep me").expect("write");
+
+    run(&kernel, "set -o latch").await;
+    run(&kernel, "rm precious.txt &").await;
+    let waited = run(&kernel, "wait 1").await;
+    let latch = waited.latch_request().expect("a backgrounded LatchRequest");
+    assert_eq!(
+        latch.job_id,
+        Some(1),
+        "the surfaced latch must carry the originating job's id"
+    );
+    assert!(
+        kernel.jobs().get(JobId(1)).await.is_some(),
+        "job must still be tracked (Latched) before confirm"
+    );
+
+    let confirmed = kernel.confirm(&latch).await.expect("confirm");
+    assert_eq!(confirmed.code, 0, "confirm deletes: {}", confirmed.err);
+    assert!(!precious.exists(), "file removed after confirm");
+    assert!(
+        kernel.jobs().get(JobId(1)).await.is_none(),
+        "the originating job must be retired after a successful confirm"
+    );
+}
+
+/// A repeat `confirm` of an already-retired job is a safe no-op — nonces are
+/// reusable within TTL (not consumed on validate), so the second replay still
+/// succeeds (idempotent delete-of-already-deleted via rm's own semantics is
+/// out of scope here; what matters is `confirm` itself doesn't panic/error
+/// trying to retire a job that's already gone).
+#[tokio::test]
+async fn confirm_of_an_already_retired_job_does_not_error() {
+    use kaish_kernel::scheduler::JobId;
+
+    let dir = tempdir();
+    let kernel = kernel_at(dir.path());
+    std::fs::write(dir.path().join("precious.txt"), "keep me").expect("write");
+
+    run(&kernel, "set -o latch").await;
+    run(&kernel, "rm precious.txt &").await;
+    let waited = run(&kernel, "wait 1").await;
+    let latch = waited.latch_request().expect("a backgrounded LatchRequest");
+
+    let first = kernel.confirm(&latch).await.expect("confirm");
+    assert_eq!(first.code, 0, "err: {}", first.err);
+    assert!(kernel.jobs().get(JobId(1)).await.is_none(), "job retired");
+
+    // Second confirm with the same (still-valid, reusable) nonce: rm's own
+    // idempotent-retry story applies to the replay itself; the job-retirement
+    // step must not error just because the job is already gone.
+    let second = kernel.confirm(&latch).await;
+    assert!(second.is_ok(), "confirm must not error on an already-retired job");
+}
+
 /// `jobs` and `/v/jobs/{id}/status` name the latched state distinctly, not
 /// the generic "Failed".
 #[tokio::test]
