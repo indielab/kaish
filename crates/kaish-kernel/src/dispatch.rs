@@ -397,7 +397,14 @@ impl BackendDispatcher {
                 stderr_task.abort();
             }
             let stderr = stderr_task.await.unwrap_or_default();
-            let code = status.map(|s| s.code().unwrap_or(1) as i64).unwrap_or(1);
+            // Signal-death mapping (128+signal, e.g. SIGKILL→137) must match
+            // the production spawn site exactly — kept in sync via the shared
+            // `exit_code_from_status` helper (GH #133 item 1). A `wait_or_kill`
+            // I/O error (not a signal death) falls back to 1, same as before.
+            let code = match status {
+                Ok(s) => crate::kernel::exit_code_from_status(&s),
+                Err(_) => 1,
+            };
             // Output was streamed to pipe, so result.out is empty
             Some(ExecResult::from_output(code, String::new(), stderr))
         } else {
@@ -473,7 +480,6 @@ impl BackendDispatcher {
                 std::time::Duration::from_secs(2),
             ).await;
             if let Some(task) = stdin_task { task.abort(); }
-
             let stderr = if cancelled_before_wait || cancel.is_cancelled() {
                 // The child's pipes are gone; late output is lost but
                 // predictable death beats partial capture (same tradeoff
@@ -486,7 +492,14 @@ impl BackendDispatcher {
                 stderr_task.await.unwrap_or_default()
             };
 
-            let code = status.map(|s| s.code().unwrap_or(1) as i64).unwrap_or(1);
+            // Signal-death mapping (128+signal, e.g. SIGKILL→137) must match
+            // the production spawn site exactly — kept in sync via the shared
+            // `exit_code_from_status` helper (GH #133 item 1). A `wait_or_kill`
+            // I/O error (not a signal death) falls back to 1, same as before.
+            let code = match status {
+                Ok(s) => crate::kernel::exit_code_from_status(&s),
+                Err(_) => 1,
+            };
             let stdout = stdout_stream.read().await;
             // stdout came back as raw bytes: text if valid UTF-8, else a Bytes
             // result (so `curl url`, `curl url > file.bin`, etc. keep binary intact).
@@ -658,6 +671,22 @@ mod external_process_tests {
             "try_external itself must not set did_spill — that's \
              Kernel::execute_pipeline's post-hoc spill_if_needed's job, \
              matching production"
+        );
+    }
+
+    /// GH #133 item 1: production maps a signal-killed child to `128 + signal`
+    /// (SIGKILL -> 137); the twin used to hardcode `code().unwrap_or(1)` -> 1,
+    /// so a cancel/timeout test run through this dispatcher observed an exit
+    /// code production never actually produces. Fails at `code == 1` pre-fix.
+    #[tokio::test]
+    async fn signal_killed_child_maps_to_128_plus_signal() {
+        let (dispatcher, mut ctx, _dir) = real_cwd_dispatcher();
+        let cmd = sh_cmd("kill -KILL $$");
+        let result = dispatcher.dispatch(&cmd, &mut ctx).await.expect("dispatch");
+        assert_eq!(
+            result.code, 137,
+            "SIGKILL should map to 128+9=137 (production's mapping), got {}",
+            result.code
         );
     }
 }
