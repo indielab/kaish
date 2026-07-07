@@ -1377,6 +1377,7 @@ fn match_record_to_json(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ast::Value;
     use crate::vfs::{Filesystem, MemoryFs, VfsRouter};
     use std::sync::Arc;
 
