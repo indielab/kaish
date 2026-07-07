@@ -20,6 +20,15 @@ breaking entries are marked **BREAKING**.
   (`transient`/`named`/`isolated`) keep the unfiltered default.
 
 ### Fixed
+- **`scatter --timeout` no longer misclassifies a worker that completes right
+  at the timeout boundary as timed out.** A worker whose command finished at
+  (or a hair before) the deadline could read the timeout flag after the
+  delay task set it — `sleep`'s own internal cancellation race could still
+  pick the "genuine success" branch even after the flag was set and the
+  cancel signal sent, so a worker that truly finished successfully was
+  reported `timed_out: true` / exit 124, and `gather` penalized the whole
+  run with exit 123. The worker's own result is now authoritative:
+  completion wins ties.
 - **A confirmation latch raised mid-pipeline (`set -o latch`) no longer gets
   swallowed by a later stage's success.** `rm x | echo done` used to exit 0
   with `.latch` dropped, even though `rm` genuinely gated and the file was
