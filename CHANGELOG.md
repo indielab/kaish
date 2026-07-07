@@ -20,6 +20,13 @@ breaking entries are marked **BREAKING**.
   (`transient`/`named`/`isolated`) keep the unfiltered default.
 
 ### Fixed
+- **The REPL's interactive table and column output align CJK/emoji cells
+  correctly** (GH #130). Column widths were computed from UTF-8 byte length
+  (`cell.len()`), not display width — a CJK cell like "你好" is 6 bytes but
+  only 4 display columns, so byte-length padding under-padded it and
+  misaligned every column after it. Width math now uses the `unicode-width`
+  crate's `UnicodeWidthStr::width()`. Cosmetic/interactive-only; `--json` and
+  other structured output are unaffected.
 - **The REPL no longer silently swallows a failing rc-file source.** A typo'd
   command or a failed `source` line in `~/.config/kaish/init.kai` (or
   `~/.kaishrc`) returns `Ok(ExecResult)` with a nonzero exit code, not an
