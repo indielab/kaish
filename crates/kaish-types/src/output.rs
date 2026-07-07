@@ -907,6 +907,47 @@ mod tests {
     }
 
     #[test]
+    fn apply_output_format_surfaces_latch_even_when_result_has_output() {
+        // GH #124 part 1: `wait %1`'s gate result carries BOTH text output
+        // (the "[1] Latched\n" status line, via `.output`/`.out`) AND `.latch`
+        // — unlike `rm`'s bare exit-2 failure, which has no output at all. The
+        // old code only merged `.latch` into the JSON envelope on the
+        // no-output error branch, so a result with output (like wait's) took
+        // the has_output() branch instead and the nonce never appeared under
+        // `--json`. Mirrors wait.rs::finish()'s exact construction.
+        let mut result = ExecResult::from_output(2, "[1] Latched\n", "");
+        result.set_output(Some(OutputData::text("[1] Latched\n")));
+        assert!(result.has_output(), "precondition: this result DOES have output");
+        result.latch = Some(Box::new(LatchRequest {
+            nonce: "a3f7b2c1".to_string(),
+            command: "rm".to_string(),
+            paths: vec!["precious.txt".to_string()],
+            hint: "rm --confirm=\"a3f7b2c1\" precious.txt".to_string(),
+            tool: "rm".to_string(),
+            argv: vec!["precious.txt".to_string()],
+            ttl: 60,
+        }));
+
+        let formatted = apply_output_format(result, OutputFormat::Json);
+        let out = formatted.text_out().into_owned();
+        let parsed: serde_json::Value = serde_json::from_str(&out).expect("valid JSON");
+        assert_eq!(
+            parsed["latch"]["nonce"], "a3f7b2c1",
+            "the nonce must be reachable from a latched result that also has \
+             output, not just the no-output error path: {parsed}"
+        );
+        assert_eq!(parsed["latch"]["command"], "rm");
+        assert_eq!(parsed["code"], 2);
+        // No .err was set (mirrors wait.rs), so the rendered text becomes the
+        // diagnostic `error` field.
+        assert_eq!(parsed["error"], "[1] Latched\n");
+        assert!(
+            formatted.latch_request().is_some(),
+            "the typed latch must survive --json formatting"
+        );
+    }
+
+    #[test]
     fn apply_output_format_leaves_clean_no_match_empty() {
         // grep no-match: exit 1, empty stdout, empty err. Not an error — must
         // NOT be wrapped in a JSON error object; stays empty.
