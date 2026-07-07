@@ -10,6 +10,17 @@ breaking entries are marked **BREAKING**.
 
 ## [Unreleased]
 
+### Added
+- **`jobs --json` rows and scatter/gather rows carry the confirmation-latch
+  object** for a `Latched` entry (nonce/paths/hint/ttl) — a caller can act on
+  a gate straight from the row instead of a second `/v/jobs/N/latch` read.
+- **`Kernel::confirm` retires the originating background job after a
+  successful confirm.** `LatchRequest` gains an optional `job_id` back-
+  reference (set when the gate came from a backgrounded job, e.g. `rm x &`);
+  a successfully-replayed confirm now removes that job from `jobs` instead of
+  leaving it lingering as `Latched` forever, mirroring the existing manual
+  `kill --discard %N` path.
+
 ### Changed
 - **The reference REPL is ignore-aware by default** (GH #134). Interactive,
   `-c`, and script modes now load `.gitignore` and the default ignore list
@@ -29,6 +40,19 @@ breaking entries are marked **BREAKING**.
   reported `timed_out: true` / exit 124, and `gather` penalized the whole
   run with exit 123. The worker's own result is now authoritative:
   completion wins ties.
+- **The REPL's interactive table and column output align CJK/emoji cells
+  correctly** (GH #130). Column widths were computed from UTF-8 byte length
+  (`cell.len()`), not display width — a CJK cell like "你好" is 6 bytes but
+  only 4 display columns, so byte-length padding under-padded it and
+  misaligned every column after it. Width math now uses the `unicode-width`
+  crate's `UnicodeWidthStr::width()`. Cosmetic/interactive-only; `--json` and
+  other structured output are unaffected.
+- **The REPL no longer silently swallows a failing rc-file source.** A typo'd
+  command or a failed `source` line in `~/.config/kaish/init.kai` (or
+  `~/.kaishrc`) returns `Ok(ExecResult)` with a nonzero exit code, not an
+  `Err` — `load_rc_file` only warned on the latter, so the former left the
+  user with a half-loaded environment and zero indication why. Nonzero rc-file
+  exits now print a warning with the exit code and any diagnostic text.
 - **A confirmation latch raised mid-pipeline (`set -o latch`) no longer gets
   swallowed by a later stage's success.** `rm x | echo done` used to exit 0
   with `.latch` dropped, even though `rm` genuinely gated and the file was
@@ -39,6 +63,23 @@ breaking entries are marked **BREAKING**.
   parsed the job argument with a bare numeric parse, so the standard `%N`
   jobspec (already accepted by `kill`/`wait`) failed with "invalid job id: %1".
   `bg`/`fg` now strip a leading `%` before parsing, matching `kill`/`wait`.
+- **`wait %1 --json` on a latched background job now surfaces the
+  confirmation nonce under a `latch` key** instead of rendering a bare
+  `"[1] Latched\n"` JSON string with no way to fulfill the gate. A latched
+  result's `--json` handling is now one canonical path (`apply_output_format`)
+  regardless of whether the result also carries text output.
+- **Shebang'd `.kai` scripts now report correct parse-error line numbers** (GH
+  #127). `run_script` used to strip the shebang line entirely
+  (`.lines().skip(1)`), which deleted a line and shifted every subsequent
+  line's reported number down by one — a syntax error on line 43 was reported
+  at line 42. The shebang line is now blanked out instead of removed, so line
+  accounting stays correct.
+- **`expand_paths` now goes loud on a list/record/bool/null path operand**
+  (GH #121), closing the gap the `Value::Bytes` guard (#117) left in the same
+  function's catch-all. `cat`/`head`/`tail`/`wc`/etc. silently dropped a
+  structured, bool, or null path argument and fell back to reading stdin
+  instead of erroring on the operand actually given — the same silent-fallback
+  class #93/#117 set out to kill.
 - **`kaish-ignore` changes now persist past their own statement.** Every
   runtime ignore mutation (`add`/`clear`/`defaults`/`scope`) was silently
   dropped at the end of the statement that made it — the per-command context
@@ -90,6 +131,12 @@ breaking entries are marked **BREAKING**.
   real `--`). All now lex as one literal word (#137).
 
 ### Added
+- **The REPL announces finished background jobs at the next prompt and reaps
+  them automatically** (GH #131). `sleep 5 &` used to complete silently — no
+  `[1] Done sleep 5`-style line, and the completed job stayed in the
+  `JobManager` until an explicit `jobs --cleanup`. A `Latched` job (gated on a
+  pending confirmation under `set -o latch`) is never auto-reaped or reported
+  as finished — it stays tracked until confirmed or explicitly discarded.
 - **`ToolSchema::glob_passthrough` (+ `with_glob_passthrough()`)** — a tool
   whose input *is* a glob pattern (like `glob`) can now tell the argv binder to
   pass bare patterns through as literal text instead of expanding them.
