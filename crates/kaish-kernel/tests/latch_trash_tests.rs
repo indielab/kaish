@@ -1174,3 +1174,101 @@ async fn backgrounded_latch_vfs_node_renders_json() {
     let parsed = run(&kernel, "cat /v/jobs/1/latch | fromjson").await;
     assert_eq!(parsed.code, 0, "latch node is valid JSON: {}", parsed.err);
 }
+
+/// `jobs --cleanup` must not reap a latched job — its cached result holds the
+/// only LatchRequest for the gated operation, so reaping silently destroys the
+/// pending confirmation (the #96 guarantee).
+#[tokio::test]
+async fn jobs_cleanup_keeps_latched_job() {
+    let dir = tempdir();
+    let kernel = kernel_at(dir.path());
+    let precious = dir.path().join("precious.txt");
+    std::fs::write(&precious, "keep me").expect("write");
+
+    run(&kernel, "set -o latch").await;
+    run(&kernel, "rm precious.txt &").await;
+    run(&kernel, "wait 1").await; // job reaches the gate
+
+    let cleaned = run(&kernel, "jobs --cleanup").await;
+    assert!(
+        cleaned.text_out().contains("Kept 1 latched job(s)"),
+        "cleanup says loudly that it kept the latched job: {}",
+        cleaned.text_out()
+    );
+
+    let jobs = run(&kernel, "jobs").await;
+    assert!(
+        jobs.text_out().contains("Latched"),
+        "cleanup must keep the latched job: {}",
+        jobs.text_out()
+    );
+
+    // The gate is still fulfillable end-to-end after the cleanup pass.
+    let waited = run(&kernel, "wait 1").await;
+    let latch = waited.latch_request().expect("latch survives cleanup");
+    let confirmed = kernel.confirm(&latch).await.expect("confirm");
+    assert_eq!(confirmed.code, 0, "confirm deletes: {}", confirmed.err);
+    assert!(!precious.exists(), "file removed after confirm");
+}
+
+/// `kill %N` on a latched job refuses instead of silently destroying the only
+/// handle to the pending confirmation.
+#[tokio::test]
+async fn kill_refuses_latched_job() {
+    let dir = tempdir();
+    let kernel = kernel_at(dir.path());
+    let precious = dir.path().join("precious.txt");
+    std::fs::write(&precious, "keep me").expect("write");
+
+    run(&kernel, "set -o latch").await;
+    run(&kernel, "rm precious.txt &").await;
+    run(&kernel, "wait 1").await;
+
+    let killed = run(&kernel, "kill %1").await;
+    assert_eq!(killed.code, 1, "kill refuses a latched job: {killed:?}");
+    assert!(killed.err.contains("latched"), "names the reason: {}", killed.err);
+    assert!(
+        killed.err.contains("--discard"),
+        "points at the escape hatch: {}",
+        killed.err
+    );
+
+    // Still present, still confirmable.
+    let jobs = run(&kernel, "jobs").await;
+    assert!(jobs.text_out().contains("Latched"), "job survives: {}", jobs.text_out());
+    let waited = run(&kernel, "wait 1").await;
+    let latch = waited.latch_request().expect("latch survives the refused kill");
+    let confirmed = kernel.confirm(&latch).await.expect("confirm");
+    assert_eq!(confirmed.code, 0, "confirm deletes: {}", confirmed.err);
+    assert!(!precious.exists(), "file removed after confirm");
+}
+
+/// `kill --discard %N` is the explicit way to abandon a pending gate: loud
+/// about what it destroyed, and the gated operation never runs.
+#[tokio::test]
+async fn kill_discard_abandons_latch_loudly() {
+    let dir = tempdir();
+    let kernel = kernel_at(dir.path());
+    let precious = dir.path().join("precious.txt");
+    std::fs::write(&precious, "keep me").expect("write");
+
+    run(&kernel, "set -o latch").await;
+    run(&kernel, "rm precious.txt &").await;
+    run(&kernel, "wait 1").await;
+
+    let killed = run(&kernel, "kill --discard %1").await;
+    assert_eq!(killed.code, 0, "discard succeeds: {killed:?}");
+    assert!(
+        killed.text_out().contains("discard"),
+        "says what it did: {}",
+        killed.text_out()
+    );
+
+    let jobs = run(&kernel, "jobs").await;
+    assert!(
+        !jobs.text_out().contains("Latched"),
+        "job gone after discard: {}",
+        jobs.text_out()
+    );
+    assert!(precious.exists(), "the gated rm never ran — file survives the discard");
+}

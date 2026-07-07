@@ -28,6 +28,11 @@ struct KillArgs {
     #[arg(short = 's', long, default_value_t = String::from("TERM"))]
     signal: String,
 
+    /// Abandon a latched (confirmation-pending) job. Without this flag, kill
+    /// refuses to destroy a job's pending confirmation gate.
+    #[arg(long)]
+    discard: bool,
+
     #[command(flatten)]
     global: GlobalFlags,
 
@@ -97,6 +102,26 @@ impl Tool for Kill {
                 Some(m) => m.clone(),
                 None => return ExecResult::failure(1, "kill: no job manager"),
             };
+            // A latched job's cached result is the only handle to its pending
+            // confirmation — killing it would silently destroy the gate
+            // (GH #96). Refuse unless the caller explicitly discards.
+            if manager.is_latched(job_id).await {
+                if !parsed.discard {
+                    return ExecResult::failure(
+                        1,
+                        format!(
+                            "kill: job {job_id} is latched awaiting confirmation — \
+                             fulfill it (see /v/jobs/{job_id}/latch) or abandon it \
+                             with: kill --discard %{job_id}"
+                        ),
+                    );
+                }
+                manager.cancel(job_id).await;
+                manager.remove(job_id).await;
+                return ExecResult::success(format!(
+                    "kill: discarded pending latch for job {job_id}"
+                ));
+            }
             return kill_job(&manager, job_id, &signal_name).await;
         }
 
