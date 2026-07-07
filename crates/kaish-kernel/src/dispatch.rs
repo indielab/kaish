@@ -238,7 +238,6 @@ impl BackendDispatcher {
 
         // Check for streaming pipes
         let has_pipe_stdin = ctx.pipe_stdin.is_some();
-        // pipe_stdout checked later when deciding buffered vs streaming output
         let has_buffered_stdin = ctx.stdin.is_some();
 
         // Spawn process
@@ -328,114 +327,56 @@ impl BackendDispatcher {
             None
         };
 
-        // Stream stdout: copy child stdout → pipe_stdout in chunks (bounded memory)
-        if let Some(mut pipe_out) = ctx.pipe_stdout.take() {
-            // Safety: stdout/stderr were set to piped() above, so take() always returns Some
-            let Some(mut child_stdout) = child.stdout.take() else {
-                return Some(ExecResult::failure(1, "internal: stdout not available"));
-            };
-            let Some(mut child_stderr_reader) = child.stderr.take() else {
-                return Some(ExecResult::failure(1, "internal: stderr not available"));
-            };
-            // Stream stderr to the kernel's stderr stream (if available) for
-            // real-time delivery. Otherwise buffer with a cap.
-            let stderr_stream_handle = ctx.stderr.clone();
-            let stderr_task = tokio::spawn(async move {
-                let mut buf = Vec::new();
-                let mut chunk = [0u8; 8192];
-                loop {
-                    match child_stderr_reader.read(&mut chunk).await {
-                        Ok(0) => break,
-                        Ok(n) => {
-                            if let Some(ref stream) = stderr_stream_handle {
-                                // Stream raw bytes — no decode here, lossy decode at drain site
-                                stream.write(&chunk[..n]);
-                            } else {
-                                buf.extend_from_slice(&chunk[..n]);
-                            }
-                        }
-                        Err(_) => break,
-                    }
-                }
-                if stderr_stream_handle.is_some() {
-                    // Already streamed — return empty
-                    String::new()
-                } else {
-                    String::from_utf8_lossy(&buf).into_owned()
-                }
-            });
+        // Capture stdout via the spill-aware collector, regardless of whether
+        // this is a pipeline stage (`ctx.pipe_stdout` set) or the last/only
+        // stage. This intentionally does NOT special-case `ctx.pipe_stdout`
+        // — production's `try_execute_external` never touches that field at
+        // all; a middle/first pipeline stage's forwarding to the next stage
+        // is entirely `PipelineRunner::run_pipeline`'s job (pipeline.rs),
+        // which reads `stage_ctx.pipe_stdout` (still `Some`, untouched here)
+        // after `dispatch()` returns and forwards `result.out` itself.
+        //
+        // Before this fix, this dispatcher special-cased `pipe_stdout` and
+        // streamed the child's stdout straight through in 8KB chunks — full
+        // fidelity, no cap. Production has no such fast path: every external
+        // stage's stdout is captured here first, then forwarded by the
+        // runner, so a >10MB intermediate stage silently loses its head in
+        // production (the runner's forward goes through the SAME capture,
+        // still true after this fix — see GH #133 item 2 for the capture
+        // primitive itself). Losing the pipe_stdout special case is what lets
+        // a test reproduce that production bug class at all (GH #133 item 3).
+        let Some(child_stdout) = child.stdout.take() else {
+            return Some(ExecResult::failure(1, "internal: stdout not available"));
+        };
+        let Some(child_stderr) = child.stderr.take() else {
+            return Some(ExecResult::failure(1, "internal: stderr not available"));
+        };
 
-            // Copy child stdout → pipe_stdout in chunks
-            let mut buf = [0u8; 8192];
-            loop {
-                match child_stdout.read(&mut buf).await {
-                    Ok(0) => break,
-                    Ok(n) => {
-                        if pipe_out.write_all(&buf[..n]).await.is_err() {
-                            break; // next stage dropped its reader (broken pipe)
-                        }
-                    }
-                    Err(_) => break,
-                }
-            }
-            let _ = pipe_out.shutdown().await;
-            drop(pipe_out);
-            let cancel = ctx.cancel.clone();
-            let status = crate::kernel::wait_or_kill(
-                &mut child,
-                kill_target.as_ref(),
-                &cancel,
-                std::time::Duration::from_secs(2),
-            ).await;
-            // Child has exited (naturally or via kill). Abort the stdin writer
-            // (nothing more to feed a dead child). Let the stderr drain FINISH
-            // — the child's stderr pipe EOFs now that it exited, so awaiting it
-            // captures all stderr; aborting first would truncate it. Only abort
-            // the drain if we were cancelled (then we don't care about output).
-            if let Some(task) = stdin_task { task.abort(); }
-            if cancel.is_cancelled() {
-                stderr_task.abort();
-            }
-            let stderr = stderr_task.await.unwrap_or_default();
-            let code = status.map(|s| s.code().unwrap_or(1) as i64).unwrap_or(1);
-            // Output was streamed to pipe, so result.out is empty
-            Some(ExecResult::from_output(code, String::new(), stderr))
-        } else {
-            // No pipe_stdout — last stage or non-pipeline.
-            // Use spill-aware collection if output limits are configured.
-            let Some(child_stdout) = child.stdout.take() else {
-                return Some(ExecResult::failure(1, "internal: stdout not available"));
-            };
-            let Some(child_stderr) = child.stderr.take() else {
-                return Some(ExecResult::failure(1, "internal: stderr not available"));
-            };
+        // Always use spill_aware_collect — it handles both limited and
+        // unlimited modes, and correctly streams stderr to ctx.stderr.
+        // (wait_with_output would bypass stderr streaming.)
+        let (stdout, stderr, did_spill) = crate::output_limit::spill_aware_collect(
+            child_stdout,
+            child_stderr,
+            ctx.stderr.clone(),
+            &ctx.output_limit,
+        ).await;
 
-            // Always use spill_aware_collect — it handles both limited and
-            // unlimited modes, and correctly streams stderr to ctx.stderr.
-            // (wait_with_output would bypass stderr streaming.)
-            let (stdout, stderr, did_spill) = crate::output_limit::spill_aware_collect(
-                child_stdout,
-                child_stderr,
-                ctx.stderr.clone(),
-                &ctx.output_limit,
-            ).await;
-
-            let cancel = ctx.cancel.clone();
-            let status = crate::kernel::wait_or_kill(
-                &mut child,
-                kill_target.as_ref(),
-                &cancel,
-                std::time::Duration::from_secs(2),
-            ).await;
-            if let Some(task) = stdin_task { task.abort(); }
-            let code = status.map(|s| s.code().unwrap_or(1) as i64).unwrap_or(1);
-            // stdout came back as raw bytes: text if valid UTF-8, else a Bytes
-            // result (so `curl url`, `curl url > file.bin`, etc. keep binary intact).
-            let mut result = ExecResult::success_text_or_bytes(stdout).with_code(code);
-            result.err = stderr;
-            result.did_spill = did_spill;
-            Some(result)
-        }
+        let cancel = ctx.cancel.clone();
+        let status = crate::kernel::wait_or_kill(
+            &mut child,
+            kill_target.as_ref(),
+            &cancel,
+            std::time::Duration::from_secs(2),
+        ).await;
+        if let Some(task) = stdin_task { task.abort(); }
+        let code = status.map(|s| s.code().unwrap_or(1) as i64).unwrap_or(1);
+        // stdout came back as raw bytes: text if valid UTF-8, else a Bytes
+        // result (so `curl url`, `curl url > file.bin`, etc. keep binary intact).
+        let mut result = ExecResult::success_text_or_bytes(stdout).with_code(code);
+        result.err = stderr;
+        result.did_spill = did_spill;
+        Some(result)
     }
 }
 
@@ -506,5 +447,196 @@ impl CommandDispatcher for BackendDispatcher {
     /// BackendDispatcher is stateless, so a fork is just a clone.
     async fn fork(&self) -> Arc<dyn CommandDispatcher> {
         Arc::new(Self { tools: Arc::clone(&self.tools) })
+    }
+}
+
+/// Tests that spawn real external processes through `try_external`, to catch
+/// behavioral drift from the production spawn site (`kernel.rs::try_execute_external`)
+/// — GH #133. Unlike the `BackendDispatcher` tests in `scheduler::pipeline`,
+/// which exercise builtins over a `MemoryFs` (virtual cwd, so `try_external`
+/// never spawns), these give the dispatcher a real tempdir cwd + PATH so the
+/// external fallback actually runs a child process.
+#[cfg(all(test, feature = "subprocess"))]
+mod external_process_tests {
+    // Test-fixture helpers (not `#[test]` bodies themselves), so the
+    // workspace's usual allow-in-tests clippy.toml carve-out doesn't cover
+    // them — see CLAUDE.md's "clap builtin gotchas" / test-code conventions.
+    #![allow(clippy::unwrap_used, clippy::expect_used)]
+    use super::*;
+    use crate::ast::{Arg, Command, Expr, Value};
+    use crate::tools::{ExecContext, ToolRegistry};
+    use crate::vfs::{LocalFs, VfsRouter};
+
+    /// A `BackendDispatcher` + `ExecContext` rooted at a real tempdir, with an
+    /// empty tool registry (every command name falls through to
+    /// `try_external`, exactly like a real external command with no matching
+    /// builtin/user tool) and PATH seeded from the test process's own OS env.
+    /// Reading OS env here is fixture code, not kaish's hermetic runtime — see
+    /// CLAUDE.md and `external_command_tests.rs::repl_kernel`.
+    fn real_cwd_dispatcher() -> (BackendDispatcher, ExecContext, tempfile::TempDir) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut vfs = VfsRouter::new();
+        vfs.mount("/", LocalFs::new(dir.path().to_path_buf()));
+        let tools = Arc::new(ToolRegistry::new());
+        let mut ctx = ExecContext::with_vfs_and_tools(Arc::new(vfs), tools.clone());
+        // Exported (not just set): try_external's own PATH lookup reads
+        // ctx.scope directly, but the CHILD process only inherits exported
+        // vars (cmd.env_clear() + exported_vars()) — a script that shells
+        // out further (`sh -c "yes | head"`) needs PATH in ITS env too,
+        // not just kaish's resolver.
+        ctx.scope.set_exported(
+            "PATH",
+            Value::String(std::env::var("PATH").unwrap_or_default()),
+        );
+        let dispatcher = BackendDispatcher::new(tools);
+        (dispatcher, ctx, dir)
+    }
+
+    /// `sh -c <script>` as a `Command`, matching how the parser would build it
+    /// from `sh -c 'script'` (a short flag, then a positional literal).
+    fn sh_cmd(script: &str) -> Command {
+        Command {
+            name: "sh".to_string(),
+            args: vec![
+                Arg::ShortFlag("c".to_string()),
+                Arg::Positional(Expr::Literal(Value::String(script.to_string()))),
+            ],
+            redirects: vec![],
+        }
+    }
+
+    /// GH #133 item 3: before this fix, `try_external` special-cased
+    /// `ctx.pipe_stdout` — taking it out of the context and hand-streaming
+    /// the child's stdout straight into it in 8KB chunks, bypassing the
+    /// capture logic a non-pipeline external goes through, and always
+    /// returning an empty `result.out` ("output was streamed to pipe").
+    /// Production's `try_execute_external` has no such special case: it never
+    /// reads or writes `ctx.pipe_stdout` at all — `PipelineRunner::run_pipeline`
+    /// (pipeline.rs) is solely responsible for reading a stage's captured
+    /// `result.out` back out and forwarding it to the next stage.
+    #[tokio::test]
+    async fn pipeline_stage_leaves_pipe_stdout_for_the_runner_to_forward() {
+        let (dispatcher, mut ctx, _dir) = real_cwd_dispatcher();
+
+        // Simulate what PipelineRunner::run_pipeline wires onto a first/middle
+        // stage's ctx before calling dispatch(): a pipe_stdout the runner
+        // expects to read back out afterward.
+        let (writer, reader) = crate::scheduler::pipe_stream_default();
+        ctx.pipe_stdout = Some(writer);
+
+        // Drain the reader concurrently — a full-fidelity writer (the old
+        // special case) would otherwise still work here for a small payload,
+        // but this also lets the pipe close out cleanly either way.
+        let drain = tokio::spawn(async move {
+            use tokio::io::AsyncReadExt;
+            let mut reader = reader;
+            let mut buf = Vec::new();
+            let _ = reader.read_to_end(&mut buf).await;
+            buf
+        });
+
+        let cmd = sh_cmd("echo hello");
+        // A generous but bounded timeout: a real hang here (e.g. an
+        // accidental deadlock reintroduced by a future edit) should fail
+        // loud and fast in CI, not stall the suite indefinitely.
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(15),
+            dispatcher.dispatch(&cmd, &mut ctx),
+        )
+        .await
+        .expect("dispatch timed out")
+        .expect("dispatch");
+
+        assert!(
+            ctx.pipe_stdout.is_some(),
+            "try_external must leave ctx.pipe_stdout untouched — forwarding \
+             to the next stage is PipelineRunner's job, matching production, \
+             which never reads or writes this field at all"
+        );
+
+        // Drop the writer now (the runner would take it back out and, after
+        // forwarding, let it go) so the reader sees EOF and `drain` actually
+        // completes — nothing else in this test closes the pipe, since
+        // try_external no longer touches it at all post-fix.
+        drop(ctx.pipe_stdout.take());
+        let _ = drain.await;
+
+        assert!(
+            result.text_out().contains("hello"),
+            "try_external must capture and return stdout the same way for a \
+             pipeline stage as a non-pipeline call (not force it empty \
+             because a pipe was attached) — got: {:?}",
+            result.text_out()
+        );
+    }
+
+    /// GH #133 item 3, large-payload consequence: before this fix, a pipeline
+    /// stage's stdout went through the hand-rolled full-fidelity streamer,
+    /// which ignored `ctx.output_limit` entirely and forwarded byte-for-byte
+    /// no matter the size — an intermediate stage had NO size cap at all, of
+    /// any kind. Post-fix, every stage (pipe or not) goes through the same
+    /// capture path a non-pipeline external uses, which DOES respect
+    /// `ctx.output_limit`.
+    ///
+    /// Note on scope: this test uses `ctx.output_limit` (in-memory mode, no
+    /// disk writes — CLAUDE.md) as the size trigger, since GH #133 item 2 (a
+    /// separate PR) is what additionally makes captures respect an
+    /// *unconditional* ~10MB ring regardless of `output_limit` configuration,
+    /// matching production's actual memory-safety net exactly. Once both
+    /// land, the same loss reproduces even with limiting disabled. This test
+    /// pins the piece item 3 alone is responsible for: a pipeline stage is no
+    /// longer special-cased into a no-cap-of-any-kind fast path.
+    #[tokio::test]
+    async fn oversized_pipeline_stage_output_is_no_longer_forwarded_losslessly() {
+        let (dispatcher, mut ctx, _dir) = real_cwd_dispatcher();
+
+        ctx.output_limit = crate::output_limit::OutputLimitConfig::agent().in_memory();
+        ctx.output_limit.set_limit(Some(1024)); // tiny vs. the >10MB payload below
+
+        let (writer, reader) = crate::scheduler::pipe_stream_default();
+        ctx.pipe_stdout = Some(writer);
+
+        // Drain the pipe concurrently — a full-fidelity writer would
+        // otherwise block on the 64KB pipe capacity well before finishing an
+        // 11MB write, deadlocking the test.
+        let drain = tokio::spawn(async move {
+            use tokio::io::AsyncReadExt;
+            let mut reader = reader;
+            let mut buf = Vec::new();
+            let _ = reader.read_to_end(&mut buf).await;
+            buf
+        });
+
+        let cmd = sh_cmd("yes x | head -c 11000000");
+        // A generous but bounded timeout: a real hang here should fail loud
+        // and fast in CI, not stall the suite indefinitely.
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(15),
+            dispatcher.dispatch(&cmd, &mut ctx),
+        )
+        .await
+        .expect("dispatch timed out")
+        .expect("dispatch");
+
+        // Drop the writer (try_external no longer touches it post-fix, so
+        // nothing else will) so the reader sees EOF and `drain` completes.
+        drop(ctx.pipe_stdout.take());
+        let _ = drain.await;
+
+        assert_eq!(result.code, 0, "err: {}", result.err);
+        assert!(
+            result.text_out().len() < 11_000_000,
+            "an oversized (~11MB) pipeline stage's output must now be capped, \
+             not forwarded byte-for-byte losslessly — the pre-fix special \
+             case ignored ctx.output_limit entirely; post-fix it goes \
+             through the same capped capture a non-pipeline external uses. \
+             got {} bytes",
+            result.text_out().len()
+        );
+        assert!(
+            result.did_spill,
+            "the size cap should flag did_spill, same as a non-pipeline \
+             external's capture over the configured limit"
+        );
     }
 }
