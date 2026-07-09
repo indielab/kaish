@@ -132,17 +132,26 @@ async fn eval_primary(ctx: &ExecContext, operands: &[Value]) -> Result<bool, Str
         0 => Err("test: missing expression".to_string()),
         1 => {
             let operand = &operands[0];
-            let s = value_to_string(operand);
-            // A lone operator is a forgotten operand — loud, not surprise-true.
-            if is_any_op(&s) {
-                return Err(format!("test: '{s}' needs an operand"));
-            }
             // A bare collection has no truth value here — loud Shape error.
             if is_collection(operand) {
                 return Err(format!(
                     "test: operand is a {}, not a string; a collection has no truth value",
                     collection_kind(operand)
                 ));
+            }
+            // Loud on binary: `test $BIN` must not silently treat the
+            // `[binary: N bytes]` placeholder as a truthy string (found via
+            // kaibo review of GH #116 — this raw-argv positional arm is the
+            // one sibling of the Named/WordAssign arms in kernel.rs's raw-argv
+            // fast path that isn't guarded there, since `test` itself needs
+            // the untouched typed value for its other operators; the guard
+            // belongs here instead, mirroring `-z`/`-n`/the path operators
+            // below).
+            let s = value_to_text_sink_named(operand, "a test operand")
+                .map_err(|e| format!("test: {e}"))?;
+            // A lone operator is a forgotten operand — loud, not surprise-true.
+            if is_any_op(&s) {
+                return Err(format!("test: '{s}' needs an operand"));
             }
             Ok(!s.is_empty())
         }
@@ -180,8 +189,16 @@ async fn apply_unary(ctx: &ExecContext, op: &str, operand: &Value) -> Result<boo
         return Err(msg);
     }
     match op {
-        "-z" => Ok(value_to_string(operand).is_empty()),
-        "-n" => Ok(!value_to_string(operand).is_empty()),
+        // Loud on binary (found via kaibo review of GH #116): `test -z $BIN`/
+        // `test -n $BIN` must not silently treat the `[binary: N bytes]`
+        // placeholder as a non-empty string — same class as the path operators
+        // below, just for the empty/non-empty-string test instead of a stat.
+        "-z" => Ok(value_to_text_sink_named(operand, "a test operand")
+            .map_err(|e| format!("test: {e}"))?
+            .is_empty()),
+        "-n" => Ok(!value_to_text_sink_named(operand, "a test operand")
+            .map_err(|e| format!("test: {e}"))?
+            .is_empty()),
         "-e" | "-f" | "-d" | "-r" | "-w" | "-x" => {
             // A binary operand goes loud rather than silently stat'ing a file
             // literally named `[binary: N bytes]` — mirrors `[[`'s `FileTest`

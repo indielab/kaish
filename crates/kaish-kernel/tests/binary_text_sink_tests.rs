@@ -570,6 +570,31 @@ async fn test_builtin_raw_argv_word_assign_binary_is_loud() {
     assert_loud_binary("b=$(cat src.bin); test foo=$b").await;
 }
 
+/// `test $BIN` — the raw-argv fast path's `Arg::Positional` arm intentionally
+/// preserves every operand's real type (untouched Bytes included) since
+/// `test` needs it for typed comparisons elsewhere; the guard belongs in
+/// `test`'s own single-operand truthiness check instead. Found via kaibo
+/// review of the rest of this PR (GH #116) — the Named/WordAssign siblings in
+/// the same raw-argv arm were already guarded, but the bare-positional
+/// truthiness path used `value_to_string` unguarded.
+#[tokio::test]
+async fn test_builtin_bare_positional_truthiness_binary_is_loud() {
+    assert_loud_binary("b=$(cat src.bin); test $b").await;
+}
+
+/// `test -z $BIN` — same class as the bare-positional truthiness case above,
+/// for the explicit empty-string operator.
+#[tokio::test]
+async fn test_builtin_dash_z_binary_is_loud() {
+    assert_loud_binary("b=$(cat src.bin); test -z $b").await;
+}
+
+/// `test -n $BIN` — same class, for the non-empty-string operator.
+#[tokio::test]
+async fn test_builtin_dash_n_binary_is_loud() {
+    assert_loud_binary("b=$(cat src.bin); test -n $b").await;
+}
+
 /// `dd if=$BIN` — the main-loop `Arg::WordAssign` non-word-assign fallback
 /// (the general `key=value` → positional path any tool outside
 /// export/alias/unalias uses). This is issue #116's own headline example.
