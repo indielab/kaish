@@ -77,18 +77,31 @@ impl Tool for Alias {
 
         // Check named args first (name=value form, parsed by kernel as named args)
         for (name, value) in &args.named {
+            // Loud on binary (GH #116): `alias name=$BIN` must not silently
+            // define an alias body of `[binary: N bytes]`.
             let val = match value {
                 Value::String(s) => s.clone(),
-                other => crate::interpreter::value_to_string(other),
+                other => match crate::interpreter::value_to_text_sink_named(other, "an alias value") {
+                    Ok(s) => s,
+                    Err(e) => return ExecResult::failure(1, format!("alias: {e}")),
+                },
             };
             ctx.aliases.insert(name.clone(), val);
         }
 
         // Check positional args: either "name=value" strings or bare names to show
         for arg in &args.positional {
+            // Loud on binary (GH #116): `alias $BIN` must not silently treat the
+            // placeholder as an alias name/definition.
             let s = match arg {
                 Value::String(s) => s.clone(),
-                other => crate::interpreter::value_to_string(other),
+                other => match crate::interpreter::value_to_text_sink_named(
+                    other,
+                    "an alias name or definition",
+                ) {
+                    Ok(s) => s,
+                    Err(e) => return ExecResult::failure(1, format!("alias: {e}")),
+                },
             };
 
             if let Some((name, value)) = s.split_once('=') {
@@ -175,9 +188,14 @@ impl Tool for Unalias {
         }
 
         for arg in &args.positional {
+            // Loud on binary (GH #116): `unalias $BIN` must not silently try to
+            // remove an alias literally named `[binary: N bytes]`.
             let name = match arg {
                 Value::String(s) => s.clone(),
-                other => crate::interpreter::value_to_string(other),
+                other => match crate::interpreter::value_to_text_sink_named(other, "an alias name") {
+                    Ok(s) => s,
+                    Err(e) => return ExecResult::failure(1, format!("unalias: {e}")),
+                },
             };
             ctx.aliases.remove(&name);
         }

@@ -541,3 +541,102 @@ async fn length_of_binary_is_byte_count_not_loud() {
     assert_eq!(result.code, 0, "err={}", result.err);
     assert_eq!(result.text_out().trim(), BIN.len().to_string());
 }
+
+// ── GH #116: residual `value_to_string` binary-fallback sinks ──
+//
+// The #93 item-1 PR closed the five primary text sinks (string interpolation,
+// echo, printf, path positionals, redirect targets, ==/in/case-glob). These
+// tests cover the sinks that fell outside that PR's scope: `key=value`
+// (WordAssign) reassembly in the argument binder (both the async kernel.rs
+// path and its sync scheduler/pipeline.rs twin — the twin has its own direct
+// unit test in pipeline.rs since scatter/gather is the only script-level route
+// to it), and a handful of builtins' own non-path scalar fallbacks.
+
+/// `awk -v x=$BIN` — `consume_flag_positionals`'s WordAssign reassembly arm.
+#[tokio::test]
+async fn awk_dash_v_binary_assignment_is_loud() {
+    assert_loud_binary("b=$(cat src.bin); awk -v x=$b 'BEGIN{}'").await;
+}
+
+/// `test --foo=$BIN` — `test`'s raw-argv fast path, the `Arg::Named` arm.
+#[tokio::test]
+async fn test_builtin_raw_argv_named_binary_is_loud() {
+    assert_loud_binary("b=$(cat src.bin); test --foo=$b").await;
+}
+
+/// `test foo=$BIN` — `test`'s raw-argv fast path, the `Arg::WordAssign` arm.
+#[tokio::test]
+async fn test_builtin_raw_argv_word_assign_binary_is_loud() {
+    assert_loud_binary("b=$(cat src.bin); test foo=$b").await;
+}
+
+/// `dd if=$BIN` — the main-loop `Arg::WordAssign` non-word-assign fallback
+/// (the general `key=value` → positional path any tool outside
+/// export/alias/unalias uses). This is issue #116's own headline example.
+#[tokio::test]
+async fn dd_word_assign_binary_is_loud() {
+    assert_loud_binary("b=$(cat src.bin); dd if=$b").await;
+}
+
+/// `alias name=$BIN` — the named-arg (`args.named`) half of alias's own
+/// value_to_string fallback.
+#[tokio::test]
+async fn alias_named_binary_value_is_loud() {
+    assert_loud_binary("b=$(cat src.bin); alias name=$b").await;
+}
+
+/// `alias $BIN` (bare positional) — the positional half of the same fallback.
+#[tokio::test]
+async fn alias_positional_binary_is_loud() {
+    assert_loud_binary("b=$(cat src.bin); alias $b").await;
+}
+
+/// `unalias $BIN`.
+#[tokio::test]
+async fn unalias_binary_is_loud() {
+    assert_loud_binary("b=$(cat src.bin); unalias $b").await;
+}
+
+/// `unset $BIN`.
+#[tokio::test]
+async fn unset_binary_is_loud() {
+    assert_loud_binary("b=$(cat src.bin); unset $b").await;
+}
+
+/// `kill --signal=$BIN %1` — the NAMED-flag `--signal` fallback only; the
+/// positional target form is guarded separately and untouched here.
+#[tokio::test]
+async fn kill_signal_named_binary_is_loud() {
+    assert_loud_binary("b=$(cat src.bin); kill --signal=$b %1").await;
+}
+
+/// `grep --ftype=$BIN pattern file` — `read_repeatable_strings`'s array arm.
+/// `--ftype` is repeatable, so even a single binary occurrence is JSON-encoded
+/// as a base64 byte envelope inside a `Json(Array)` by the binder
+/// (`push_repeatable_value` → `value_to_json`); the array arm used to silently
+/// DROP that entry (`filter_map(v.as_str())` skips non-string JSON) rather
+/// than erroring — worse than a placeholder, since the filter just vanished
+/// and grep ran unfiltered against the real data.
+///
+/// Searches a plain-text file (not `src.bin`) so the assertion isolates the
+/// `--ftype` guard: `src.bin` itself would trip grep's unrelated "refuses to
+/// search binary content" guard first and mask whether this fix fired at all
+/// (caught empirically — the pre-fix version of this test still failed, but
+/// for that unrelated reason, not the silently-dropped filter).
+#[tokio::test]
+async fn grep_ftype_binary_is_loud_not_silently_dropped() {
+    let dir = tempdir().unwrap();
+    fs::write(dir.path().join("src.bin"), BIN).unwrap();
+    fs::write(dir.path().join("plain.txt"), "hello world\n").unwrap();
+    let kernel = kernel_at(dir.path());
+    let result = kernel
+        .execute("b=$(cat src.bin); grep --ftype=$b pattern plain.txt")
+        .await
+        .unwrap();
+    assert_ne!(result.code, 0, "err={}", result.err);
+    assert!(
+        result.err.contains("cannot be used as"),
+        "error should name the binary problem, got err={:?}",
+        result.err
+    );
+}

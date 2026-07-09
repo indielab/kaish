@@ -876,7 +876,13 @@ pub fn build_tool_args(
                     if accepts_word_assign {
                         tool_args.named.insert(key.clone(), val);
                     } else {
-                        let val_str = crate::interpreter::value_to_string(&val);
+                        // Loud on binary (GH #116) — sync twin of the async
+                        // binder's WordAssign fallback in kernel.rs.
+                        let val_str = crate::interpreter::value_to_text_sink_named(
+                            &val,
+                            "a key=value argument",
+                        )
+                        .map_err(|e| e.to_string())?;
                         tool_args.positional.push(Value::String(format!("{key}={val_str}")));
                     }
                 }
@@ -1988,6 +1994,28 @@ mod tests {
         assert_eq!(
             tool_args.positional,
             vec![Value::String("--this-is-data".to_string())]
+        );
+    }
+
+    /// GH #116: the sync twin of kernel.rs's async `build_args_async` WordAssign
+    /// fallback must also go loud on binary rather than silently reassembling
+    /// the `[binary: N bytes]` placeholder into `key=value` (e.g. `dd if=$BIN`
+    /// reached via a scatter/gather flag value, which routes through this sync
+    /// evaluator instead of the async binder).
+    #[test]
+    fn word_assign_binary_value_is_loud_not_placeholder() {
+        let args = vec![Arg::WordAssign {
+            key: "if".to_string(),
+            value: Expr::Literal(Value::Bytes(vec![0xff, 0x00, 0xfe])),
+        }];
+        let ctx = make_minimal_ctx();
+
+        // schema=None ⇒ accepts_word_assign is false ⇒ falls to the
+        // stringify-to-positional branch under test.
+        let err = build_tool_args(&args, &ctx, None).expect_err("binary WordAssign must error");
+        assert!(
+            err.contains("cannot be used as"),
+            "error should name the binary problem, got {err:?}"
         );
     }
 

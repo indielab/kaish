@@ -228,8 +228,14 @@ impl Tool for Grep {
         // unknown type name is loud (exit 2), never a silent empty match. The
         // filter only takes effect on the `-r` walk below, but we validate the
         // names here regardless so a typo is caught on any invocation.
-        let ftype_select = read_repeatable_strings(&args, "ftype");
-        let ftype_negate = read_repeatable_strings(&args, "ftype-not");
+        let ftype_select = match read_repeatable_strings(&args, "ftype") {
+            Ok(v) => v,
+            Err(e) => return ExecResult::failure(2, format!("grep: {e}")),
+        };
+        let ftype_negate = match read_repeatable_strings(&args, "ftype-not") {
+            Ok(v) => v,
+            Err(e) => return ExecResult::failure(2, format!("grep: {e}")),
+        };
         let file_types = match build_file_types(&ftype_select, &ftype_negate) {
             Ok(t) => t,
             Err(e) => return ExecResult::failure(2, format!("grep: {e}")),
@@ -421,10 +427,18 @@ impl Tool for Grep {
                     // them off the raw args like `--ftype`; the filter itself
                     // enforces include semantics (a file must match one).
                     let mut filter = IncludeExclude::new();
-                    for pattern in read_repeatable_strings(&args, "include") {
+                    let includes = match read_repeatable_strings(&args, "include") {
+                        Ok(v) => v,
+                        Err(e) => return ExecResult::failure(2, format!("grep: {e}")),
+                    };
+                    let excludes = match read_repeatable_strings(&args, "exclude") {
+                        Ok(v) => v,
+                        Err(e) => return ExecResult::failure(2, format!("grep: {e}")),
+                    };
+                    for pattern in includes {
                         filter.include(&pattern);
                     }
-                    for pattern in read_repeatable_strings(&args, "exclude") {
+                    for pattern in excludes {
                         filter.exclude(&pattern);
                     }
                     let glob = GlobPath::new("**/*").ok();

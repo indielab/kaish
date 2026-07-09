@@ -121,16 +121,51 @@ use super::ToolRegistry;
 /// the clap field isn't a reliable source — search builtins read the raw args
 /// here. Shared by grep/glob `--ftype`/`--ftype-not`; mirrors sed's
 /// `collect_expressions` (see the repeatable-flag gotcha in `arch_repeatable_flags`).
-pub(crate) fn read_repeatable_strings(args: &super::ToolArgs, key: &str) -> Vec<String> {
+///
+/// Loud on binary (GH #116): a single binary occurrence lands in the bare
+/// `Some(other)` arm; a *repeated* binary occurrence lands inside the
+/// `Json(Array)` as a base64 byte envelope (`push_repeatable_value` runs every
+/// value through `value_to_json`, which encodes `Value::Bytes` that way) — the
+/// array arm's `filter_map(v.as_str())` used to silently DROP that entry
+/// instead of erroring, which is worse than a placeholder: the filter/pattern
+/// just vanished and the caller ran unfiltered against real data. Both shapes
+/// now error instead of silently stringifying or dropping.
+pub(crate) fn read_repeatable_strings(
+    args: &super::ToolArgs,
+    key: &str,
+) -> Result<Vec<String>, String> {
     use crate::ast::Value;
     match args.named.get(key) {
-        Some(Value::Json(serde_json::Value::Array(items))) => items
-            .iter()
-            .filter_map(|v| v.as_str().map(|s| s.to_string()))
-            .collect(),
-        Some(Value::String(s)) => vec![s.clone()],
-        Some(other) => vec![crate::interpreter::value_to_string(other)],
-        None => Vec::new(),
+        Some(Value::Json(serde_json::Value::Array(items))) => {
+            let mut out = Vec::with_capacity(items.len());
+            for v in items {
+                match v.as_str() {
+                    Some(s) => out.push(s.to_string()),
+                    // Not a string: check for a binary envelope before
+                    // silently skipping (the pre-existing behavior, preserved
+                    // below for any other JSON shape — out of this sweep's
+                    // scope).
+                    None => {
+                        if let Some(bytes) = kaish_types::envelope_to_bytes(v) {
+                            return Err(format!(
+                                "binary data ({} bytes) cannot be used as a repeatable \
+                                 flag value — decode it (base64/xxd) or redirect to a file",
+                                bytes.len()
+                            ));
+                        }
+                    }
+                }
+            }
+            Ok(out)
+        }
+        Some(Value::String(s)) => Ok(vec![s.clone()]),
+        Some(other) => {
+            match crate::interpreter::value_to_text_sink_named(other, "a repeatable flag value") {
+                Ok(s) => Ok(vec![s]),
+                Err(e) => Err(e.to_string()),
+            }
+        }
+        None => Ok(Vec::new()),
     }
 }
 
