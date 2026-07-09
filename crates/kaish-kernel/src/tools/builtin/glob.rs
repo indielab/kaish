@@ -126,8 +126,14 @@ impl Tool for Glob {
         // Build the rg-style file-type filter from `--ftype`/`--ftype-not`.
         // Repeatable value flags arrive as `Json(Array)`; read them off the raw
         // args (shared with grep). An unknown type name is loud (exit 2).
-        let ftype_select = read_repeatable_strings(&args, "ftype");
-        let ftype_negate = read_repeatable_strings(&args, "ftype-not");
+        let ftype_select = match read_repeatable_strings(&args, "ftype") {
+            Ok(v) => v,
+            Err(e) => return ExecResult::failure(2, format!("glob: {e}")),
+        };
+        let ftype_negate = match read_repeatable_strings(&args, "ftype-not") {
+            Ok(v) => v,
+            Err(e) => return ExecResult::failure(2, format!("glob: {e}")),
+        };
         let file_types = match build_file_types(&ftype_select, &ftype_negate) {
             Ok(t) => t,
             Err(e) => return ExecResult::failure(2, format!("glob: {e}")),
@@ -180,10 +186,18 @@ impl Tool for Glob {
         // Build the include/exclude filter. Repeatable value flags arrive as
         // `Json(Array)`; read them off the raw args like `--ftype` above.
         let mut filter = IncludeExclude::new();
-        for pattern in read_repeatable_strings(&args, "include") {
+        let includes = match read_repeatable_strings(&args, "include") {
+            Ok(v) => v,
+            Err(e) => return ExecResult::failure(2, format!("glob: {e}")),
+        };
+        let excludes = match read_repeatable_strings(&args, "exclude") {
+            Ok(v) => v,
+            Err(e) => return ExecResult::failure(2, format!("glob: {e}")),
+        };
+        for pattern in includes {
             filter.include(&pattern);
         }
-        for pattern in read_repeatable_strings(&args, "exclude") {
+        for pattern in excludes {
             filter.exclude(&pattern);
         }
 

@@ -3383,7 +3383,15 @@ impl Kernel {
                     Arg::WordAssign { key, value } => {
                         let val = self.eval_expr_async(value).await?;
                         let val = apply_tilde_expansion(val, home.as_deref());
-                        let val_str = crate::interpreter::value_to_string(&val);
+                        // Loud on binary (GH #116): `-v a=$BIN` must not silently
+                        // reassemble the `[binary: N bytes]` placeholder into the
+                        // flag's value — same text-sink boundary as the primary
+                        // sinks fixed in #93 item 1.
+                        let val_str = crate::interpreter::value_to_text_sink_named(
+                            &val,
+                            "a key=value argument",
+                        )
+                        .map_err(|e| anyhow::anyhow!("{e}"))?;
                         collected.push(Value::String(format!("{key}={val_str}")));
                         consumed.insert(pos_idx);
                     }
@@ -3508,18 +3516,31 @@ impl Kernel {
                     Arg::Named { key, value } => {
                         let val = self.eval_expr_async(value).await?;
                         let val = apply_tilde_expansion(val, home.as_deref());
-                        tool_args.positional.push(Value::String(format!(
-                            "--{key}={}",
-                            crate::interpreter::value_to_string(&val)
-                        )));
+                        // Loud on binary (GH #116): `test --k=$BIN` must not
+                        // silently reassemble the placeholder into the raw-argv
+                        // positional stream `test` binds against.
+                        let val_str = crate::interpreter::value_to_text_sink_named(
+                            &val,
+                            "a --key=value argument",
+                        )
+                        .map_err(|e| anyhow::anyhow!("{e}"))?;
+                        tool_args
+                            .positional
+                            .push(Value::String(format!("--{key}={val_str}")));
                     }
                     Arg::WordAssign { key, value } => {
                         let val = self.eval_expr_async(value).await?;
                         let val = apply_tilde_expansion(val, home.as_deref());
-                        tool_args.positional.push(Value::String(format!(
-                            "{key}={}",
-                            crate::interpreter::value_to_string(&val)
-                        )));
+                        // Loud on binary (GH #116): same reasoning as the Named
+                        // arm above, for the bare `key=value` raw-argv form.
+                        let val_str = crate::interpreter::value_to_text_sink_named(
+                            &val,
+                            "a key=value argument",
+                        )
+                        .map_err(|e| anyhow::anyhow!("{e}"))?;
+                        tool_args
+                            .positional
+                            .push(Value::String(format!("{key}={val_str}")));
                     }
                     Arg::DoubleDash => {
                         tool_args.positional.push(Value::String("--".to_string()));
@@ -3645,7 +3666,14 @@ impl Kernel {
                     } else {
                         // Stringify "key=value" and pass as a positional.
                         // Matches bash: `cat foo=bar` opens a file named `foo=bar`.
-                        let val_str = crate::interpreter::value_to_string(&val);
+                        // Loud on binary (GH #116): `cat foo=$BIN`/`dd if=$BIN`
+                        // must not silently become a path/operand literally named
+                        // `foo=[binary: N bytes]`.
+                        let val_str = crate::interpreter::value_to_text_sink_named(
+                            &val,
+                            "a key=value argument",
+                        )
+                        .map_err(|e| anyhow::anyhow!("{e}"))?;
                         tool_args.positional.push(Value::String(format!("{key}={val_str}")));
                     }
                 }

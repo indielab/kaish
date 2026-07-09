@@ -56,9 +56,14 @@ impl Tool for Unset {
         }
 
         for arg in &args.positional {
+            // Loud on binary (GH #116): `unset $BIN` must not silently try to
+            // remove a variable literally named `[binary: N bytes]`.
             let name = match arg {
                 Value::String(s) => s.clone(),
-                other => value_to_string(other),
+                other => match crate::interpreter::value_to_text_sink_named(other, "a variable name") {
+                    Ok(s) => s,
+                    Err(e) => return ExecResult::failure(1, format!("unset: {e}")),
+                },
             };
 
             // POSIX: unsetting a nonexistent variable is not an error.
@@ -69,18 +74,6 @@ impl Tool for Unset {
         // `$()` captures and `--json` output with a stray number
         // (found by the --json sweep 2026-06-11).
         ExecResult::success("")
-    }
-}
-
-fn value_to_string(value: &Value) -> String {
-    match value {
-        Value::Null => "null".to_string(),
-        Value::Bool(b) => b.to_string(),
-        Value::Int(i) => i.to_string(),
-        Value::Float(f) => f.to_string(),
-        Value::String(s) => s.clone(),
-        Value::Json(json) => json.to_string(),
-        Value::Bytes(b) => format!("[binary: {} bytes]", b.len()),
     }
 }
 

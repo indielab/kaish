@@ -86,6 +86,21 @@ breaking entries are marked **BREAKING**.
   Running in `jobs`/`wait` with no live process and no reaper ever spawned to
   clean it up. `bg` now only marks the job Running after a confirmed
   successful `SIGCONT`.
+- **`key=value` reassembly (`WordAssign`) now errors loudly on binary instead of
+  splicing the `[binary: N bytes]` placeholder.** `-v a=$BIN`-style value-flag
+  reassembly (`consume_flag_positionals`), `test`'s raw-argv binder, and the
+  general `key=value` → positional path (`dd if=$BIN`, `cat foo=$BIN`) all
+  fell outside the #93 item-1 sweep; the scheduler's sync `build_tool_args`
+  twin (the scatter/gather flag-value path) is fixed the same way (GH #116).
+- **`alias`, `unalias`, `unset`, and `kill --signal` now error loudly on a
+  binary operand** instead of silently treating the `[binary: N bytes]`
+  placeholder as a literal alias/variable/signal name (GH #116).
+- **A repeatable flag bound to binary (`grep --ftype=$BIN`, `glob
+  --include=$BIN`) now errors loudly.** Previously a single binary occurrence
+  silently vanished from the filter — the JSON-array reader skipped the
+  base64 byte envelope the binder had encoded it as — so the flag was
+  silently dropped rather than applied or refused, worse than the
+  placeholder pattern elsewhere (GH #116).
 - **`kaish-ignore` changes now persist past their own statement.** Every
   runtime ignore mutation (`add`/`clear`/`defaults`/`scope`) was silently
   dropped at the end of the statement that made it — the per-command context

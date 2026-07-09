@@ -74,15 +74,21 @@ impl Tool for Kill {
 
         // Signal from --signal / -s named param, or default to TERM. Prefer
         // args.named so an Int signal keeps its typing.
-        let signal_name = args
-            .named
-            .get("signal")
-            .map(|v| match v {
-                Value::String(s) => s.clone(),
-                Value::Int(i) => i.to_string(),
-                other => crate::interpreter::value_to_string(other),
-            })
-            .unwrap_or(parsed.signal);
+        //
+        // Loud on binary (GH #116): `--signal=$BIN` must not silently become
+        // the literal string `[binary: N bytes]` as the requested signal name
+        // (the positional target form below is already guarded separately).
+        let signal_name = match args.named.get("signal") {
+            Some(Value::String(s)) => s.clone(),
+            Some(Value::Int(i)) => i.to_string(),
+            Some(other) => {
+                match crate::interpreter::value_to_text_sink_named(other, "a signal name") {
+                    Ok(s) => s,
+                    Err(e) => return ExecResult::failure(1, format!("kill: {e}")),
+                }
+            }
+            None => parsed.signal,
+        };
 
         let target_str = match args.get_positional(0) {
             Some(Value::String(s)) => s.clone(),
