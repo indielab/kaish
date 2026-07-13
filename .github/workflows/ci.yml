@@ -1,0 +1,104 @@
+# The correctness gates from CLAUDE.md, run on every pull request and every push to
+# main: the full workspace test suite, clippy with warnings denied (test targets
+# included), the capability-feature sandbox compile, and the WASI target build.
+# kaish releases to crates.io (no binary artifacts), and publishing is deliberately
+# manual — the /release runbook — so this is the only workflow.
+#
+# Actions are pinned by commit SHA, not tag — a tag can be moved, a digest can't
+# (supply-chain). Each pin carries a `# vX.Y.Z` comment naming the release it points
+# at, for humans and Dependabot.
+name: ci
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: test + clippy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@fa04a1451ff1842e2626ccb99004d0195b455a88 # stable branch, pinned 2026-07-05
+        with:
+          toolchain: stable
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+
+      - name: Test
+        run: cargo test --all --locked
+
+      - name: Clippy (deny warnings)
+        run: cargo clippy --all --all-targets --locked -- -D warnings
+
+      # insta writes `.snap.new` files for pending snapshots during local runs; they
+      # must be reviewed (`cargo insta review`) and never committed. Under CI insta
+      # already fails tests on mismatch without writing files, so any `.snap.new`
+      # found here was committed by mistake.
+      - name: Pending snapshots (none committed)
+        run: |
+          pending=$(find crates -name '*.snap.new')
+          if [ -n "$pending" ]; then
+            echo "Pending insta snapshots committed to the tree:"
+            echo "$pending"
+            exit 1
+          fi
+
+  # Capability features are opt-in axes (localfs, subprocess, host, os-integration,
+  # tokens); a no-default-features build must compile without touching the OS. This
+  # is the gate that catches OS-touching code landing outside its axis. `check`, not
+  # `test`: the integration-test crates call feature-gated constructors like
+  # `KernelConfig::repl()` (localfs) and have never compiled without default
+  # features — upgrading this leg to `cargo test` is GH #170.
+  sandbox:
+    name: no-default-features
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@fa04a1451ff1842e2626ccb99004d0195b455a88 # stable branch, pinned 2026-07-05
+        with:
+          toolchain: stable
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+        with:
+          key: no-default-features
+
+      - name: Check (kernel, no default features)
+        run: cargo check -p kaish-kernel --no-default-features --locked
+
+  # The WASI target only builds (no test runner); it exists to keep the kernel
+  # compiling for wasm32-wasip1 so embedders on that target don't discover breakage
+  # at release time.
+  wasi:
+    name: wasi build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@fa04a1451ff1842e2626ccb99004d0195b455a88 # stable branch, pinned 2026-07-05
+        with:
+          toolchain: stable
+          targets: wasm32-wasip1
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+        with:
+          key: wasi
+
+      - name: Build (wasm32-wasip1)
+        run: cargo build -p kaish-wasi --target wasm32-wasip1 --locked
