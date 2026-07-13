@@ -10,6 +10,12 @@ breaking entries are marked **BREAKING**.
 
 ## [Unreleased]
 
+### Added
+- **GitHub Actions CI** (`.github/workflows/ci.yml`): every PR and push to `main`
+  runs the workspace test suite, clippy with warnings denied (test targets
+  included), the kernel's no-default-features tests, and the `wasm32-wasip1`
+  build. Publishing to crates.io stays manual (the `/release` runbook).
+
 ## [0.12.0] - 2026-07-12
 
 ### Added

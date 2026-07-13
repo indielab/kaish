@@ -12,6 +12,10 @@
 .DS_Store
 Thumbs.db
 
+# insta pending snapshots — review with `cargo insta review`, never commit.
+# CI has a tripwire for these too (.github/workflows/ci.yml).
+*.snap.new
+
 # Coverage
 /coverage/
 
