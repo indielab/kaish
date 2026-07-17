@@ -176,7 +176,13 @@ async fn test_background_job_status_transitions() {
     // has generous margin over it — a prior version used `sleep 1` against a
     // 1s wait_for_job deadline with zero margin, so host load could push the
     // job's actual completion past the deadline and fail the test (#148).
-    kernel.execute("sleep 0.2 &").await.unwrap();
+    // `sleep 0.5` keeps both margins strictly better than the original on
+    // both axes: ~490ms of headroom for the "running" check below (10ms
+    // registration sleep + an execute() round-trip through the kernel lock —
+    // #148 was seen at load average 50-130, exactly the conditions that can
+    // stretch that round-trip) and 10x headroom (5s wait) on completion,
+    // versus the original's ~990ms/1x.
+    kernel.execute("sleep 0.5 &").await.unwrap();
 
     // Give job a moment to register
     tokio::time::sleep(Duration::from_millis(10)).await;
@@ -186,7 +192,7 @@ async fn test_background_job_status_transitions() {
     assert!(result.ok(), "status check failed: {}", result.err);
     assert_eq!(result.text_out().trim(), "running", "expected running status");
 
-    // Wait for completion, with a wide margin over the 0.2s sleep above.
+    // Wait for completion, with 10x margin over the 0.5s sleep above.
     let status = wait_for_job(&kernel, 1, Duration::from_secs(5)).await;
     assert_eq!(status, "done:0", "expected done:0 status");
 }
