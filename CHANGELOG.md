@@ -11,12 +11,33 @@ breaking entries are marked **BREAKING**.
 ## [Unreleased]
 
 ### Added
+- **Flag completion helpers in `kaish_client::completion`** —
+  `current_command(line, pos)` (which command word governs the statement
+  under the cursor) and `flag_candidates(params, word)` (canonical `--long`
+  and `-x` spellings from a tool's `ParamSchema`s; snake-case field-id
+  aliases stay reachable but aren't offered). First consumer: the
+  kaish-extras browser playground; the native REPL can adopt the same pair
+  (GH #202).
+
+### Fixed
+- `cargo test -p kaish-client` alone no longer fails the cwd test: the
+  tests assert localfs-flavored behavior and now declare `localfs` as a
+  dev-dependency feature instead of inheriting it from whichever workspace
+  sibling happened to build.
+
+### Added
 - **`kaish_client::completion`** — completion context detection
   (`CompletionContext`, `detect_completion_context`, `word_start`) extracted
   from the REPL into the client crate, so every frontend answering Tab (the
   rustyline REPL, the kaish-extras browser playground, embedders) shares one
   detector; the REPL now consumes it. `EmbeddedClient` is also browser-safe:
   its blob-id timestamp goes through `kaish_types::clock`.
+- **`ToolArgs::to_argv_excluding`** — like `to_argv()` but skips given named
+  keys entirely, so a builtin that deliberately reads one of its own named
+  params raw (to preserve a `Value::Bytes` payload past the argv/text
+  boundary) doesn't need a bespoke clone-and-remove dance. `to_argv()` now
+  delegates to it with an empty exclude list. `write`'s `content` param
+  adopts it (GH #218, a follow-up from the GH #164/#215 review).
 ### Removed
 - **BREAKING:** `output_limit::spill_aware_collect` and its private helpers
   (`collect_stderr`, `collect_stdout_with_spill`, `handle_overflow`,
@@ -65,6 +86,18 @@ breaking entries are marked **BREAKING**.
   given. Both now delegate to the shared `read_repeatable_strings` helper
   that `grep`/`glob` already use for `--ftype`/`--include`/`--exclude`, so a
   binary occurrence errors instead of disappearing.
+- **`scatter`/`gather`'s error paths honor `--json`** — a bad flag or a stdin
+  read failure used to leak a plain-text `scatter: ...`/`gather: ...` message
+  under `--json` instead of the standard `{"error","code"}` envelope. Found by
+  a kaibo review pair on merged PR #215 and confirmed pre-existing for the
+  whole `owns_output` error-path class (clap-parse failures included), not
+  just the newest instance: `owns_output` opts a tool out of the kernel's
+  `--json` rendering so it can render its own bespoke SUCCESS output
+  (scatter/gather's JSONL/array), but the same opt-out was blanket-skipping
+  their FAILURE results too, even though neither tool ever renders a
+  structured error itself. `finalize_output` now only skips
+  `apply_output_format` when the tool owns its output **and** the result
+  succeeded.
 - **Case patterns accept dash/plus bare words** (GH #144) — `---`, `-`, `--`,
   `-x`, `+foo`, and alternations like `-h|--help) ...` are now valid case
   patterns; they previously failed to parse (`pattern_part` had no arm for
