@@ -171,7 +171,12 @@ async fn test_background_job_captures_stdout() {
 #[tokio::test]
 async fn test_background_job_status_transitions() {
     let kernel = setup().await;
-    kernel.execute("sleep 1 &").await.unwrap();
+    // The background command must run long enough that the "running" check
+    // below reliably observes it mid-flight, while the completion wait below
+    // has generous margin over it — a prior version used `sleep 1` against a
+    // 1s wait_for_job deadline with zero margin, so host load could push the
+    // job's actual completion past the deadline and fail the test (#148).
+    kernel.execute("sleep 0.2 &").await.unwrap();
 
     // Give job a moment to register
     tokio::time::sleep(Duration::from_millis(10)).await;
@@ -181,8 +186,8 @@ async fn test_background_job_status_transitions() {
     assert!(result.ok(), "status check failed: {}", result.err);
     assert_eq!(result.text_out().trim(), "running", "expected running status");
 
-    // Wait for completion
-    let status = wait_for_job(&kernel, 1, Duration::from_secs(1)).await;
+    // Wait for completion, with a wide margin over the 0.2s sleep above.
+    let status = wait_for_job(&kernel, 1, Duration::from_secs(5)).await;
     assert_eq!(status, "done:0", "expected done:0 status");
 }
 
