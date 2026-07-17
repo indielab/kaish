@@ -55,7 +55,9 @@ async fn wait_for_job(kernel: &Kernel, job_id: u64, timeout: Duration) -> String
 /// A kernel that owns no host filesystem must not persist job output to a host
 /// temp file — that write goes through `std::fs`, bypassing the VFS and any
 /// read-only mount. Holds for `NoLocal` (mounts nothing) and `with_backend`
-/// (the embedder owns the VFS). A host-owning kernel still persists.
+/// (the embedder owns the VFS). The host-owning counterpart lives in
+/// `test_job_output_persistence_enabled_for_host_owning_kernel` below (localfs
+/// only — see that test's doc comment for why).
 #[tokio::test]
 async fn test_job_output_persistence_disabled_for_hostless_kernels() {
     use kaish_kernel::vfs::{MemoryFs, VfsRouter};
@@ -78,8 +80,18 @@ async fn test_job_output_persistence_disabled_for_hostless_kernels() {
         !embedded.jobs().persist_output_files(),
         "with_backend kernel must not write job output to host disk"
     );
+}
 
-    // A host-owning kernel (Sandboxed) keeps the default persistence.
+/// A host-owning kernel (`Sandboxed` vfs_mode) keeps the default persistence.
+///
+/// `KernelConfig::transient()` only builds a `Sandboxed` (real host cwd)
+/// config behind the `localfs` feature; without it, `transient()` falls back
+/// to `Self::isolated()` (`NoLocal`) per `kernel.rs`, so this kernel would be
+/// hostless too and the assertion below would not hold — hence the gate,
+/// rather than folding this into the hostless test above.
+#[cfg(feature = "localfs")]
+#[tokio::test]
+async fn test_job_output_persistence_enabled_for_host_owning_kernel() {
     let host_owning = Kernel::new(KernelConfig::transient()).expect("transient kernel");
     assert!(
         host_owning.jobs().persist_output_files(),
@@ -171,7 +183,18 @@ async fn test_background_job_captures_stdout() {
 #[tokio::test]
 async fn test_background_job_status_transitions() {
     let kernel = setup().await;
-    kernel.execute("sleep 1 &").await.unwrap();
+    // The background command must run long enough that the "running" check
+    // below reliably observes it mid-flight, while the completion wait below
+    // has generous margin over it — a prior version used `sleep 1` against a
+    // 1s wait_for_job deadline with zero margin, so host load could push the
+    // job's actual completion past the deadline and fail the test (#148).
+    // `sleep 0.5` keeps both margins strictly better than the original on
+    // both axes: ~490ms of headroom for the "running" check below (10ms
+    // registration sleep + an execute() round-trip through the kernel lock —
+    // #148 was seen at load average 50-130, exactly the conditions that can
+    // stretch that round-trip) and 10x headroom (5s wait) on completion,
+    // versus the original's ~990ms/1x.
+    kernel.execute("sleep 0.5 &").await.unwrap();
 
     // Give job a moment to register
     tokio::time::sleep(Duration::from_millis(10)).await;
@@ -181,8 +204,8 @@ async fn test_background_job_status_transitions() {
     assert!(result.ok(), "status check failed: {}", result.err);
     assert_eq!(result.text_out().trim(), "running", "expected running status");
 
-    // Wait for completion
-    let status = wait_for_job(&kernel, 1, Duration::from_secs(1)).await;
+    // Wait for completion, with 10x margin over the 0.5s sleep above.
+    let status = wait_for_job(&kernel, 1, Duration::from_secs(5)).await;
     assert_eq!(status, "done:0", "expected done:0 status");
 }
 

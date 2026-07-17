@@ -1051,6 +1051,7 @@ dependencies = [
  "tracing-opentelemetry",
  "tracing-subscriber",
  "trash",
+ "unicode-width",
 ]
 
 [[package]]

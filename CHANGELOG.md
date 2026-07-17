@@ -17,6 +17,15 @@ breaking entries are marked **BREAKING**.
   rustyline REPL, the kaish-extras browser playground, embedders) shares one
   detector; the REPL now consumes it. `EmbeddedClient` is also browser-safe:
   its blob-id timestamp goes through `kaish_types::clock`.
+### Removed
+- **BREAKING:** `output_limit::spill_aware_collect` and its private helpers
+  (`collect_stderr`, `collect_stdout_with_spill`, `handle_overflow`,
+  `drain_in_memory`, `extend_ring`, `stream_to_spill`) are gone. Dead since
+  GH #133 item 2 moved external-process capture onto `BoundedStream` /
+  `drain_to_stream`, with post-hoc spill applied at the pipeline level
+  (`Kernel::execute_pipeline` → `spill_if_needed`) instead of inline during
+  capture. `OutputLimitConfig` and the disk/memory spill machinery it still
+  drives are unaffected.
 
 ### Changed
 - **`uname -o` (and the tail of `uname -a`) now reports `kai`** instead of
@@ -35,12 +44,35 @@ breaking entries are marked **BREAKING**.
   kaish-extras `kaish-web` crate is a working embedding.
 
 ### Fixed
+- **Case patterns accept dash/plus bare words** (GH #144) — `---`, `-`, `--`,
+  `-x`, `+foo`, and alternations like `-h|--help) ...` are now valid case
+  patterns; they previously failed to parse (`pattern_part` had no arm for
+  the lexer's flag-shaped and dash/plus bare-word tokens). Also fixes a
+  related lexer bug the repro surfaced: `---)` swallowed the closing paren
+  into the bare-word token text, leaving no `)` for the branch parser to
+  find — the dash/plus bare-word tokens now stop at unquoted shell operators
+  (`()|&;<>`) instead of running to the next whitespace.
+- **External-command output that overflows the 10MB capture buffer with
+  output limiting off now fails loudly** (GH #191) instead of silently
+  dropping the head: exit code 3, plus a stderr marker naming the bytes lost
+  and total written. Previously `BoundedStream`'s ring tracked the eviction
+  internally but nothing ever surfaced it, so a >10MB external stdout (the
+  repl/embedded/test default has output limiting off) reported clean success
+  with its head quietly gone. The marker always lands in stderr, never
+  prepended into stdout, since stdout may be binary.
 - **Bare `${X:-${Y}}` works** (GH #173) — a nested braced reference in a
   default word outside quotes was a parse error (the `VarRef` token stopped at
   the first `}`); the reference now extends to the balanced closing brace,
   matching the quoted form and bash. Defaults nest to any depth
   (`${A:-${B:-${C}}}`); an unbalanced reference is a loud
   `unterminated variable reference` error.
+- **`printf`'s `%Ns` width now pads by display width, not UTF-8 byte length**
+  (GH #154) — a CJK or emoji argument to `printf '%10s'`/`%-10s`/`%5c` was
+  under-padded because its byte length exceeds its display width (same bug
+  class as #130's table-alignment fix); `awk`'s `sprintf` shares the fix
+  since both builtins go through the same formatter. `%.Ns` precision
+  truncation was audited too — it already truncates by character count, so
+  it cannot split a UTF-8 codepoint.
 
 ### Added
 - **GitHub Actions CI** (`.github/workflows/ci.yml`): every PR and push to `main`
