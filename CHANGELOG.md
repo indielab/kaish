@@ -37,12 +37,15 @@ breaking entries are marked **BREAKING**.
   job types since it was flagged in the same audit (GH #241/#247).
 
 ### Changed
-- **BREAKING:** `jobs --json` row shape changed now that it's the serialized
-  `JobInfo` plus a bolted-on `path` field, rather than a hand-built mirror:
-  `status` is lowercase (`"failed"`, not `"Failed"`), and rows gain
-  `exit_code`/`started_at`/`finished_at`/`pgids` (each present only when set —
-  `exit_code`/`finished_at` are absent for a still-running job, `pgids` absent
-  when empty). `path` (`/v/jobs/N/`) is unchanged.
+- **`jobs --json` now emits the serialized `JobInfo`** plus a bolted-on `path`
+  field, rather than a hand-built mirror. `status` is lowercase (`"failed"`,
+  not `"Failed"`), which brings it in line with `/v/jobs/N/status`'s existing
+  `done:0`/`failed:42` vocabulary — the two surfaces disagreed before. Rows
+  gain `exit_code`/`started_at`/`finished_at`/`pgids`, each present only when
+  set (`exit_code`/`finished_at` absent for a still-running job, `pgids`
+  absent when empty). `path` (`/v/jobs/N/`) is unchanged. Human-facing output
+  is untouched — `Display` stays capitalized for the `jobs` table and
+  `[N]+ Done …` notifications.
 
 ## [0.13.0] - 2026-07-18
 
