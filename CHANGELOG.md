@@ -10,6 +10,22 @@ breaking entries are marked **BREAKING**.
 
 ## [Unreleased]
 
+### Changed
+- **Allocation cuts on three hot paths**, each justified by the new GH #48 heap
+  profile: `grep` over a directory tree allocates 70% fewer bytes (one
+  `grep-searcher` per walk instead of one per file, each owning a 64 KiB line
+  buffer); a script of many small commands allocates 18% fewer blocks (command
+  dispatch reads the tool schema from the kernel's catalog instead of rebuilding
+  the builtin's clap `Command` every time); brace-free glob patterns — every
+  ignore rule against every walked path — no longer run brace expansion.
+  Behavior is otherwise unchanged; this is allocator churn, not peak memory.
+
+### Fixed
+- **`grep -r --encoding=<bad-label>` is now a loud usage error (exit 2)** naming
+  the bad label. It used to report nothing and exit 1 — indistinguishable from
+  "no matches" — because the encoding was validated once per file inside the
+  walk, where a per-file error is deliberately swallowed as a benign race.
+
 ## [0.13.0] - 2026-07-18
 
 ### Added

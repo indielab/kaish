@@ -15,6 +15,86 @@ before it ships.
 
 ---
 
+## We optimized for a year against a profile we never ran (2026-07-30)
+
+GH #48's own "Approach" section says: *profile a representative workload first,
+"treat the bullets above as hypotheses to confirm, not a task list."* Then a
+gemini-pro + fable batch review produced a ranked ten-item burndown from a static
+read of async frame sizes, and we landed eight of them (items 0–5, 7, 8) without
+ever running the profile. The two we didn't land — item 6 (`Value::Json(Box<…>)`)
+and item 9 (split `ExecContext` into `Arc<SharedCtx>` + a mutable core) — were the
+two the review itself flagged "measure first, then decide". Amy sent me to go
+measure.
+
+The harness is `crates/kaish-kernel/examples/alloc_profile.rs` behind a `dhat-heap`
+feature. dhat over a hand-rolled counting allocator for two reasons: the workspace
+denies `unsafe_code`, so a `unsafe impl GlobalAlloc` of our own would mean punching
+a hole in that for a profiling toy, and a counter gives totals with no attribution
+— attribution was the whole point. `required-features` keeps the example (and the
+dependency) out of every normal build, test, and clippy run. It parses dhat's own
+JSON back in-process and prints a ranked table, so a terminal-only run answers
+"where did the allocations come from" without the external viewer. Six workloads,
+all shaped like an embedder rather than a REPL: kernel construction, one
+`execute()` per tool call, grep-over-a-tree, nested `$( )`, a 200-command loop,
+and an 8-way scatter/gather.
+
+**The profile contradicted the review on both parked items, and on where the cost
+actually is.**
+
+Item 9 is simply not there. `snapshot_exec_ctx` — precisely what the split
+collapses — never exceeds 10.3% of allocations in any workload, is 7.5% in the
+loop workload where per-command dispatch is most exposed, and 1.0% in the
+per-`execute()` workload. Worse for the proposal: much of even that is the
+`Scope::clone` *inside* the snapshot, and `scope` is the mutable half the split
+leaves behind. The read-mostly fields it would collapse are already `Arc` bumps
+costing zero allocations. Widest change on the list, single-digit payoff.
+Declined on allocation grounds.
+
+Item 6 is more interesting: `Value::Json` *is* the top term in scatter/gather
+(53.6% of blocks, 39.3% of bytes) — and boxing it would not help at all. The cost
+is a **deep clone**, not a size: `Scope::last_result` carries the previous
+command's whole `ExecResult` including `.data`, and every `Scope::clone` (three
+per command, plus one per fork) deep-copies that JSON through indexmap. A `Box`
+clone is still a deep clone, one pointer further down. The review also predicted
+`Value` at ~88 B (it's 72) and predicted the win would land in the recursion
+frames — in the actual recursion workload, `serde_json::Value` cloning is 0.0%.
+The change the evidence supports is `Arc<serde_json::Value>`, which is a different
+change with different semantics, and Amy's call. (The narrower fix — don't carry
+`.data` in `last_result` — is blocked: `kaish-last` reads exactly that.)
+
+And the thing nobody predicted, which is now the single biggest number in the
+report: **`parser::parse()` rebuilds the entire chumsky combinator graph on every
+call.** For one `echo hello world` through `kernel.execute()` — the exact shape of
+a kaibo or kaijutsu tool call — that is 840 allocations and ~163 KB, **62% of all
+allocations and 69% of all bytes, spent before a single token is consumed.**
+Nothing in the burndown touches it, and it can't be fixed cheaply: chumsky 0.13's
+parser type is parameterized by the input lifetime, so the built graph can't be
+stashed in a `OnceLock` without a transmute we've denied ourselves. Filed rather
+than forced.
+
+Three cheap wins did fall out of the profile and landed here. `grep` built a fresh
+`grep_searcher::Searcher` per file, and a `Searcher` owns a 64 KiB zeroed line
+buffer plus an 8 KiB decode buffer — 94 MB across 64 files, 68.5% of every byte
+the grep workload allocated, for a buffer `search_slice` resets anyway; one
+searcher per walk cut the workload's bytes 70%. `glob_match` ran brace expansion
+unconditionally, five allocations per call for a pattern with no braces — and
+every ignore rule against every walked path goes through it, which made it 49.7%
+of the grep workload's allocation *count*; a brace-free fast path took 41% off it.
+And command dispatch called `tool.schema()` per command, which for a clap-derived
+builtin rebuilds the whole clap `Command` and reflects it — to produce exactly
+what `ExecContext.tool_schemas` already held, name-sorted; a `binary_search_by`
+into the catalog took that from 69,850 blocks to 1,460 in the loop workload, 18%
+off the whole workload.
+
+The lesson is the one #48 wrote down for itself and we didn't follow: a static
+read of type sizes tells you what is *big*, not what is *hot*. Eight of the eight
+landed items were real improvements to frame size — the per-recursion-level stack
+did drop from ~380 KB to ~55 KB — but not one of them was in the top three
+allocation sites of any workload we measured. The profile costs an afternoon and
+would have redirected the whole effort.
+
+---
+
 ## The burndown: sixteen issues in one orchestrated day (2026-07-17)
 
 Amy asked for a backlog burndown with a specific shape: one orchestrator
