@@ -823,6 +823,23 @@ same API as a foreground gate.
 The status strings are exactly `running`, `done:0`, and `failed:{code}` —
 match on those, not on `completed`.
 
+`JobId`/`JobStatus`/`JobInfo` (`kaish-types`) implement `Serialize`/
+`Deserialize` (plus `schemars::JsonSchema` behind the `schema` feature), so an
+embedder can serialize `JobManager::list()`/`get()` output directly rather
+than hand-rolling a mirror struct. `JobStatus`'s wire spelling under
+serde is lowercase (`"running"`/`"stopped"`/`"done"`/`"latched"`/`"failed"`),
+matching the `/v/jobs/N/status` text vocabulary above — not the capitalized
+`Display` impl used for human-facing text (the `jobs` table). `JobInfo` also
+carries `exit_code: Option<i64>` (set once the job finishes), `started_at` /
+`finished_at: Option<SystemTime>` (acquired via `kaish_types::clock`, so they
+work on `wasm32-unknown-unknown` too), and `pgids: Vec<u32>` — the real OS
+process groups a background job spawned. `pgids` is the surface to use for
+"what is this job actually doing"; `pid` is set only for a Ctrl-Z-stopped
+foreground job (a TTY concept an embedder never sees) and is otherwise
+`None`. For a finished job's `ExecResult` without blocking, use the
+non-blocking `JobManager::try_result(id) -> Option<ExecResult>` instead of
+`wait`, which parks until the job completes.
+
 ## Frontend Completion Helpers (`kaish_client::completion`)
 
 Answering Tab in a frontend (a REPL, a browser playground, any custom UI

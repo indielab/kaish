@@ -10,6 +10,40 @@ breaking entries are marked **BREAKING**.
 
 ## [Unreleased]
 
+### Added
+- **`JobId`/`JobStatus`/`JobInfo` (kaish-types) now derive `Serialize`/
+  `Deserialize`** (plus `schemars::JsonSchema` behind the `schema` feature,
+  matching `OutputData`'s gating) — the last type family in kaish-types
+  without serde (GH #241). `JobId` serializes `#[serde(transparent)]` as a
+  bare integer. `JobStatus`'s pinned wire spelling is lowercase
+  (`"running"`/`"stopped"`/`"done"`/`"latched"`/`"failed"`), matching the
+  existing `/v/jobs/N/status` text vocabulary rather than the capitalized
+  `Display` impl (which stays capitalized for human-facing text — the `jobs`
+  table, `[N]+ Done ...` notifications).
+- **`JobInfo` gained `exit_code: Option<i64>`, `started_at: SystemTime`,
+  `finished_at: Option<SystemTime>`, and `pgids: Vec<u32>`** (GH #243) — an
+  embedder can now learn how a job exited and how long it ran, and see the
+  real OS process groups it spawned, without blocking on `wait` or
+  string-parsing `/v/jobs/N/status`. `pgids` is the surface that actually
+  applies to an embedder-created job; `pid` remains TTY-stopped-only and is
+  usually `None` for one. Timestamps are acquired via
+  `kaish_types::clock::system_now()`, not `SystemTime::now()` directly, so
+  they stay valid on `wasm32-unknown-unknown`.
+- **`JobManager::try_result(JobId) -> Option<ExecResult>`** — a non-blocking
+  accessor for a finished job's result (GH #243). Previously the only way to
+  read a job's `ExecResult` was the blocking `JobManager::wait`.
+- **`StreamStats` (kaish-kernel scheduler) now derives `Serialize`/
+  `Deserialize`** (schema-gated `JsonSchema` too) — folded in alongside the
+  job types since it was flagged in the same audit (GH #241/#247).
+
+### Changed
+- **BREAKING:** `jobs --json` row shape changed now that it's the serialized
+  `JobInfo` plus a bolted-on `path` field, rather than a hand-built mirror:
+  `status` is lowercase (`"failed"`, not `"Failed"`), and rows gain
+  `exit_code`/`started_at`/`finished_at`/`pgids` (each present only when set —
+  `exit_code`/`finished_at` are absent for a still-running job, `pgids` absent
+  when empty). `path` (`/v/jobs/N/`) is unchanged.
+
 ## [0.13.0] - 2026-07-18
 
 ### Added
