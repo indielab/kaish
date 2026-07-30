@@ -10,6 +10,16 @@ breaking entries are marked **BREAKING**.
 
 ## [Unreleased]
 
+### Changed
+- **The "passes `shellcheck --enable=all`" framing is retired** (GH #201). kaish
+  is now described as *inspired by POSIX `sh` and bash, informed by
+  `shellcheck`'s lints* — accurate, where the old claim was aspirational:
+  `[[ ]]` is bash (SC3010 under `sh`), here-strings `<<<` are bash (SC3011), and
+  typed data, structured `$()`, and collections are modelled by no shellcheck
+  dialect at all. The corollary is now stated plainly in the README and
+  `docs/LANGUAGE.md`: shellcheck gives zero coverage for kaish's extensions, so
+  the kaish validator is their sole safety net.
+
 ## [0.13.0] - 2026-07-18
 
 ### Added

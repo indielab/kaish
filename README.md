@@ -8,8 +8,10 @@
 </p>
 
 **kaish** is a predictable shell for AI agents delivered as an embeddable Rust
-library with a reference REPL. The language is a strict subset of `sh`, so most
-muscle memory and model training will transfer.
+library with a reference REPL. The language is inspired by POSIX `sh` and bash
+and informed by `shellcheck`'s lints: it drops the constructs that make shell
+unpredictable and adds typed data on top, so most muscle memory and model
+training will transfer.
 
 The builtins — grep, sed, awk, find, and ninety-odd more — run in-process, so most
 text processing never needs `fork()` or `exec()`. All file I/O goes through a

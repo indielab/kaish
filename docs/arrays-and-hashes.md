@@ -596,10 +596,10 @@ Not yet resolved; flagging them so we decide deliberately.
   measure how much jq usage remains, then write the heuristic — and only then consider the
   plugin split (jq is heavily model-trained; removal must not strand agents).
 
-- **shellcheck posture.** Arrays/records are a kaish *extension* beyond the `sh` subset that
-  passes `shellcheck --enable=all`. Scripts using them are no longer plain-sh-clean by
-  construction. Confirm acceptable (it is — explicit extensions, like floats and booleans). See
-  issues.md P4 for the broader framing fix.
+- **shellcheck posture.** Arrays/records are a kaish *extension* beyond the Bourne-shaped core.
+  No shellcheck dialect models them, so the kaish validator — not shellcheck — owns their
+  correctness. Confirmed acceptable (explicit extensions, like floats and booleans). The broader
+  framing fix landed as GH #201.
 
 - **Record field deletion / list removal.** Not designed yet. Lean `unset user[email]` (reuses
   the existing shell concept, same bracket-path lvalue) over inventing `remove`. Out of scope
@@ -992,6 +992,8 @@ taught a specific way** — get the examples wrong and even capable models fail.
 9. **Update the "sh subset / shellcheck" framing in the same PR** (see issues.md P4). The docs
    that introduce collections are the natural place to restate "inspired by sh/bash, informed by
    shellcheck" and that the validator — not shellcheck — owns collection correctness.
+   **DONE** — landed separately as GH #201 (README, CLAUDE.md, and LANGUAGE.md's ShellCheck
+   Alignment section).
 
 10. **Spaced-assignment error needs positive reinforcement.** Models context-switch to JSON/Python
     spacing and will write `x = [a, b]`. The SC1068-style validator error must show BOTH the
