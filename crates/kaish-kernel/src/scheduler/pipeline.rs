@@ -12,7 +12,7 @@ use std::collections::HashMap;
 use crate::arithmetic;
 use crate::ast::{Arg, Command, Expr, Redirect, RedirectKind, Value};
 use crate::dispatch::{CommandDispatcher, PipelinePosition};
-use crate::interpreter::{ExecResult, PathError};
+use crate::interpreter::{apply_output_format, ExecResult, OutputFormat, PathError};
 use crate::tools::{ExecContext, ToolArgs, ToolRegistry, ToolSchema};
 use tokio::io::AsyncWriteExt;
 
@@ -20,6 +20,35 @@ use super::pipe_stream::pipe_stream_default;
 use super::scatter::{
     parse_gather_options, parse_scatter_options, ScatterGatherRunner,
 };
+
+/// Whether `--json` appears literally among a command's raw AST args.
+///
+/// Used only for `run_scatter_gather`'s own option-parsing error path (GH
+/// #222): scatter/gather's arguments are pulled out and parsed directly by
+/// the pipeline runner rather than via `Tool::execute()`, so a parse failure
+/// can happen before there's ever a `ToolArgs` to read a `--json` flag off of
+/// through the usual `GlobalFlags::apply_from_args` route every other
+/// builtin's dispatch takes. `--json` is always a bare boolean flag (never
+/// `--json=value`), so it always lexes to `Arg::LongFlag`.
+fn has_json_flag(args: &[Arg]) -> bool {
+    args.iter().any(|a| matches!(a, Arg::LongFlag(name) if name == "json"))
+}
+
+/// Apply `--json` to a `run_scatter_gather` early-return error.
+///
+/// Mirrors the kernel's `finalize_output` seam (kernel.rs::execute_command)
+/// for the one path that bypasses it entirely: scatter/gather's own
+/// option-parsing errors return straight out of `run_scatter_gather` before
+/// either tool's `Tool::execute()` — and thus `finalize_output` — ever runs
+/// (GH #222). Every early return in `run_scatter_gather` funnels through this
+/// one function, so it is the single place the format gets applied — not
+/// three separate copies threaded through each `return` site.
+fn finalize_scatter_gather_error(result: ExecResult, format: Option<OutputFormat>) -> ExecResult {
+    match format {
+        Some(format) => apply_output_format(result, format),
+        None => result,
+    }
+}
 
 /// Apply redirects to an execution result.
 ///
@@ -358,6 +387,19 @@ impl PipelineRunner {
         let gather_cmd = &commands[gather_idx];
         let post_gather = &commands[gather_idx + 1..];
 
+        // scatter/gather's own option-parsing below returns `ExecResult`s
+        // directly, bypassing `Tool::execute()` and thus the normal
+        // per-command `finalize_output` seam (kernel.rs::execute_command)
+        // that every other builtin's `--json` goes through. Detect `--json`
+        // up front from the raw AST (not a built `ToolArgs`): the very first
+        // fallible step below (`build_tool_args`) can itself fail, in which
+        // case there is no `ToolArgs` yet to read a flag off of via the usual
+        // `GlobalFlags::apply_from_args` route. Every early return in this
+        // function funnels through `finalize_scatter_gather_error` below so
+        // this is the ONE place the format gets applied (GH #222).
+        let format = (has_json_flag(&scatter_cmd.args) || has_json_flag(&gather_cmd.args))
+            .then_some(OutputFormat::Json);
+
         // Parse options from scatter and gather commands
         // These are builtins with simple key=value syntax, no schema-driven parsing needed.
         // build_tool_args is fallible: a bad/subscripted collection access in a
@@ -368,19 +410,39 @@ impl PipelineRunner {
         let gather_schema = self.tools.get("gather").map(|t| t.schema());
         let scatter_args = match build_tool_args(&scatter_cmd.args, ctx, scatter_schema.as_ref()).await {
             Ok(args) => args,
-            Err(e) => return ExecResult::failure(1, format!("scatter: {e}")),
+            Err(e) => {
+                return finalize_scatter_gather_error(
+                    ExecResult::failure(1, format!("scatter: {e}")),
+                    format,
+                )
+            }
         };
         let gather_args = match build_tool_args(&gather_cmd.args, ctx, gather_schema.as_ref()).await {
             Ok(args) => args,
-            Err(e) => return ExecResult::failure(1, format!("gather: {e}")),
+            Err(e) => {
+                return finalize_scatter_gather_error(
+                    ExecResult::failure(1, format!("gather: {e}")),
+                    format,
+                )
+            }
         };
         let scatter_opts = match parse_scatter_options(&scatter_args) {
             Ok(opts) => opts,
-            Err(e) => return ExecResult::failure(2, format!("scatter: {e}")),
+            Err(e) => {
+                return finalize_scatter_gather_error(
+                    ExecResult::failure(2, format!("scatter: {e}")),
+                    format,
+                )
+            }
         };
         let gather_opts = match parse_gather_options(&gather_args) {
             Ok(opts) => opts,
-            Err(e) => return ExecResult::failure(2, format!("gather: {e}")),
+            Err(e) => {
+                return finalize_scatter_gather_error(
+                    ExecResult::failure(2, format!("gather: {e}")),
+                    format,
+                )
+            }
         };
 
         // We need an `Arc<dyn CommandDispatcher>` to hand to `ScatterGatherRunner`.

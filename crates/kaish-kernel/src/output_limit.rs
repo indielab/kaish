@@ -174,6 +174,18 @@ pub async fn spill_if_needed(
 ) -> Option<SpillResult> {
     let max = config.max_bytes?;
 
+    // Remember whether a lower-level capture ring already overflowed before
+    // this check ran (kernel.rs's `try_execute_external` / dispatch.rs's
+    // test-only twin flip `did_spill` when the fixed ~10MB stdout ring evicts
+    // output, independent of whether this output-limit is even enabled). If
+    // so, `result`'s current bytes are ALREADY a ring-capped tail, not the
+    // command's full output — any disk spill performed below would be
+    // spilling that already-partial tail, so a "full output at <path>"
+    // message would mislead (GH #212 part 2). Only read by the disk-spill
+    // path below, which is itself `localfs`-only.
+    #[cfg(feature = "localfs")]
+    let ring_already_overflowed = result.did_spill;
+
     // Binary payloads are measured and spilled by RAW bytes. text_out() would
     // lossy-decode a Bytes result — corrupting the spill file and mis-measuring
     // the size (U+FFFD is 3 bytes per invalid byte). Handle them up front.
@@ -229,7 +241,7 @@ pub async fn spill_if_needed(
             if total <= max {
                 return None;
             }
-            return spill_string(result, config, max).await;
+            return spill_string(result, config, max, ring_already_overflowed).await;
         }
 
         // If we have structured OutputData, estimate size before materializing
@@ -242,11 +254,11 @@ pub async fn spill_if_needed(
                 if result.text_out().len() <= max {
                     return None;
                 }
-                return spill_string(result, config, max).await;
+                return spill_string(result, config, max, ring_already_overflowed).await;
             }
 
             // Large — stream directly to spill file, never holding full String
-            return spill_output_data(result, config, max).await;
+            return spill_output_data(result, config, max, ring_already_overflowed).await;
         }
 
         return None;
@@ -254,6 +266,30 @@ pub async fn spill_if_needed(
 
     // In-memory head+tail truncation (Memory mode or no `localfs`): no disk I/O.
     truncate_in_memory(result, config, max)
+}
+
+/// Apply the kernel's spill/exit-3 contract to a raw `ExecResult`: run the
+/// output-limit spill check when enabled, then remap the exit code to 3
+/// whenever `did_spill` ends up set — whether `spill_if_needed` just set it,
+/// or a lower-level capture-ring overflow already had (kernel.rs's
+/// `try_execute_external`, GH #191).
+///
+/// This is the ONE seam every execution surface that produces a raw
+/// `ExecResult` — the foreground pipeline (`Kernel::execute_pipeline`), a
+/// background job (`Kernel::execute_background`), a scatter worker
+/// (`run_parallel`) — must funnel through before treating that result as
+/// final. Without it, spilled output silently reports its ORIGINAL exit code
+/// instead of the loud 3, and a downstream success/failure decision (a
+/// background job's `JobStatus`, gather's 0-vs-123 aggregation) reads the
+/// wrong thing (GH #212).
+pub async fn apply_spill_contract(result: &mut ExecResult, config: &OutputLimitConfig) {
+    if config.is_enabled() {
+        let _ = spill_if_needed(result, config).await;
+    }
+    if result.did_spill {
+        result.original_code = Some(result.code);
+        result.code = 3;
+    }
 }
 
 /// Truncate output in memory to head+tail, with no disk I/O.
@@ -317,16 +353,23 @@ fn truncate_in_memory(
 }
 
 /// Spill an already-materialized string in result.out.
+///
+/// `ring_already_overflowed` is `true` when a lower-level capture ring had
+/// already flipped `did_spill` before this check ran (see `spill_if_needed`)
+/// — the message then must not claim the spill file holds the "full output",
+/// since it only holds the ring-capped tail (GH #212 part 2).
 #[cfg(feature = "localfs")]
 async fn spill_string(
     result: &mut ExecResult,
     config: &OutputLimitConfig,
     max: usize,
+    ring_already_overflowed: bool,
 ) -> Option<SpillResult> {
     let total = result.text_out().len();
     match write_spill_file(result.text_out().as_bytes()).await {
         Ok((path, written)) => {
-            let truncated = build_truncated_output(&result.text_out(), config, &path, total);
+            let truncated =
+                build_truncated_output(&result.text_out(), config, &path, total, ring_already_overflowed);
             result.set_out(truncated);
             result.did_spill = true;
             Some(SpillResult {
@@ -346,11 +389,15 @@ async fn spill_string(
 }
 
 /// Stream OutputData directly to a spill file without materializing the full String.
+///
+/// `ring_already_overflowed` — see `spill_string`'s doc comment; same caveat
+/// applies to the "full output at" message built below.
 #[cfg(feature = "localfs")]
 async fn spill_output_data(
     result: &mut ExecResult,
     config: &OutputLimitConfig,
     max: usize,
+    ring_already_overflowed: bool,
 ) -> Option<SpillResult> {
     let output = result.output()?;
 
@@ -395,8 +442,8 @@ async fn spill_output_data(
     let path_str = path.to_string_lossy();
 
     result.set_out(format!(
-        "{}\n...\n{}\n[output truncated: {} bytes total — full output at {}]",
-        head, tail, total, path_str
+        "{}\n...\n{}\n[output truncated: {} bytes total — {}]",
+        head, tail, total, spill_pointer_phrase(ring_already_overflowed, &path_str)
     ));
     result.did_spill = true;
 
@@ -418,6 +465,27 @@ async fn write_spill_file(data: &[u8]) -> Result<(PathBuf, usize), std::io::Erro
     Ok((path, data.len()))
 }
 
+/// The spill message's trailing pointer phrase, tuned for whether the
+/// spilled bytes are the command's actual full output or only a ring-capped
+/// tail (GH #212 part 2 — see `spill_if_needed`'s `ring_already_overflowed`).
+///
+/// A ring overflow already discarded the earliest output before this spill
+/// ever saw it, so the spill file below is itself only a partial capture;
+/// claiming "full output" there would contradict the stderr overflow marker
+/// that reported the true, larger size.
+#[cfg(feature = "localfs")]
+fn spill_pointer_phrase(ring_already_overflowed: bool, path: &str) -> String {
+    if ring_already_overflowed {
+        format!(
+            "ring-capped tail spilled to {path} (the fixed capture ring already evicted \
+             earlier output before this spill ran; see the stderr overflow marker for the \
+             true size)"
+        )
+    } else {
+        format!("full output at {path}")
+    }
+}
+
 /// Build the truncated output string with head, tail, and pointer.
 #[cfg(feature = "localfs")]
 fn build_truncated_output(
@@ -425,13 +493,14 @@ fn build_truncated_output(
     config: &OutputLimitConfig,
     spill_path: &std::path::Path,
     total_bytes: usize,
+    ring_already_overflowed: bool,
 ) -> String {
     let head = truncate_to_char_boundary(full, config.head_bytes);
     let tail = tail_from_str(full, config.tail_bytes);
     let path_str = spill_path.to_string_lossy();
     format!(
-        "{}\n...\n{}\n[output truncated: {} bytes total — full output at {}]",
-        head, tail, total_bytes, path_str
+        "{}\n...\n{}\n[output truncated: {} bytes total — {}]",
+        head, tail, total_bytes, spill_pointer_phrase(ring_already_overflowed, &path_str)
     )
 }
 
@@ -676,6 +745,79 @@ mod tests {
         assert!(!result.did_spill);
     }
 
+    // GH #212 part 2: when a lower-level capture ring already overflowed
+    // (did_spill already true, e.g. kernel.rs's try_execute_external stdout
+    // ring, GH #191) BEFORE this enabled-limit spill runs, the file it writes
+    // is itself only the ring-capped tail — the message must say so instead
+    // of claiming "full output at <path>".
+    #[tokio::test]
+    async fn test_spill_if_needed_tunes_message_when_ring_already_overflowed() {
+        let config = OutputLimitConfig {
+            max_bytes: Some(100),
+            head_bytes: 20,
+            tail_bytes: 10,
+            spill_mode: SpillMode::Disk,
+        };
+        let big_output = "x".repeat(200);
+        let mut result = ExecResult::success(big_output).with_code(0);
+        // Simulate the ring having already overflowed before this check runs.
+        result.did_spill = true;
+
+        let spill = spill_if_needed(&mut result, &config).await;
+        let spill = spill.expect("still over the limit, must spill");
+        assert!(
+            !result.text_out().contains("full output at"),
+            "must not claim the spill file is the full output when the ring \
+             already truncated it: {}",
+            result.text_out()
+        );
+        assert!(
+            result.text_out().contains("ring-capped tail spilled to"),
+            "should name the tail-only nature of the spill file: {}",
+            result.text_out()
+        );
+        let _ = tokio::fs::remove_file(&spill.path).await;
+    }
+
+    // GH #212: `apply_spill_contract` is the one seam every execution surface
+    // (foreground pipeline, background job, scatter worker) must funnel a raw
+    // `ExecResult` through — these two tests pin its two responsibilities
+    // directly, independent of any particular surface's plumbing.
+
+    #[tokio::test]
+    async fn apply_spill_contract_remaps_exit_code_when_spill_if_needed_flips_did_spill() {
+        // Memory mode: no disk I/O, nothing to clean up (CLAUDE.md: no real
+        // system paths in tests) — the exit-code remap is identical either way.
+        let config = OutputLimitConfig {
+            max_bytes: Some(100),
+            head_bytes: 20,
+            tail_bytes: 10,
+            spill_mode: SpillMode::Memory,
+        };
+        let mut result = ExecResult::success("x".repeat(200));
+        apply_spill_contract(&mut result, &config).await;
+
+        assert!(result.did_spill);
+        assert_eq!(result.code, 3, "a spill must remap to exit 3");
+        assert_eq!(result.original_code, Some(0), "original exit code preserved");
+    }
+
+    #[tokio::test]
+    async fn apply_spill_contract_remaps_exit_code_when_did_spill_already_set_and_limit_disabled() {
+        // Mirrors the disabled-limit ring-overflow path (GH #191): a lower
+        // level already flipped `did_spill` with the ORIGINAL exit code still
+        // in place, and the output limit itself is disabled (so
+        // `spill_if_needed` never runs). The remap must still happen.
+        let config = OutputLimitConfig::none();
+        let mut result = ExecResult::success("small").with_code(0);
+        result.did_spill = true;
+
+        apply_spill_contract(&mut result, &config).await;
+
+        assert_eq!(result.code, 3, "did_spill set anywhere must remap to exit 3");
+        assert_eq!(result.original_code, Some(0));
+    }
+
     #[test]
     fn test_build_truncated_output() {
         let config = OutputLimitConfig {
@@ -686,11 +828,36 @@ mod tests {
         };
         let full = "abcdefghijklmnop";
         let path = PathBuf::from("/tmp/test-spill.txt");
-        let result = build_truncated_output(full, &config, &path, 16);
+        let result = build_truncated_output(full, &config, &path, 16, false);
         assert!(result.starts_with("abcde"));
         assert!(result.contains("..."));
         assert!(result.contains("nop"));
         assert!(result.contains("[output truncated: 16 bytes total — full output at /tmp/test-spill.txt]"));
+    }
+
+    // GH #212 part 2: a spill that runs AFTER a lower-level capture-ring
+    // overflow already flipped `did_spill` must not claim its spill file
+    // holds the "full output" — it only holds the ring-capped tail.
+    #[test]
+    fn test_build_truncated_output_tunes_message_when_ring_already_overflowed() {
+        let config = OutputLimitConfig {
+            max_bytes: Some(100),
+            head_bytes: 5,
+            tail_bytes: 3,
+            spill_mode: SpillMode::Disk,
+        };
+        let full = "abcdefghijklmnop";
+        let path = PathBuf::from("/tmp/test-spill.txt");
+        let result = build_truncated_output(full, &config, &path, 16, true);
+        assert!(
+            !result.contains("full output at"),
+            "must not claim the spill file is the full output when the ring already \
+             truncated it: {result}"
+        );
+        assert!(
+            result.contains("ring-capped tail spilled to /tmp/test-spill.txt"),
+            "should point at the tail-only nature of the spill file: {result}"
+        );
     }
 
     #[tokio::test]
