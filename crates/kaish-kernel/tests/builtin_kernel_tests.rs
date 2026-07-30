@@ -439,6 +439,35 @@ async fn grep_searches_all_files_and_prefixes_filenames() {
     );
 }
 
+/// Line numbers must restart at 1 for each file in a multi-file grep.
+///
+/// Multi-file grep drives ONE `grep_searcher::Searcher` across every file
+/// (hoisted out of the per-file loop in GH #48 — each `Searcher` owns a 64 KiB
+/// zeroed line buffer, so building one per file dominated grep's allocation
+/// profile). That reuse is only sound because `search_slice` takes `&mut self`
+/// and resets per-search state, which is how ripgrep itself drives it. If that
+/// ever stops holding, the line counter leaks across files and grep reports
+/// *plausible but wrong* line numbers — quietly, with a zero exit code. This
+/// test is the tripwire for that.
+///
+/// `b.txt`'s match sits on line 1 while `a.txt`'s sits on line 2, so a leaked
+/// counter would report `b.txt:3:` and fail loudly here.
+#[tokio::test]
+async fn grep_line_numbers_restart_per_file() {
+    let dir = tempdir().unwrap();
+    touch(dir.path(), "a.txt", "alpha\nneedle here\n");
+    touch(dir.path(), "b.txt", "needle first\nbeta\ngamma\n");
+    let kernel = kernel_at(dir.path());
+    let (out, code) = run(&kernel, "grep -n needle a.txt b.txt").await;
+    assert_eq!(code, 0, "grep -n should succeed: {out:?}");
+    assert!(out.contains("a.txt:2:"), "a.txt's match is on line 2: {out:?}");
+    assert!(
+        out.contains("b.txt:1:"),
+        "b.txt's match is on line 1 — a leaked per-file line counter would \
+         report line 3 instead: {out:?}"
+    );
+}
+
 #[tokio::test]
 async fn grep_glob_searches_all_matched_files() {
     let dir = tempdir().unwrap();
