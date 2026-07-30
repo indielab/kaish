@@ -10,6 +10,27 @@ breaking entries are marked **BREAKING**.
 
 ## [Unreleased]
 
+### Added
+- **`kill` accepts the bash/POSIX signal shorthand** (GH #198): `kill -9 %1`,
+  `kill -STOP %1`/`kill -SIGSTOP %1`, case-insensitive, alongside the existing
+  `--signal NAME`/`-s NAME`. Fixed set of 9 names (`TERM KILL INT HUP STOP
+  CONT QUIT USR1 USR2`) plus any numeric signal (`-9`, `-15`, `-<N>`) — an
+  unsupported name is a loud usage error naming what IS supported, never a
+  silent fallback.
+
+### Fixed
+- **`--signal NAME` is now case-insensitive** (`kill --signal kill` used to
+  fail as "unknown signal: kill") — found alongside the shorthand fix above;
+  both forms now share one name table.
+- **Hermetic and `subprocess` builds now agree on which signal names `kill`
+  recognizes.** The hermetic path used to accept `ABRT`/`TSTP`/`WINCH` by
+  coincidence while the `subprocess` path didn't — `kill --signal ABRT`
+  behaved differently depending on the build. Both now use the same fixed
+  9-name table.
+- **`--json` now applies to `raw_argv` builtins** (`test`, and `kill` as of
+  this change) — their argv binder never lifts flags into the flag set the
+  kernel's `--json` pre-apply reads, so it was silently missed on this path.
+
 ## [0.13.0] - 2026-07-18
 
 ### Added
