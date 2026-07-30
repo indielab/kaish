@@ -15,6 +15,15 @@ use crate::tools::{schema_from_clap, ExecContext, ToolCtx, GlobalFlags, Tool, To
 /// Bg tool: resume a stopped job in the background.
 pub struct Bg;
 
+/// How often the background reaper polls a backgrounded job for
+/// completion (GH #162). 200ms keeps `jobs`/`kill %N` state and the async
+/// job-manager cleanup reasonably prompt after the process actually exits,
+/// without waking up an otherwise-idle task 100+ times a second for every
+/// backgrounded job (which, unlike `wait`'s much tighter 5-10ms poll, has
+/// no foreground caller blocked on the result and may run for hours).
+#[cfg(unix)]
+const BG_REAP_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(200);
+
 /// clap-derived argv layer for bg.
 #[derive(Parser, Debug)]
 #[command(name = "bg", about = "Resume a stopped job in the background")]
@@ -115,23 +124,43 @@ impl Tool for Bg {
             }
             manager.resume_job(job_id).await;
 
-            // Spawn a background reaper task
+            // Spawn a background reaper task.
+            //
+            // GH #162: this used to be `tokio::task::block_in_place` running
+            // a blocking `waitpid(pid, None)` loop. Its `JoinHandle` was
+            // (deliberately) dropped, uncollected — but dropping a
+            // `JoinHandle` doesn't cancel the task; it kept running on
+            // tokio's blocking thread pool for as long as the backgrounded
+            // process did. `tokio::runtime::Runtime::drop` blocks the
+            // dropping thread until all outstanding blocking-pool work
+            // finishes, so exiting the REPL hung for as long as any
+            // backgrounded job kept running.
+            //
+            // Fixed by polling `waitpid(pid, WNOHANG)` on a plain async
+            // interval instead: nothing here calls `block_in_place`, so
+            // there's no blocking-pool work for `Runtime::drop` to wait on
+            // — an unfinished poll loop is simply dropped/cancelled at
+            // shutdown like any other async task. This matches bash's own
+            // default (`huponexit` off): a backgrounded job outlives the
+            // shell, unsignaled and orphaned to init; kaish's reaper never
+            // gets to block exit waiting to observe it finish.
             let jobs = manager.clone();
             let pid = nix::unistd::Pid::from_raw(_pid_raw as i32);
             tokio::spawn(async move {
-                let result = tokio::task::block_in_place(|| {
+                loop {
                     // Wait without WUNTRACED — we don't care about stops in bg
-                    loop {
-                        match nix::sys::wait::waitpid(pid, None) {
-                            Ok(nix::sys::wait::WaitStatus::Exited(_, _))
-                            | Ok(nix::sys::wait::WaitStatus::Signaled(_, _, _)) => break,
-                            Ok(_) => continue,
-                            Err(nix::errno::Errno::EINTR) => continue,
-                            Err(_) => break,
+                    match nix::sys::wait::waitpid(pid, Some(nix::sys::wait::WaitPidFlag::WNOHANG)) {
+                        Ok(nix::sys::wait::WaitStatus::Exited(_, _))
+                        | Ok(nix::sys::wait::WaitStatus::Signaled(_, _, _)) => break,
+                        // `StillAlive` (WNOHANG, nothing to report yet), any
+                        // other transient status, or EINTR: keep polling.
+                        Ok(_) | Err(nix::errno::Errno::EINTR) => {
+                            tokio::time::sleep(BG_REAP_POLL_INTERVAL).await;
                         }
+                        // e.g. ECHILD — already reaped elsewhere.
+                        Err(_) => break,
                     }
-                });
-                let _ = result;
+                }
                 jobs.remove(job_id).await;
             });
 

@@ -156,6 +156,22 @@ impl PtySession {
             Err(e) => panic!("command {:?} failed: {}", cmd, e),
         }
     }
+
+    /// Poll (non-blocking, via `try_wait`) for the kaish child process to
+    /// exit, up to `timeout`. Returns `None` on timeout rather than
+    /// blocking indefinitely — if the reaper regresses (GH #162), we want
+    /// the test to fail promptly instead of hanging the suite for as long
+    /// as the backgrounded job under test keeps running.
+    fn wait_for_child_exit(&mut self, timeout: Duration) -> Option<std::process::ExitStatus> {
+        let start = Instant::now();
+        while start.elapsed() < timeout {
+            if let Ok(Some(status)) = self.child.try_wait() {
+                return Some(status);
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        None
+    }
 }
 
 impl Drop for PtySession {
@@ -427,5 +443,47 @@ fn test_background_job_completion_is_notified_and_reaped() {
         output.contains("no jobs"),
         "the finished job should have been auto-reaped, got:\n{}",
         output
+    );
+}
+
+#[test]
+fn test_exit_does_not_wait_for_resumed_background_job() {
+    // GH #162: `bg`'s reaper used to be `tokio::spawn` wrapping a
+    // `tokio::task::block_in_place` closure that ran a blocking
+    // `waitpid(pid, None)` loop. The task's `JoinHandle` was dropped
+    // immediately, but dropping a handle doesn't cancel the task — it kept
+    // running on tokio's blocking thread pool for as long as the
+    // backgrounded process did. `Runtime::drop` at REPL exit blocks the
+    // dropping thread until all outstanding blocking-pool work finishes,
+    // so `exit` hung for as long as the backgrounded job kept running.
+    //
+    // Matches bash's `huponexit off` default: a backgrounded job outlives
+    // the shell, unsignaled, orphaned to init — kaish's exit must not wait
+    // around to observe it finish.
+    let mut session = PtySession::new();
+
+    // Long enough that "kaish exited before the job finished" can't be a
+    // coincidence of scheduling jitter, short enough not to linger past
+    // the test even as an orphaned process.
+    session.send_line("sh -c 'sleep 5'");
+    std::thread::sleep(Duration::from_millis(300));
+    session.send_ctrl_z();
+    session
+        .wait_for("会sh> ", Duration::from_secs(3))
+        .expect("prompt after Ctrl-Z");
+
+    session.run_command("bg");
+
+    session.send_line("exit");
+
+    // Well under the 5s job duration, but generously above the ~100ms a
+    // healthy exit takes even under host load (see GH #162's own control
+    // measurement) — a wide, deliberately non-tight margin per this repo's
+    // prior timing-test de-flaking (GH #211).
+    let exited = session.wait_for_child_exit(Duration::from_secs(3));
+    assert!(
+        exited.is_some(),
+        "kaish should exit well before the 5s backgrounded job finishes, \
+         but was still running 3s after `exit`"
     );
 }
