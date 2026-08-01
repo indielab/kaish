@@ -1127,3 +1127,53 @@ principal is refused, loud, naming both. Its job is catching
 resisting an attacker. Either way the ledger records both principals on every
 grant, so even where the policy is off, self-approval is visible in the record
 rather than silent.
+
+### H.6 Stacked approvals and a client-model approver (the kaibo-coder sketch)
+
+*(Amy, same conversation — "just dreaming here, but it impacts our design
+goals." Recorded as design pressure, not commitment.)*
+
+Two embedder shapes stress §H from opposite ends:
+
+- **kaijutsu** hooks the approval and gives the human a popup. That is
+  `Approver::decide` (§C.2 stage 3) doing exactly what it was designed for —
+  nothing new to build, the patient hold already covers think time.
+- **kaibo-coder** (the later chapter): a worker kernel with **no general CLI**
+  — an essentials-only toolset (`cargo build`-class, possibly dynamic tools)
+  and no approval authority. Its requests **stack up** as `Requested` (stage-4
+  defer is already the async path), and the approver is the **client model on
+  the far side of the MCP boundary** — the orchestrating model, not the human,
+  reviews the pending set and approves **in bulk**. Same structure as §H.4
+  inverted: there the small model clears for the big one; here the big client
+  model clears for the constrained worker. Authority still follows the
+  channel; the MCP connection is the tier-2 boundary.
+
+What this asks of the design, beyond what is already drawn:
+
+1. **Batch grant is UX, not a ledger primitive.** `approvals grant` should
+   take multiple ids (or a filter over the pending set); the ledger still
+   posts per-request entries, so bulk approval changes no invariant and the
+   record stays per-operation.
+2. **A request must be judgeable from structure alone.** The reviewing model
+   sees operation + risk class + resources + transitions — never a shell
+   command, because the worker has none and dynamic tools post their own
+   operations through `ToolCtx::request_approval` (PR 5). This hardens the
+   §A.6 taxonomy rule from "nice for audit" to load-bearing: if an operation's
+   resources don't carry enough to judge it, bulk review degrades to
+   rubber-stamping.
+3. **The tokenless view suffices for a remote approver.** The client model
+   grants by request-id over its authority channel; the token never crosses
+   the MCP boundary in either direction. §D.3 already provides this — worth
+   stating that no "send the token to the approver" path should ever be added
+   for this case.
+4. **Standing-before beats bulk-after for the repetitive tail.** A queue of
+   forty identical `cargo.build` approvals invites rubber-stamping; the better
+   move is the client model issuing one scoped `StandingGrant`
+   (operation-and-resource patterns, `max_uses`, expiry) and letting the
+   novel remainder come through for individual review. One rule entry plus
+   countable uses is a *better* audit record than forty stamps.
+5. **A model approver is never silent in the record.** Grants carry the
+   client model's principal and grounds — "granted (standing, issued by
+   <client-model>)" or "granted in bulk by <client-model>" is readable in
+   `approvals log`. Rubber-stamping may happen; invisible rubber-stamping
+   cannot.
