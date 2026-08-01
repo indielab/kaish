@@ -10,6 +10,14 @@ breaking entries are marked **BREAKING**.
 
 ## [Unreleased]
 
+### Security
+- **Confirmation nonces (`--confirm=<nonce>` on `rm`, overwrites, `kaish-trash empty`)
+  now come from the OS CSPRNG.** Previously derived from `RandomState` +
+  wall-clock nanoseconds folded into 32 bits (8 hex chars) — guessable/collidable
+  in a hostile setting. Now 16 bytes from `getrandom` rendered as 32 lowercase
+  hex chars (128 bits); entropy failure is a hard error, never a silent
+  fallback. Format-compatible (still an opaque hex string) and non-breaking.
+
 ## [0.13.0] - 2026-07-18
 
 ### Added

@@ -300,7 +300,7 @@ mod tests {
         let mut ctx = make_ctx();
         ctx.trash_backend = Some(Arc::new(crate::trash_system::SystemTrash));
 
-        let nonce = ctx.nonce_store.issue("kaish-trash empty", &[]);
+        let nonce = ctx.nonce_store.issue("kaish-trash empty", &[]).expect("entropy");
 
         let mut args = ToolArgs::new();
         args.positional.push(Value::String("empty".into()));

@@ -757,7 +757,15 @@ impl ExecContext {
         reason: &str,
         confirm_hint: impl FnOnce(&str) -> String,
     ) -> ExecResult {
-        let nonce = self.nonce_store.issue(command, paths);
+        // Entropy failure is fatal — never emit a guessable confirmation
+        // token (see `nonce::generate_nonce`). Mirrors `mktemp`'s handling of
+        // the same underlying `getrandom` failure mode.
+        let nonce = match self.nonce_store.issue(command, paths) {
+            Ok(nonce) => nonce,
+            Err(e) => {
+                return ExecResult::failure(1, format!("{command}: could not obtain system entropy: {e}"));
+            }
+        };
         let ttl = self.nonce_store.ttl().as_secs();
         let authorized = if paths.is_empty() {
             String::new()
