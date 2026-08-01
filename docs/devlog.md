@@ -1471,9 +1471,10 @@ unprompted. All 18 generated scripts were then run against the real
 `./target/debug/kaish` binary and produced correct output. **The v2
 bare-collection-iterates relaxation is not adopted** — there's no evidence the `$()`-only
 form is a tax being paid forever; it converged in one round across the whole tested range.
-`docs/arrays-and-hashes.md` carries the full result inline at Teaching note #8 and the
-Resolved-decisions "Access form" entry, rather than a separate write-up, since the doc is
-already the design's evidence record.
+The arrays-and-hashes design doc carried the full result inline at Teaching note #8 and the
+Resolved-decisions "Access form" entry, rather than a separate write-up, since that doc was
+already the design's evidence record. (It has since been retired; the teaching notes live in
+`docs/designing-syntax-with-llms.md`.)
 
 
 ## BRE follow-ups + the stale-`$?` bug (2026-07-03)
@@ -1758,7 +1759,8 @@ values the literal grammar can't yet.
 
 First implementation step of the collections effort, and deliberately the one
 that touches no lexer or parser. `fromjson`/`tojson` are the value model's text
-boundary — the pair the arrays-and-hashes doc sketched as "prototype early." They
+boundary — the pair the arrays-and-hashes design doc (since retired into
+`docs/designing-syntax-with-llms.md`) sketched as "prototype early." They
 exercise the whole value-model plumbing (structured `$()`, `.data`, typed
 positionals, assignment capture) end to end, so building them first de-risks the
 boundary semantics and pins the error copy before the big grammar PR.

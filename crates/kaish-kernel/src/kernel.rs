@@ -2258,9 +2258,9 @@ impl Kernel {
                     }
                 } else {
                     // Subscripted lvalue (`xs[0]=v`, `user[email]=v`, …): always
-                    // mutates the existing root wherever it lives — `local` is
-                    // meaningless here (see docs/arrays-and-hashes.md, "Assignment
-                    // lvalues").
+                    // mutates the existing root wherever it lives, so `local`
+                    // has nothing to declare. See docs/LANGUAGE.md,
+                    // "Assignment — bracket-path lvalues".
                     scope.walk_write(&assign.path, value.clone()).map_err(|e| match e {
                         PathError::UndefinedRoot(name) => anyhow::anyhow!(
                             "{name}: undefined — create it first, e.g. `{name}={{}}` or `{name}=[]`"

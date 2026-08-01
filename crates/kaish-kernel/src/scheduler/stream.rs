@@ -180,7 +180,8 @@ impl std::fmt::Debug for BoundedStream {
 }
 
 /// Statistics about a bounded stream.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct StreamStats {
     /// Current bytes in buffer.
     pub current_size: usize,
@@ -384,6 +385,28 @@ mod tests {
             stream.has_overflowed().await,
             "writing past capacity must flip has_overflowed"
         );
+    }
+
+    #[test]
+    fn stream_stats_round_trips_through_serde() {
+        // GH #241 (folded in): StreamStats was flagged alongside the job types
+        // as another kaish type family with no serde — bytes-evicted/
+        // truncation warnings are useful for an embedder surfacing job output
+        // health, same spirit as the rest of this PR.
+        let stats = StreamStats {
+            current_size: 42,
+            max_size: 100,
+            total_written: 142,
+            bytes_evicted: 100,
+            closed: true,
+        };
+        let json = serde_json::to_string(&stats).unwrap();
+        let back: StreamStats = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.current_size, stats.current_size);
+        assert_eq!(back.max_size, stats.max_size);
+        assert_eq!(back.total_written, stats.total_written);
+        assert_eq!(back.bytes_evicted, stats.bytes_evicted);
+        assert_eq!(back.closed, stats.closed);
     }
 
     #[test]
