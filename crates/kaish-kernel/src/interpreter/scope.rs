@@ -809,9 +809,10 @@ impl Scope {
     ///
     /// The root must already be defined (`UndefinedRoot`) and be a collection
     /// (`Shape` for a scalar root) — same rule as a read. On success the
-    /// mutated root replaces the old value via `set_global` (bracket-path
-    /// writes always update wherever the variable lives, regardless of
-    /// `local` — see `docs/arrays-and-hashes.md`, "Assignment lvalues").
+    /// mutated root replaces the old value via `set_global`. A bracket-path
+    /// write updates the variable wherever it lives and ignores `local`,
+    /// because it mutates an existing binding instead of creating one. See
+    /// `docs/LANGUAGE.md`, "Assignment — bracket-path lvalues".
     pub fn walk_write(&mut self, path: &VarPath, value: Value) -> Result<(), PathError> {
         let Some(VarSegment::Field(root_name)) = path.segments.first() else {
             return Err(PathError::UndefinedRoot(String::new()));
@@ -862,10 +863,11 @@ impl Scope {
     ///
     /// The target must already exist and be a list — an undefined root, a
     /// non-list leaf, or a missing intermediate hop is a loud error, never a
-    /// silent create or autoviv (see `docs/arrays-and-hashes.md`, "Append —
-    /// push"). Intermediate hops share `walk_write`'s `resolve_step`/
-    /// `descend_mut` (no autoviv, same bounds/shape classification); the
-    /// final hop diverges — it appends instead of replacing.
+    /// silent create or autoviv. See `docs/LANGUAGE.md`, "Assignment —
+    /// bracket-path lvalues + `push`". Intermediate hops share `walk_write`'s
+    /// `resolve_step`/`descend_mut`, so a `push` path and an assignment path
+    /// classify identically. Only the final hop differs: it appends instead
+    /// of replacing.
     pub fn walk_append(&mut self, path: &VarPath, values: Vec<Value>) -> Result<(), String> {
         let Some(VarSegment::Field(root_name)) = path.segments.first() else {
             return Err("push: target has no root".to_string());

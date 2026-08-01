@@ -328,6 +328,30 @@ async fn test_failed_background_job_status() {
     );
 }
 
+/// GH #212: `execute_background` must apply the same spill/exit-3 contract
+/// the foreground path gets (`Kernel::execute_pipeline`'s
+/// `apply_spill_contract`). Before the fix, a background job's output
+/// overflowing the output limit set `did_spill` but shipped the child's
+/// ORIGINAL exit code (0) to `JobManager`, so `[N]`'s status silently read
+/// `done:0` even though the output was capped — the loud exit-3 contract
+/// foreground commands get did not apply to `cmd &`.
+#[tokio::test]
+async fn test_spilled_background_job_reports_failed_not_done() {
+    let kernel = setup().await;
+
+    // `setup()` builds a NoLocal (isolated) kernel, which forces in-memory
+    // spill mode automatically — no disk writes in this test (CLAUDE.md).
+    kernel.execute("set -o output-limit=64").await.unwrap();
+
+    kernel.execute("seq 1 5000 &").await.unwrap();
+
+    let status = wait_for_job(&kernel, 1, Duration::from_secs(5)).await;
+    assert_eq!(
+        status, "failed:3",
+        "a spilled background job must report failed:3 (loud), not done:0 (silent): {status}"
+    );
+}
+
 // ============================================================================
 // Pipelines in Background
 // ============================================================================
@@ -370,6 +394,40 @@ async fn test_jobs_builtin_shows_background_job() {
         "expected job info, got: {}",
         result.text_out()
     );
+}
+
+/// GH #243(a) end-to-end: `jobs --json` for a job that exited non-zero used
+/// to report only `{"status":"Failed"}` — the audit verified the exit code
+/// was recoverable only by blocking on `wait` or string-parsing
+/// `/v/jobs/N/status`. Routed through `kernel.execute()` (not the builtin's
+/// `.execute()` directly, per CLAUDE.md) so the whole dispatch chain —
+/// background spawn, `JobManager`, `JobInfo` serde, the `jobs` builtin's
+/// `--json` row — is exercised, not just the unit-level pieces.
+#[tokio::test]
+async fn jobs_json_carries_exit_code_for_failed_job() {
+    let kernel = setup().await;
+    kernel
+        .execute("bgfail() { return 42; }; bgfail & wait %1")
+        .await
+        .expect("execute");
+
+    let result = kernel.execute("jobs --json").await.expect("execute");
+    assert!(result.ok(), "jobs --json failed: {}", result.err);
+
+    let json: serde_json::Value =
+        serde_json::from_str(&result.text_out()).expect("jobs --json must be valid JSON");
+    let rows = json.as_array().expect("jobs --json is an array of rows");
+    assert_eq!(rows.len(), 1, "expected exactly one job row: {json}");
+
+    // GH #241: the pinned lowercase wire spelling, not the capitalized
+    // Display string ("Failed") the old hand-rolled row used to emit.
+    assert_eq!(rows[0]["status"], "failed");
+    assert_eq!(
+        rows[0]["exit_code"], 42,
+        "the exit code must survive onto jobs --json: {}",
+        rows[0]
+    );
+    assert_eq!(rows[0]["path"], "/v/jobs/1/");
 }
 
 /// `wait %N` — the bash jobspec form — must parse (it was a lexer error) and

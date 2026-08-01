@@ -70,6 +70,7 @@ impl<'de> serde::Deserialize<'de> for OutputPayload {
 /// shows the exact form). The nonce is command- and path-scoped, so it cannot
 /// authorize a different command or a path outside `paths`.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
 pub struct LatchRequest {
     /// Confirmation nonce — pass back as `--confirm=<nonce>` on the same command.

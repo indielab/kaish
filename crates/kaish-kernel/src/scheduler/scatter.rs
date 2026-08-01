@@ -318,21 +318,27 @@ impl ScatterGatherRunner {
                 let mut result =
                     runner.run_sequential(&commands, &mut worker_ctx, &*worker_dispatcher).await;
 
-                // Per-worker spill boundary. `run_sequential` never reaches the
-                // kernel's top-level post-run spill check (kernel.rs:2704), so
-                // without this each worker holds its FULL output in memory —
+                // Capture the worker's OWN completion signal before the spill
+                // remap below can rewrite `result.code` to 3 — GH #132's tie-break
+                // (below) needs to know whether the command itself genuinely
+                // finished clean, and a spilled-but-otherwise-successful result
+                // must not be misread as "this worker timed out" just because
+                // its (remapped) exit code is no longer 0.
+                let genuinely_completed = result.ok();
+
+                // Per-worker spill boundary + exit-3 remap. `run_sequential` never
+                // reaches the kernel's top-level post-run spill contract
+                // (`Kernel::execute_pipeline`'s `apply_spill_contract` call), so
+                // without this each worker both holds its FULL output in memory —
                 // N concurrent workers × large output evades the sandbox
                 // `output_limit` (10 workers × 1 GB = 10 GB resident before
-                // anything spills). Cap here, where the N× multiplication lives;
-                // `child_for_pipeline` shares the parent's `output_limit`, so
-                // workers cap against the same budget.
-                if worker_ctx.output_limit.is_enabled() {
-                    let _ = crate::output_limit::spill_if_needed(
-                        &mut result,
-                        &worker_ctx.output_limit,
-                    )
-                    .await;
-                }
+                // anything spills) — AND reports its original exit code even when
+                // its output was capped, so `gather`'s 0-vs-123 decision (which
+                // reads `result.ok()`) silently counted a spilled worker as
+                // success (GH #212). `child_for_pipeline` shares the parent's
+                // `output_limit`, so workers cap against the same budget and get
+                // the same loud exit-3 contract the foreground pipeline does.
+                crate::output_limit::apply_spill_contract(&mut result, &worker_ctx.output_limit).await;
 
                 // Worker finished — abort the timer if still pending so it
                 // doesn't fire a now-pointless cancel and idle resources.
@@ -348,13 +354,13 @@ impl ScatterGatherRunner {
                 // builtin's) own `tokio::select! { operation, cancelled() }`
                 // is unbiased: if cancellation has *already* been signaled by
                 // the time the operation's own timer also matures, tokio can
-                // still pick the operation's branch, so `result.ok()` can be
-                // `true` even after the flag was set and `cancel.cancel()`
-                // was called. The result's own success is the ground truth
-                // the flag can't override — a worker that truly finished
-                // successfully must never be reported as timed out, no
-                // matter what the racing flag says.
-                let timed_out = timed_out_check.load(Ordering::SeqCst) && !result.ok();
+                // still pick the operation's branch, so `genuinely_completed`
+                // can be `true` even after the flag was set and
+                // `cancel.cancel()` was called. The result's own (pre-remap)
+                // success is the ground truth the flag can't override — a
+                // worker that truly finished successfully must never be
+                // reported as timed out, no matter what the racing flag says.
+                let timed_out = timed_out_check.load(Ordering::SeqCst) && !genuinely_completed;
 
                 ScatterResult { item, result, timed_out }
             }.instrument(worker_span)));
@@ -997,6 +1003,41 @@ mod tests {
         assert_eq!(row["latch"]["command"], "rm");
     }
 
+    // GH #212: gather's 0-vs-123 decision reads `result.ok()` (`code == 0`).
+    // Before the fix, `run_parallel` never remapped a spilled worker's exit
+    // code, so a worker whose output overflowed the shared output limit kept
+    // `code == 0` (`did_spill == true` but otherwise untouched) and this
+    // aggregation silently read it as a success. `apply_spill_contract` (now
+    // called from `run_parallel`) remaps a spilled worker's own `code` to 3
+    // before it ever reaches `gather_results` — this test pins that
+    // `gather_results` itself already does the right thing once it's handed
+    // a properly-remapped result, independent of any real spill-file I/O.
+    #[test]
+    fn test_gather_results_spilled_worker_counts_as_failed() {
+        let mut spilled = ExecResult::success("truncated preview");
+        spilled.did_spill = true;
+        spilled.original_code = Some(0);
+        spilled.code = 3; // what `apply_spill_contract` does to a spilled worker
+
+        let results = vec![
+            ScatterResult { item: item("a"), result: spilled, timed_out: false },
+            ScatterResult { item: item("b"), result: ExecResult::success("clean"), timed_out: false },
+        ];
+        let out = gather_results(&results, &GatherOptions::default());
+        assert_eq!(
+            out.code, 123,
+            "a spilled worker (code remapped to 3) must count as failed, not silently succeed"
+        );
+        let rows: Vec<serde_json::Value> = out
+            .text_out()
+            .lines()
+            .map(|l| serde_json::from_str(l).unwrap())
+            .collect();
+        assert_eq!(rows[0]["ok"], false, "spilled row must read ok:false: {:?}", rows[0]);
+        assert_eq!(rows[0]["code"], 3, "spilled row must carry the remapped exit 3: {:?}", rows[0]);
+        assert_eq!(rows[1]["ok"], true, "the clean worker's own row is unaffected: {:?}", rows[1]);
+    }
+
     #[test]
     fn test_gather_results_lines_happy_path() {
         let results = vec![
@@ -1259,7 +1300,7 @@ mod tests {
 
     #[tokio::test]
     async fn worker_spills_over_the_shared_output_limit() {
-        use crate::output_limit::{spill_if_needed, OutputLimitConfig};
+        use crate::output_limit::{apply_spill_contract, OutputLimitConfig};
 
         // Small in-memory limit (no disk writes in tests — CLAUDE.md).
         let mut cfg = OutputLimitConfig::agent().in_memory();
@@ -1275,12 +1316,20 @@ mod tests {
         let worker_ctx = parent.child_for_pipeline();
         assert!(worker_ctx.output_limit.is_enabled(), "budget must reach the worker");
 
-        // Mirror the worker sequence: a large result, then the per-worker spill.
+        // Mirror the worker sequence: a large result, then the per-worker
+        // spill/exit-3 contract (GH #212 — `apply_spill_contract` is what
+        // `run_parallel` now calls, replacing a bare `spill_if_needed` that
+        // never remapped the exit code).
         let mut result = ExecResult::success("x".repeat(4096));
         assert!(worker_ctx.output_limit.is_enabled());
-        let _ = spill_if_needed(&mut result, &worker_ctx.output_limit).await;
+        apply_spill_contract(&mut result, &worker_ctx.output_limit).await;
 
         assert!(result.did_spill, "worker output over the limit must spill, not stay resident");
+        assert_eq!(
+            result.code, 3,
+            "a spilled worker must exit 3 so gather's ok()-based aggregation counts it as failed"
+        );
+        assert_eq!(result.original_code, Some(0), "the worker's own clean exit is preserved");
         assert!(
             result.text_out().len() < 4096,
             "spilled output must be truncated, not the full payload: {} bytes",

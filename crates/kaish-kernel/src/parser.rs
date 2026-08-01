@@ -1093,15 +1093,15 @@ where
         // persistent assignment. Must precede `assignment_parser` so the
         // prefixed-command form wins when a command follows.
         // Env-prefix assignment stays BARE-IDENT ONLY — a subscripted target
-        // (`user[email]=x cmd`) is illegal here, not just unsupported:
-        // structured values can't cross the process boundary anyway (see
-        // docs/arrays-and-hashes.md, "Assignment lvalues"). Using
-        // `ident_parser()` directly (not `lvalue_path_parser()`) means a
-        // bracket run before `=` in this position never gets a chance to
-        // parse as a path — it either isn't there (plain ident) or the
-        // lexer's lvalue suppression fires and the stray `LBracket` fails
-        // this parser, falling through to a real parse error instead of
-        // silently being accepted.
+        // (`user[email]=x cmd`) is illegal here, not just unsupported: a
+        // structured value cannot cross the process boundary into a child's
+        // environment, so there is nothing correct to assign.
+        //
+        // Using `ident_parser()` directly, not `lvalue_path_parser()`, means a
+        // bracket run before `=` never gets a chance to parse as a path here.
+        // Either it is absent (plain ident), or the lexer's lvalue suppression
+        // fires and the stray `LBracket` fails this parser. Both fall through
+        // to a real parse error rather than being accepted silently.
         let env_prefix_assign = ident_parser()
             .then_ignore(just(Token::Eq))
             .then(value_expr_parser())
@@ -1221,9 +1221,9 @@ where
 
 /// Assignment: `NAME=value` / `NAME[sub]=value` (bash-style), or
 /// `local NAME = value` (scoped). Bracket paths are lvalues here — see
-/// `docs/arrays-and-hashes.md` ("Assignment lvalues") — and are resolved at
-/// runtime by `Scope::walk_write`, sharing the read resolver's per-hop
-/// classification.
+/// `docs/LANGUAGE.md`, "Assignment — bracket-path lvalues". They resolve at
+/// runtime in `Scope::walk_write`, which shares the read resolver's per-hop
+/// classification so a read and a write disagree about no path.
 fn assignment_parser<'tokens, I>(
 ) -> impl Parser<'tokens, I, Assignment, extra::Err<Rich<'tokens, Token, Span>>> + Clone
 where
@@ -2153,7 +2153,7 @@ where
 /// - File tests: `[[ -f path ]]`, `[[ -d path ]]`, etc.
 /// - String tests: `[[ -z str ]]`, `[[ -n str ]]`
 /// - Shape-guard tests: `[[ -list x ]]`, `[[ -record x ]]` (see
-///   `docs/arrays-and-hashes.md`, decision F)
+///   `docs/LANGUAGE.md`, "Shape guards")
 /// - Comparisons: `[[ $X == "value" ]]`, `[[ $NUM -gt 5 ]]`
 /// - Compound: `[[ -f a && -d b ]]`, `[[ -z x || -n y ]]`, `[[ ! -f file ]]`
 ///
@@ -2230,11 +2230,10 @@ where
         });
 
     // Collection membership: `e in $coll` / `e not in $coll` (element-in-list,
-    // key-in-record; see docs/arrays-and-hashes.md). There is no dedicated
-    // `not` token — it lexes as a plain identifier, so `not_in` is matched as
-    // the two-word sequence `Ident("not") In`. `not_in` must be tried before
-    // `in` in the choice below so `e not in c` doesn't get parsed as `e` `in`
-    // failing on the stray `not` bareword.
+    // key-in-record; see docs/LANGUAGE.md, "Membership"). There is no dedicated
+    // `not` token — it lexes as a plain identifier, so `not_in` matches the
+    // two-word sequence `Ident("not") In`. Try `not_in` before `in` below, or
+    // `e not in c` parses as `e in` and then fails on the stray `not` bareword.
     let not_in = primary_expr_parser()
         .then_ignore(select! { Token::Ident(s) if s == "not" => () })
         .then_ignore(just(Token::In))
@@ -2426,11 +2425,11 @@ where
 
 /// List literal: `[a b c]`, `[]`, `[...$xs date]`. Elements may be separated
 /// by whitespace alone, commas, newlines, or any mix — all optional and
-/// interchangeable (see docs/arrays-and-hashes.md, "Commas optional in BOTH
-/// lists and records") — and newlines are consumed rather than treated as
-/// statement terminators, so a multi-line literal doesn't end the assignment
-/// early. A bare element nests as ONE item; `...` flattens a list operand's
-/// elements into this one (spread).
+/// interchangeable (see docs/LANGUAGE.md, "Construction — list/record
+/// literals"). Newlines are consumed rather than treated as statement
+/// terminators, so a multi-line literal does not end the assignment early.
+/// A bare element nests as ONE item; `...` flattens a list operand's elements
+/// into this one (spread).
 fn list_literal_parser<'tokens, I, V>(
     value: V,
 ) -> impl Parser<'tokens, I, Expr, extra::Err<Rich<'tokens, Token, Span>>> + Clone

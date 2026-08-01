@@ -2258,9 +2258,9 @@ impl Kernel {
                     }
                 } else {
                     // Subscripted lvalue (`xs[0]=v`, `user[email]=v`, …): always
-                    // mutates the existing root wherever it lives — `local` is
-                    // meaningless here (see docs/arrays-and-hashes.md, "Assignment
-                    // lvalues").
+                    // mutates the existing root wherever it lives, so `local`
+                    // has nothing to declare. See docs/LANGUAGE.md,
+                    // "Assignment — bracket-path lvalues".
                     scope.walk_write(&assign.path, value.clone()).map_err(|e| match e {
                         PathError::UndefinedRoot(name) => anyhow::anyhow!(
                             "{name}: undefined — create it first, e.g. `{name}={{}}` or `{name}=[]`"
@@ -2892,17 +2892,12 @@ impl Kernel {
 
         let mut result = self.runner.run(&pipeline.commands, &mut ctx, self).await;
 
-        // Post-hoc spill check (catches builtins and fast external commands)
-        if ctx.output_limit.is_enabled() {
-            let _ = crate::output_limit::spill_if_needed(&mut result, &ctx.output_limit).await;
-        }
-
-        // Signal spill with exit 3; agent reads the spill file directly
-        // (use `set +o output-limit` before cat/head/tail to bypass the limit)
-        if result.did_spill {
-            result.original_code = Some(result.code);
-            result.code = 3;
-        }
+        // Post-hoc spill check + exit-3 remap (catches builtins and fast
+        // external commands; also catches a ring overflow that already
+        // flipped `did_spill` even when the limit itself is disabled, GH
+        // #191). This is the shared contract every execution surface must
+        // apply — see `apply_spill_contract`'s doc comment (GH #212).
+        crate::output_limit::apply_spill_contract(&mut result, &ctx.output_limit).await;
 
         // Sync changes back from context
         {
@@ -2984,7 +2979,15 @@ impl Kernel {
         tokio::spawn(crate::telemetry::bind_current_context(async move {
             // runner.run needs a &dyn CommandDispatcher; fork.as_ref()
             // gives us that (Kernel implements CommandDispatcher).
-            let result = runner.run(&commands, &mut bg_ctx, fork.as_ref()).await;
+            let mut result = runner.run(&commands, &mut bg_ctx, fork.as_ref()).await;
+
+            // Apply the same spill/exit-3 contract the foreground path gets
+            // (`execute_pipeline`'s `apply_spill_contract` call) — without
+            // this, a background job whose output overflows the capture ring
+            // or trips the output limit reports the child's ORIGINAL exit
+            // code to JobManager, so `[N] done:0`/`Job::status()` silently
+            // read success even though the output was capped (GH #212).
+            crate::output_limit::apply_spill_contract(&mut result, &bg_ctx.output_limit).await;
 
             // Write output to streams
             let text = result.text_out();
@@ -3226,37 +3229,60 @@ impl Kernel {
             }
         };
 
-        // Build arguments (async to support command substitution, schema-aware for flag values)
-        let schema = tool.schema();
-        let tool_args = self.build_args_async(args, Some(&schema)).await?;
+        // Build arguments (async to support command substitution, schema-aware
+        // for flag values), then decide `--help` and `owns_output` — all three
+        // read the tool's schema and nothing after this block does, so the whole
+        // schema borrow is scoped here and cannot ride the `tool.execute` await
+        // below (GH #48, item 7).
+        let (tool_args, wants_help, owns_output) = {
+            // Prefer the kernel's schema catalog over `tool.schema()`: for a
+            // clap-derived builtin, `schema()` rebuilds the entire clap
+            // `Command` and reflects it into a fresh `ToolSchema` — ~34
+            // allocations per command, 18% of all allocations in the GH #48
+            // many-small-commands profile — to produce exactly what the catalog
+            // already holds. The catalog is seeded from this same registry in
+            // `Kernel::assemble` and is name-sorted, so this is a binary search
+            // with no allocation at all. `owned` covers a tool the catalog
+            // doesn't list (registered after assembly, or whose schema name
+            // differs from its dispatch name): the fallback calls the same
+            // `schema()` and is equivalent, just not free.
+            let catalog = { self.exec_ctx.read().await.tool_schemas.clone() };
+            let owned;
+            let schema: &crate::tools::ToolSchema =
+                match catalog.binary_search_by(|s| s.name.as_str().cmp(name)) {
+                    Ok(i) => &catalog[i],
+                    Err(_) => {
+                        owned = tool.schema();
+                        &owned
+                    }
+                };
 
-        // --help / -h: show the generic whole-tool help, unless either the tool's
-        // root schema claims that flag OR the tool owns its output. Owned-output
-        // tools re-parse their own argv and route their own `--help` — including
-        // leaf/subcommand help — through their internal (clap) parser, so the root
-        // schema can't express "this leaf claims help" and intercepting here would
-        // render top-level help and return before `execute()` ever sees the
-        // request (#51). Pass it through and let the tool render its own help.
-        let schema_claims = |flag: &str| -> bool {
-            let bare = flag.trim_start_matches('-');
-            schema.params.iter().any(|p| p.matches_flag(flag) || p.matches_flag(bare))
+            let tool_args = self.build_args_async(args, Some(schema)).await?;
+
+            // --help / -h: show the generic whole-tool help, unless either the tool's
+            // root schema claims that flag OR the tool owns its output. Owned-output
+            // tools re-parse their own argv and route their own `--help` — including
+            // leaf/subcommand help — through their internal (clap) parser, so the root
+            // schema can't express "this leaf claims help" and intercepting here would
+            // render top-level help and return before `execute()` ever sees the
+            // request (#51). Pass it through and let the tool render its own help.
+            let schema_claims = |flag: &str| -> bool {
+                let bare = flag.trim_start_matches('-');
+                schema.params.iter().any(|p| p.matches_flag(flag) || p.matches_flag(bare))
+            };
+            let wants_help = !schema.owns_output
+                && ((tool_args.flags.contains("help") && !schema_claims("help"))
+                    || (tool_args.flags.contains("h") && !schema_claims("-h")));
+
+            (tool_args, wants_help, schema.owns_output)
         };
-        let wants_help = !schema.owns_output
-            && ((tool_args.flags.contains("help") && !schema_claims("help"))
-                || (tool_args.flags.contains("h") && !schema_claims("-h")));
+
         if wants_help {
             let help_topic = crate::help::HelpTopic::Tool(name.to_string());
             let ctx = self.exec_ctx.read().await;
             let content = crate::help::get_help(&help_topic, &ctx.tool_schemas);
             return Ok(ExecResult::with_output(crate::interpreter::OutputData::text(content)));
         }
-
-        // `owns_output` is the only thing read from `schema` after the recursive
-        // `tool.execute` await below; capture the bool and drop the (heap-backed)
-        // `ToolSchema` now so it doesn't ride that await in every command's frame
-        // (GH #48, item 7).
-        let owns_output = schema.owns_output;
-        drop(schema);
 
         // Snapshot exec_ctx into a local context and release the write lock
         // before calling tool.execute. Holding the write across tool execution

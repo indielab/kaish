@@ -167,6 +167,11 @@ Consequences for embedders:
   `allow_external_commands` (see [Sandboxing](#sandboxing-and-external-commands)).
   Git is an ordinary external command (`git status`, `git log`): it runs via
   `subprocess` against your system `git`, with no in-tree builtin or backend.
+  The old `kaish-tools-git` crate (git builtin + `GitVfs`, removed in 0.9.0) is
+  being reinvented as a shallow, safety-first git plugin in
+  [kaish-extras](https://github.com/tobert/kaish-extras) — history, autopsy,
+  and design intent live in `docs/git.md` there, and that repo is its
+  maintained home going forward.
 - A read-only agent shell wants the default features plus a custom backend —
   see [with_backend hermeticity](#custom-backend-kernelwith_backend).
 
@@ -822,6 +827,23 @@ same API as a foreground gate.
 
 The status strings are exactly `running`, `done:0`, and `failed:{code}` —
 match on those, not on `completed`.
+
+`JobId`/`JobStatus`/`JobInfo` (`kaish-types`) implement `Serialize`/
+`Deserialize` (plus `schemars::JsonSchema` behind the `schema` feature), so an
+embedder can serialize `JobManager::list()`/`get()` output directly rather
+than hand-rolling a mirror struct. `JobStatus`'s wire spelling under
+serde is lowercase (`"running"`/`"stopped"`/`"done"`/`"latched"`/`"failed"`),
+matching the `/v/jobs/N/status` text vocabulary above — not the capitalized
+`Display` impl used for human-facing text (the `jobs` table). `JobInfo` also
+carries `exit_code: Option<i64>` (set once the job finishes), `started_at` /
+`finished_at: Option<SystemTime>` (acquired via `kaish_types::clock`, so they
+work on `wasm32-unknown-unknown` too), and `pgids: Vec<u32>` — the real OS
+process groups a background job spawned. `pgids` is the surface to use for
+"what is this job actually doing"; `pid` is set only for a Ctrl-Z-stopped
+foreground job (a TTY concept an embedder never sees) and is otherwise
+`None`. For a finished job's `ExecResult` without blocking, use the
+non-blocking `JobManager::try_result(id) -> Option<ExecResult>` instead of
+`wait`, which parks until the job completes.
 
 ## Frontend Completion Helpers (`kaish_client::completion`)
 

@@ -13,6 +13,51 @@ use crate::tools::{schema_from_clap, ExecContext, ToolCtx, GlobalFlags, Tool, To
 /// Fg tool: resume a stopped job in the foreground.
 pub struct Fg;
 
+/// Give a stopped job the foreground and confirm it actually resumed,
+/// end to end — decoupled from the concrete terminal/signal syscalls so
+/// the *ordering* can be unit-tested without a real controlling terminal
+/// (`TerminalState::init()` needs one and has no test-friendly
+/// constructor; GH #161).
+///
+/// Contract: `give_terminal` runs first (standard job-control practice —
+/// the process group must already be the terminal's foreground group
+/// before it's continued, or it risks a `SIGTTIN`/`SIGTTOU` the instant it
+/// touches the terminal). `send_sigcont` runs next; `mark_running` — which
+/// tells the job manager the job is `Running` — only runs if `send_sigcont`
+/// succeeded. If either step fails, any terminal handoff already done is
+/// undone via `reclaim_terminal` before returning the error. This is the
+/// same class of fix as `bg.rs`'s #160 (never mark a job `Running` before
+/// its `SIGCONT` is confirmed), extended to `fg`'s extra terminal-ownership
+/// surface.
+#[cfg(unix)]
+async fn resume_stopped_job_for_foreground<GiveTerm, SendCont, Reclaim, MarkRunning, Fut>(
+    give_terminal: GiveTerm,
+    send_sigcont: SendCont,
+    reclaim_terminal: Reclaim,
+    mark_running: MarkRunning,
+) -> Result<(), String>
+where
+    GiveTerm: FnOnce() -> nix::Result<()>,
+    SendCont: FnOnce() -> nix::Result<()>,
+    Reclaim: FnOnce() -> nix::Result<()>,
+    MarkRunning: FnOnce() -> Fut,
+    Fut: std::future::Future<Output = ()>,
+{
+    if let Err(e) = give_terminal() {
+        return Err(format!("fg: failed to give terminal: {}", e));
+    }
+
+    if let Err(e) = send_sigcont() {
+        if let Err(e2) = reclaim_terminal() {
+            tracing::warn!("fg: failed to reclaim terminal after failed SIGCONT: {}", e2);
+        }
+        return Err(format!("fg: failed to continue job: {}", e));
+    }
+
+    mark_running().await;
+    Ok(())
+}
+
 /// clap-derived argv layer for fg.
 #[derive(Parser, Debug)]
 #[command(name = "fg", about = "Resume a stopped job in the foreground")]
@@ -20,7 +65,8 @@ struct FgArgs {
     #[command(flatten)]
     global: GlobalFlags,
 
-    /// Job specifier (e.g. `%1`) or PID; defaults to the most recent job.
+    /// Job id, with or without the `%` prefix (`%1` or `1`). Defaults to the
+    /// highest-numbered stopped job.
     job: Vec<String>,
 }
 
@@ -109,16 +155,20 @@ impl Tool for Fg {
             let pid = nix::unistd::Pid::from_raw(pid_raw as i32);
             let pgid = nix::unistd::Pid::from_raw(pgid_raw as i32);
 
-            // Give terminal to the job's process group
-            if let Err(e) = term.give_terminal_to(pgid) {
-                return ExecResult::failure(1, format!("fg: failed to give terminal: {}", e));
-            }
-
-            // Mark as resumed and send SIGCONT
-            manager.resume_job(job_id).await;
-            if let Err(e) = nix::sys::signal::killpg(pgid, nix::sys::signal::Signal::SIGCONT) {
-                let _ = term.reclaim_terminal();
-                return ExecResult::failure(1, format!("fg: failed to continue job: {}", e));
+            // Give the job the terminal, confirm SIGCONT, and only then mark
+            // it Running — see `resume_stopped_job_for_foreground` for why
+            // the ordering and the rollback-on-failure matter (GH #161).
+            let term_for_signal = term.clone();
+            let manager_for_resume = manager.clone();
+            let resumed = resume_stopped_job_for_foreground(
+                || term.give_terminal_to(pgid),
+                || nix::sys::signal::killpg(pgid, nix::sys::signal::Signal::SIGCONT),
+                || term_for_signal.reclaim_terminal(),
+                || async move { manager_for_resume.resume_job(job_id).await },
+            )
+            .await;
+            if let Err(msg) = resumed {
+                return ExecResult::failure(1, msg);
             }
 
             eprintln!("{}", cmd);
@@ -157,5 +207,128 @@ impl Tool for Fg {
 
             ExecResult::from_output(code, String::new(), String::new())
         }
+    }
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::*;
+    use std::sync::{Arc, Mutex};
+
+    /// Records the order in which the injected steps actually ran, so the
+    /// ordering contract itself — not just the final `Result` — is pinned.
+    fn recorder() -> Arc<Mutex<Vec<&'static str>>> {
+        Arc::new(Mutex::new(Vec::new()))
+    }
+
+    /// GH #161: a failed `SIGCONT` must never let the job manager be told
+    /// the job is `Running`, and the terminal handoff that already
+    /// happened must be undone. Pre-fix, `mark_running` (the analogue of
+    /// `manager.resume_job`) ran unconditionally before the `SIGCONT`
+    /// result was even checked; this pins the corrected order.
+    #[tokio::test]
+    async fn test_failed_sigcont_skips_mark_running_and_reclaims_terminal() {
+        let calls = recorder();
+        let (c1, c2, c3, c4) = (calls.clone(), calls.clone(), calls.clone(), calls.clone());
+
+        let result = resume_stopped_job_for_foreground(
+            move || {
+                c1.lock().unwrap().push("give_terminal");
+                Ok(())
+            },
+            move || {
+                c2.lock().unwrap().push("send_sigcont");
+                Err(nix::errno::Errno::ESRCH)
+            },
+            move || {
+                c3.lock().unwrap().push("reclaim_terminal");
+                Ok(())
+            },
+            move || {
+                let c4 = c4.clone();
+                async move { c4.lock().unwrap().push("mark_running") }
+            },
+        )
+        .await;
+
+        assert!(result.is_err(), "a failed SIGCONT must surface as an error");
+        assert_eq!(
+            *calls.lock().unwrap(),
+            vec!["give_terminal", "send_sigcont", "reclaim_terminal"],
+            "mark_running must never run after a failed SIGCONT, and the \
+             terminal handoff must be reclaimed"
+        );
+    }
+
+    /// If the terminal handoff itself fails, nothing past it should run —
+    /// no `SIGCONT`, no reclaim (there was nothing to reclaim), no
+    /// `mark_running`.
+    #[tokio::test]
+    async fn test_terminal_handoff_failure_skips_everything_else() {
+        let calls = recorder();
+        let (c1, c2, c3, c4) = (calls.clone(), calls.clone(), calls.clone(), calls.clone());
+
+        let result = resume_stopped_job_for_foreground(
+            move || {
+                c1.lock().unwrap().push("give_terminal");
+                Err(nix::errno::Errno::ENOTTY)
+            },
+            move || {
+                c2.lock().unwrap().push("send_sigcont");
+                Ok(())
+            },
+            move || {
+                c3.lock().unwrap().push("reclaim_terminal");
+                Ok(())
+            },
+            move || {
+                let c4 = c4.clone();
+                async move { c4.lock().unwrap().push("mark_running") }
+            },
+        )
+        .await;
+
+        assert!(result.is_err());
+        assert_eq!(
+            *calls.lock().unwrap(),
+            vec!["give_terminal"],
+            "a failed terminal handoff must short-circuit before SIGCONT"
+        );
+    }
+
+    /// The happy path: `mark_running` only runs, and only runs, after a
+    /// successful `SIGCONT` — confirming the fix didn't just move the bug
+    /// (e.g. by skipping `mark_running` on success too).
+    #[tokio::test]
+    async fn test_successful_resume_marks_running_after_sigcont() {
+        let calls = recorder();
+        let (c1, c2, c3, c4) = (calls.clone(), calls.clone(), calls.clone(), calls.clone());
+
+        let result = resume_stopped_job_for_foreground(
+            move || {
+                c1.lock().unwrap().push("give_terminal");
+                Ok(())
+            },
+            move || {
+                c2.lock().unwrap().push("send_sigcont");
+                Ok(())
+            },
+            move || {
+                c3.lock().unwrap().push("reclaim_terminal");
+                Ok(())
+            },
+            move || {
+                let c4 = c4.clone();
+                async move { c4.lock().unwrap().push("mark_running") }
+            },
+        )
+        .await;
+
+        assert!(result.is_ok());
+        assert_eq!(
+            *calls.lock().unwrap(),
+            vec!["give_terminal", "send_sigcont", "mark_running"],
+            "reclaim_terminal must not run when nothing failed"
+        );
     }
 }

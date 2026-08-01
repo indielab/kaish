@@ -8,6 +8,7 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::future::Future;
 use std::sync::Arc;
+use std::time::SystemTime;
 
 use tokio::sync::{oneshot, Mutex};
 use tokio::task::JoinHandle;
@@ -65,6 +66,15 @@ pub struct Job {
     /// straight to the real processes via `killpg`, not just terminate. Empty
     /// for a pure-builtin job (nothing with a PGID ran).
     pgids: Vec<u32>,
+    /// Wall-clock time this job started running, stamped at construction.
+    /// Acquired via `kaish_types::clock::system_now` (not `SystemTime::now()`
+    /// directly) so this stays valid on `wasm32-unknown-unknown`. Surfaced on
+    /// `JobInfo.started_at` (GH #243).
+    started_at: SystemTime,
+    /// Wall-clock time this job's result became available, stamped once by
+    /// `try_poll` the moment `self.result` transitions from `None` to `Some`.
+    /// Surfaced on `JobInfo.finished_at` (GH #243).
+    finished_at: Option<SystemTime>,
 }
 
 impl Job {
@@ -86,6 +96,8 @@ impl Job {
             stopped: false,
             cancel: None,
             pgids: Vec::new(),
+            started_at: kaish_types::clock::system_now(),
+            finished_at: None,
         }
     }
 
@@ -107,6 +119,8 @@ impl Job {
             stopped: false,
             cancel: None,
             pgids: Vec::new(),
+            started_at: kaish_types::clock::system_now(),
+            finished_at: None,
         }
     }
 
@@ -137,6 +151,8 @@ impl Job {
             stopped: false,
             cancel: None,
             pgids: Vec::new(),
+            started_at: kaish_types::clock::system_now(),
+            finished_at: None,
         }
     }
 
@@ -158,6 +174,12 @@ impl Job {
             stopped: true,
             cancel: None,
             pgids: Vec::new(),
+            // The foreground process actually started earlier (before Ctrl-Z
+            // stopped it into job tracking), but kaish had no job entry for it
+            // until now — "now" is the best available approximation, and a
+            // strict improvement over having no timestamp at all.
+            started_at: kaish_types::clock::system_now(),
+            finished_at: None,
         }
     }
 
@@ -342,6 +364,7 @@ impl Job {
                 Ok(result) => {
                     self.result = Some(result);
                     self.result_rx = None;
+                    self.finished_at = Some(kaish_types::clock::system_now());
                     return true;
                 }
                 Err(tokio::sync::oneshot::error::TryRecvError::Empty) => {
@@ -352,6 +375,7 @@ impl Job {
                     // Channel closed without result - job failed
                     self.result = Some(ExecResult::failure(1, "job channel closed"));
                     self.result_rx = None;
+                    self.finished_at = Some(kaish_types::clock::system_now());
                     return true;
                 }
             }
@@ -383,10 +407,44 @@ impl Job {
                     }
                 };
                 self.result = Some(result);
+                self.finished_at = Some(kaish_types::clock::system_now());
                 return true;
             }
 
         false
+    }
+
+    /// The process groups recorded for this job, combining `pgids` (from
+    /// externals spawned while running) with the legacy single `pgid`
+    /// recorded for a *stopped* foreground job — the single accessor `list`/
+    /// `get`/`reap_finished` use to fill `JobInfo.pgids` (GH #243), and what
+    /// `JobManager::job_pgids` delegates to so the combine logic exists once.
+    fn pgids_combined(&self) -> Vec<u32> {
+        let mut v = self.pgids.clone();
+        if let Some(pg) = self.pgid
+            && !v.contains(&pg)
+        {
+            v.push(pg);
+        }
+        v
+    }
+
+    /// Build the full `JobInfo` snapshot for this job. `status`/`latch` are
+    /// taken as parameters rather than recomputed here because both require
+    /// `&mut self` (they poll) — callers (`list`/`get`/`reap_finished`)
+    /// already did that poll to decide reap-safety before calling this. The
+    /// single chokepoint that populates every `JobInfo` field (GH #243), so
+    /// the three call sites can't drift on which fields they remember to set.
+    fn to_info(&self, status: JobStatus, latch: Option<kaish_types::result::LatchRequest>) -> JobInfo {
+        let exit_code = self.result.as_ref().map(|r| r.code);
+        JobInfo::new(self.id, self.command.clone(), status)
+            .with_output_file(self.output_file.clone())
+            .with_pid(self.pid)
+            .with_latch(latch)
+            .with_exit_code(exit_code)
+            .with_started_at(self.started_at)
+            .with_finished_at(self.finished_at)
+            .with_pgids(self.pgids_combined())
     }
 }
 
@@ -635,10 +693,7 @@ impl JobManager {
             .map(|job| {
                 let status = job.status();
                 let latch = job.latch();
-                JobInfo::new(job.id, job.command.clone(), status)
-                    .with_output_file(job.output_file.clone())
-                    .with_pid(job.pid)
-                    .with_latch(latch)
+                job.to_info(status, latch)
             })
             .collect()
     }
@@ -680,7 +735,8 @@ impl JobManager {
                 continue;
             };
             let status = job.status();
-            let info = JobInfo::new(job.id, job.command.clone(), status).with_pid(job.pid);
+            let latch = job.latch();
+            let info = job.to_info(status, latch);
             job.cleanup_files();
             removed.push(info);
         }
@@ -715,10 +771,7 @@ impl JobManager {
         jobs.get_mut(&id).map(|job| {
             let status = job.status();
             let latch = job.latch();
-            JobInfo::new(job.id, job.command.clone(), status)
-                .with_output_file(job.output_file.clone())
-                .with_pid(job.pid)
-                .with_latch(latch)
+            job.to_info(status, latch)
         })
     }
 
@@ -869,17 +922,20 @@ impl JobManager {
     /// so `kill %N` signals a stopped foreground job's group too.
     pub async fn job_pgids(&self, id: JobId) -> Vec<u32> {
         let jobs = self.jobs.lock().await;
-        jobs.get(&id)
-            .map(|job| {
-                let mut v = job.pgids.clone();
-                if let Some(pg) = job.pgid {
-                    if !v.contains(&pg) {
-                        v.push(pg);
-                    }
-                }
-                v
-            })
-            .unwrap_or_default()
+        jobs.get(&id).map(Job::pgids_combined).unwrap_or_default()
+    }
+
+    /// Non-blocking accessor for a finished job's result — `None` while the
+    /// job is still `Running`/`Stopped`, or if `id` doesn't exist. Unlike
+    /// [`Self::wait`], this never parks: it polls once and returns whatever is
+    /// (or isn't) already available. GH #243: previously the only ways to
+    /// read a job's `ExecResult` were `wait` (blocks until done) or
+    /// string-parsing `failed:{code}` off `/v/jobs/N/status`.
+    pub async fn try_result(&self, id: JobId) -> Option<ExecResult> {
+        let mut jobs = self.jobs.lock().await;
+        let job = jobs.get_mut(&id)?;
+        job.try_poll();
+        job.try_result().cloned()
     }
 
     /// Remove a job from tracking.
@@ -1042,6 +1098,121 @@ mod tests {
         let info = manager.get(id).await;
         assert!(info.is_some());
         assert_eq!(info.unwrap().status, JobStatus::Done);
+    }
+
+    #[tokio::test]
+    async fn test_job_info_carries_exit_code_on_failure() {
+        // GH #243(a): a job that exited 42 must surface the code on
+        // JobInfo.exit_code, not just JobStatus::Failed — the audit verified
+        // `jobs --json` lost it entirely.
+        let manager = JobManager::new();
+
+        let id = manager
+            .spawn("sh -c 'exit 42'".to_string(), async {
+                ExecResult::failure(42, "")
+            })
+            .await;
+
+        tokio::time::sleep(Duration::from_millis(10)).await;
+
+        let info = manager.get(id).await.expect("job exists");
+        assert_eq!(info.status, JobStatus::Failed);
+        assert_eq!(info.exit_code, Some(42), "exit code must survive onto JobInfo");
+    }
+
+    #[tokio::test]
+    async fn test_job_info_exit_code_none_while_running() {
+        let manager = JobManager::new();
+        let (_tx, rx) = oneshot::channel();
+        let id = manager.register("still going".to_string(), rx).await;
+
+        let info = manager.get(id).await.expect("job exists");
+        assert_eq!(info.status, JobStatus::Running);
+        assert!(info.exit_code.is_none(), "a running job has no exit code yet");
+    }
+
+    #[tokio::test]
+    async fn test_job_info_started_at_and_finished_at() {
+        // GH #243(b): timestamps must be present so an embedder can compute
+        // "running for Ns" or sort by recency.
+        let manager = JobManager::new();
+        let before_spawn = kaish_types::clock::system_now();
+
+        let id = manager
+            .spawn("quick".to_string(), async {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+                ExecResult::success("")
+            })
+            .await;
+
+        // Immediately after spawn, started_at is set but finished_at is not.
+        let info = manager.get(id).await.expect("job exists");
+        assert!(
+            info.started_at >= before_spawn,
+            "started_at must be stamped at (or after) spawn time"
+        );
+        assert!(info.finished_at.is_none(), "not finished yet");
+
+        let _ = manager.wait(id).await;
+
+        let info = manager.get(id).await.expect("job exists");
+        let finished_at = info.finished_at.expect("finished_at must be set once done");
+        assert!(
+            finished_at >= info.started_at,
+            "finished_at must be at or after started_at"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_job_info_surfaces_pgids() {
+        // GH #243(c): pgids (real OS process groups an embedder actually
+        // creates) must be surfaced on JobInfo — pid almost never is
+        // (TTY-only, Ctrl-Z path).
+        let manager = JobManager::new();
+        let id = manager.spawn("bg".to_string(), async { ExecResult::success("") }).await;
+
+        manager.add_pgid(id, 4242).await;
+        manager.add_pgid(id, 4243).await;
+
+        let info = manager.get(id).await.expect("job exists");
+        assert_eq!(info.pgids, vec![4242, 4243]);
+        assert!(info.pid.is_none(), "pid stays None for a non-stopped job");
+    }
+
+    #[tokio::test]
+    async fn test_try_result_is_non_blocking_and_none_while_running() {
+        // GH #243: previously the only way to read a finished job's ExecResult
+        // was the blocking `wait`; `Job::try_result` was `pub` but the `jobs`
+        // map was private, so nothing on JobManager could reach it.
+        let manager = JobManager::new();
+        let (_tx, rx) = oneshot::channel::<ExecResult>();
+        let id = manager.register("still going".to_string(), rx).await;
+
+        // Must return immediately (no sleep here) with None — the job never
+        // got a result.
+        assert!(manager.try_result(id).await.is_none());
+
+        // Unknown id -> None too, no panic.
+        assert!(manager.try_result(JobId(999)).await.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_try_result_returns_result_once_finished() {
+        let manager = JobManager::new();
+        let id = manager
+            .spawn("quick".to_string(), async { ExecResult::success("hi") })
+            .await;
+
+        tokio::time::sleep(Duration::from_millis(10)).await;
+
+        let result = manager.try_result(id).await.expect("job finished");
+        assert!(result.ok());
+        assert_eq!(&*result.text_out(), "hi");
+
+        // The job is still tracked (try_result doesn't reap) — a second call
+        // (and wait()) still sees it.
+        assert!(manager.try_result(id).await.is_some());
+        assert!(manager.wait(id).await.is_some());
     }
 
     #[tokio::test]
