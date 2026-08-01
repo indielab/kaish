@@ -1,9 +1,9 @@
 //! typeof — the shape guard: a value's type as a plain type name.
 //!
-//! Part of the native-collections shape-guard surface (see
-//! `docs/arrays-and-hashes.md`, decision F: "Ship a shape guard (`typeof` /
-//! `[[ -list ]]` / `[[ -record ]]`) — antidote to the keys-on-list footgun
-//! and the API-shape-variance trap"). `typeof $x` answers "what did this
+//! The shape-guard surface is `typeof`, `[[ -list ]]`, and `[[ -record ]]` —
+//! see `docs/LANGUAGE.md`, "Shape guards". It exists to close two footguns:
+//! calling `keys` on a list, and an API whose shape varies between calls.
+//! `typeof $x` answers "what did this
 //! value actually turn out to be" before an agent commits to `keys`/`values`
 //! or a `for` loop over it — the trap this guards against is an API call
 //! that sometimes returns a list and sometimes returns a single record.

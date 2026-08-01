@@ -1,7 +1,7 @@
 //! push — append value(s) to a list variable, in place.
 //!
-//! Part of the native-collections OPS surface (see `docs/arrays-and-hashes.md`,
-//! "Append — `push` (in-place); spelling frozen, pure `append` dropped"). `push`
+//! See `docs/LANGUAGE.md`, "Assignment — bracket-path lvalues + `push`". The
+//! spelling is frozen: kaish has one append idiom, not two. `push`
 //! mutates the named list in place, so it takes the variable **name**
 //! (bareword, like `read`/`unset`), not `$name` — `push xs date`, not
 //! `push $xs date`. The pure functional `append` builtin was deliberately

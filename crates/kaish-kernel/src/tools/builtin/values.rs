@@ -1,9 +1,8 @@
 //! values — the values of a collection, insertion order.
 //!
-//! See `docs/arrays-and-hashes.md`, "OPS — keys/values are builtins; length is
-//! the param-expansion `${#…}`". `values $collection` accepts a collection
-//! directly (never nested through another builtin), same rationale as
-//! [`super::keys`].
+//! See `docs/LANGUAGE.md`, "keys / values". `values $collection` takes a
+//! collection directly and is never nested through another builtin, for the
+//! same reason as [`super::keys`].
 //!
 //! jq semantics for the two collection shapes:
 //! - a **record** → its values, insertion order (pairwise-aligned with `keys`);
