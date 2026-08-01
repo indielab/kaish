@@ -181,10 +181,14 @@ impl Default for NonceStore {
 /// Generate a 32-character hex nonce (128 bits) from the OS CSPRNG.
 ///
 /// Pulls raw entropy via `getrandom` (already a kernel dependency for
-/// `mktemp`'s temp-name generation) rather than deriving the nonce from a
-/// hasher seeded with wall-clock time — a confirmation token gates
-/// destructive operations, so it must not be guessable or collidable by an
-/// adversary who can observe or influence the clock.
+/// `mktemp`'s temp-name generation) rather than from a non-cryptographic
+/// hasher. A confirmation token gates destructive operations, so it must be
+/// neither guessable nor collidable. The previous generator truncated its
+/// output to 32 bits, which is brute-forceable and collides at roughly 65,000
+/// issued nonces. 128 bits from the OS CSPRNG is neither.
+///
+/// The weakness was the truncation, not the clock: `RandomState` seeds its
+/// keys from OS entropy, so observing the clock alone did not predict a nonce.
 ///
 /// There is deliberately **no fallback** to a weaker generator: if the OS
 /// cannot supply entropy, issuing a nonce fails loudly (propagated to the
