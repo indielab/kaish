@@ -72,6 +72,14 @@ breaking entries are marked **BREAKING**.
   only checker that sees them.
 
 ### Fixed
+- **`fg` marks a job Running only after `SIGCONT` succeeds** (GH #161) — a failed
+  handoff or a failed `SIGCONT` reclaims the terminal and leaves the job `Stopped`.
+- The terminal is still handed over first, because a process group must own the
+  terminal before it is continued.
+- **REPL `exit` no longer waits on a backgrounded job** (GH #162) — `bg`'s reaper
+  polls the job every 200ms instead of blocking until it ends.
+- An exiting REPL orphans a backgrounded job rather than signaling it, matching
+  bash's `huponexit`-off default.
 - **`grep -r --encoding=<bad-label>` is now a loud usage error (exit 2)** naming the
   bad label — it used to report nothing and exit 1, indistinguishable from "no
   matches".
