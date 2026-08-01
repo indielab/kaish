@@ -1,6 +1,6 @@
 //! Native collection LITERALS: `xs=[a b c]` (list), `{port: 8080}` / `{port:8080}`
 //! (record), multi-line literals with trailing commas, `[...$xs date]` (spread),
-//! nesting. See docs/arrays-and-hashes.md.
+//! nesting. See `docs/LANGUAGE.md`, "Construction".
 //!
 //! Kernel-routed via `KernelConfig::isolated()` (pure data, no localfs) — pairs
 //! with `collection_access_tests.rs` (read side, already shipped) and

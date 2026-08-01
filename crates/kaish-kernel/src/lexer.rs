@@ -2112,8 +2112,8 @@ fn relex_fragment(
 /// Per-token context for the fusion passes: is this token part of a
 /// value-position collection literal? Both merge passes suppress fusion
 /// there so `x=[dog]` / `{port:8080}` reach the parser as primitive
-/// tokens instead of a fused `GlobWord`/`Ident` — see
-/// docs/arrays-and-hashes.md ("Implementation notes").
+/// tokens instead of a fused `GlobWord`/`Ident`. A fused token would reach
+/// the parser as one word, and the literal's structure would be gone.
 #[derive(Clone, Copy, Default)]
 struct ValueContext {
     /// Inside (or opening) a value-position `[`/`{` literal — suppresses
@@ -2745,8 +2745,8 @@ fn merge_flag_metachar_adjacent(tokens: Vec<Spanned<Token>>) -> Vec<Spanned<Toke
 /// A SEPARATE trigger suppresses fusion for an **assignment lvalue**
 /// (`fruits[0]=kiwi`, `services[web][port]=9090`): a bracket-pair run
 /// (no `*`/`?`) led by an `Ident` and immediately followed by `Token::Eq`
-/// is a subscripted assignment target, not a glob — see
-/// `docs/arrays-and-hashes.md` ("Assignment lvalues").
+/// is a subscripted assignment target, not a glob — see `docs/LANGUAGE.md`,
+/// "Assignment — bracket-path lvalues".
 fn merge_glob_adjacent(tokens: Vec<Spanned<Token>>, source: &str) -> Vec<Spanned<Token>> {
     if tokens.is_empty() {
         return tokens;
