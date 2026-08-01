@@ -264,13 +264,20 @@ Hard-won rules that aren't obvious from the code. Violating these silently break
 
 - **No legacy dual-representations.** Delete old code the moment it's superseded —
   no compatibility shims, no parallel old/new types. Fix call sites immediately.
-- **Defer out-of-scope work to GitHub Issues**, not inline `TODO`s in code or
-  scratch notes. New deferrals discovered *outside* an active PR go to
-  `gh issue create` (GH is the transparent surface contributors see); scoped
-  deferrals found *while building a PR* go in the PR body so they carry with the
-  change, then to GH Issues if they outlive it. (`docs/issues.md`, the old backlog
-  file, was verified entry-by-entry, migrated to GH Issues #175–#203, and deleted
-  on 2026-07-16.)
+- **Prefer a small PR over an issue, and ask before filing one.** When the work is
+  straightforward, do it — a small focused PR beats an issue describing the same
+  thing. Pick the lightest artifact that keeps the thought:
+  - **Straightforward?** Fix it in a small PR.
+  - **Minor, and you don't want to lose it?** An inline `TODO` is fine. We sweep
+    them, and a `TODO` rides in the diff where review can call it out — either
+    "just fix that now" or "that's a follow-up". A comment nobody reads is the
+    failure mode; one sitting in a diff under review is not.
+  - **Out of scope for the PR you're in?** The PR body, so it travels with the
+    change. A merged PR is a sufficient record and the merge commit keeps it
+    searchable.
+  - **Real backlog that outlives the PR?** A GitHub issue — but **agents check
+    with the user before opening one.** Unilateral filing produces granular churn
+    that costs more attention than it saves.
 - **Test builtins through `kernel.execute(...)`, not a builtin's direct
   `.execute()`.** Direct calls skip the dispatch chain (arg binding, `--json`,
   output limits) and pass while the real path is broken.
