@@ -72,6 +72,15 @@ breaking entries are marked **BREAKING**.
   only checker that sees them.
 
 ### Fixed
+- **A background job that spills now reports `failed:3`, not `done:0`** (GH #212) —
+  it used to keep the child's original exit code.
+- **A scatter worker that spills now exits 3, so `gather` reports 123** (GH #212) —
+  a spilled worker used to count as a success.
+- **`scatter`/`gather` option errors honor `--json`** (GH #222) — the error envelope
+  was bypassing the kernel's output-format handling.
+- **A spill after a 10 MiB capture-ring overflow now says `tail only at <path>`, not
+  `full output`** (GH #212) — the ring drops the earliest bytes, so the file holds
+  only the tail.
 - **`fg` marks a job Running only after `SIGCONT` succeeds** (GH #161) — a failed
   handoff or a failed `SIGCONT` reclaims the terminal and leaves the job `Stopped`.
 - The terminal is still handed over first, because a process group must own the

@@ -2892,17 +2892,12 @@ impl Kernel {
 
         let mut result = self.runner.run(&pipeline.commands, &mut ctx, self).await;
 
-        // Post-hoc spill check (catches builtins and fast external commands)
-        if ctx.output_limit.is_enabled() {
-            let _ = crate::output_limit::spill_if_needed(&mut result, &ctx.output_limit).await;
-        }
-
-        // Signal spill with exit 3; agent reads the spill file directly
-        // (use `set +o output-limit` before cat/head/tail to bypass the limit)
-        if result.did_spill {
-            result.original_code = Some(result.code);
-            result.code = 3;
-        }
+        // Post-hoc spill check + exit-3 remap (catches builtins and fast
+        // external commands; also catches a ring overflow that already
+        // flipped `did_spill` even when the limit itself is disabled, GH
+        // #191). This is the shared contract every execution surface must
+        // apply — see `apply_spill_contract`'s doc comment (GH #212).
+        crate::output_limit::apply_spill_contract(&mut result, &ctx.output_limit).await;
 
         // Sync changes back from context
         {
@@ -2984,7 +2979,15 @@ impl Kernel {
         tokio::spawn(crate::telemetry::bind_current_context(async move {
             // runner.run needs a &dyn CommandDispatcher; fork.as_ref()
             // gives us that (Kernel implements CommandDispatcher).
-            let result = runner.run(&commands, &mut bg_ctx, fork.as_ref()).await;
+            let mut result = runner.run(&commands, &mut bg_ctx, fork.as_ref()).await;
+
+            // Apply the same spill/exit-3 contract the foreground path gets
+            // (`execute_pipeline`'s `apply_spill_contract` call) — without
+            // this, a background job whose output overflows the capture ring
+            // or trips the output limit reports the child's ORIGINAL exit
+            // code to JobManager, so `[N] done:0`/`Job::status()` silently
+            // read success even though the output was capped (GH #212).
+            crate::output_limit::apply_spill_contract(&mut result, &bg_ctx.output_limit).await;
 
             // Write output to streams
             let text = result.text_out();

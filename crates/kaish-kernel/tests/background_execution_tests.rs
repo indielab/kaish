@@ -328,6 +328,30 @@ async fn test_failed_background_job_status() {
     );
 }
 
+/// GH #212: `execute_background` must apply the same spill/exit-3 contract
+/// the foreground path gets (`Kernel::execute_pipeline`'s
+/// `apply_spill_contract`). Before the fix, a background job's output
+/// overflowing the output limit set `did_spill` but shipped the child's
+/// ORIGINAL exit code (0) to `JobManager`, so `[N]`'s status silently read
+/// `done:0` even though the output was capped — the loud exit-3 contract
+/// foreground commands get did not apply to `cmd &`.
+#[tokio::test]
+async fn test_spilled_background_job_reports_failed_not_done() {
+    let kernel = setup().await;
+
+    // `setup()` builds a NoLocal (isolated) kernel, which forces in-memory
+    // spill mode automatically — no disk writes in this test (CLAUDE.md).
+    kernel.execute("set -o output-limit=64").await.unwrap();
+
+    kernel.execute("seq 1 5000 &").await.unwrap();
+
+    let status = wait_for_job(&kernel, 1, Duration::from_secs(5)).await;
+    assert_eq!(
+        status, "failed:3",
+        "a spilled background job must report failed:3 (loud), not done:0 (silent): {status}"
+    );
+}
+
 // ============================================================================
 // Pipelines in Background
 // ============================================================================
