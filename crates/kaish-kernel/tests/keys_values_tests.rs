@@ -4,11 +4,12 @@
 //! builtin's `.execute()` directly) so the full dispatch chain runs, and they
 //! use `KernelConfig::isolated()` — no localfs — because the pair is pure data
 //! and must work in every capability build. Records are built with `fromjson`
-//! (the JSON ingress bridge) since the native `{...}` literal grammar hasn't
-//! landed yet — same pattern as `collection_access_tests.rs`.
+//! (the JSON ingress bridge) rather than a `{...}` literal — same pattern as
+//! `collection_access_tests.rs`.
 //!
-//! See `docs/arrays-and-hashes.md`, "OPS — keys/values are builtins" and
-//! "Implementation notes" ("keys/values dispatch on Value::Json shape").
+//! See `docs/LANGUAGE.md`, "keys / values": both are builtins, and both accept
+//! either shape — a record yields its keys or its values, a list yields its
+//! indices or its elements.
 
 // Test-fixture code: unwrap/expect on known-good setup is the idiom here.
 #![allow(clippy::unwrap_used, clippy::expect_used)]
@@ -97,10 +98,10 @@ done
 
 // ── end-to-end: for-head over $(keys $r) ──────────────────────────────────
 //
-// Note: `for k in $r` (bare record in a for-head iterating its keys directly)
-// is a separate, not-yet-landed feature (see docs/arrays-and-hashes.md,
-// "Record iteration" — the for-loop's `Object` arm is still sketched, not
-// implemented). This exercises the in-scope idiom: `for k in $(keys $r)`.
+// Note: a bare `$r` in a for-head is E012, not a missing feature — kaish has
+// no word splitting, so all iteration goes through `$()`. See
+// `docs/LANGUAGE.md`, "Iteration is `$()`-only". This exercises the shipped
+// idiom: `for k in $(keys $r)`.
 
 #[tokio::test]
 async fn for_loop_over_keys_of_captures_same_order() {

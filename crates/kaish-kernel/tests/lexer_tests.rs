@@ -793,9 +793,8 @@ fn lexer_navigation_tokens(#[case] input: &str, #[case] expected: &[&str]) {
 // Assignment lvalue subscripts: `fruits[0]=kiwi` must NOT fuse into a
 // `GlobWord` — the glob-merge pass suppresses fusion for a bracket run (no
 // `*`/`?`) immediately followed by `=`, distinct from the value-position
-// (RHS) suppression used by list/record literals. See
-// docs/arrays-and-hashes.md, "Assignment lvalues", and
-// `lexer::flush_glob_run`'s `followed_by_eq` parameter.
+// (RHS) suppression used by list/record literals. See `docs/LANGUAGE.md`,
+// "Assignment", and `lexer::flush_glob_run`'s `followed_by_eq` parameter.
 // =============================================================================
 
 #[rstest]
@@ -848,8 +847,8 @@ fn lexer_bare_char_class_operand_before_eq_still_fuses() {
 // verbatim into a single `Ident` — never a `GlobWord` to glob-expand — by a
 // THIRD, independent trigger (`PushTarget`, `flush_glob_run`'s `push_target`
 // parameter). The target has no trailing `=` to key off the way an
-// assignment lvalue does, so it needs its own recognition. See GH #183,
-// docs/arrays-and-hashes.md ("Append — push").
+// assignment lvalue does, so it needs its own recognition. See GH #183 and
+// `docs/LANGUAGE.md`, "Assignment".
 // =============================================================================
 
 #[rstest]

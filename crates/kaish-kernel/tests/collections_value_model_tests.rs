@@ -4,13 +4,12 @@
 //! fable deliberation over a kaibo dossier) — both independently flagged that
 //! the *load-bearing* semantics here had zero integration tests: copy-on-assign
 //! aliasing, function-scope × mutation, read-modify-write ordering, iteration
-//! snapshots, and the fromjson/tojson round-trip law the design doc declares
-//! "test-pinned". Every test pins RATIFIED design (docs/arrays-and-hashes.md),
-//! with one deliberate exception: `local_without_initializer_does_not_parse`
-//! guards current *implementation* behavior because the write-through safety
-//! property depends on it (see that test's comment). Behaviors the review
-//! flagged as unratified are otherwise NOT asserted here — they're queued for
-//! Decisions-section ratification first.
+//! snapshots, and the `fromjson`/`tojson` round-trip law. Every test pins
+//! ratified design (`docs/LANGUAGE.md`, "Collections"), with one deliberate
+//! exception: `local_without_initializer_does_not_parse` guards current
+//! *implementation* behavior because the write-through safety property depends
+//! on it (see that test's comment). Behaviors the review flagged as unratified
+//! are otherwise NOT asserted here — they are queued for ratification first.
 //!
 //! The shared failure mode these guard against is the project's cardinal sin:
 //! a plausible-but-wrong value with no error. In particular, a future
