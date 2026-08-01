@@ -46,6 +46,16 @@ breaking entries are marked **BREAKING**.
   its dictionary is copyrighted and aerospace-shaped, so we keep our own terms.
 
 ### Changed
+- **`grep` over a directory tree allocates 70% fewer bytes** (GH #48) — one
+  `grep-searcher` per walk instead of one per file, each owning a 64 KiB line
+  buffer.
+- **A script of many small commands makes 18% fewer allocations** (GH #48) —
+  command dispatch reads the tool schema from the kernel's catalog instead of
+  rebuilding the builtin's clap `Command` every time.
+- **Brace-free glob patterns no longer run brace expansion** (GH #48) — that path
+  runs for every ignore rule against every walked path.
+- All three cuts are allocator churn, not peak memory, and were justified by the
+  new GH #48 heap profile; behavior is otherwise unchanged.
 - **`jobs --json` now emits the serialized `JobInfo`** plus a bolted-on `path`
   field, rather than a hand-built mirror.
 - `status` in that output is lowercase (`"failed"`, not `"Failed"`), in line with
@@ -62,6 +72,11 @@ breaking entries are marked **BREAKING**.
   only checker that sees them.
 
 ### Fixed
+- **`grep -r --encoding=<bad-label>` is now a loud usage error (exit 2)** naming the
+  bad label — it used to report nothing and exit 1, indistinguishable from "no
+  matches".
+- The encoding was validated once per file inside the walk, where a per-file error
+  is deliberately swallowed as a benign race.
 - **`--signal NAME` is now case-insensitive** — `kill --signal kill` used to fail
   as "unknown signal: kill"; both forms now share one name table.
 - **Hermetic and `subprocess` builds now agree on which signal names `kill`

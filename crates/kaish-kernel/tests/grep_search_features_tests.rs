@@ -262,3 +262,29 @@ async fn recursive_mixed_file_and_dir_operands() {
     assert!(out.contains("inner.txt"), "the dir operand is walked: {out:?}");
     assert!(out.contains("needle top") && out.contains("needle inner"), "both matches: {out:?}");
 }
+
+/// A bad `--encoding` label on a recursive search is a loud usage error.
+///
+/// It used to be silent: the searcher was built per file, so the encoding
+/// failure surfaced as a per-file error that the recursive walk deliberately
+/// swallows (a file vanishing mid-walk is a benign race), leaving `grep -r
+/// --encoding=bogus` reporting nothing at all and exiting 1 — indistinguishable
+/// from "no matches". Hoisting the searcher out of the loop (GH #48) moved the
+/// check to where it belongs: once, before the walk, as exit 2.
+#[tokio::test]
+async fn bad_encoding_on_recursive_search_is_a_loud_usage_error() {
+    let dir = tempdir().unwrap();
+    fs::write(dir.path().join("a.txt"), "needle a\n").expect("write a");
+    let kernel = kernel_at(dir.path());
+
+    let result = kernel
+        .execute("grep -r needle . --encoding no-such-encoding")
+        .await
+        .expect("kernel execute");
+    assert_eq!(result.code, 2, "bad --encoding is a usage error; err={:?}", result.err);
+    assert!(
+        result.err.contains("invalid encoding") && result.err.contains("no-such-encoding"),
+        "the bad label must be named: {:?}",
+        result.err
+    );
+}

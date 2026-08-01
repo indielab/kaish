@@ -8,7 +8,7 @@
 use async_trait::async_trait;
 use clap::{CommandFactory, Parser};
 use grep_regex::{RegexMatcher, RegexMatcherBuilder};
-use grep_searcher::{BinaryDetection, Encoding, SearcherBuilder};
+use grep_searcher::{BinaryDetection, Encoding, Searcher, SearcherBuilder};
 use regex::RegexBuilder;
 use std::path::{Path, PathBuf};
 
@@ -797,6 +797,14 @@ impl Grep {
             ..base_opts.clone()
         };
 
+        // One searcher for the whole walk: it owns a 64 KiB line buffer that
+        // `search_slice` resets per call, so building it per file was pure waste
+        // (GH #48 — 68% of the grep-over-a-tree profile's bytes).
+        let mut searcher = match build_searcher(&opts) {
+            Ok(s) => s,
+            Err(e) => return ExecResult::failure(2, format!("grep: {e}")),
+        };
+
         for file_path in files {
             // Create relative filename for display
             let display_name = file_path
@@ -815,7 +823,8 @@ impl Grep {
                 }
             };
 
-            let render = match grep_lines_structured(&bytes, matcher, &opts, Some(&display_name)) {
+            let render = match search_with(&mut searcher, &bytes, matcher, &opts, Some(&display_name))
+            {
                 Ok(t) => t,
                 Err(e) => {
                     if report_missing {
@@ -1192,9 +1201,22 @@ fn grep_lines_structured(
     opts: &GrepOptions,
     filename: Option<&str>,
 ) -> Result<RenderResult, String> {
-    // Build the searcher. line_number is always on so the renderer can
-    // emit `LINE` cells when requested; `show_line_numbers` gates *display*,
-    // not the underlying numbering.
+    let mut searcher = build_searcher(opts)?;
+    search_with(&mut searcher, input, matcher, opts, filename)
+}
+
+/// Build the grep-searcher `Searcher` for these options.
+///
+/// Split out from [`grep_lines_structured`] so a multi-file search builds it
+/// **once** and reuses it: a `Searcher` owns a 64 KiB zeroed line buffer plus an
+/// 8 KiB decode buffer, and building one per file made those two allocations
+/// 68% of all bytes allocated in the GH #48 grep-over-a-tree profile. Reuse is
+/// the intended usage — `search_slice` takes `&mut self` and resets per search,
+/// which is how ripgrep itself drives it.
+///
+/// `line_number` is always on so the renderer can emit `LINE` cells when
+/// requested; `show_line_numbers` gates *display*, not the underlying numbering.
+fn build_searcher(opts: &GrepOptions) -> Result<Searcher, String> {
     let mut sb = SearcherBuilder::new();
     sb.line_number(true)
         .multi_line(opts.multiline)
@@ -1214,14 +1236,22 @@ fn grep_lines_structured(
             Err(e) => return Err(format!("invalid encoding '{enc_label}': {e}")),
         }
     }
-    let mut searcher = sb.build();
+    Ok(sb.build())
+}
 
+/// Search one buffer with an already-built searcher and render the result.
+fn search_with(
+    searcher: &mut Searcher,
+    input: &[u8],
+    matcher: &RegexMatcher,
+    opts: &GrepOptions,
+    filename: Option<&str>,
+) -> Result<RenderResult, String> {
     let mut sink = AccumulatorSink::new(matcher, None);
     searcher
         .search_slice(matcher, input, &mut sink)
         .map_err(|e| e.to_string())?;
     let events = sink.into_events();
-
     Ok(render_events(&events, opts, filename))
 }
 
