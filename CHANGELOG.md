@@ -11,32 +11,10 @@ breaking entries are marked **BREAKING**.
 ## [Unreleased]
 
 ### Fixed
-- **Background jobs and scatter workers now apply the same output-limit
-  spill/exit-3 contract the foreground pipeline gets** (GH #212): `cmd &`
-  and a scatter worker whose output overflowed the capture ring or tripped
-  an enabled `output-limit` used to keep the child's original exit code
-  (`[N]`'s job status read `done:0`; a spilled worker still counted as a
-  `gather` success) even though `did_spill` was set — the loud contract
-  GH #191/#209 established for the foreground pipeline never reached these
-  two execution surfaces. Both now funnel through one shared
-  `output_limit::apply_spill_contract` seam (the same `spill_if_needed` +
-  exit-3 remap `execute_pipeline` already did), so a spilled background job
-  reports `failed:3` and a spilled scatter worker correctly flips `gather`'s
-  0-vs-123 aggregation to a failure.
-- **`scatter`/`gather` pipeline-construction option-parsing errors honor
-  `--json`** (GH #222): a parse failure in `scatter`'s/`gather`'s own flags
-  when they appear as a matched `scatter | ... | gather` pipeline (e.g.
-  `scatter --limit nope`) used to return plain text even under `--json`,
-  bypassing the kernel's `apply_output_format` seam entirely — a gap
-  `finalize_output`'s `owns_output` fix (GH #215) didn't reach, since this
-  path never goes through `Tool::execute()` at all. It now renders the same
-  `{"error","code"}` envelope every other builtin's `--json` error path gets.
-- **Spill message no longer claims "full output" when a capture-ring
-  overflow already truncated the bytes being spilled** (GH #212 part 2):
-  when the fixed ~10MB stdout ring overflows and an enabled output limit
-  then spills that same (already ring-capped) result, the message now says
-  the spill file holds only the ring-capped tail instead of implying it's
-  the complete output.
+- **A background job that spills now reports `failed:3`, not `done:0`** (GH #212) — it used to keep the child's original exit code.
+- **A scatter worker that spills now exits 3, so `gather` reports 123** (GH #212) — a spilled worker used to count as a success.
+- **`scatter`/`gather` option errors honor `--json`** (GH #222) — the error envelope was bypassing the kernel's output-format handling.
+- **A spill that follows a 10 MiB capture-ring overflow now says `tail only at <path>`, not `full output`** (GH #212) — the ring drops the earliest bytes before the spill runs, so the file holds only the tail.
 
 ## [0.13.0] - 2026-07-18
 

@@ -442,8 +442,8 @@ async fn spill_output_data(
     let path_str = path.to_string_lossy();
 
     result.set_out(format!(
-        "{}\n...\n{}\n[output truncated: {} bytes total — {}]",
-        head, tail, total, spill_pointer_phrase(ring_already_overflowed, &path_str)
+        "{}\n...\n{}\n[output truncated: {}]",
+        head, tail, spill_summary(total, ring_already_overflowed, &path_str)
     ));
     result.did_spill = true;
 
@@ -465,24 +465,26 @@ async fn write_spill_file(data: &[u8]) -> Result<(PathBuf, usize), std::io::Erro
     Ok((path, data.len()))
 }
 
-/// The spill message's trailing pointer phrase, tuned for whether the
-/// spilled bytes are the command's actual full output or only a ring-capped
-/// tail (GH #212 part 2 — see `spill_if_needed`'s `ring_already_overflowed`).
+/// The whole body of the `[output truncated: ...]` message: the byte count,
+/// the word that qualifies it, and the pointer at the spill file.
 ///
-/// A ring overflow already discarded the earliest output before this spill
-/// ever saw it, so the spill file below is itself only a partial capture;
-/// claiming "full output" there would contradict the stderr overflow marker
-/// that reported the true, larger size.
+/// The count and its qualifier are built together on purpose. `total` is the
+/// number of bytes this spill wrote, which is the command's whole output only
+/// when no capture ring evicted anything first (GH #212 part 2 — see
+/// `spill_if_needed`'s `ring_already_overflowed`). After a ring overflow the
+/// same number is just what survived, so the message says "captured" and sends
+/// the reader to the stderr overflow marker, which reports the true size.
+/// Splitting the number from its qualifier is how the two branches drifted into
+/// contradicting each other the first time.
 #[cfg(feature = "localfs")]
-fn spill_pointer_phrase(ring_already_overflowed: bool, path: &str) -> String {
+fn spill_summary(total: usize, ring_already_overflowed: bool, path: &str) -> String {
     if ring_already_overflowed {
         format!(
-            "ring-capped tail spilled to {path} (the fixed capture ring already evicted \
-             earlier output before this spill ran; see the stderr overflow marker for the \
-             true size)"
+            "{total} bytes captured — tail only at {path}; earlier output was dropped \
+             before the spill, so see the stderr overflow marker for the true size"
         )
     } else {
-        format!("full output at {path}")
+        format!("{total} bytes total — full output at {path}")
     }
 }
 
@@ -499,8 +501,8 @@ fn build_truncated_output(
     let tail = tail_from_str(full, config.tail_bytes);
     let path_str = spill_path.to_string_lossy();
     format!(
-        "{}\n...\n{}\n[output truncated: {} bytes total — {}]",
-        head, tail, total_bytes, spill_pointer_phrase(ring_already_overflowed, &path_str)
+        "{}\n...\n{}\n[output truncated: {}]",
+        head, tail, spill_summary(total_bytes, ring_already_overflowed, &path_str)
     )
 }
 
@@ -771,8 +773,16 @@ mod tests {
              already truncated it: {}",
             result.text_out()
         );
+        // The byte count must be qualified as "captured", never "total": in
+        // this branch it is only what survived the ring, and the message goes
+        // on to say the true size is elsewhere.
         assert!(
-            result.text_out().contains("ring-capped tail spilled to"),
+            !result.text_out().contains("bytes total"),
+            "the count is not the total after a ring overflow: {}",
+            result.text_out()
+        );
+        assert!(
+            result.text_out().contains("bytes captured — tail only at"),
             "should name the tail-only nature of the spill file: {}",
             result.text_out()
         );
@@ -855,8 +865,12 @@ mod tests {
              truncated it: {result}"
         );
         assert!(
-            result.contains("ring-capped tail spilled to /tmp/test-spill.txt"),
-            "should point at the tail-only nature of the spill file: {result}"
+            result.contains(
+                "[output truncated: 16 bytes captured — tail only at /tmp/test-spill.txt; \
+                 earlier output was dropped before the spill, so see the stderr overflow \
+                 marker for the true size]"
+            ),
+            "the count must read as captured-not-total and point at the true size: {result}"
         );
     }
 
