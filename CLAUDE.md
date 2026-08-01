@@ -264,14 +264,14 @@ Hard-won rules that aren't obvious from the code. Violating these silently break
 
 - **No legacy dual-representations.** Delete old code the moment it's superseded —
   no compatibility shims, no parallel old/new types. Fix call sites immediately.
-- **Fix it now, or carry it in the PR body — don't file an issue.** When you find
-  a small problem, the cheapest correct move is usually to fix it while you are
-  already in the file. When a fix is genuinely out of scope, write it into the PR
-  body so it travels with the change; **a merged PR is a sufficient record**, and
-  the merge commit keeps it searchable. Reserve `gh issue create` for work that
-  outlives the PR and that nobody is about to pick up — a real backlog item, not
-  a granular nit. Issue churn costs more attention than it saves. Never leave
-  inline `TODO`s in code.
+- **Prefer a small PR over an issue, and ask before filing one.** When the work is
+  straightforward, do it — a small focused PR beats an issue describing the same
+  thing. When a fix is genuinely out of scope for the PR you are in, write it into
+  the PR body so it travels with the change; a merged PR is a sufficient record and
+  the merge commit keeps it searchable. GitHub Issues are fine and welcome for real
+  backlog, but **agents check with the user before opening one** — unilateral
+  filing produces granular churn that costs more attention than it saves. Never
+  leave inline `TODO`s in code.
 - **Test builtins through `kernel.execute(...)`, not a builtin's direct
   `.execute()`.** Direct calls skip the dispatch chain (arg binding, `--json`,
   output limits) and pass while the real path is broken.
