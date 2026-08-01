@@ -92,6 +92,14 @@ trash = { workspace = true, optional = true }
 directories = { workspace = true, optional = true }
 tiktoken-rs = { workspace = true, optional = true }
 
+# Heap profiler for the `alloc_profile` example (GH #48). Optional and off by
+# default; it ships as a normal dependency rather than a dev-dependency because
+# Cargo forbids optional dev-dependencies, and the example that uses it is
+# `required-features`-gated so nothing else ever builds it. dhat owns the
+# `unsafe impl GlobalAlloc`, which is what lets the harness exist at all under
+# the workspace's `unsafe_code = "deny"`.
+dhat = { version = "0.3", optional = true }
+
 [target.'cfg(unix)'.dependencies]
 nix = { version = "0.29", features = ["signal", "process", "term"], optional = true }
 
@@ -136,6 +144,12 @@ native = ["full"]
 
 schema = ["dep:schemars", "kaish-types/schema"]
 
+# Heap profiling harness (GH #48). Enables the dhat global allocator used by
+# `examples/alloc_profile.rs`; that example is `required-features`-gated on this,
+# so a normal build/test/clippy run never compiles either. Never enable in
+# production — every allocation captures a backtrace.
+dhat-heap = ["dep:dhat"]
+
 [build-dependencies]
 chrono = { workspace = true }
 
@@ -154,6 +168,13 @@ clap_complete = { workspace = true }
 # InMemorySpanExporter. (tracing-opentelemetry is a normal dependency above.)
 opentelemetry_sdk = { workspace = true, features = ["testing"] }
 tracing-subscriber = { workspace = true }
+
+# GH #48 heap-profiling harness. `required-features` keeps it out of every
+# normal build — `cargo build`, `cargo test --all`, and
+# `cargo clippy --all --all-targets` all skip it because `dhat-heap` is off.
+[[example]]
+name = "alloc_profile"
+required-features = ["dhat-heap"]
 
 [lints]
 workspace = true

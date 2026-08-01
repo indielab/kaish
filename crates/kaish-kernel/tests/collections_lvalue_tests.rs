@@ -1,8 +1,7 @@
 //! Collection lvalue WRITES: `xs[0]=9`, `user[email]=x`,
 //! `services[web][port]=9000`, and the `push` builtin — bareword
 //! (`push xs val`) and bracket-path (`push services[web][tags] val`)
-//! targets alike. See `docs/arrays-and-hashes.md`, "Assignment lvalues" and
-//! "Append — push".
+//! targets alike. See `docs/LANGUAGE.md`, "Assignment".
 //!
 //! Kernel-routed via `KernelConfig::isolated()` WITH validation ON (unlike
 //! the sibling `collection_literals_tests.rs`/`collection_access_tests.rs`,
@@ -252,7 +251,7 @@ async fn bare_char_class_comparison_operand_before_eq_is_not_an_lvalue() {
 // own independent trigger (`lexer::PushTarget`) — the target has no
 // trailing `=` to key off the way an assignment lvalue does — so
 // `services[web][tags]` fuses verbatim into a path instead of glob-expanding
-// against the filesystem. See `docs/arrays-and-hashes.md`, "Append — push".
+// against the filesystem. See `docs/LANGUAGE.md`, "Assignment".
 
 #[tokio::test]
 async fn bracket_path_push_target_extends_the_nested_list() {

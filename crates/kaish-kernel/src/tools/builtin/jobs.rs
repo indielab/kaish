@@ -7,26 +7,31 @@ use crate::interpreter::{ExecResult, OutputData, OutputNode};
 use crate::scheduler::JobInfo;
 use crate::tools::{schema_from_clap, ExecContext, ToolCtx, GlobalFlags, Tool, ToolArgs, ToolSchema};
 
-/// Build `jobs --json` rows: `{"id", "status", "command", "path", "latch"?}`.
-/// `latch` (nonce/paths/hint/ttl) is present only for a `Latched` row — a
-/// caller can act on a gated job straight from `jobs --json` instead of a
-/// second `/v/jobs/N/latch` read (GH #124 part 2). A pure function so the
-/// row shape is unit-testable without a `JobManager`/kernel round trip.
+/// Build `jobs --json` rows: the full serialized `JobInfo` (GH #241 — id,
+/// status, command, exit_code, started_at/finished_at, pgids, latch, ... —
+/// whatever `JobInfo`'s own `Serialize` impl emits) plus one bolt-on `path`
+/// field.
+///
+/// `path` (`/v/jobs/N/`) is deliberately NOT a `JobInfo` field: it names
+/// *this VFS mount's* convention for reaching the job's live streams/status,
+/// not an intrinsic property of the job itself, so the builtin adds it here
+/// rather than the type baking in a `jobs`-specific presentation detail.
+/// Before GH #241 this function hand-built every field with `serde_json::json!`
+/// (including re-deriving `status` from `Display` and re-serializing `latch`)
+/// because `JobInfo` couldn't serialize itself — now that it can, the only
+/// thing left to bolt on is `path`.
 fn job_rows_json(jobs: &[JobInfo]) -> Vec<serde_json::Value> {
     jobs.iter()
         .map(|job| {
-            let mut row = serde_json::json!({
-                "id": job.id.0,
-                "status": job.status.to_string(),
-                "command": job.command,
-                "path": format!("/v/jobs/{}/", job.id),
-            });
-            // Infallible: LatchRequest is String/Vec<String>/u64 fields only.
-            if let Some(latch) = &job.latch
-                && let Ok(v) = serde_json::to_value(latch)
-            {
-                row["latch"] = v;
-            }
+            // JobInfo's fields are all plain scalars/strings/SystemTime —
+            // serialization cannot fail in practice. Per CLAUDE.md, an
+            // error that can never happen in practice may be hidden, but the
+            // program must panic on the outside case rather than silently
+            // dropping the row.
+            #[allow(clippy::expect_used)]
+            let mut row = serde_json::to_value(job)
+                .expect("JobInfo serializes to plain JSON scalars/strings/timestamps — never fails");
+            row["path"] = serde_json::Value::String(format!("/v/jobs/{}/", job.id));
             row
         })
         .collect()
@@ -177,7 +182,10 @@ mod tests {
         let rows = job_rows_json(&jobs);
         assert_eq!(rows.len(), 2);
         assert_eq!(rows[0]["id"], 1);
-        assert_eq!(rows[0]["status"], "Latched");
+        // GH #241: the JSON spelling of JobStatus is lowercase, matching the
+        // existing `/v/jobs/N/status` vocabulary — NOT the capitalized
+        // `Display` impl this row used to derive from (`"Latched"`).
+        assert_eq!(rows[0]["status"], "latched");
         assert_eq!(rows[0]["path"], "/v/jobs/1/");
         assert_eq!(
             rows[0]["latch"]["nonce"], "a3f7b2c1",
@@ -193,6 +201,27 @@ mod tests {
             rows[1].get("latch").is_none(),
             "a non-latched row must NOT carry a latch key: {}",
             rows[1]
+        );
+    }
+
+    #[test]
+    fn job_rows_json_carries_exit_code_on_failure() {
+        // GH #243(a): the audit verified `jobs --json` for a job that exited
+        // 42 reported only `{"status":"Failed"}` — the exit code was lost
+        // entirely. Now it must ride along as JobInfo.exit_code.
+        use crate::scheduler::{JobId, JobStatus};
+
+        let jobs = vec![
+            JobInfo::new(JobId(1), "/bin/sh -c 'exit 42'", JobStatus::Failed)
+                .with_exit_code(Some(42)),
+        ];
+
+        let rows = job_rows_json(&jobs);
+        assert_eq!(rows[0]["status"], "failed");
+        assert_eq!(
+            rows[0]["exit_code"], 42,
+            "the exit code must be reachable from jobs --json, not just \"Failed\": {}",
+            rows[0]
         );
     }
 

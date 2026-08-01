@@ -5,7 +5,7 @@
 //! argument or stdin, and lands the result in `.data` so it can be captured or
 //! iterated: `cfg=$(curl -s api/config | fromjson)`.
 //!
-//! Non-negotiables (see `docs/arrays-and-hashes.md`):
+//! Non-negotiables (see `docs/LANGUAGE.md`, "Crossing the boundary"):
 //! - **Envelope-free.** External JSON is converted with
 //!   [`kaish_types::json_to_value_no_envelope`] — a base64 byte-envelope-shaped
 //!   object stays a plain record, never silently becomes `Value::Bytes`.
