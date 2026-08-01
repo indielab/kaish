@@ -14,7 +14,11 @@ showcase (a read-only codebase-analysis MCP that drives kaish), and
 have the same maintainer, so API changes are straightforward where they improve the projects
 together.
 
-**Philosophy**: 80% rule applied to POSIX/Bourne/bash shell. Kaish implements a `sh` subset that passes `shellcheck --enable=all`.
+**Philosophy**: 80% rule applied to POSIX/Bourne/bash shell. kaish is *inspired by POSIX
+`sh` and bash, informed by ShellCheck's lints* — not a dialect ShellCheck can validate:
+`[[ ]]` and `<<<` are bash, and typed data, structured `$()`, and collections are modeled
+by no ShellCheck dialect at all. **ShellCheck reports nothing about kaish's extensions.
+The kaish validator is the only checker that sees them.**
 
 **Explicitly dropped features**: process substitution `<(cmd)`, backticks, `eval`, word splitting
 

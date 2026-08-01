@@ -345,7 +345,7 @@ token, so they need no quoting.
 This is the complement of the no-word-splitting rule: kaish neither splits a
 variable's value **nor** pastes neighbouring words. The "always quote
 interpolated words" habit is exactly what `shellcheck --enable=all` enforces
-(SC2086), so quoted kaish stays lint-clean. When in doubt, quote.
+(SC2086), so the habit transfers directly. When in doubt, quote.
 
 ## Arguments
 
@@ -1203,9 +1203,19 @@ These bash features are omitted because they're confusing, error-prone, or ambig
 
 ## ShellCheck Alignment
 
-**The Bourne-compatible subset of kaish passes `shellcheck --enable=all`.**
+**ShellCheck cannot check a kaish script. It shaped the language; it does not
+validate it.**
 
-Features that ShellCheck warns about (word splitting, backticks) don't exist in kaish. Glob expansion is supported but controllable via `set +o glob`.
+The Bourne-shaped core is built so the classic warnings cannot arise: word
+splitting and backticks are not in the grammar. Glob expansion is on by default;
+`set +o glob` turns it off.
+
+The extensions sit outside every ShellCheck dialect. `[[ ]]` is bash (SC3010
+under `sh`), here-strings `<<<` are bash (SC3011), and typed data, structured
+`$()`, and collections are modeled by no dialect at all. **ShellCheck reports
+nothing about these. The kaish validator is the only checker that sees them.**
+
+The table below records which lint shaped which design decision.
 
 | SC Code | Warning | Kaish Approach |
 |---------|---------|----------------|
