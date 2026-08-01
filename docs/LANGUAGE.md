@@ -777,7 +777,7 @@ When latch is enabled, `rm` returns **exit code 2** with a nonce:
 $ rm important.dat
 rm: confirmation required (latch enabled)
 Authorized: important.dat
-To confirm, run: rm --confirm="a3f7b2c1" important.dat
+To confirm, run: rm --confirm="4b1e0d9a7c3f28e6b5a0c1d4e7f2938a" important.dat
 Nonce expires in 60 seconds.
 ```
 
@@ -799,8 +799,8 @@ data-plane `.data`:
   ```json
   { "error": "rm: confirmation required (latch enabled)…",
     "code": 2,
-    "latch": { "nonce": "a3f7b2c1", "command": "rm", "paths": ["important.dat"],
-               "hint": "...", "ttl": 60 } }
+    "latch": { "nonce": "4b1e0d9a7c3f28e6b5a0c1d4e7f2938a", "command": "rm",
+               "paths": ["important.dat"], "hint": "...", "ttl": 60 } }
   ```
 
 The same contract holds for the truncating-overwrite gate (`tee`, `patch`,

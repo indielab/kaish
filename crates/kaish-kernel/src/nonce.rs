@@ -9,11 +9,10 @@
 //! are a subset of the authorized paths.
 
 use std::collections::{BTreeSet, HashMap};
-use std::hash::{BuildHasher, Hasher};
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, SystemTime};
+use std::time::Duration;
 
-use kaish_types::clock::{system_now, Instant};
+use kaish_types::clock::Instant;
 
 /// What a nonce authorizes: a command and a set of paths.
 #[derive(Debug, Clone)]
@@ -38,10 +37,11 @@ impl NonceScope {
 
 /// A store for confirmation nonces with TTL-based expiration.
 ///
-/// Nonces are 8-character hex strings that gate dangerous operations.
+/// Nonces are 32-character hex strings that gate dangerous operations.
 /// They remain valid until their TTL expires — not consumed on validation —
-/// making operations idempotent: a retried `rm --confirm=abc123 bigdir/`
-/// works if the nonce hasn't expired.
+/// making operations idempotent: a retried
+/// `rm --confirm=4b1e0d9a7c3f28e6b5a0c1d4e7f2938a bigdir/` works if the nonce
+/// hasn't expired.
 #[derive(Clone, Debug)]
 pub struct NonceStore {
     inner: Arc<Mutex<NonceStoreInner>>,
@@ -95,9 +95,17 @@ impl NonceStore {
 
     /// Issue a new nonce for the given command and paths.
     ///
-    /// Returns an 8-character hex string. Opportunistically GCs expired nonces.
-    pub fn issue(&self, command: &str, paths: &[&str]) -> String {
-        let nonce = generate_nonce();
+    /// Returns a 32-character hex string (128 bits from the OS CSPRNG). Removes
+    /// nonces past their TTL on the way through.
+    ///
+    /// # Errors
+    ///
+    /// Propagates `getrandom::Error` if the OS entropy source fails. There is
+    /// deliberately no fallback: a guessable nonce would let an attacker
+    /// forge a `--confirm` for a destructive operation, so callers must fail
+    /// loudly rather than silently degrade (see `generate_nonce`).
+    pub fn issue(&self, command: &str, paths: &[&str]) -> Result<String, getrandom::Error> {
+        let nonce = generate_nonce()?;
         let now = Instant::now();
         let ttl = self.ttl;
 
@@ -113,7 +121,7 @@ impl NonceStore {
         inner.nonces.retain(|_, (created, _)| now.duration_since(*created) < ttl);
 
         inner.nonces.insert(nonce.clone(), (now, scope));
-        nonce
+        Ok(nonce)
     }
 
     /// Validate a nonce against a command and paths.
@@ -170,24 +178,25 @@ impl Default for NonceStore {
     }
 }
 
-/// Generate an 8-character hex nonce using RandomState + SystemTime.
-fn generate_nonce() -> String {
-    let hasher_state = std::collections::hash_map::RandomState::new();
-    let mut hasher = hasher_state.build_hasher();
-
-    // Mix in current time for uniqueness
-    let now = system_now()
-        .duration_since(SystemTime::UNIX_EPOCH)
-        .unwrap_or_default();
-    hasher.write_u128(now.as_nanos());
-
-    // Mix in a second RandomState for additional entropy
-    let hasher_state2 = std::collections::hash_map::RandomState::new();
-    let mut hasher2 = hasher_state2.build_hasher();
-    hasher2.write_u64(0xdeadbeef);
-    hasher.write_u64(hasher2.finish());
-
-    format!("{:08x}", hasher.finish() as u32)
+/// Generate a 32-character hex nonce (128 bits) from the OS CSPRNG.
+///
+/// Pulls raw entropy via `getrandom` (already a kernel dependency for
+/// `mktemp`'s temp-name generation) rather than from a non-cryptographic
+/// hasher. A confirmation token gates destructive operations, so it must be
+/// neither guessable nor collidable. The previous generator truncated its
+/// output to 32 bits, which is brute-forceable and collides at roughly 65,000
+/// issued nonces. 128 bits from the OS CSPRNG is neither.
+///
+/// The weakness was the truncation, not the clock: `RandomState` seeds its
+/// keys from OS entropy, so observing the clock alone did not predict a nonce.
+///
+/// There is deliberately **no fallback** to a weaker generator: if the OS
+/// cannot supply entropy, issuing a nonce fails loudly (propagated to the
+/// caller) rather than silently emitting a guessable confirmation token.
+fn generate_nonce() -> Result<String, getrandom::Error> {
+    let mut entropy = [0u8; 16];
+    getrandom::fill(&mut entropy)?;
+    Ok(entropy.iter().map(|b| format!("{b:02x}")).collect())
 }
 
 #[cfg(test)]
@@ -197,18 +206,56 @@ mod tests {
     #[test]
     fn issue_and_validate() {
         let store = NonceStore::new();
-        let nonce = store.issue("rm", &["/tmp/important"]);
-        assert_eq!(nonce.len(), 8);
+        let nonce = store.issue("rm", &["/tmp/important"]).expect("entropy");
+        assert_eq!(nonce.len(), 32);
         assert!(nonce.chars().all(|c| c.is_ascii_hexdigit()));
 
         let result = store.validate(&nonce, "rm", &["/tmp/important"]);
         assert!(result.is_ok());
     }
 
+    // ── CSPRNG hardening (nonce widened from a 32-bit hash-derived value to
+    // 128 bits of `getrandom` entropy) ──
+
+    #[test]
+    fn nonce_is_32_lowercase_hex_chars() {
+        let store = NonceStore::new();
+        let nonce = store.issue("rm", &["/tmp/important"]).expect("entropy");
+        assert_eq!(nonce.len(), 32, "128 bits rendered as hex is 32 chars: {nonce}");
+        assert!(
+            nonce.chars().all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()),
+            "nonce must be lowercase hex: {nonce}"
+        );
+    }
+
+    #[test]
+    fn no_collisions_across_a_large_batch() {
+        let store = NonceStore::new();
+        let mut seen = std::collections::HashSet::with_capacity(100_000);
+        for i in 0..100_000 {
+            let nonce = store
+                .issue("rm", &["/tmp/batch"])
+                .unwrap_or_else(|e| panic!("entropy failure at iteration {i}: {e}"));
+            assert!(seen.insert(nonce), "collision detected within 100_000 issued nonces");
+        }
+    }
+
+    #[test]
+    fn back_to_back_nonces_differ_under_identical_conditions() {
+        // Guards against a time/hash-derived generator sneaking back in: if the
+        // generator were seeded from wall-clock time alone, two calls issued
+        // in immediate succession (same command, same paths, same instant to
+        // clock resolution) could collide. A CSPRNG draw should not.
+        let store = NonceStore::new();
+        let a = store.issue("rm", &["same/path"]).expect("entropy");
+        let b = store.issue("rm", &["same/path"]).expect("entropy");
+        assert_ne!(a, b, "back-to-back nonces must differ even under identical scope/timing");
+    }
+
     #[test]
     fn idempotent_reuse() {
         let store = NonceStore::new();
-        let nonce = store.issue("rm", &["bigdir/"]);
+        let nonce = store.issue("rm", &["bigdir/"]).expect("entropy");
 
         let first = store.validate(&nonce, "rm", &["bigdir/"]);
         let second = store.validate(&nonce, "rm", &["bigdir/"]);
@@ -219,7 +266,7 @@ mod tests {
     #[test]
     fn expired_nonce_fails() {
         let store = NonceStore::with_ttl(Duration::from_millis(0));
-        let nonce = store.issue("rm", &["ephemeral"]);
+        let nonce = store.issue("rm", &["ephemeral"]).expect("entropy");
 
         // With 0ms TTL, nonce is immediately expired
         std::thread::sleep(Duration::from_millis(1));
@@ -237,8 +284,8 @@ mod tests {
     #[test]
     fn nonces_are_unique() {
         let store = NonceStore::new();
-        let a = store.issue("rm", &["first"]);
-        let b = store.issue("rm", &["second"]);
+        let a = store.issue("rm", &["first"]).expect("entropy");
+        let b = store.issue("rm", &["second"]).expect("entropy");
         assert_ne!(a, b);
     }
 
@@ -246,7 +293,7 @@ mod tests {
     fn clone_shares_state() {
         let store = NonceStore::new();
         let cloned = store.clone();
-        let nonce = store.issue("rm", &["/shared"]);
+        let nonce = store.issue("rm", &["/shared"]).expect("entropy");
 
         let result = cloned.validate(&nonce, "rm", &["/shared"]);
         assert!(result.is_ok());
@@ -255,12 +302,12 @@ mod tests {
     #[test]
     fn gc_cleans_expired() {
         let store = NonceStore::with_ttl(Duration::from_millis(10));
-        let old_nonce = store.issue("rm", &["old"]);
+        let old_nonce = store.issue("rm", &["old"]).expect("entropy");
 
         std::thread::sleep(Duration::from_millis(20));
 
         // This issue() triggers GC
-        let _new = store.issue("rm", &["new"]);
+        let _new = store.issue("rm", &["new"]).expect("entropy");
 
         // Old nonce should be gone (GC'd)
         let result = store.validate(&old_nonce, "rm", &["old"]);
@@ -272,7 +319,7 @@ mod tests {
     #[test]
     fn path_mismatch_rejected() {
         let store = NonceStore::new();
-        let nonce = store.issue("rm", &["fileA.txt"]);
+        let nonce = store.issue("rm", &["fileA.txt"]).expect("entropy");
 
         let result = store.validate(&nonce, "rm", &["fileB.txt"]);
         assert!(result.is_err());
@@ -282,7 +329,7 @@ mod tests {
     #[test]
     fn subset_accepted() {
         let store = NonceStore::new();
-        let nonce = store.issue("rm", &["a.txt", "b.txt", "c.txt"]);
+        let nonce = store.issue("rm", &["a.txt", "b.txt", "c.txt"]).expect("entropy");
 
         // Subset of authorized paths — should succeed
         let result = store.validate(&nonce, "rm", &["a.txt", "b.txt"]);
@@ -292,7 +339,7 @@ mod tests {
     #[test]
     fn superset_rejected() {
         let store = NonceStore::new();
-        let nonce = store.issue("rm", &["a.txt", "b.txt"]);
+        let nonce = store.issue("rm", &["a.txt", "b.txt"]).expect("entropy");
 
         // Superset — c.txt not authorized
         let result = store.validate(&nonce, "rm", &["a.txt", "b.txt", "c.txt"]);
@@ -303,7 +350,7 @@ mod tests {
     #[test]
     fn command_mismatch_rejected() {
         let store = NonceStore::new();
-        let nonce = store.issue("rm", &["file.txt"]);
+        let nonce = store.issue("rm", &["file.txt"]).expect("entropy");
 
         let result = store.validate(&nonce, "kaish-trash empty", &[]);
         assert!(result.is_err());
@@ -313,7 +360,7 @@ mod tests {
     #[test]
     fn empty_paths_command_only() {
         let store = NonceStore::new();
-        let nonce = store.issue("kaish-trash empty", &[]);
+        let nonce = store.issue("kaish-trash empty", &[]).expect("entropy");
 
         let result = store.validate(&nonce, "kaish-trash empty", &[]);
         assert!(result.is_ok());
@@ -322,7 +369,7 @@ mod tests {
     #[test]
     fn empty_paths_rejects_nonempty() {
         let store = NonceStore::new();
-        let nonce = store.issue("kaish-trash empty", &[]);
+        let nonce = store.issue("kaish-trash empty", &[]).expect("entropy");
 
         // Nonce was issued with no paths — can't use it to authorize a path
         let result = store.validate(&nonce, "kaish-trash empty", &["sneaky.txt"]);

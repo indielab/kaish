@@ -119,7 +119,10 @@ impl Tool for Rm {
             [
                 ("Remove a file", "rm temp.txt"),
                 ("Remove directory recursively", "rm -rf build/"),
-                ("Confirm latched removal", "rm --confirm=a3f7b2c1 bigfile.bin"),
+                (
+                    "Confirm latched removal",
+                    "rm --confirm=4b1e0d9a7c3f28e6b5a0c1d4e7f2938a bigfile.bin",
+                ),
             ],
         )
     }
@@ -466,7 +469,7 @@ mod tests {
         ctx.scope.set_latch_enabled(true);
 
         // Issue a nonce manually
-        let nonce = ctx.nonce_store.issue("rm", &["/file.txt"]);
+        let nonce = ctx.nonce_store.issue("rm", &["/file.txt"]).expect("entropy");
 
         let mut args = ToolArgs::new();
         args.positional.push(Value::String("/file.txt".into()));
@@ -525,7 +528,7 @@ mod tests {
         let mut ctx = make_ctx().await;
         ctx.scope.set_latch_enabled(true);
 
-        let nonce = ctx.nonce_store.issue("rm", &["/file.txt"]);
+        let nonce = ctx.nonce_store.issue("rm", &["/file.txt"]).expect("entropy");
 
         // First confirm: deletes the file
         let mut args = ToolArgs::new();
@@ -562,12 +565,14 @@ mod tests {
         assert!(err.contains("/file.txt"));
         assert!(err.contains("60 seconds"));
 
-        // Extract nonce: find '--confirm="' then take next 8 chars
+        // Extract nonce: find '--confirm="' then take up to the closing quote.
+        // Don't assume a fixed nonce length here — the generator's width is an
+        // implementation detail (see nonce.rs), not part of this contract.
         let confirm_prefix = "rm --confirm=\"";
         let idx = err.find(confirm_prefix).expect("should contain confirm prefix");
         let nonce_start = idx + confirm_prefix.len();
-        let nonce: String = err[nonce_start..].chars().take(8).collect();
-        assert_eq!(nonce.len(), 8);
+        let nonce: String = err[nonce_start..].chars().take_while(|&c| c != '"').collect();
+        assert!(!nonce.is_empty());
         assert!(nonce.chars().all(|c| c.is_ascii_hexdigit()));
     }
 

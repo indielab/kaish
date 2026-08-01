@@ -298,10 +298,10 @@ async fn confirm_without_captured_invocation_errors() {
     let dir = tempdir();
     let kernel = kernel_at(dir.path());
     let bare = kaish_kernel::interpreter::LatchRequest {
-        nonce: "deadbeef".to_string(),
+        nonce: "9f2c7d1a0b4e63859c7a1e0d5b8f4a26".to_string(),
         command: "rm".to_string(),
         paths: vec!["x".to_string()],
-        hint: "rm --confirm=deadbeef x".to_string(),
+        hint: "rm --confirm=9f2c7d1a0b4e63859c7a1e0d5b8f4a26 x".to_string(),
         tool: String::new(),
         argv: vec![],
         ttl: 60,
@@ -319,7 +319,9 @@ async fn latch_bogus_nonce_fails_and_file_survives() {
     let kernel = kernel_at(dir.path());
 
     run(&kernel, "set -o latch").await;
-    let r = run(&kernel, "rm --confirm=\"deadbeef\" precious.txt").await;
+    // Well-formed but never issued: rejection has to come from the store
+    // lookup, not from the shape of the string.
+    let r = run(&kernel, "rm --confirm=\"9f2c7d1a0b4e63859c7a1e0d5b8f4a26\" precious.txt").await;
     assert_eq!(r.code, 1, "bogus nonce must fail, out: {}", r.text_out());
     assert!(
         r.err.contains("rm:"),

@@ -748,7 +748,8 @@ impl ExecContext {
     ///
     /// The result includes structured data in `.data` for programmatic access:
     /// ```json
-    /// {"nonce": "a3f7b2c1", "command": "rm", "paths": [...], "hint": "rm --confirm=a3f7b2c1 file", "ttl": 60}
+    /// {"nonce": "4b1e0d9a7c3f28e6b5a0c1d4e7f2938a", "command": "rm", "paths": [...],
+    ///  "hint": "rm --confirm=4b1e0d9a7c3f28e6b5a0c1d4e7f2938a file", "ttl": 60}
     /// ```
     pub fn latch_result(
         &self,
@@ -757,7 +758,15 @@ impl ExecContext {
         reason: &str,
         confirm_hint: impl FnOnce(&str) -> String,
     ) -> ExecResult {
-        let nonce = self.nonce_store.issue(command, paths);
+        // Entropy failure is fatal — never emit a guessable confirmation
+        // token (see `nonce::generate_nonce`). Mirrors `mktemp`'s handling of
+        // the same underlying `getrandom` failure mode.
+        let nonce = match self.nonce_store.issue(command, paths) {
+            Ok(nonce) => nonce,
+            Err(e) => {
+                return ExecResult::failure(1, format!("{command}: could not obtain system entropy: {e}"));
+            }
+        };
         let ttl = self.nonce_store.ttl().as_secs();
         let authorized = if paths.is_empty() {
             String::new()

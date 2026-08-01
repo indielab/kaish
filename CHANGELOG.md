@@ -46,6 +46,9 @@ breaking entries are marked **BREAKING**.
   its dictionary is copyrighted and aerospace-shaped, so we keep our own terms.
 
 ### Changed
+- **BREAKING:** `NonceStore::issue` returns `Result<String, getrandom::Error>`
+  instead of `String` — entropy failure has to reach the caller, and the old
+  signature had nowhere to put it.
 - **`grep` over a directory tree allocates 70% fewer bytes** (GH #48) — one
   `grep-searcher` per walk instead of one per file, each owning a 64 KiB line
   buffer.
@@ -106,6 +109,15 @@ breaking entries are marked **BREAKING**.
 - `help limits` gave the recursion depth cap as 32; `MAX_RECURSION_DEPTH` is 48.
 - `cp` and `mv` published no description for `-n`/`--no-clobber` and a mangled one
   for `--confirm` — both doc comments sat on the `confirm` field.
+
+### Security
+- Confirmation nonces (`--confirm=<nonce>` on `rm`, overwrites, `kaish-trash
+  empty`) are now 128 bits from the OS CSPRNG, rendered as 32 lowercase hex chars.
+- They replace a non-cryptographic hash truncated to 32 bits — 32 bits is a
+  guessable gate on a command that deletes files.
+- Issuing a nonce exits 1 with `could not obtain system entropy` when `getrandom`
+  fails — there is no fallback generator, because a predictable nonce confirms the
+  operation it exists to gate.
 
 ## [0.13.0] - 2026-07-18
 
