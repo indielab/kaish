@@ -11,16 +11,14 @@ breaking entries are marked **BREAKING**.
 ## [Unreleased]
 
 ### Fixed
-- **`fg` no longer marks a job Running (or hands it the terminal) before
-  `SIGCONT` is confirmed** (GH #161) — the same ordering bug fixed in `bg`
-  by #160, now closed end to end: the terminal is reclaimed and the job
-  stays `Stopped` on any failure in the resume sequence.
-- **REPL `exit` no longer hangs waiting on a backgrounded job** (GH #162) —
-  `bg`'s reaper used a blocking `waitpid` on tokio's blocking-pool, which
-  `Runtime::drop` waited on at shutdown; it's now a plain async task
-  polling `waitpid(..., WNOHANG)`, so exit is prompt regardless of how long
-  a backgrounded job keeps running (matching bash's `huponexit`-off
-  default: the job is orphaned to init, not signaled).
+- **`fg` marks a job Running only after `SIGCONT` succeeds** (GH #161) — the
+  terminal is still handed over first, because a process group must own the
+  terminal before it is continued, and a failed handoff or failed `SIGCONT`
+  now reclaims the terminal and leaves the job `Stopped`.
+- **REPL `exit` no longer waits on a backgrounded job** (GH #162) — `bg`'s
+  reaper now polls the job every 200ms instead of blocking until it ends, so
+  exit does not wait for it and the job is orphaned rather than signaled
+  (bash's `huponexit`-off default).
 
 ## [0.13.0] - 2026-07-18
 

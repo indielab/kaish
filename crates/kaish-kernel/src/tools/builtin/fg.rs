@@ -65,7 +65,8 @@ struct FgArgs {
     #[command(flatten)]
     global: GlobalFlags,
 
-    /// Job specifier (e.g. `%1`) or PID; defaults to the most recent job.
+    /// Job id, with or without the `%` prefix (`%1` or `1`). Defaults to the
+    /// highest-numbered stopped job.
     job: Vec<String>,
 }
 
