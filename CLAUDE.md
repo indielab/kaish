@@ -174,16 +174,18 @@ fails if it's stale). `limits.md` and the deeper `docs/LANGUAGE.md` still need m
 
 ## Writing style
 
-kaish is a strict subset of `sh`, chosen so muscle memory transfers. Our prose is a
-strict subset of English, chosen for the same reason. Full guide: `docs/style.md`.
-**These are weights, not gates** — there is no linter. Groom the text you touch; we are
-not scheduling a rewrite.
+kaish keeps a small, predictable subset of `sh`, chosen so muscle memory transfers. Our
+prose keeps a small, predictable subset of English, chosen for the same reason. Full
+guide: `docs/style.md`. **These are weights, not gates** — there is no linter. Groom the
+text you touch; we are not scheduling a rewrite.
 
-- **Subset, not dialect** — keep the vocabulary small; this constrains distinct words, not
+- **Subset, not slang** — keep the vocabulary small; this constrains distinct words, not
   length. Avoid metaphors that name a mental act as a physical one ("reach for"). `muscle
-  memory` and `footgun` are load-bearing and stay; do not add more.
+  memory` and `footgun` are load-bearing and stay; do not add more. Prefer the reader's
+  word over a tool's private one ("allocations", not dhat's "blocks"). American spelling.
 - **One term, one meaning** — a synonym reads as a new concept. Terms that carry a
-  guarantee go in the table below.
+  guarantee go in the table below. Example labels are imperative. Cross-references take one
+  form: ``see `help <topic>` ``, or `docs/LANGUAGE.md`, "Section name".
 - **State the number** — exact exit code, size, flag, default, condition. "Spills to a file
   and exits 3", never "fails". Agents act on our numbers.
 - **Fail loud** — constraint and consequence at the front of the sentence, no hedging. The
@@ -197,12 +199,18 @@ not scheduling a rewrite.
   behavior, not whether the sentence names one. When you touch a builtin, audit every `///`
   on its clap struct (see Code Style).
 
-Full weight applies to help content, `fragments.rs` bodies, and builtin schema text
-(`description`, `about`, example labels, `///` argument docs). Partial weight to
-`LANGUAGE.md`/`EMBEDDING.md`/`NAMING.md`. Terms only to `README.md` and the design docs.
-`devlog.md`, `signoff.md`, `designing-syntax-with-llms.md`, and `arrays-and-hashes.md`
-are exempt — they tell a story and need a voice. kaibo and kaish-extras adopt this by
-reference as they evolve; kaijutsu is exempt.
+Full weight applies to help content, `fragments.rs` bodies, builtin schema text
+(`description`, `about`, example labels, `///` argument docs), and **every error and
+diagnostic string a builtin or the kernel returns** — an agent reads a failure message
+more often than any help topic. Partial weight to `LANGUAGE.md`/`EMBEDDING.md`/`NAMING.md`
+and `///` rustdoc on `pub` items. Terms only to `README.md` and the design docs.
+`devlog.md`, `signoff.md`, and `designing-syntax-with-llms.md` are exempt — they tell a
+story and need a voice. kaibo and kaish-extras adopt this by reference as they evolve;
+kaijutsu is exempt.
+
+`CHANGELOG.md` is the one place "Keep the why" does not win: one line per bullet, carrying
+the rule and one clause of rationale. The narrative goes in the PR body, which becomes the
+merge commit. Three numbers and three reasons means three bullets.
 
 ### Terms
 
