@@ -83,9 +83,10 @@ impl Stmt {
 pub struct Assignment {
     pub path: VarPath,
     pub value: Expr,
-    /// True if declared with `local` keyword (explicit local scope). Ignored
-    /// for a subscripted path — a bracket-path write always mutates the
-    /// existing root (see `docs/arrays-and-hashes.md`, "Assignment lvalues").
+    /// True if declared with `local` (explicit local scope). Ignored for a
+    /// subscripted path — a bracket-path write mutates the existing root, so
+    /// there is no new binding to scope. See `docs/LANGUAGE.md`,
+    /// "Assignment — bracket-path lvalues".
     pub local: bool,
 }
 
@@ -319,7 +320,8 @@ pub enum Expr {
     GlobPattern(String),
     /// List literal: `[a b c]`, `[]`, `[...$xs date]`. Value-position only
     /// (assignment RHS, `in`/`not in` RHS, nested literal interiors) — never
-    /// argv or a `for`-head item. See `docs/arrays-and-hashes.md`.
+    /// argv or a `for`-head item. See `docs/LANGUAGE.md`, "Construction —
+    /// list/record literals".
     ListLiteral(Vec<ListElem>),
     /// Record literal: `{name: amy, role: maintainer}`, `{port:8080}` (colon
     /// may be spaced or unspaced). Value-position only, same as `ListLiteral`.
@@ -333,8 +335,8 @@ pub enum ListElem {
     /// splitting of a variable's contents).
     Item(Expr),
     /// A spread element: `[...$xs date]` — flattens the referenced list's
-    /// elements into the new list at this position. Records have no spread
-    /// (out of scope, see `docs/arrays-and-hashes.md`).
+    /// elements into the new list at this position. Records have no spread:
+    /// merging records is set/map algebra, which the first cut left out.
     Spread(Expr),
 }
 
@@ -346,9 +348,10 @@ pub struct RecordEntry {
 }
 
 /// A record literal key: `{name: amy}` (bare), `{"content-type": x}` (quoted,
-/// for anything that isn't a bareword), or `{"$k": x}` (double-quoted with
+/// for anything that is not a bareword), or `{"$k": x}` (double-quoted with
 /// interpolation — resolved at eval time like any double-quoted string; single
-/// quotes are the literal-`$` escape hatch). See `docs/arrays-and-hashes.md`.
+/// quotes keep a literal `$`). See `docs/LANGUAGE.md`, "Construction —
+/// list/record literals".
 #[derive(Debug, Clone, PartialEq)]
 pub enum RecordKey {
     Bare(String),
@@ -399,7 +402,8 @@ pub enum TestExpr {
     /// Logical NOT: `[[ ! -f file ]]`
     Not { expr: Box<TestExpr> },
     /// Collection membership: `[[ e in $list ]]` (element) / `[[ k in $record ]]`
-    /// (key). A scalar/string RHS is a loud error — see `docs/arrays-and-hashes.md`.
+    /// (key). A scalar or string RHS is a loud error — see `docs/LANGUAGE.md`,
+    /// "Membership".
     In { left: Box<Expr>, right: Box<Expr> },
     /// Negated membership: `[[ e not in $coll ]]`.
     NotIn { left: Box<Expr>, right: Box<Expr> },
@@ -429,9 +433,9 @@ pub enum StringTestOp {
     IsEmpty,
     /// `-n` - string is non-empty
     IsNonEmpty,
-    /// `-list` - value is a native list (`Value::Json(Array)`). Shape guard —
-    /// the antidote to the "API sometimes returns an object instead of a
-    /// list" trap (see `docs/arrays-and-hashes.md`, decision F). Evaluates
+    /// `-list` - value is a native list (`Value::Json(Array)`). Shape guard for
+    /// an API that sometimes returns an object where a list is expected — see
+    /// `docs/LANGUAGE.md`, "Shape guards". Evaluates
     /// the operand's *value*, like `-z`/`-n`, not a path stat like `-f`/`-d`.
     /// A defined-but-wrong-shaped value is false; a bare unset `$var` is an
     /// undefined-variable error (like `-z`/`-n`), so a typo isn't silently false.

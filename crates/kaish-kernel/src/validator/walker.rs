@@ -96,8 +96,8 @@ impl<'a> Validator<'a> {
     /// admits `.` for other uses (filenames), so a dotted assignment target
     /// is caught here rather than by tightening the lexer regex. A
     /// subscripted lvalue (`x[k]=v`) additionally requires the root to
-    /// already be bound — a path-set never autovivifies the root (see
-    /// `docs/arrays-and-hashes.md`, "Assignment lvalues").
+    /// already be bound — a path-set never autovivifies the root. See
+    /// `docs/LANGUAGE.md`, "Assignment — bracket-path lvalues".
     fn validate_assignment(&mut self, assign: &Assignment) {
         // Validate the value expression
         self.validate_expr(&assign.value);

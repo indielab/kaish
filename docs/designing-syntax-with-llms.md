@@ -19,8 +19,10 @@ Human taste still matters — readability, consistency, the feel of the thing. B
 guess you argue about and becomes a thing you can **measure**, today, for the price
 of a few API calls. So we did. This is the writeup of the method, grounded in a
 real decision: adding array/hash (list/record) literals to kaish. The design doc
-that fell out of it is [`arrays-and-hashes.md`](arrays-and-hashes.md); this doc is
-about *how* we got there.
+that fell out of it has since been retired into this one — what was worth keeping
+was never the decision log but the notes on how to *teach* the syntax we chose,
+and those are the [teaching section](#teaching-it-the-docs-are-part-of-the-design)
+near the end. This doc is about *how* we got there.
 
 The short version: a few hours of `oneshot` calls to DeepSeek, Gemini, and Claude
 Haiku settled a dozen syntax questions, caught problems no amount of armchair
@@ -267,6 +269,130 @@ for completeness. The strong models will be fine. They were always going to be f
 
 ---
 
+## Teaching it: the docs are part of the design
+
+That corollary cost us more effort than the syntax decisions did. If completeness
+of teaching is the variable that actually moves the numbers, then the doc copy
+isn't downstream of the design — it *is* part of it, and it earns the same lab.
+What follows came out of grading model output against draft teaching copy: first
+ad-hoc cheat-sheets, and at the end the real shipped help text.
+
+**Show it. Stating it is not enough.** We had a rules sheet that plainly stated
+paths must be braced inside strings. Models read it and emitted unwrapped paths
+anyway. An *example* that showed `"${r[$k]}"` got copied verbatim, every time.
+Models reproduce what's on the page and guess at what isn't, so we ended up
+listing every access form side by side — `${xs[0]}`, `${xs[-1]}`, `${xs[0:2]}`,
+`${r[k]}`, `${r[$key]}`, `${r["weird key"]}`, `${r[a][b]}` — after example-only
+teaching that omitted list indexing produced an invented `$(colors.1)`, dropped
+sigil and hallucinated `$()` included.
+
+**Show the wrong form with its error, right next to the right one.** The bash/JS
+prior for field access is a dot, so the docs show `${user.name}` as the WRONG
+form together with the error it produces. That's not a stylistic nicety; it's the
+only version that worked. The payoff was measurable at the end: on a bare
+field-access task with no "don't use dots" warning anywhere in the prompt, the
+panel produced *zero* dot-leakage. A taught contrast holds where a stated rule
+evaporates.
+
+**Adjacency does work that prose can't.** Two rules kept getting smeared into one:
+access and length are expansions and take no `$()` (`${xs[0]}`, `${#xs}`), while a
+builtin used as a value needs it (`$(keys $r)`). Explained in separate paragraphs,
+models overgeneralized the capture rule across both. Printed next to each other,
+the boundary held. Same story for nest-vs-spread — `[$a $b]` beside
+`[...$a ...$b]` went 12/12 on the lite models, in both directions.
+
+**Anchor a novel form to one the reader already has.** `push colors cyan` takes a
+variable *name*, not a value — an odd calling convention that models got right
+every single time. We think the reason is one clause of prose: it works like
+`read`. A sentence of analogy to something already in the language buys more than
+several sentences of specification.
+
+**One operation, one spelling.** We dropped the pure-functional `append` in favor
+of in-place `push`, then made sure no document showed both. A model that has to
+choose between two spellings of the same operation will sometimes choose the one
+you were about to remove.
+
+**Teach the boring form too, or the novel one over-attracts.** Given no `!=`
+example, Haiku expressed "not equal to dog" as `[[ $a not in [dog] ]]` — a
+list-membership test standing in for scalar inequality. Correct, and utterly
+roundabout. A shiny new operator will absorb work that belongs to the plain one
+unless the plain one is on the page. It also forced a design consequence: `in`'s
+right-hand side had to accept a literal and not just a variable, because models
+will write one.
+
+**Error messages are teaching copy, and the highest-leverage kind.** Models
+context-switch out of JSON and Python and write `x = [a, b]`. A validator that
+merely rejects that buys you a retry; one that shows the fix — "kaish assignment
+takes no spaces around `=`; write `x=[a, b]`" — converges the model in a single
+round. So every loud error the collections work added was written that way:
+dotted access says *use `${user[name]}`*, a multi-word literal says *quote it*, an
+out-of-bounds set says *`push` grows lists*. An error message is the one piece of
+documentation you can guarantee the model reads, at the exact moment it is
+confused.
+
+**Turning the ambiguous form into an error relocates the trap; it doesn't remove
+it.** A hostile review caught that `for x in $data` would silently iterate a
+*record's keys* when an API returned an object where a list was expected — a
+silent type cascade, the worst class of bug in a shell agents drive. So we made
+the bare form a hard error. The trap promptly moved into the sanctioned idiom:
+`for x in $(values $data)` on a record iterates its field values instead of the
+one object, just as silently. The real fix was a shape guard (`typeof`,
+`[[ -list ]]`, `[[ -record ]]`) plus docs that show the guard wherever the shape
+of the data isn't trusted. When you plug a hole, go look where the water comes
+out.
+
+**The teaching copy has a budget, and the tier most likely to be read is the
+scarcest.** The always-on instruction block an embedder ships was already
+~9–10K characters, dominated by the builtin index. The dense teaching above
+cannot live there. So collections got a handful of terse rules and exactly one
+wrong-form contrast in the always-on tier, the full tested example set in the
+reference tier (`help syntax`), and the prose in the language reference. Amy's
+framing for the always-on block, which we adopted: lead with the most important
+200–300 characters and descend in ranked steps, so a skimmed or truncated read
+still delivers the rules that matter most, with everything below it reachable by
+name.
+
+**Test the artifact you ship, not the cheat-sheet you wrote for the test.** Every
+round up to the last handed the panel an ad-hoc cheat-sheet — convenient, and one
+step removed from what an agent actually receives. For the final pass we made the
+panel's *entire* reference the real composed help output: the shipped
+`Recipe::agent_onboarding()` block plus the shipped collections help section, byte
+for byte, no repo access, no other context. DeepSeek V4, Gemini 3.5-flash and
+Claude Haiku 4.5, stateless one-shots, six tasks each covering every form that had
+changed since the previous panel.
+
+Eighteen for eighteen, no correction rounds. All three models wrote a nested record
+literal and iterated it as
+`for k in $(keys $servers); do echo "$k: ${servers[$k][port]}"; done` on the first
+try — the exact construction the earlier panel most often got wrong, now reached
+for unprompted. Dynamic subscripts came out distinct from literal keys, membership
+arrived wrapped in a full `if … then … else … fi`, the slice was right, dot-leakage
+was zero. All eighteen generated scripts were then executed against the real `kaish`
+binary and produced correct output.
+
+The argument for testing the shipped copy, though, landed *before* the panel ran.
+Preparing the material turned up two shipped help fragments that taught membership
+as a bare standalone `[[ k in $r ]]` line — precisely the failure mode we had
+diagnosed rounds earlier and written a rule about (#4). It shipped alongside the
+membership feature a month prior and survived every review since, because nothing
+had ever pointed a panel at the composed artifact. We fixed the fragments and the
+matching language-reference examples before the run. A rule you have learned is not
+a rule your docs follow; only the artifact can tell you which.
+
+**Pre-register the number and the response.** Before that panel we wrote down which
+result would change the design: if models needed more than one round to accept the
+mandated `$(keys $r)` loop head, we would ship a relaxation letting a bare
+collection iterate. Three of three converged in round one, so we didn't ship it, and
+that restraint is only credible because the threshold was set beforehand. Deciding
+in advance what the number means is what keeps a green run from being read as
+permission to do the thing you already wanted to do.
+
+The obvious next move — which we have not done — is to run the doc copy the way we
+ran the syntax: variants of the teaching text, measured against task success, across
+model families and sizes. Same lab, different subject.
+
+---
+
 ## The other variant: tuning an existing tool
 
 Everything above is about inventing *new* syntax. The same lab runs in reverse —
@@ -338,7 +464,9 @@ A checklist for using an LLM panel as a syntax usability lab:
    together.
 8. **Use a second model as a hostile reviewer** of the whole design.
 9. **Re-test the final, changed forms** before you commit — the things you adopted
-   late were never actually validated in their final shape.
+   late were never actually validated in their final shape — and re-test them
+   against the **copy you actually ship**, not a cheat-sheet written for the test.
+   Say in advance which result would change the design.
 
 Total cost for the kaish collections design: a few dozen one-shot calls, a few
 hours. It settled a dozen contentious syntax decisions with evidence instead of
@@ -371,6 +499,7 @@ as design feedback gets.
 
 ---
 
-*Methodology notes from the kaish project. The collection-syntax design doc this
-produced is [`arrays-and-hashes.md`](arrays-and-hashes.md). Panel: DeepSeek V4
-(pro/flash), Gemini 3.x (pro/lite), Claude Haiku — June 2026.*
+*Methodology notes from the kaish project. The collection-syntax design doc these
+produced has been retired into this one; its teaching notes live above. Panel:
+DeepSeek V4 (pro/flash), Gemini 3.x (pro/lite/3.5-flash), Claude Haiku (4.5) —
+June–July 2026.*

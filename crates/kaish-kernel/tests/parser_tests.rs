@@ -588,7 +588,8 @@ fn parser_test_complex_compound() {
 }
 
 // ── Collection membership: `in` / `not in` ─────────────────────────────────
-// See docs/arrays-and-hashes.md — "Membership `in` is collection-only".
+// The right-hand side must be a collection; a string RHS is a loud error.
+// See `docs/LANGUAGE.md`, "Membership".
 
 #[test]
 fn parser_test_in() {

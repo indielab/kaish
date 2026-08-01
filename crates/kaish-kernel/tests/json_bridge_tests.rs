@@ -5,7 +5,7 @@
 //! use `KernelConfig::isolated()` — no localfs — because the pair is pure data
 //! and must work in every capability build.
 //!
-//! The load-bearing guarantees under test (see `docs/arrays-and-hashes.md`):
+//! The load-bearing guarantees under test:
 //! - **Envelope-free**: an envelope-shaped object from external JSON stays a
 //!   record, never silently becomes bytes.
 //! - **One document, one value**: empty input and trailing garbage are loud

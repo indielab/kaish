@@ -8,8 +8,10 @@
 </p>
 
 **kaish** is a predictable shell for AI agents delivered as an embeddable Rust
-library with a reference REPL. The language is a strict subset of `sh`, so most
-muscle memory and model training will transfer.
+library with a reference REPL. The language is inspired by POSIX `sh` and bash
+and informed by `shellcheck`'s lints: it drops the constructs that make shell
+unpredictable and adds typed data on top, so most muscle memory and model
+training will transfer.
 
 The builtins — grep, sed, awk, find, and ninety-odd more — run in-process, so most
 text processing never needs `fork()` or `exec()`. All file I/O goes through a
@@ -264,6 +266,29 @@ an `awk` that never surprises.
 Latch and trash semantics are covered in [docs/LANGUAGE.md](docs/LANGUAGE.md);
 the embedder-facing contract (`LatchRequest`, nonce stores, `Kernel::confirm`)
 in [docs/EMBEDDING.md](docs/EMBEDDING.md).
+
+## Terms
+
+kaish uses these words with one meaning each, in the docs, the help system, and the
+error messages.
+
+| Term | Meaning |
+|---|---|
+| loud, fail loud | An error is explicit and immediate. kaish never continues on a wrong assumption. |
+| silently | Used only in the negative, to name behavior kaish refuses. |
+| builtin | A tool that runs inside the kernel process. |
+| external command | A program the kernel runs through `PATH`. |
+| kernel | The execution core. Not the OS kernel. |
+| mount | A path prefix bound to a filesystem, or the act of binding one. |
+| typed | A value keeps its JSON type through substitution. It is not stringified. |
+| overlay | Copy-on-write mode. Writes land in a virtual upper layer until committed. |
+| trash | Recoverable deletion under `set -o trash`. A trash failure is an error, never a permanent delete. |
+| nonce | The confirmation token a latch-gated operation requires. |
+| spill | To write oversize output to a file, or the file that results. |
+| latch | The confirmation hold that a destructive operation waits on. |
+
+Contributors: the writing style behind this vocabulary is in
+[docs/style.md](docs/style.md).
 
 ## Why build 会sh?
 
