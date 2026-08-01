@@ -11,6 +11,13 @@ breaking entries are marked **BREAKING**.
 ## [Unreleased]
 
 ### Added
+- **`kill` accepts the bash/POSIX signal shorthand** (GH #198) — `kill -9 %1`,
+  `kill -STOP %1`, `kill -SIGSTOP %1`, case-insensitive, alongside the existing
+  `--signal NAME`/`-s NAME`.
+- The shorthand covers a fixed set of 9 names (`TERM KILL INT HUP STOP CONT QUIT
+  USR1 USR2`) plus any numeric signal (`-9`, `-15`, `-<N>`).
+- An unsupported signal name is a loud usage error naming what IS supported, never
+  a silent fallback.
 - **Writing style guide** (`docs/style.md`) plus a `Terms` glossary in `README.md`
   and `CLAUDE.md` — weights, not gates, groomed at the point of touch.
 - Inspired by the structure of ASD-STE100 Simplified Technical English, not STE —
@@ -24,6 +31,15 @@ breaking entries are marked **BREAKING**.
   only checker that sees them.
 
 ### Fixed
+- **`--signal NAME` is now case-insensitive** — `kill --signal kill` used to fail
+  as "unknown signal: kill"; both forms now share one name table.
+- **Hermetic and `subprocess` builds now agree on which signal names `kill`
+  recognizes** — both read the same fixed 9-name table.
+- The hermetic path used to accept `ABRT`/`TSTP`/`WINCH` by coincidence while the
+  `subprocess` path did not, so `kill --signal ABRT` varied by build.
+- **`--json` now applies to `raw_argv` builtins** (`test`, and `kill` as of this
+  change) — their argv binder never lifts flags into the flag set the kernel's
+  `--json` pre-apply reads.
 - `help limits` gave the recursion depth cap as 32; `MAX_RECURSION_DEPTH` is 48.
 - `cp` and `mv` published no description for `-n`/`--no-clobber` and a mangled one
   for `--confirm` — both doc comments sat on the `confirm` field.
