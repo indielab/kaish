@@ -1203,20 +1203,19 @@ These bash features are omitted because they're confusing, error-prone, or ambig
 
 ## ShellCheck Alignment
 
-**kaish is informed by ShellCheck's lints, not validated by them.** The
-Bourne-shaped core of the language is built so the classic ShellCheck warnings
-can't arise in the first place — the constructs they warn about (word
-splitting, backticks) simply don't exist. Glob expansion is supported but
-controllable via `set +o glob`.
+**ShellCheck cannot check a kaish script. It shaped the language; it does not
+validate it.**
 
-kaish is not, however, a dialect ShellCheck knows how to check. `[[ ]]` is bash
-(SC3010 under `sh`), here-strings `<<<` are bash (SC3011), and typed data,
-structured `$()`, and collections are modelled by no ShellCheck dialect at all.
-**ShellCheck gives zero coverage for kaish's extensions — the kaish validator
-is their sole safety net.**
+The Bourne-shaped core is built so the classic warnings cannot arise: word
+splitting and backticks are not in the grammar. Glob expansion is on by default;
+`set +o glob` turns it off.
 
-The table below records which lints shaped which design decision. It is not a
-claim that ShellCheck can pass judgement on a kaish script.
+The extensions sit outside every ShellCheck dialect. `[[ ]]` is bash (SC3010
+under `sh`), here-strings `<<<` are bash (SC3011), and typed data, structured
+`$()`, and collections are modeled by no dialect at all. **ShellCheck reports
+nothing about these. The kaish validator is the only checker that sees them.**
+
+The table below records which lint shaped which design decision.
 
 | SC Code | Warning | Kaish Approach |
 |---------|---------|----------------|

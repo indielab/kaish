@@ -1,10 +1,11 @@
 //! keys — the keys of a collection, in insertion order.
 //!
-//! Part of the native-collections OPS surface (see `docs/arrays-and-hashes.md`,
-//! "OPS — keys/values are builtins; length is the param-expansion `${#…}`").
-//! `keys $collection` accepts a collection **directly** (never nested through
-//! another builtin) so it never falls into the `len $(keys $r)`-style nesting
-//! trap that motivated this design.
+//! `keys` and `values` are builtins; length is the param-expansion `${#…}`.
+//! See `docs/LANGUAGE.md`, "keys / values".
+//!
+//! `keys $collection` takes a collection **directly** and is never nested
+//! through another builtin. Nesting invites `len $(keys $r)`, which reads as a
+//! length of text rather than a count of keys.
 //!
 //! jq semantics for the two collection shapes:
 //! - a **record** → its keys, insertion order;

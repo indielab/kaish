@@ -167,6 +167,11 @@ Consequences for embedders:
   `allow_external_commands` (see [Sandboxing](#sandboxing-and-external-commands)).
   Git is an ordinary external command (`git status`, `git log`): it runs via
   `subprocess` against your system `git`, with no in-tree builtin or backend.
+  The old `kaish-tools-git` crate (git builtin + `GitVfs`, removed in 0.9.0) is
+  being reinvented as a shallow, safety-first git plugin in
+  [kaish-extras](https://github.com/tobert/kaish-extras) — history, autopsy,
+  and design intent live in `docs/git.md` there, and that repo is its
+  maintained home going forward.
 - A read-only agent shell wants the default features plus a custom backend —
   see [with_backend hermeticity](#custom-backend-kernelwith_backend).
 
