@@ -46,12 +46,23 @@ pub fn contains_glob(s: &str) -> bool {
 pub fn glob_match(pattern: &str, input: &str) -> bool {
     use std::cell::Cell;
 
-    // Expand braces first, then match each expanded pattern
-    let expanded = expand_braces(pattern);
     let calls = Cell::new(0usize);
-    for pat in expanded {
+    // The input is the same for every alternative, so collect it once. (It used
+    // to be re-collected inside the loop.)
+    let input_chars: Vec<char> = input.chars().collect();
+
+    // Brace-free is the overwhelmingly common case — every ignore rule matched
+    // against every walked path lands here (GH #48: `expand_braces` inside
+    // `glob_match` was ~50% of all allocations in the grep-over-a-tree profile).
+    // Skip the expansion machinery entirely rather than round-tripping the
+    // pattern through a `Vec<char>` and a one-element `Vec<String>`.
+    if !pattern.contains('{') {
+        let pat_chars: Vec<char> = pattern.chars().collect();
+        return match_bounded(&pat_chars, 0, &input_chars, 0, &calls);
+    }
+
+    for pat in expand_braces(pattern) {
         let pat_chars: Vec<char> = pat.chars().collect();
-        let input_chars: Vec<char> = input.chars().collect();
         if match_bounded(&pat_chars, 0, &input_chars, 0, &calls) {
             return true;
         }
@@ -72,6 +83,13 @@ pub fn glob_match(pattern: &str, input: &str) -> bool {
 /// assert_eq!(expand_braces("{a,b}"), vec!["a", "b"]);
 /// ```
 pub fn expand_braces(pattern: &str) -> Vec<String> {
+    // Nothing to expand: skip the `Vec<char>` scan entirely. The recursive tail
+    // below re-enters here once per alternative, so this is also the recursion's
+    // base case.
+    if !pattern.contains('{') {
+        return vec![pattern.to_string()];
+    }
+
     let chars: Vec<char> = pattern.chars().collect();
 
     // Find the first top-level brace group

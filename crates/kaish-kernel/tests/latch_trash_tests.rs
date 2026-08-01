@@ -1297,7 +1297,11 @@ async fn jobs_json_row_carries_the_latch_object() {
     let rows: serde_json::Value =
         serde_json::from_str(jobs.text_out().trim()).expect("a JSON array of job rows");
     let row = rows.as_array().and_then(|a| a.first()).expect("at least one job row");
-    assert_eq!(row["status"], "Latched", "row: {row}");
+    // GH #241: JobStatus's pinned wire spelling is lowercase (matching the
+    // existing /v/jobs/N/status vocabulary), not the capitalized Display
+    // string this row used to derive from via job_rows_json's hand-rolled
+    // `.to_string()`.
+    assert_eq!(row["status"], "latched", "row: {row}");
     assert_eq!(row["latch"]["command"], "rm", "row: {row}");
     assert!(
         !row["latch"]["nonce"].as_str().unwrap_or("").is_empty(),

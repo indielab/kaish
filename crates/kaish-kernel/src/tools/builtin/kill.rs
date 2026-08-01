@@ -8,6 +8,36 @@
 //! to an external child's process group, and signalling a bare PID. When
 //! external commands are disabled there are no such processes to signal anyway
 //! (and when they're enabled, `/bin/kill` is on PATH for raw PIDs).
+//!
+//! ## Signal shorthand (GH #198)
+//!
+//! Besides `--signal NAME`/`-s NAME`, kill accepts the bash/POSIX shorthand as
+//! a leading dash token: `kill -9 %1`, `kill -STOP %1`. Getting there needed
+//! `raw_argv` (see [`ToolSchema::with_raw_argv`]) — the *default* argv binder
+//! would otherwise mangle these tokens before `execute()` ever sees them:
+//!
+//! - `-9`/`-15`/… lexes as a plain `Int` positional (fine on its own), but
+//!   `execute()` used to always read positional 0 as the target — so `-9`
+//!   silently became "the target" (tried as a PID) while the real target
+//!   (`%1`) was dropped with no error at all.
+//! - `-STOP`/`-KILL`/… lexes as a multi-character `ShortFlag`. The default
+//!   binder splits any *undeclared* multi-char short flag into one boolean
+//!   flag per letter (`-S -T -O -P`), which then fails clap with a confusing
+//!   `unexpected argument '-O'` — nothing about signals at all. Worse: since
+//!   `-s` (`--signal`) IS a declared value-taking short flag, a
+//!   case-insensitive lowercase spelling (`-stop`, `-sigkill`) would collide
+//!   with the binder's glued-short-value rule (`-s<rest>` → `--signal <rest>`)
+//!   and silently resolve to the wrong thing (`-stop` → `--signal top`) —
+//!   not even loud, just wrong. `raw_argv` sidesteps the entire flag/positional
+//!   split so kill can hand-roll its own tiny grammar over the untouched,
+//!   source-ordered tokens (à la `set.rs`).
+//!
+//! `raw_argv` has two costs, both accepted deliberately: the kernel's generic
+//! `--help`/`-h` interception (which reads `args.flags`, always empty under
+//! raw_argv) no longer fires for `kill` — `help kill` is the fully equivalent
+//! replacement, verified to produce identical output. `--json` needed a
+//! companion fix in `GlobalFlags::apply_from_args` (kaish-tool-api) since it
+//! has the same problem; fixed there once, for every raw_argv builtin.
 
 use async_trait::async_trait;
 use clap::{CommandFactory, Parser};
@@ -20,17 +50,26 @@ use crate::tools::{schema_from_clap, ExecContext, GlobalFlags, Tool, ToolArgs, T
 /// Kill tool: send signals to processes or jobs.
 pub struct Kill;
 
-/// clap-derived argv layer for kill.
+/// clap-derived argv layer for kill — schema/help generation only. Real
+/// binding happens by hand over `args.positional` in `execute()` (`raw_argv`,
+/// see the module docs above): `signal`/`discard` are never populated by a
+/// real parse (raw_argv keeps `flags`/`named` empty, so clap only ever sees
+/// the declared defaults), and `targets` is a validation-only sink — per
+/// CLAUDE.md's clap-builtin convention, never read directly.
 #[derive(Parser, Debug)]
 #[command(name = "kill", about = "Send a signal to a process or job")]
 struct KillArgs {
-    /// Signal name or number: TERM, KILL, STOP, CONT, INT, HUP, USR1, USR2, QUIT (--signal or -s)
+    /// Signal name or number: TERM, KILL, INT, HUP, STOP, CONT, QUIT, USR1,
+    /// USR2 (--signal or -s; case-insensitive, optional SIG prefix). The
+    /// bash/POSIX shorthand is also accepted as a leading token: `-9`/`-15`/
+    /// `-<N>` (numeric) or `-KILL`/`-STOP`/... (name, e.g. `-SIGKILL`).
     #[arg(short = 's', long, default_value_t = String::from("TERM"))]
     signal: String,
 
     /// Abandon a latched (confirmation-pending) job. Without this flag, kill
     /// refuses to destroy a job's pending confirmation gate. Conflicts with
-    /// --signal: discarding a gate delivers nothing to anyone.
+    /// a signal (--signal/-s, or a shorthand): discarding a gate delivers
+    /// nothing to anyone.
     #[arg(long, conflicts_with = "signal")]
     discard: bool,
 
@@ -39,6 +78,28 @@ struct KillArgs {
 
     /// Target PID(s) or job specifier(s) (e.g. `%1`).
     targets: Vec<String>,
+}
+
+/// Signal names kaish recognizes, for both `--signal NAME` and the `-NAME`
+/// shorthand — the fixed 80/20 set Amy named for job control in kaijutsu
+/// (GH #198), not the full POSIX/BSD table. Deliberately excludes
+/// ABRT/TSTP/WINCH/etc.: an unsupported name fails loudly below, naming
+/// exactly what IS supported, rather than a silent guess or a per-platform
+/// host lookup (the latter is exactly why this shorthand was demoted to P3 —
+/// see the issue).
+const KNOWN_SIGNAL_NAMES: &[&str] =
+    &["TERM", "KILL", "INT", "HUP", "STOP", "CONT", "QUIT", "USR1", "USR2"];
+
+/// Normalize a bare signal-name token (no leading `-`) to kaish's fixed
+/// canonical spelling. Case-insensitive (bash accepts `-kill` as well as
+/// `-KILL`) and tolerant of an optional `SIG` prefix (`SIGKILL`/`KILL` both
+/// work, matching bash). `None` means the name isn't in
+/// [`KNOWN_SIGNAL_NAMES`] — every caller must fail loud on `None`, never fall
+/// back to a default signal.
+fn normalize_signal_name(raw: &str) -> Option<&'static str> {
+    let upper = raw.to_ascii_uppercase();
+    let stripped = upper.strip_prefix("SIG").unwrap_or(&upper);
+    KNOWN_SIGNAL_NAMES.iter().copied().find(|&n| n == stripped)
 }
 
 #[async_trait]
@@ -55,8 +116,11 @@ impl Tool for Kill {
             [
                 ("Terminate a job", "kill %1"),
                 ("Kill a process by PID", "kill --signal KILL 1234"),
+                ("Bash-style signal shorthand", "kill -9 %1"),
+                ("Named shorthand (case-insensitive, SIG optional)", "kill -STOP %1"),
             ],
         )
+        .with_raw_argv()
     }
 
     async fn execute(&self, args: ToolArgs, ctx: &mut dyn ToolCtx) -> ExecResult {
@@ -76,44 +140,129 @@ impl Tool for Kill {
         };
         parsed.global.apply(ctx);
 
-        // Signal from --signal / -s named param, or default to TERM. Prefer
-        // args.named so an Int signal keeps its typing.
-        //
-        // `--signal` is a named/flag value only, never positional, so
-        // `ToolArgs::to_argv()` (called above) now rejects a `Value::Bytes`
-        // signal loudly before `KillArgs::try_parse_from` ever runs (GH #164,
-        // closing the root cause behind this GH #116 guard) — `Value::Bytes`
-        // can no longer reach this match at all (the positional target form
-        // below is guarded separately, since positional Bytes isn't covered
-        // by `to_argv()`'s guard). Bool/Float/Json/Null remain genuinely
-        // reachable, though: a bare `true`/`9`/`1.5` literal in argv position
-        // binds directly as `Value::Bool`/`Int`/`Float` (no `fromjson`
-        // needed — see `parser.rs`'s `literal_parser`), and Json/Null arrive
-        // via a variable holding `fromjson`'s typed result. All four
-        // stringify sensibly and fall through to `signal_is_terminating`'s
-        // (or `parse_signal`'s) existing "unknown signal" rejection below —
-        // that's real, exercised behavior, not dead code. Bytes is the one
-        // case that structurally cannot happen; per the project's
-        // error-handling rules an impossible case must panic loudly rather
-        // than silently ride the generic arm.
-        let signal_name = match args.named.get("signal") {
-            Some(Value::String(s)) => s.clone(),
-            Some(Value::Int(i)) => i.to_string(),
-            Some(v @ (Value::Null | Value::Bool(_) | Value::Float(_) | Value::Json(_))) => {
-                crate::interpreter::value_to_string(v)
-            }
-            Some(Value::Bytes(_)) => unreachable!(
-                "kill: --signal held Value::Bytes past to_argv()'s guard above — that \
-                 invariant (GH #164) is broken"
-            ),
-            None => parsed.signal,
-        };
+        // Hand-rolled grammar over the raw, source-ordered `args.positional`
+        // (see the module docs for why this can't be a normal clap/binder
+        // parse). `explicit_signal` is anything spelled via --signal/-s (any
+        // form); `shorthand_signal` is a leading `-9`/`-STOP`-style token.
+        // Kept separate so mixing the two forms can be flagged as ambiguous
+        // instead of silently preferring one.
+        let mut discard = false;
+        let mut explicit_signal: Option<String> = None;
+        let mut shorthand_signal: Option<String> = None;
+        let mut targets: Vec<Value> = Vec::new();
+        // POSIX end-of-options: once a literal `--` is seen, every following
+        // token is an operand (a target), never a flag or shorthand — so
+        // `kill -- -9 %1` tries to signal a PID literally named `-9`, not
+        // send signal 9 (found via kaibo review: without this, `--` was
+        // silently a no-op instead of actually ending option parsing).
+        let mut past_dash_dash = false;
 
-        let target_str = match args.get_positional(0) {
+        let mut i = 0;
+        while i < args.positional.len() {
+            let value = &args.positional[i];
+            if past_dash_dash {
+                targets.push(value.clone());
+                i += 1;
+                continue;
+            }
+            match value {
+                // Numeric shorthand: -9, -15, -2, -1, -<N>. Only a NEGATIVE
+                // Int can be this — a real PID target is always positive, so
+                // there's no ambiguity. (`-0` is not reachable this way: i64
+                // has no negative zero, so it lexes identically to a bare
+                // `0`; out of scope for this 80/20 pass.)
+                Value::Int(n) if *n < 0 => {
+                    shorthand_signal = Some((-n).to_string());
+                }
+                Value::String(s) => match s.as_str() {
+                    "--" => past_dash_dash = true,
+                    // --json is a kernel-level concern (GlobalFlags's
+                    // raw_argv-aware pre-apply already handled it); nothing
+                    // to do here but recognize and skip it, not error.
+                    "--json" => {}
+                    "--discard" => discard = true,
+                    "-s" | "--signal" => {
+                        i += 1;
+                        let Some(next) = args.positional.get(i) else {
+                            return ExecResult::failure(2, "kill: --signal requires a value".to_string());
+                        };
+                        explicit_signal = match crate::interpreter::value_to_text_sink_named(
+                            next,
+                            "a --signal value",
+                        ) {
+                            Ok(v) => Some(v),
+                            Err(e) => return ExecResult::failure(2, format!("kill: {e}")),
+                        };
+                    }
+                    _ if s.starts_with("--signal=") => {
+                        explicit_signal = Some(s["--signal=".len()..].to_string());
+                    }
+                    _ if s.starts_with("--json=") => {}
+                    _ if s.starts_with('-') && s.len() > 1 => {
+                        let bare = s.trim_start_matches('-');
+                        if let Some(canonical) = normalize_signal_name(bare) {
+                            // Named shorthand: -STOP, -KILL, -SIGKILL, -kill, ...
+                            shorthand_signal = Some(canonical.to_string());
+                        } else if let Some(rest) = s.strip_prefix("-s").filter(|r| !r.is_empty()) {
+                            // Glued explicit form: -sKILL (clap parity for
+                            // the old `-s`-as-clap-short-flag behavior).
+                            // Checked AFTER the shorthand-name match above so
+                            // a lowercase name-shorthand starting with 's'
+                            // (-stop, -sigkill, -sigstop, ...) resolves as
+                            // the intended signal name, not as `-s` + glued
+                            // garbage (the exact collision `raw_argv` exists
+                            // to dodge — see the module docs).
+                            explicit_signal = Some(rest.to_string());
+                        } else {
+                            return ExecResult::failure(
+                                2,
+                                format!(
+                                    "kill: unrecognized option {s} — kill accepts --signal/-s \
+                                     NAME, --discard, or a signal shorthand (-TERM/-KILL/-INT/\
+                                     -HUP/-STOP/-CONT/-QUIT/-USR1/-USR2, case-insensitive, \
+                                     optional SIG prefix) or -<N> (e.g. -9); see `help kill`"
+                                ),
+                            );
+                        }
+                    }
+                    _ => targets.push(value.clone()),
+                },
+                _ => targets.push(value.clone()),
+            }
+            i += 1;
+        }
+
+        if discard && (explicit_signal.is_some() || shorthand_signal.is_some()) {
+            return ExecResult::failure(
+                2,
+                "kill: --discard cannot be combined with a signal (--signal/-s or a \
+                 shorthand) — discarding a gate delivers nothing to anyone"
+                    .to_string(),
+            );
+        }
+        if explicit_signal.is_some() && shorthand_signal.is_some() {
+            return ExecResult::failure(
+                2,
+                "kill: signal specified twice (--signal/-s and a shorthand) — use one form"
+                    .to_string(),
+            );
+        }
+        // `parsed.signal` is always clap's declared default ("TERM") here —
+        // raw_argv means the real value never reaches clap's own parse — so
+        // using it as the fallback keeps `#[arg(default_value_t = ...)]` the
+        // single source of truth for what "no signal given" means.
+        let signal_name = explicit_signal.or(shorthand_signal).unwrap_or(parsed.signal);
+
+        let target_str = match targets.first() {
             Some(Value::String(s)) => s.clone(),
             Some(Value::Int(i)) => i.to_string(),
             Some(_) => return ExecResult::failure(1, "kill: invalid target"),
-            None => return ExecResult::failure(1, "kill: usage: kill [--signal SIG] target"),
+            None => {
+                return ExecResult::failure(
+                    1,
+                    "kill: usage: kill [--signal SIG | -SIG | -N] target".to_string(),
+                )
+            }
         };
 
         // Job reference `%N` — kaish-level job control, available in every build.
@@ -138,7 +287,7 @@ impl Tool for Kill {
             // accidental destruction; a job killed while still running is the
             // caller's stated intent, whatever it was about to become.
             if manager.is_latched(job_id).await {
-                if !parsed.discard {
+                if !discard {
                     return ExecResult::failure(
                         1,
                         format!(
@@ -181,11 +330,12 @@ fn signal_is_terminating(name: &str) -> Option<bool> {
             _ => None,
         };
     }
-    let name = name.strip_prefix("SIG").unwrap_or(name);
-    match name {
-        "TERM" | "KILL" | "INT" | "HUP" | "QUIT" | "ABRT" => Some(true),
-        "STOP" | "CONT" | "USR1" | "USR2" | "TSTP" | "WINCH" => Some(false),
-        _ => None,
+    match normalize_signal_name(name)? {
+        "TERM" | "KILL" | "INT" | "HUP" | "QUIT" => Some(true),
+        "STOP" | "CONT" | "USR1" | "USR2" => Some(false),
+        other => unreachable!(
+            "normalize_signal_name returned {other:?}, outside its own KNOWN_SIGNAL_NAMES table"
+        ),
     }
 }
 
@@ -314,10 +464,7 @@ fn parse_signal(name: &str) -> Option<nix::sys::signal::Signal> {
         return Signal::try_from(num).ok();
     }
 
-    // Strip optional "SIG" prefix
-    let name = name.strip_prefix("SIG").unwrap_or(name);
-
-    match name {
+    match normalize_signal_name(name)? {
         "TERM" => Some(Signal::SIGTERM),
         "KILL" => Some(Signal::SIGKILL),
         "STOP" => Some(Signal::SIGSTOP),
@@ -327,6 +474,35 @@ fn parse_signal(name: &str) -> Option<nix::sys::signal::Signal> {
         "USR1" => Some(Signal::SIGUSR1),
         "USR2" => Some(Signal::SIGUSR2),
         "QUIT" => Some(Signal::SIGQUIT),
-        _ => None,
+        other => unreachable!(
+            "normalize_signal_name returned {other:?}, outside its own KNOWN_SIGNAL_NAMES table"
+        ),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::normalize_signal_name;
+
+    #[test]
+    fn normalize_signal_name_is_case_insensitive() {
+        assert_eq!(normalize_signal_name("kill"), Some("KILL"));
+        assert_eq!(normalize_signal_name("Kill"), Some("KILL"));
+        assert_eq!(normalize_signal_name("KILL"), Some("KILL"));
+    }
+
+    #[test]
+    fn normalize_signal_name_accepts_optional_sig_prefix() {
+        assert_eq!(normalize_signal_name("SIGKILL"), Some("KILL"));
+        assert_eq!(normalize_signal_name("sigstop"), Some("STOP"));
+        assert_eq!(normalize_signal_name("STOP"), Some("STOP"));
+    }
+
+    #[test]
+    fn normalize_signal_name_rejects_unknown_names() {
+        assert_eq!(normalize_signal_name("ABRT"), None);
+        assert_eq!(normalize_signal_name("TSTP"), None);
+        assert_eq!(normalize_signal_name("WINCH"), None);
+        assert_eq!(normalize_signal_name("FOOBAR"), None);
     }
 }

@@ -15,11 +15,11 @@ pub struct Mv;
 #[derive(Parser, Debug)]
 #[command(name = "mv", about = "Move (rename) files and directories")]
 struct MvArgs {
-    /// Do not overwrite existing files (-n)
     /// Confirmation nonce for a latch-gated overwrite.
     #[arg(long = "confirm")]
     confirm: Option<String>,
 
+    /// Do not overwrite existing files (-n)
     #[arg(short = 'n', long = "no-clobber", visible_alias = "no_clobber")]
     no_clobber: bool,
 

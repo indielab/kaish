@@ -345,7 +345,7 @@ token, so they need no quoting.
 This is the complement of the no-word-splitting rule: kaish neither splits a
 variable's value **nor** pastes neighbouring words. The "always quote
 interpolated words" habit is exactly what `shellcheck --enable=all` enforces
-(SC2086), so quoted kaish stays lint-clean. When in doubt, quote.
+(SC2086), so the habit transfers directly. When in doubt, quote.
 
 ## Arguments
 
@@ -1118,7 +1118,7 @@ Kaish has a single, uniform cancellation discipline that reaches every spawned e
 Cascade rules:
 
 - **Foreground forks** (concurrent pipeline stages, scatter workers, `$(...)` cmdsubs) inherit the parent kernel's cancellation via `fork_attached`. A parent timeout/cancel kills externals running in any stage.
-- **Background `&` jobs** are *detached* — they survive parent cancellation. Signal them explicitly with `kill %N`. `kill %N` (or `kill --signal TERM/KILL/INT/HUP/QUIT %N`) stops *any* job: a job that wraps external processes is signalled via their process group(s), and a pure in-process job (e.g. `sleep &`, a kaish builtin, which has no OS process group) is stopped through its cancellation token. A non-terminating signal (`--signal STOP/CONT/USR1/…`) is delivered only to jobs that spawned real external processes; sending one to a pure-builtin job is refused (there is nothing to receive it).
+- **Background `&` jobs** are *detached* — they survive parent cancellation. Signal them explicitly with `kill %N`. `kill %N` (or `kill --signal TERM/KILL/INT/HUP/QUIT %N`) stops *any* job: a job that wraps external processes is signalled via their process group(s), and a pure in-process job (e.g. `sleep &`, a kaish builtin, which has no OS process group) is stopped through its cancellation token. A non-terminating signal (`--signal STOP/CONT/USR1/…`) is delivered only to jobs that spawned real external processes; sending one to a pure-builtin job is refused (there is nothing to receive it). The bash/POSIX shorthand also works as a leading token: `kill -9 %N` (numeric) or `kill -KILL %N`/`kill -SIGKILL %N` (name — case-insensitive, `SIG` prefix optional). Only the fixed set above (`TERM KILL INT HUP QUIT STOP CONT USR1 USR2`) is recognized either way; anything else is a loud usage error naming what IS supported, never a silent fallback.
 
 When `kill %N` targets external processes it signals their **process group**, so shell wrappers like `bash -c '...'` do not protect their grandchildren. SIGTERM-trapping processes are escalated to SIGKILL after `kill_grace`.
 
@@ -1203,9 +1203,19 @@ These bash features are omitted because they're confusing, error-prone, or ambig
 
 ## ShellCheck Alignment
 
-**The Bourne-compatible subset of kaish passes `shellcheck --enable=all`.**
+**ShellCheck cannot check a kaish script. It shaped the language; it does not
+validate it.**
 
-Features that ShellCheck warns about (word splitting, backticks) don't exist in kaish. Glob expansion is supported but controllable via `set +o glob`.
+The Bourne-shaped core is built so the classic warnings cannot arise: word
+splitting and backticks are not in the grammar. Glob expansion is on by default;
+`set +o glob` turns it off.
+
+The extensions sit outside every ShellCheck dialect. `[[ ]]` is bash (SC3010
+under `sh`), here-strings `<<<` are bash (SC3011), and typed data, structured
+`$()`, and collections are modeled by no dialect at all. **ShellCheck reports
+nothing about these. The kaish validator is the only checker that sees them.**
+
+The table below records which lint shaped which design decision.
 
 | SC Code | Warning | Kaish Approach |
 |---------|---------|----------------|

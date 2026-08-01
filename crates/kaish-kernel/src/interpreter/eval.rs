@@ -1068,8 +1068,8 @@ fn element_matches(needle: &Value, element: &Value) -> bool {
 /// 443, not just the string "443"; a nested-collection element is just "not a
 /// match," never an abort). A record tests key membership (the LHS is
 /// stringified, since record keys are always strings). A scalar/string RHS is
-/// a loud error — substring tests use `=~`/glob/`case`, never `in` (see
-/// docs/arrays-and-hashes.md).
+/// a loud error — substring tests use `=~`, glob, or `case`, never `in`. See
+/// `docs/LANGUAGE.md`, "Membership".
 fn eval_membership(needle: &Value, haystack: &Value) -> EvalResult<bool> {
     match haystack {
         Value::Json(serde_json::Value::Array(items)) => {

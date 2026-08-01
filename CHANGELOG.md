@@ -10,615 +10,636 @@ breaking entries are marked **BREAKING**.
 
 ## [Unreleased]
 
+### Added
+- **`JobId`/`JobStatus`/`JobInfo` (kaish-types) now derive `Serialize`/`Deserialize`**
+  (GH #241) — the last type family in kaish-types without serde.
+- `schemars::JsonSchema` on those types sits behind the `schema` feature, matching
+  `OutputData`'s gating.
+- `JobId` serializes `#[serde(transparent)]` as a bare integer.
+- `JobStatus`'s pinned wire spelling is lowercase (`"running"`/`"stopped"`/`"done"`/
+  `"latched"`/`"failed"`), matching the existing `/v/jobs/N/status` text vocabulary.
+- `Display` stays capitalized for human-facing text — the `jobs` table and the
+  `[N]+ Done ...` notifications.
+- **`JobInfo` gained `exit_code: Option<i64>`, `started_at: SystemTime`,
+  `finished_at: Option<SystemTime>`, and `pgids: Vec<u32>`** (GH #243) — an embedder
+  reads how a job exited and how long it ran without blocking on `wait`.
+- `pgids` reports the real OS process groups a job spawned; `pid` remains
+  TTY-stopped-only and is usually `None` for an embedder-created job.
+- Timestamps come from `kaish_types::clock::system_now()`, not `SystemTime::now()`,
+  so they stay valid on `wasm32-unknown-unknown`.
+- **`JobManager::try_result(JobId) -> Option<ExecResult>`** (GH #243) — a
+  non-blocking read of a finished job's result; the only prior path was the
+  blocking `JobManager::wait`.
+- **`StreamStats` (kaish-kernel scheduler) now derives `Serialize`/`Deserialize`**,
+  schema-gated `JsonSchema` too — flagged in the same audit as the job types
+  (GH #241/#247).
+- **`kill` accepts the bash/POSIX signal shorthand** (GH #198) — `kill -9 %1`,
+  `kill -STOP %1`, `kill -SIGSTOP %1`, case-insensitive, alongside the existing
+  `--signal NAME`/`-s NAME`.
+- The shorthand covers a fixed set of 9 names (`TERM KILL INT HUP STOP CONT QUIT
+  USR1 USR2`) plus any numeric signal (`-9`, `-15`, `-<N>`).
+- An unsupported signal name is a loud usage error naming what IS supported, never
+  a silent fallback.
+- **Writing style guide** (`docs/style.md`) plus a `Terms` glossary in `README.md`
+  and `CLAUDE.md` — weights, not gates, groomed at the point of touch.
+- Inspired by the structure of ASD-STE100 Simplified Technical English, not STE —
+  its dictionary is copyrighted and aerospace-shaped, so we keep our own terms.
+
+### Changed
+- **`grep` over a directory tree allocates 70% fewer bytes** (GH #48) — one
+  `grep-searcher` per walk instead of one per file, each owning a 64 KiB line
+  buffer.
+- **A script of many small commands makes 18% fewer allocations** (GH #48) —
+  command dispatch reads the tool schema from the kernel's catalog instead of
+  rebuilding the builtin's clap `Command` every time.
+- **Brace-free glob patterns no longer run brace expansion** (GH #48) — that path
+  runs for every ignore rule against every walked path.
+- All three cuts are allocator churn, not peak memory, and were justified by the
+  new GH #48 heap profile; behavior is otherwise unchanged.
+- **`jobs --json` now emits the serialized `JobInfo`** plus a bolted-on `path`
+  field, rather than a hand-built mirror.
+- `status` in that output is lowercase (`"failed"`, not `"Failed"`), in line with
+  `/v/jobs/N/status`'s existing `done:0`/`failed:42` vocabulary — the two disagreed
+  before.
+- Rows gain `exit_code`/`started_at`/`finished_at`/`pgids`, each present only when
+  set — `exit_code`/`finished_at` absent for a still-running job, `pgids` absent
+  when empty.
+- `path` (`/v/jobs/N/`) is unchanged, and human-facing output is untouched.
+- **Retired the "passes `shellcheck --enable=all`" claim** (GH #201) — no
+  ShellCheck dialect models `[[ ]]` (SC3010), `<<<` (SC3011), typed data, or
+  collections.
+- ShellCheck reports nothing about kaish's extensions; the kaish validator is the
+  only checker that sees them.
+
 ### Fixed
-- **`fg` marks a job Running only after `SIGCONT` succeeds** (GH #161) — the
-  terminal is still handed over first, because a process group must own the
-  terminal before it is continued, and a failed handoff or failed `SIGCONT`
-  now reclaims the terminal and leaves the job `Stopped`.
-- **REPL `exit` no longer waits on a backgrounded job** (GH #162) — `bg`'s
-  reaper now polls the job every 200ms instead of blocking until it ends, so
-  exit does not wait for it and the job is orphaned rather than signaled
-  (bash's `huponexit`-off default).
+- **`fg` marks a job Running only after `SIGCONT` succeeds** (GH #161) — a failed
+  handoff or a failed `SIGCONT` reclaims the terminal and leaves the job `Stopped`.
+- The terminal is still handed over first, because a process group must own the
+  terminal before it is continued.
+- **REPL `exit` no longer waits on a backgrounded job** (GH #162) — `bg`'s reaper
+  polls the job every 200ms instead of blocking until it ends.
+- An exiting REPL orphans a backgrounded job rather than signaling it, matching
+  bash's `huponexit`-off default.
+- **`grep -r --encoding=<bad-label>` is now a loud usage error (exit 2)** naming the
+  bad label — it used to report nothing and exit 1, indistinguishable from "no
+  matches".
+- The encoding was validated once per file inside the walk, where a per-file error
+  is deliberately swallowed as a benign race.
+- **`--signal NAME` is now case-insensitive** — `kill --signal kill` used to fail
+  as "unknown signal: kill"; both forms now share one name table.
+- **Hermetic and `subprocess` builds now agree on which signal names `kill`
+  recognizes** — both read the same fixed 9-name table.
+- The hermetic path used to accept `ABRT`/`TSTP`/`WINCH` by coincidence while the
+  `subprocess` path did not, so `kill --signal ABRT` varied by build.
+- **`--json` now applies to `raw_argv` builtins** (`test`, and `kill` as of this
+  change) — their argv binder never lifts flags into the flag set the kernel's
+  `--json` pre-apply reads.
+- `help limits` gave the recursion depth cap as 32; `MAX_RECURSION_DEPTH` is 48.
+- `cp` and `mv` published no description for `-n`/`--no-clobber` and a mangled one
+  for `--confirm` — both doc comments sat on the `confirm` field.
 
 ## [0.13.0] - 2026-07-18
 
 ### Added
-- **`OutputData.rich_json` now persists through serde** (self-describing
-  formats: JSON, CBOR). The `--json` render override — set by `grep --json`,
-  available to any builtin — was `#[serde(skip)]` as a transient render hint.
-  It now serializes when `Some` (omitted when `None` via
-  `skip_serializing_if`), so an embedder can carry a builtin's rich structured
-  output onto a stored record and read it back — e.g. kaijutsu persisting a
-  `kj` command's structured output onto a CRDT block for its MCP surface. The
-  `None` (common) case is unchanged on the wire. Caveat: **decoding** a `Some`
-  value from a non-self-describing format fails — `serde_json::Value` needs
-  `deserialize_any`, which postcard/bincode lack. kaish and its embedders use
-  only self-describing formats (JSON/CBOR), so this is a documented boundary,
-  not a live path.
+- **`OutputData.rich_json` now persists through serde** — the `--json` render
+  override (set by `grep --json`, available to any builtin) was
+  `#[serde(skip)]`, so an embedder could not store a builtin's rich structured
+  output on a record and read it back. kaijutsu stores it on a CRDT block.
+- `rich_json` serializes only when `Some`, so the common `None` case is
+  unchanged on the wire.
+- **Decoding a `Some` `rich_json` needs a self-describing format** — JSON and
+  CBOR work; postcard and bincode lack the `deserialize_any` that
+  `serde_json::Value` requires.
 
 ### Fixed
-- **Arg-binding polish** (GH #189): four small gaps in the shared arg binder
-  (`kernel::bind_tool_args`), verified against current code post-#188/#231:
-  - `export -- A=1`/`alias -- ll=val` no longer bind `A=1`/`ll=val` as a named
-    shell assignment past `--` — every word-assign-accepting builtin now
-    treats a `key=value` after `--` as literal data, like every other tool
-    already did. `unalias -- foo=bar` no longer crashes with a clap
-    "unexpected argument" error (the lingering named entry used to render as
-    a `--foo=bar` flag token `UnaliasArgs` never declares).
-  - `--flag=true`/`--flag=false` now flagifies at bind time instead of
-    landing in `named` as a literal `Value::Bool` — a clap `bool` field's
-    `SetTrue` action rejected it (`seq --json=true` used to exit 2). This
-    fixes every schema-aware builtin uniformly, including `--json` itself
-    (deliberately excluded from every builtin's own schema, so no
-    per-builtin `ToolArgs::flagify_bool_named` call ever covered it).
-  - An undeclared SHORT flag (`-t explorer`) immediately before an unconsumed
-    positional under a `map_positionals` (backend/MCP) schema is now the same
-    loud "ambiguous, would silently drop the value" error the long-flag form
-    (`--type explorer`) already gave since GH #188 — previously it silently
-    defaulted to a bare bool flag and misrouted the value.
-  - A glued redirect target (`> /tmp/$(echo x).txt`, unquoted) now gets a
-    "quote the redirect target" parse-error hint instead of a generic
-    chumsky "expected ..." message, and the no-token-pasting guard now also
-    covers args after `--` and a flag glued straight to a following fragment
-    (`--flag$(echo x)`) — previously both silently split into multiple
-    positionals instead of erroring. The short-flag glued-value idiom
-    (`cut -d,`, `grep -A1`) is unaffected.
-- **BREAKING:** buffered stdin is bytes-typed, not `String` (GH #176) —
-  `ExecContext::stdin` and `ExecuteOptions::stdin` now carry `Vec<u8>` instead
-  of `String` (`set_stdin`/`with_stdin` accept `impl Into<Vec<u8>>`, so
-  existing `&str`/`String` call sites keep compiling unchanged). A `< binfile`
-  redirect over non-UTF-8 content — or an embedder's pre-read
-  `ExecuteOptions::with_stdin(Vec<u8>)` — now feeds a byte-aware builtin
-  (`wc -c`, `cat`, `cmp`, …) the raw bytes intact instead of erroring at
-  redirect setup; a text-only builtin (`grep`, `sed`, …) still refuses binary
-  loudly, just at the point it actually asks for text (`read_stdin_to_text`),
-  not before the command even runs. **`ExecContext::read_stdin_to_string`
-  removed** (embedder-facing) — it was a lossy `U+FFFD`-mangling counterpart
-  to `read_stdin_to_bytes`/`read_stdin_to_text` with zero remaining callers
-  once stdin itself carries bytes; use `read_stdin_to_text` (loud on binary)
-  or `read_stdin_to_bytes` (byte-clean) instead.
-- **`wc -m`/`-w`/default now refuse invalid UTF-8 loudly** (GH #176) instead
-  of lossy-decoding it — `String::from_utf8_lossy`'s `U+FFFD` expansion used to
-  over-count a binary stream's/file's chars and words. `wc -c`/`wc -l` are
-  pure byte-level counts (exact length, raw `\n` scan) and are unaffected,
-  bringing `wc` in line with the rest of the fleet's binary stance
-  (`grep`/`sed`/`head`'s line mode/…).
-- **`xxd -r` refuses invalid UTF-8 loudly instead of lossy-decoding it into
-  corrupt bytes** — found via a second review pass on the stdin fix above,
-  which newly let a `< binfile` redirect reach `xxd -r`'s existing
-  `String::from_utf8_lossy` call; a `U+FFFD`-mangled "hex" string silently
-  decoded into wrong (or truncated) bytes rather than erroring. Fixed for
-  both the stdin and file-path input sources, which share the same read path.
+- **Arg-binding polish** (GH #189) — four gaps in the shared arg binder,
+  verified against current code after #188 and #231:
+  - A `key=value` after `--` is literal data for every word-assign builtin
+    (`export -- A=1`, `alias -- ll=val`), as it always was for every other tool.
+  - `unalias -- foo=bar` no longer fails with a clap "unexpected argument"
+    error.
+  - `--flag=true` and `--flag=false` now bind as flags for every schema-aware
+    builtin; `seq --json=true` used to exit 2. This covers `--json`, which sits
+    in no builtin's own schema.
+  - An undeclared short flag (`-t explorer`) before an unconsumed positional
+    under a `map_positionals` schema now raises the same ambiguity error the
+    long form (`--type explorer`) has given since GH #188; it used to bind as a
+    bare bool and misroute the value.
+  - An unquoted glued redirect target (`> /tmp/$(echo x).txt`) gets a "quote
+    the redirect target" hint instead of a generic parse error.
+  - The no-token-pasting guard now covers args after `--` and a flag glued to a
+    following fragment (`--flag$(echo x)`), which used to split silently into
+    several positionals. Glued short-flag values (`cut -d,`, `grep -A1`) are
+    unaffected.
+- **BREAKING:** `ExecContext::stdin` and `ExecuteOptions::stdin` carry `Vec<u8>`
+  instead of `String` (GH #176). `set_stdin`/`with_stdin` take
+  `impl Into<Vec<u8>>`, so `&str` and `String` call sites still compile.
+- A `< binfile` redirect over non-UTF-8 content, or an embedder's
+  `ExecuteOptions::with_stdin(Vec<u8>)`, now reaches a byte-aware builtin
+  (`wc -c`, `cat`, `cmp`) intact instead of erroring at redirect setup. A
+  text-only builtin (`grep`, `sed`) still refuses binary loudly, at the point it
+  asks for text.
+- **BREAKING:** `ExecContext::read_stdin_to_string` is removed
+  (embedder-facing) — it decoded lossily to `U+FFFD`. Use `read_stdin_to_text`
+  (loud on binary) or `read_stdin_to_bytes` (byte-clean).
+- **`wc -m`, `-w`, and the default now refuse invalid UTF-8 loudly** (GH #176)
+  — lossy `U+FFFD` decoding over-counted a binary stream's chars and words.
+  `wc -c` and `wc -l` are byte-level counts and are unaffected.
+- **`xxd -r` refuses invalid UTF-8 loudly** instead of decoding a
+  `U+FFFD`-mangled hex string into wrong or truncated bytes. Fixed for both the
+  stdin and file-path input sources, which share a read path.
 - **`push` accepts a bracket-path target** (`push services[web][tags] item`),
-  not just a top-level bareword — the lexer now recognizes `push`'s target
-  with its own trigger and fuses it verbatim into a path instead of
-  glob-expanding it (GH #183).
+  not just a top-level bareword — the target is fused verbatim into a path
+  instead of glob-expanded (GH #183).
 - **A `]` inside a quoted subscript key no longer breaks the subscript**
-  (`${r["weird]key"]}`) — the bracket collector consumes a quoted key
-  verbatim to its own closing quote before looking for the terminator (GH #183).
-- **An unquoted multi-word record value gets an actionable error** instead of
-  a generic parse-error message — `{msg: hello world}` now names the mistake
-  and shows the quoted fix (GH #183).
-- **A bad `$((...))` arithmetic expansion no longer fails silently** — this
-  used to swallow the error and splice in an empty string/drop the value in
-  three places: string interpolation (`"$((1/0))"` in ordinary command
-  execution), and a scatter/gather flag value's bare and quoted forms
-  (`scatter --limit $((1/0))`, `scatter --limit "$((1/0))"`); all three now
-  propagate the real arithmetic error (GH #183).
+  (`${r["weird]key"]}`) — a quoted key runs to its own closing quote before the
+  terminator is looked for (GH #183).
+- **An unquoted multi-word record value now names the mistake and shows the
+  quoted fix** — `{msg: hello world}` used to give a generic parse error
+  (GH #183).
+- **A bad `$((...))` no longer fails silently** in three places: string
+  interpolation (`"$((1/0))"`), and a scatter/gather flag value's bare and
+  quoted forms (`scatter --limit $((1/0))`). All three now propagate the real
+  arithmetic error (GH #183).
 
 ### Added
-- **`ExecuteOptions::interrupt`** — a polled interrupt check for embedders
-  whose thread cannot fire `cancel_token` while execution runs (the browser:
-  single-threaded wasm reading a SharedArrayBuffer flag the page's main
-  thread flips). The kernel polls at its existing cancellation checkpoints
-  and maps a firing check to the same exit-130 path as `Kernel::cancel()`;
-  session state survives the interrupt. Per-call and cleared on every exit
-  path. First consumer: state-preserving Ctrl-C in the kaish-extras
-  browser playground.
+- **`ExecuteOptions::interrupt`** — a polled interrupt check for an embedder
+  whose thread cannot fire `cancel_token` while execution runs, such as
+  single-threaded wasm reading a SharedArrayBuffer flag the page's main thread
+  flips.
+- The kernel polls the check at its existing cancellation checkpoints and maps
+  a firing check to the same exit-130 path as `Kernel::cancel()`; session state
+  survives. It is per-call and cleared on every exit path. First consumer:
+  state-preserving Ctrl-C in the kaish-extras browser playground.
 
 ### Added
-- **Flag completion helpers in `kaish_client::completion`** —
-  `current_command(line, pos)` (which command word governs the statement
-  under the cursor) and `flag_candidates(params, word)` (canonical `--long`
-  and `-x` spellings from a tool's `ParamSchema`s; snake-case field-id
-  aliases stay reachable but aren't offered). First consumer: the
-  kaish-extras browser playground; the native REPL can adopt the same pair
-  (GH #202).
+- **Flag completion helpers in `kaish_client::completion`** (GH #202) —
+  `current_command(line, pos)` returns the command word governing the statement
+  under the cursor; `flag_candidates(params, word)` returns a tool's canonical
+  `--long` and `-x` spellings from its `ParamSchema`s.
+- Snake-case field-id aliases stay reachable but are not offered as candidates.
+  First consumer: the kaish-extras browser playground; the native REPL can adopt
+  the same pair.
 
 ### Fixed
-- **Friendlier error when an external command can't be spawned under a
-  virtual working directory** (CoW overlay, in-memory VFS mount, `/dev`, …):
-  a resolvable command used to fall all the way through to the generic
-  `command not found` (127), which blamed the wrong thing. Now it names the
-  real cause and suggests a fix (a kaish builtin, `cd` to a real path, or
-  `kaish-vfs commit` to materialize a CoW overlay) — exit code is unchanged.
-  A command that genuinely isn't in PATH still gets the plain
-  `command not found` (GH #181; cross-layer symlink/whiteout/mtime
-  semantics remain parked, tracked in the same issue).
-- `cargo test -p kaish-client` alone no longer fails the cwd test: the
-  tests assert localfs-flavored behavior and now declare `localfs` as a
-  dev-dependency feature instead of inheriting it from whichever workspace
-  sibling happened to build.
+- **An external command that cannot spawn under a virtual working directory**
+  (CoW overlay, in-memory VFS mount, `/dev`) now names the real cause instead of
+  a misleading `command not found`; the exit code is still 127.
+- The message suggests a fix — a kaish builtin, `cd` to a real path, or
+  `kaish-vfs commit` to materialize a CoW overlay.
+- A command that genuinely is not in PATH still gets the plain
+  `command not found` (GH #181; cross-layer symlink, whiteout, and mtime
+  semantics stay parked in that issue).
+- `cargo test -p kaish-client` alone no longer fails the cwd test — the tests
+  assert localfs-flavored behavior and now declare `localfs` as a
+  dev-dependency feature instead of inheriting it from a workspace sibling.
 
 ### Added
-- **`kaish_client::completion`** — completion context detection
-  (`CompletionContext`, `detect_completion_context`, `word_start`) extracted
-  from the REPL into the client crate, so every frontend answering Tab (the
-  rustyline REPL, the kaish-extras browser playground, embedders) shares one
-  detector; the REPL now consumes it. `EmbeddedClient` is also browser-safe:
-  its blob-id timestamp goes through `kaish_types::clock`.
-- **`ToolArgs::to_argv_excluding`** — like `to_argv()` but skips given named
-  keys entirely, so a builtin that deliberately reads one of its own named
-  params raw (to preserve a `Value::Bytes` payload past the argv/text
-  boundary) doesn't need a bespoke clone-and-remove dance. `to_argv()` now
-  delegates to it with an empty exclude list. `write`'s `content` param
-  adopts it (GH #218, a follow-up from the GH #164/#215 review).
+- **`kaish_client::completion`** — `CompletionContext`,
+  `detect_completion_context`, and `word_start` move out of the REPL into the
+  client crate, so every frontend answering Tab shares one detector. The REPL
+  now consumes it.
+- `EmbeddedClient` is browser-safe: its blob-id timestamp goes through
+  `kaish_types::clock`.
+- **`ToolArgs::to_argv_excluding`** — like `to_argv()` but skips the named keys
+  given, so a builtin that reads one of its own named params raw keeps a
+  `Value::Bytes` payload past the argv/text boundary (GH #218).
+- `to_argv()` delegates to it with an empty exclude list; `write`'s `content`
+  param is the first user.
+
 ### Removed
-- **BREAKING:** `output_limit::spill_aware_collect` and its private helpers
-  (`collect_stderr`, `collect_stdout_with_spill`, `handle_overflow`,
-  `drain_in_memory`, `extend_ring`, `stream_to_spill`) are gone. Dead since
-  GH #133 item 2 moved external-process capture onto `BoundedStream` /
-  `drain_to_stream`, with post-hoc spill applied at the pipeline level
-  (`Kernel::execute_pipeline` → `spill_if_needed`) instead of inline during
-  capture. `OutputLimitConfig` and the disk/memory spill machinery it still
-  drives are unaffected.
+- **BREAKING:** `output_limit::spill_aware_collect` is gone, with its private
+  helpers (`collect_stderr`, `collect_stdout_with_spill`, `handle_overflow`,
+  `drain_in_memory`, `extend_ring`, `stream_to_spill`). Dead since GH #133
+  item 2 moved external-process capture onto `BoundedStream`/`drain_to_stream`,
+  with spill applied at the pipeline level after capture.
+- `OutputLimitConfig` and the disk and memory spill machinery it drives are
+  unaffected.
 
 ### Changed
-- **BREAKING:** `ToolArgs::to_argv()` now returns `Result<Vec<String>, ToolArgvError>`
-  instead of `Vec<String>` — a named/flag argument holding `Value::Bytes` is a
-  loud error instead of silently stringifying to the `[binary: N bytes]`
-  placeholder (GH #164). This closes the root cause behind GH #120's
-  `seq --separator`/`cut --fields`/`--characters` fixes (now simplified back
-  to reading the clap-parsed field directly) and makes every other
-  clap-based builtin's named arguments loud on binary too. Positional
-  `Value::Bytes` is unaffected — a clap-reflected positional field is a
-  validation-only sink no builtin reads, so `push`/`write` and friends keep
-  accepting binary content through positionals unchanged.
+- **BREAKING:** `ToolArgs::to_argv()` returns
+  `Result<Vec<String>, ToolArgvError>` instead of `Vec<String>` (GH #164) — a
+  named or flag argument holding `Value::Bytes` is now a loud error, not the
+  silent `[binary: N bytes]` placeholder.
+- Every clap-based builtin's named arguments are loud on binary; GH #120's
+  `seq --separator` and `cut --fields`/`--characters` fixes simplify back to
+  reading the clap-parsed field directly.
+- Positional `Value::Bytes` is unaffected — a clap-reflected positional field is
+  a validation-only sink no builtin reads, so `push` and `write` still accept
+  binary content through positionals.
 - **`uname -o` (and the tail of `uname -a`) now reports `kai`** instead of
-  `Kaijutsu` — the shell's identity belongs to kaish itself, not to one
-  embedder. Scripts detecting the platform should match `kai` (sysname is
-  still `kaish`, unchanged).
+  `Kaijutsu` — the shell's identity belongs to kaish, not to one embedder.
+  Match `kai` when detecting the platform; sysname is still `kaish`.
+
 ### Added
-- **The kernel runs in the browser** (`wasm32-unknown-unknown`) — clock
-  acquisition now routes through `kaish_types::clock` (`system_now()` plus
-  an `Instant` alias), which reads the JS clock via `web-time` on the
-  browser target and is exactly the std clock everywhere else (no new
-  dependency on native/WASI builds; types stay `std::time` in every
-  signature). Previously any wall-clock touch — including mounting a
-  `MemoryFs` — hit `std`'s unsupported-platform shim and panicked. Browser
-  embedders enable getrandom's `wasm_js` backend per its docs; the
+- **The kernel runs in the browser** (`wasm32-unknown-unknown`) — any
+  wall-clock touch, including mounting a `MemoryFs`, used to hit std's
+  unsupported-platform shim and panic.
+- Clock acquisition routes through `kaish_types::clock` (`system_now()` plus an
+  `Instant` alias), which reads the JS clock via `web-time` on the browser
+  target and is the std clock everywhere else. Native and WASI builds gain no
+  dependency, and types stay `std::time` in every signature.
+- Browser embedders enable getrandom's `wasm_js` backend per its docs; the
   kaish-extras `kaish-web` crate is a working embedding.
 
 ### Fixed
-- **`awk -v` and `env -u` fail loudly on a binary occurrence instead of
-  silently dropping it** (GH #217) — found by a kaibo review of PR #215.
-  Both flags are repeatable-value flags, so the kernel accumulates every
-  occurrence (even the first) into a `Value::Json(Array)`; a binary
-  occurrence lands in that array as a base64 envelope, and each builtin's own
-  hand-rolled collector (`awk::collect_vars`, `env::collect_unset_vars`)
-  filtered for strings and silently skipped anything else — the assignment
-  or unset just vanished and the builtin ran as if the flag had never been
-  given. Both now delegate to the shared `read_repeatable_strings` helper
-  that `grep`/`glob` already use for `--ftype`/`--include`/`--exclude`, so a
-  binary occurrence errors instead of disappearing.
-- **`scatter`/`gather`'s error paths honor `--json`** — a bad flag or a stdin
-  read failure used to leak a plain-text `scatter: ...`/`gather: ...` message
-  under `--json` instead of the standard `{"error","code"}` envelope. Found by
-  a kaibo review pair on merged PR #215 and confirmed pre-existing for the
-  whole `owns_output` error-path class (clap-parse failures included), not
-  just the newest instance: `owns_output` opts a tool out of the kernel's
-  `--json` rendering so it can render its own bespoke SUCCESS output
-  (scatter/gather's JSONL/array), but the same opt-out was blanket-skipping
-  their FAILURE results too, even though neither tool ever renders a
-  structured error itself. `finalize_output` now only skips
-  `apply_output_format` when the tool owns its output **and** the result
-  succeeded.
-- **Case patterns accept dash/plus bare words** (GH #144) — `---`, `-`, `--`,
-  `-x`, `+foo`, and alternations like `-h|--help) ...` are now valid case
-  patterns; they previously failed to parse (`pattern_part` had no arm for
-  the lexer's flag-shaped and dash/plus bare-word tokens). Also fixes a
-  related lexer bug the repro surfaced: `---)` swallowed the closing paren
-  into the bare-word token text, leaving no `)` for the branch parser to
-  find — the dash/plus bare-word tokens now stop at unquoted shell operators
-  (`()|&;<>`) instead of running to the next whitespace.
-- **External-command output that overflows the 10MB capture buffer with
-  output limiting off now fails loudly** (GH #191) instead of silently
-  dropping the head: exit code 3, plus a stderr marker naming the bytes lost
-  and total written. Previously `BoundedStream`'s ring tracked the eviction
-  internally but nothing ever surfaced it, so a >10MB external stdout (the
-  repl/embedded/test default has output limiting off) reported clean success
-  with its head quietly gone. The marker always lands in stderr, never
-  prepended into stdout, since stdout may be binary.
-- **Bare `${X:-${Y}}` works** (GH #173) — a nested braced reference in a
-  default word outside quotes was a parse error (the `VarRef` token stopped at
-  the first `}`); the reference now extends to the balanced closing brace,
-  matching the quoted form and bash. Defaults nest to any depth
-  (`${A:-${B:-${C}}}`); an unbalanced reference is a loud
-  `unterminated variable reference` error.
-- **`printf`'s `%Ns` width now pads by display width, not UTF-8 byte length**
-  (GH #154) — a CJK or emoji argument to `printf '%10s'`/`%-10s`/`%5c` was
-  under-padded because its byte length exceeds its display width (same bug
-  class as #130's table-alignment fix); `awk`'s `sprintf` shares the fix
-  since both builtins go through the same formatter. `%.Ns` precision
-  truncation was audited too — it already truncates by character count, so
-  it cannot split a UTF-8 codepoint.
+- **`awk -v` and `env -u` fail loudly on a binary occurrence** (GH #217, found
+  by a kaibo review of PR #215) instead of dropping it — a binary occurrence of
+  these repeatable-value flags vanished, and the builtin ran as if the flag had
+  never been given.
+- Both now delegate to the shared `read_repeatable_strings` helper that `grep`
+  and `glob` use for `--ftype`, `--include`, and `--exclude`.
+- **`scatter` and `gather` error paths honor `--json`** — a bad flag or a stdin
+  read failure used to leak a plain-text message instead of the standard
+  `{"error","code"}` envelope (found by a kaibo review of merged PR #215).
+- `owns_output` now opts a tool out of the kernel's `--json` rendering only when
+  the result succeeded. It used to skip failures too, across the whole
+  `owns_output` class, clap parse failures included.
+- **Case patterns accept dash and plus bare words** (GH #144) — `---`, `-`,
+  `--`, `-x`, `+foo`, and alternations like `-h|--help) ...` used to fail to
+  parse.
+- A dash or plus bare word now stops at an unquoted shell operator (`()|&;<>`)
+  instead of running to the next whitespace, so `---)` keeps its closing paren
+  for the branch parser.
+- **External-command output that overflows the 10MB capture buffer with output
+  limiting off now exits 3** (GH #191) with a stderr marker naming the bytes
+  lost and the total written. It used to report clean success with its head
+  quietly gone.
+- Output limiting is off by default in the REPL, embedded, and test
+  configurations. The marker always lands in stderr, never prepended into
+  stdout, since stdout may be binary.
+- **Bare `${X:-${Y}}` works** (GH #173) — a nested braced reference in an
+  unquoted default word was a parse error; the reference now extends to the
+  balanced closing brace, matching the quoted form and bash.
+- Defaults nest to any depth (`${A:-${B:-${C}}}`); an unbalanced reference is a
+  loud `unterminated variable reference` error.
+- **`printf`'s `%Ns` width pads by display width, not UTF-8 byte length**
+  (GH #154) — a CJK or emoji argument to `%10s`, `%-10s`, or `%5c` was
+  under-padded, the same class as #130's table-alignment fix. `awk`'s `sprintf`
+  shares the formatter and the fix.
+- `%.Ns` precision truncates by character count, so it cannot split a UTF-8
+  codepoint.
 
 ### Added
-- **GitHub Actions CI** (`.github/workflows/ci.yml`): every PR and push to `main`
-  runs the workspace test suite, clippy with warnings denied (test targets
-  included), the kernel's no-default-features check, and the `wasm32-wasip1`
+- **GitHub Actions CI** (`.github/workflows/ci.yml`) — every PR and push to
+  `main` runs the workspace test suite, clippy with warnings denied on test
+  targets too, the kernel's no-default-features check, and the `wasm32-wasip1`
   build. Publishing to crates.io stays manual (the `/release` runbook).
 
 ### Changed
-- **Lexer pipeline rewritten around one composed scanner** (GH #95). One
-  quote/escape/comment-aware pass extracts heredocs and arithmetic together
-  and records a complete replacement table, so every token span — including
-  everything after a heredoc — is an exact original-source byte range. The
+- **Lexer pipeline rewritten around one composed scanner** (GH #95) — one
+  quote, escape, and comment aware pass extracts heredocs and arithmetic
+  together and records a complete replacement table, so every token span is an
+  exact original-source byte range, including everything after a heredoc. The
   token vocabulary is unchanged.
-- **Arithmetic glued to a word is now a loud parse error** with a quoting
-  hint (`echo $((1+2))abc` used to print raw internal marker text). kaish
-  does not interpolate bash's `3abc` here — quote the word instead.
+- **Arithmetic glued to a word is now a loud parse error** with a quoting hint;
+  `echo $((1+2))abc` used to print raw internal marker text. kaish does not
+  produce bash's `3abc` — quote the word instead.
 - **`$((expr))` inside a bare `${...}` reference is a new loud lexer error**
-  (`ArithmeticInVarRef`, e.g. `${X:-$((1+2))}`) instead of silently leaking
-  marker text into the default value. The same construct inside a
-  double-quoted string keeps working via string interpolation.
+  (`ArithmeticInVarRef`, e.g. `${X:-$((1+2))}`) instead of leaking marker text
+  into the default value. The same construct inside a double-quoted string keeps
+  working via string interpolation.
 - **Heredoc delimiter words take bash-style whole-word quote removal**
   (`<<EO"F"` is delimiter `EOF`, literal), instead of stopping at the first
   closing quote.
 
 ### Fixed
-- **`echo "a << b"` and `# see <<EOF` no longer misfire heredoc collection**
-  — the heredoc scanner now understands quotes and comments.
-- **An apostrophe in a heredoc body no longer poisons later arithmetic**
-  (`don't` in a body used to swallow every following `$((..))`); a literal
-  `$((` in a `<<'EOF'` body is prose, not an unterminated-arithmetic error.
+- **`echo "a << b"` and `# see <<EOF` no longer misfire heredoc collection** —
+  the heredoc scanner now understands quotes and comments.
+- **An apostrophe in a heredoc body no longer breaks later arithmetic** —
+  `don't` in a body used to disable every following `$((..))`. A literal `$((`
+  in a `<<'EOF'` body is prose, not an unterminated-arithmetic error.
 - **Arithmetic inside command substitution works** — `echo $(echo $((1+2)))`
-  prints `3` (bash parity); it was previously a parse error because
-  substitution bodies were skipped by the arithmetic pass but never re-lexed.
-- **Fused words keep their exact source text**: `a:007` no longer collapses
-  to `a:7`, and `007*` globs as `007*` (leading zeros survived nowhere in
-  fusion before).
+  prints `3` (bash parity). Substitution bodies were skipped by the arithmetic
+  pass and never re-lexed.
+- **Fused words keep their exact source text** — `a:007` no longer collapses to
+  `a:7`, and `007*` globs as `007*`.
 - **An argv `=` no longer suppresses glob fusion** — `grep -E = [a-z]*` sees
   `GlobWord("[a-z]*")`; only real assignments (`x = [a b]`, `local x = [ab]`,
   subscripted lvalues, env-prefix chains) put their RHS at value position.
 - **`$( )` bodies get fresh lexer context** — `[[ -n $(x=[a]) ]]` no longer
   leaks test-expression state into the substitution, and an unterminated
   literal inside `$( )` no longer poisons the enclosing statement.
-- **`$#` before arithmetic** — the `#` of `$#` no longer opens comment state
-  in the scanner (`echo $# $((1+2))` works).
+- **`$#` before arithmetic** — the `#` of `$#` no longer opens comment state in
+  the scanner (`echo $# $((1+2))` works).
 - **Two heredocs on one line both collect their bodies**; the parser then
-  rejects the ambiguous stdin with its own clear message (the second heredoc
-  previously vanished into a mangled token stream).
+  rejects the ambiguous stdin with its own clear message. The second heredoc
+  previously vanished into a mangled token stream.
 
 ## [0.12.0] - 2026-07-12
 
 ### Added
 - **`jobs --json` rows and scatter/gather rows carry the confirmation-latch
-  object** for a `Latched` entry (nonce/paths/hint/ttl) — a caller can act on
+  object** for a `Latched` entry (nonce, paths, hint, ttl) — a caller can act on
   a gate straight from the row instead of a second `/v/jobs/N/latch` read.
-- **`Kernel::confirm` retires the originating background job after a
-  successful confirm.** `LatchRequest` gains an optional `job_id` back-
-  reference (set when the gate came from a backgrounded job, e.g. `rm x &`);
-  a successfully-replayed confirm now removes that job from `jobs` instead of
-  leaving it lingering as `Latched` forever, mirroring the existing manual
-  `kill --discard %N` path.
+- **`Kernel::confirm` retires the originating background job after a successful
+  confirm** — the job leaves `jobs` instead of lingering as `Latched`, mirroring
+  the manual `kill --discard %N` path.
+- `LatchRequest` gains an optional `job_id` back-reference, set when the gate
+  came from a backgrounded job (`rm x &`).
 
 ### Changed
-- **The reference REPL is ignore-aware by default** (GH #134). Interactive,
-  `-c`, and script modes now load `.gitignore` and the default ignore list
-  (`.git`, `target`, `node_modules`, …) at Advisory scope: glob/tree/grep/ls
-  filter, `find` stays POSIX-unrestricted, and the unfiltered view is one
-  `--no-ignore` (per call) or `kaish-ignore clear` (per session) away. A new
-  `IgnoreConfig::interactive()` preset carries this; bare embedded kernels
-  (`transient`/`named`/`isolated`) keep the unfiltered default.
+- **The reference REPL is ignore-aware by default** (GH #134) — interactive,
+  `-c`, and script modes load `.gitignore` and the default ignore list (`.git`,
+  `target`, `node_modules`, …) at Advisory scope.
+- `glob`, `tree`, `grep`, and `ls` filter; `find` stays POSIX-unrestricted.
+  `--no-ignore` unfilters one call, `kaish-ignore clear` a session.
+- A new `IgnoreConfig::interactive()` preset carries this; bare embedded kernels
+  (`transient`, `named`, `isolated`) keep the unfiltered default.
 
 ### Fixed
 - **`seq --separator`, `cut --fields`/`--characters`, and `awk
-  --field-separator` now error loudly on a binary value** instead of
-  silently misbehaving (GH #120). All three read their own clap-parsed field
-  before the untouched raw `ToolArgs` value — `to_argv()`'s re-serialization
-  had already stringified the binary into a `[binary: N bytes]` placeholder
-  by the time clap saw it, so a guard added only on the raw-value fallback
-  never ran. `seq` spliced the placeholder text between the generated
-  numbers; `cut` silently parsed it as zero valid field/character indices and
-  emitted one blank line per input line; `awk` set it as the literal `FS`,
-  so every line silently became a single field. Reordered all three to check
-  the raw value first, mirroring the `checksum --check`/`patch --file` fix
-  from the #93 item-1 PR.
-- **`scatter --timeout` no longer misclassifies a worker that completes right
-  at the timeout boundary as timed out.** A worker whose command finished at
-  (or a hair before) the deadline could read the timeout flag after the
-  delay task set it — `sleep`'s own internal cancellation race could still
-  pick the "genuine success" branch even after the flag was set and the
-  cancel signal sent, so a worker that truly finished successfully was
-  reported `timed_out: true` / exit 124, and `gather` penalized the whole
-  run with exit 123. The worker's own result is now authoritative:
-  completion wins ties.
+  --field-separator` now error loudly on a binary value** (GH #120) instead of
+  misbehaving silently. All three now read the raw `ToolArgs` value before their
+  own clap-parsed field, mirroring the `checksum --check`/`patch --file` fix
+  from GH #93 item 1.
+- `to_argv()`'s re-serialization had already stringified the binary into a
+  `[binary: N bytes]` placeholder by the time clap saw it, so a guard on the
+  raw-value fallback alone never ran.
+- `seq` spliced the placeholder text between the generated numbers.
+- `cut` parsed the placeholder as zero valid field or character indices and
+  emitted one blank line per input line.
+- `awk` set the placeholder as the literal `FS`, so every line became a single
+  field.
+- **`scatter --timeout` no longer misclassifies a worker that completes right at
+  the timeout boundary.** A worker that finished at or just before the deadline
+  could still read the timeout flag and report `timed_out: true` with exit 124,
+  and `gather` then penalized the whole run with exit 123.
+- The worker's own result is now authoritative: completion wins ties.
 - **The REPL's interactive table and column output align CJK/emoji cells
-  correctly** (GH #130). Column widths were computed from UTF-8 byte length
-  (`cell.len()`), not display width — a CJK cell like "你好" is 6 bytes but
-  only 4 display columns, so byte-length padding under-padded it and
-  misaligned every column after it. Width math now uses the `unicode-width`
-  crate's `UnicodeWidthStr::width()`. Cosmetic/interactive-only; `--json` and
-  other structured output are unaffected.
-- **The REPL no longer silently swallows a failing rc-file source.** A typo'd
-  command or a failed `source` line in `~/.config/kaish/init.kai` (or
-  `~/.kaishrc`) returns `Ok(ExecResult)` with a nonzero exit code, not an
-  `Err` — `load_rc_file` only warned on the latter, so the former left the
-  user with a half-loaded environment and zero indication why. Nonzero rc-file
-  exits now print a warning with the exit code and any diagnostic text.
-- **A confirmation latch raised mid-pipeline (`set -o latch`) no longer gets
-  swallowed by a later stage's success.** `rm x | echo done` used to exit 0
-  with `.latch` dropped, even though `rm` genuinely gated and the file was
-  never touched — only the last pipeline stage's result used to survive. Any
-  gated stage now overrides the pipeline's exit code (2) and carries its
-  structured `.latch` through; first latch wins if more than one stage gates.
-- **`bg %1` / `fg %1` no longer reject the POSIX jobspec form.** Both builtins
-  parsed the job argument with a bare numeric parse, so the standard `%N`
-  jobspec (already accepted by `kill`/`wait`) failed with "invalid job id: %1".
-  `bg`/`fg` now strip a leading `%` before parsing, matching `kill`/`wait`.
-- **`wait %1 --json` on a latched background job now surfaces the
-  confirmation nonce under a `latch` key** instead of rendering a bare
-  `"[1] Latched\n"` JSON string with no way to fulfill the gate. A latched
-  result's `--json` handling is now one canonical path (`apply_output_format`)
-  regardless of whether the result also carries text output.
-- **Shebang'd `.kai` scripts now report correct parse-error line numbers** (GH
-  #127). `run_script` used to strip the shebang line entirely
-  (`.lines().skip(1)`), which deleted a line and shifted every subsequent
-  line's reported number down by one — a syntax error on line 43 was reported
-  at line 42. The shebang line is now blanked out instead of removed, so line
-  accounting stays correct.
-- **`expand_paths` now goes loud on a list/record/bool/null path operand**
+  correctly** (GH #130) — column widths came from UTF-8 byte length, so "你好"
+  (6 bytes, 4 display columns) was under-padded and every later column
+  misaligned. Width math now uses `unicode-width`.
+- That fix is cosmetic and interactive-only; `--json` and other structured
+  output are unaffected.
+- **The REPL now warns on a failing rc-file line.** A typo'd command or a failed
+  `source` in `~/.config/kaish/init.kai` or `~/.kaishrc` returns a nonzero exit
+  code, not an `Err`, and `load_rc_file` only warned on the latter — leaving a
+  half-loaded environment with no indication why.
+- The warning names the exit code and any diagnostic text.
+- **A confirmation latch raised mid-pipeline (`set -o latch`) now survives a
+  later stage's success.** `rm x | echo done` used to exit 0 with `.latch` lost,
+  even though `rm` genuinely gated and the file was never touched — only the
+  last stage's result survived.
+- A gated stage now sets the pipeline's exit code to 2 and carries its
+  structured `.latch` through; the first latch wins if several stages gate.
+- **`bg %1` and `fg %1` accept the POSIX jobspec form.** Both parsed the job
+  argument as a bare number, so `%N` — already accepted by `kill`/`wait` —
+  failed with "invalid job id: %1". Both now strip a leading `%`.
+- **`wait %1 --json` on a latched background job surfaces the confirmation nonce
+  under a `latch` key** instead of a bare `"[1] Latched\n"` JSON string with no
+  way to fulfill the gate.
+- A latched result's `--json` handling is now one canonical path regardless of
+  whether the result also carries text output.
+- **Shebang'd `.kai` scripts now report correct parse-error line numbers**
+  (GH #127). `run_script` stripped the shebang line, shifting every later line
+  number down by one — a syntax error on line 43 was reported at line 42. The
+  line is now blanked out instead of removed.
+- **`expand_paths` now goes loud on a list, record, bool, or null path operand**
   (GH #121), closing the gap the `Value::Bytes` guard (#117) left in the same
-  function's catch-all. `cat`/`head`/`tail`/`wc`/etc. silently dropped a
-  structured, bool, or null path argument and fell back to reading stdin
-  instead of erroring on the operand actually given — the same silent-fallback
-  class #93/#117 set out to kill.
-- **`bg` no longer marks a job Running when its `SIGCONT` fails.** `resume_job()`
-  (clearing the job's Stopped flag) ran *before* the `killpg(SIGCONT)` call, so
-  a failed signal (e.g. the process already died) left the job looking
-  Running in `jobs`/`wait` with no live process and no reaper ever spawned to
-  clean it up. `bg` now only marks the job Running after a confirmed
-  successful `SIGCONT`.
-- **`key=value` reassembly (`WordAssign`) now errors loudly on binary instead of
-  splicing the `[binary: N bytes]` placeholder.** `-v a=$BIN`-style value-flag
-  reassembly (`consume_flag_positionals`), `test`'s raw-argv binder, and the
-  general `key=value` → positional path (`dd if=$BIN`, `cat foo=$BIN`) all
-  fell outside the #93 item-1 sweep; the scheduler's sync `build_tool_args`
-  twin (the scatter/gather flag-value path) is fixed the same way (GH #116).
+  catch-all. `cat`, `head`, `tail`, and `wc` used to drop such an argument and
+  read stdin instead.
+- **`bg` no longer marks a job Running when its `SIGCONT` fails.** The Stopped
+  flag was cleared before the `killpg(SIGCONT)` call, so a failed signal left
+  the job Running in `jobs`/`wait` with no live process and no reaper.
+- `bg` now marks the job Running only after a confirmed `SIGCONT`.
+- **`key=value` reassembly (`WordAssign`) now errors loudly on binary** instead
+  of splicing the `[binary: N bytes]` placeholder (GH #116). This covers
+  `-v a=$BIN` value-flag reassembly (`consume_flag_positionals`), `test`'s
+  raw-argv binder, and the general `key=value` positional path (`dd if=$BIN`,
+  `cat foo=$BIN`).
+- The scheduler's sync `build_tool_args` twin, on the scatter/gather flag-value
+  path, is fixed the same way.
 - **`alias`, `unalias`, `unset`, and `kill --signal` now error loudly on a
-  binary operand** instead of silently treating the `[binary: N bytes]`
-  placeholder as a literal alias/variable/signal name (GH #116).
+  binary operand** instead of treating the `[binary: N bytes]` placeholder as a
+  literal alias, variable, or signal name (GH #116).
 - **A repeatable flag bound to binary (`grep --ftype=$BIN`, `glob
-  --include=$BIN`) now errors loudly.** Previously a single binary occurrence
-  silently vanished from the filter — the JSON-array reader skipped the
-  base64 byte envelope the binder had encoded it as — so the flag was
-  silently dropped rather than applied or refused, worse than the
-  placeholder pattern elsewhere (GH #116).
-- **`kaish-ignore` changes now persist past their own statement.** Every
-  runtime ignore mutation (`add`/`clear`/`defaults`/`scope`) was silently
-  dropped at the end of the statement that made it — the per-command context
-  sync copied back cwd/aliases/output-limit but not the ignore config — so
-  the documented `kaish-ignore add .gitignore` rc-file recipe did nothing.
-- **Command substitution (`$(...)`) no longer leaks session-config
-  mutations.** `x=$(kaish-ignore clear)`, `$(kaish-output-limit off)`, or
-  `$(unalias name)` used to silently mutate the persistent kernel session
-  past the end of the `$(...)` — command substitution already isolated `cd`
-  and variable assignments but not `aliases`/`ignore_config`/`output_limit`,
-  the same missing-field class #138 just fixed for the plain-statement path.
-- **`glob --include` now actually filters.** It was a complete no-op: the
-  walker consulted only exclude rules, so `glob '*' --include='*.rs'` listed
-  everything. Include semantics are now rg-like: when include patterns exist a
-  file must match one of them (by relative path or basename); directories are
-  still traversed so included files below them are reached; exclude patterns
-  still prune whole subtrees. (`grep --include` half-worked through a separate
-  walk-pattern hack, now removed in favor of the same filter.)
+  --include=$BIN`) now errors loudly** (GH #116). A single binary occurrence
+  used to vanish from the filter, so the flag was neither applied nor refused.
+- **`kaish-ignore` changes now persist past their own statement.** Every runtime
+  mutation (`add`, `clear`, `defaults`, `scope`) was dropped at the end of its
+  statement, so the documented `kaish-ignore add .gitignore` rc-file recipe did
+  nothing.
+- The per-command context sync copied back cwd, aliases, and output limit, but
+  not the ignore config.
+- **Command substitution (`$(...)`) no longer leaks session-config mutations.**
+  `x=$(kaish-ignore clear)`, `$(kaish-output-limit off)`, and `$(unalias name)`
+  used to mutate the persistent kernel session past the end of the `$(...)`.
+- `$(...)` already isolated `cd` and variable assignments; it now also isolates
+  `aliases`, `ignore_config`, and `output_limit`, the same fields #138 fixed for
+  the plain-statement path.
+- **`glob --include` now actually filters.** It was a complete no-op: the walker
+  consulted only exclude rules, so `glob '*' --include='*.rs'` listed
+  everything.
+- Include semantics are now rg-like — when include patterns exist a file must
+  match one of them by relative path or basename; directories are still
+  traversed so included files below them are reached, and exclude patterns still
+  prune whole subtrees.
+- `grep --include` half-worked through a separate walk-pattern hack, now removed
+  in favor of the same filter.
 - **Repeated `--include`/`--exclude` accumulate in `glob` and `grep`.** Both
-  were bound single-valued, so repeating the flag silently kept only the LAST
-  pattern — `glob` while its help said "can be repeated", and `grep -r TODO .
-  --include='*.rs' --include='*.toml'` silently searched only the toml files
-  (a false negative). Repeats now accumulate like `--ftype` always has.
-- **A malformed numeric flag value errors instead of silently meaning
-  "unlimited"/"disabled".** `glob --depth=abc`, `tree -L abc`, and
-  `find -maxdepth xyz` all exited 0 and walked without a depth limit;
-  `spawn timeout=abc` silently DISABLED the timeout (unbounded child);
-  `split --limit` and `head -c` wrapped negative values through `usize`.
-  All now fail loudly, and negative values are refused rather than wrapped.
-  `glob --type=<unknown>` similarly errored silently into "files only" and is
-  now a usage error.
+  were bound single-valued, so repeating the flag kept only the LAST pattern —
+  `grep -r TODO . --include='*.rs' --include='*.toml'` silently searched only
+  the toml files, a false negative.
+- `glob`'s own help already said the flag could be repeated. Repeats now
+  accumulate like `--ftype` always has.
+- **A malformed numeric flag value now errors** instead of silently meaning
+  "unlimited" or "disabled". `glob --depth=abc`, `tree -L abc`, and
+  `find -maxdepth xyz` all exited 0 and walked with no depth limit;
+  `spawn timeout=abc` DISABLED the timeout, leaving an unbounded child.
+- `split --limit` and `head -c` wrapped negative values through `usize`;
+  negative values are now refused rather than wrapped.
+- `glob --type=<unknown>` errored silently into "files only" and is now a usage
+  error.
 - **`spawn`'s own help examples didn't work.** `help spawn` taught
-  `spawn command="cargo" argv=["build"]`, but that word-assign form never
-  binds for spawn — the whole token became the program name and exited 127.
-  The examples now show the working flag form (`spawn --command cargo --argv
-  build`).
+  `spawn command="cargo" argv=["build"]`, but that word-assign form never binds
+  for spawn — the whole token became the program name and exited 127. The
+  examples now show `spawn --command cargo --argv build`.
 - **Unquoted `glob **/*.rs` now works: the pattern reaches the builtin as
-  written.** Previously the kernel's argv glob expansion pre-expanded the bare
-  pattern into matching paths, so `glob` bound the first path as its "pattern",
-  silently ignored the rest, and printed exactly one file — after walking the
-  tree twice. The builtin's own examples (and agents following them) spell the
-  pattern unquoted. Quoted patterns behave as before.
-- **A dash-only operand no longer loses its leading dashes.** `echo ---`
-  printed `-` instead of `---`: the lexer's plain `--` literal always won a
-  length tie against any `--`-prefixed word whose 3rd character wasn't a
-  letter, silently truncating the word and swallowing the rest as a spurious
-  end-of-flags marker. Also broke `echo --=x` (→ `= x`), `echo --1` (→ `1`),
-  and made `echo -- ---` a parse error (the spurious marker collided with the
-  real `--`). All now lex as one literal word (#137).
-- **`spawn --timeout` no longer leaks the child process.** On timeout, the
-  `wait_with_output()` future (and the `Child` it owned) was dropped without
+  written.** The kernel's argv glob expansion pre-expanded the bare pattern, so
+  `glob` bound the first path as its "pattern", ignored the rest, and printed
+  exactly one file — after walking the tree twice.
+- The builtin's own examples (and agents following them) spell the pattern
+  unquoted. Quoted patterns behave as before.
+- **A dash-only operand no longer loses its leading dashes.** `echo ---` printed
+  `-` instead of `---`: the lexer's plain `--` literal always won a length tie
+  against any
+  `--`-prefixed word whose 3rd character wasn't a letter, truncating the word
+  and leaving a spurious end-of-flags marker (#137).
+- The same bug broke `echo --=x` (→ `= x`) and `echo --1` (→ `1`), and made
+  `echo -- ---` a parse error. All now lex as one literal word.
+- **`spawn --timeout` no longer leaks the child process.** On timeout the
+  `wait_with_output()` future, and the `Child` it owned, was dropped without
   `kill_on_drop` set on the `Command`, so the OS process kept running past the
-  124 exit — a real leak for a long-lived agent that repeatedly times out
-  spawned commands. `kill_on_drop(true)` is now set at command construction,
-  mirroring the existing precedent in `dispatch.rs`/`kernel.rs`.
+  124 exit — a real leak for an agent that times out spawns repeatedly.
+- `kill_on_drop(true)` is now set at command construction.
 - **`jq -n -s` now wraps the synthetic null input in an array.** `-n`/
-  `--null-input` short-circuited straight to a bare `Value::Null` before the
-  `-s`/`--slurp` branch was ever consulted, so `jq -n -s '.'` produced `null`
-  instead of real jq's `[null]` — `-s` unconditionally wraps its input, even
-  the `-n` synthetic document (GH #111).
-- **`VirtualOverlayBackend` no longer reserves the whole `/v` tree — an
-  embedder can mount its own storage under it** (GH #118). `is_virtual_path`
-  matched any `/v`/`/v/…` path lexically before consulting the mount table, so
-  an embedder mounting under `/v` (e.g. kaijutsu's CAS at `/v/cas`) found its
-  own paths shadowed to `NotFound`, while surfaces that bypass the overlay saw
-  the real content — two different `/v/x` depending on the surface, silently.
-  Routing is now purely mount-coverage based: an unclaimed `/v/*` path
-  delegates to the embedder's backend and hits the embedder's own
-  read-only/write gate. A synthesized shared-ancestor directory (a path like
-  `/v` that sits above kaish's mounts but isn't itself one) is now handled
-  consistently everywhere — `stat`/`lstat`/`exists`/`list` all agree it's a
-  read-only union directory (a real kaish mount shadows a same-named embedder
-  entry), and any direct mutation (`rm`/`mkdir`/`touch`/write/rename/…) is
-  refused with a clear error instead of a misleading `NotFound` (closing a
-  `rm -rf /v` half-delete risk). Also fixes `ls /v` returning nothing, `ls /`
-  dropping `dev`, and a stale `is_trash_excluded` `/v` clause that would have
-  silently exempted an embedder's newly-reachable real content under `/v`
-  from trash/latch protection.
+  `--null-input` short-circuited to a bare `Value::Null` before the `-s`/
+  `--slurp` branch was consulted, so `jq -n -s '.'` produced `null` instead of
+  real jq's `[null]` — `-s` wraps its input unconditionally (GH #111).
+- **`VirtualOverlayBackend` no longer reserves the whole `/v` tree — an embedder
+  can mount its own storage under it** (GH #118), such as kaijutsu's CAS at
+  `/v/cas`.
+- Routing is now purely mount-coverage based, not lexical: an unclaimed `/v/*`
+  path delegates to the embedder's backend and hits the embedder's own
+  read-only/write gate. Such a path used to be shadowed to `NotFound` while
+  surfaces that bypass the overlay saw the real content — two different `/v/x`
+  depending on the surface.
+- A synthesized shared-ancestor directory (a path like `/v` that sits above
+  kaish's mounts but isn't one) is a read-only union directory for `stat`,
+  `lstat`, `exists`, and `list` alike; a real kaish mount shadows a same-named
+  embedder entry.
+- Direct mutation of such a directory (`rm`, `mkdir`, `touch`, write, rename, …)
+  is refused with a clear error instead of a misleading `NotFound`, closing a
+  `rm -rf /v` half-delete risk.
+- The same change fixes `ls /v` returning nothing, `ls /` dropping `dev`, and a
+  stale `is_trash_excluded` `/v` clause that would have exempted an embedder's
+  newly-reachable content under `/v` from trash and latch protection.
 
 ### Added
 - **The REPL announces finished background jobs at the next prompt and reaps
   them automatically** (GH #131). `sleep 5 &` used to complete silently — no
-  `[1] Done sleep 5`-style line, and the completed job stayed in the
-  `JobManager` until an explicit `jobs --cleanup`. A `Latched` job (gated on a
-  pending confirmation under `set -o latch`) is never auto-reaped or reported
-  as finished — it stays tracked until confirmed or explicitly discarded.
+  `[1] Done sleep 5` line — and the completed job stayed in the `JobManager`
+  until an explicit `jobs --cleanup`.
+- A `Latched` job (gated on a pending confirmation under `set -o latch`) is
+  never auto-reaped or reported as finished; it stays tracked until confirmed or
+  explicitly discarded.
 - **`ToolSchema::glob_passthrough` (+ `with_glob_passthrough()`)** — a tool
-  whose input *is* a glob pattern (like `glob`) can now tell the argv binder to
-  pass bare patterns through as literal text instead of expanding them.
-  Embedder tools with pattern-shaped inputs can opt in the same way.
-- **`glob` accepts multiple patterns** (`glob **/*.rs **/*.toml`): matches are
+  whose input *is* a glob pattern (like `glob`) can tell the argv binder to pass
+  bare patterns through as literal text instead of expanding them. Embedder
+  tools with pattern-shaped inputs opt in the same way.
+- **`glob` accepts multiple patterns** (`glob **/*.rs **/*.toml`) — matches are
   the deduped union in pattern order; any pattern with zero matches fails the
   whole command (exit 1) naming the pattern that missed.
-- **A backgrounded confirmation latch is now surfaced and fulfillable** (GH
-  #96). A destructive op gated under `set -o latch` and run in the background
-  (`rm x &`) stored its `LatchRequest` but no consumer exposed it, so the nonce
-  was unreachable and the gate could never be confirmed. Now: `wait` surfaces
-  the request on the result's `.latch` field (exit 2, like a foreground gate);
-  `jobs` and `/v/jobs/{id}/status` report `Latched` distinctly from a plain
-  failure; and a new `/v/jobs/{id}/latch` node renders the request as JSON
-  (nonce, command, paths, hint) — empty when the job isn't gated. An embedder
-  fulfills it with `Kernel::confirm(&latch)`. **Embedders:** `JobStatus` gains
-  a `Latched` variant (exhaustive matches must handle it) and `JobInfo` gains
-  a `latch: Option<LatchRequest>` field.
+- **A backgrounded confirmation latch is now surfaced and fulfillable**
+  (GH #96). A destructive op gated under `set -o latch` and run in the
+  background (`rm x &`) stored its `LatchRequest`, but no consumer exposed it,
+  so the nonce was unreachable and the gate could never be confirmed.
+- `wait` now surfaces the request on the result's `.latch` field (exit 2, like a
+  foreground gate); `jobs` and `/v/jobs/{id}/status` report `Latched` distinctly
+  from a plain failure.
+- A new `/v/jobs/{id}/latch` node renders the request as JSON (nonce, command,
+  paths, hint), empty when the job isn't gated. An embedder fulfills it with
+  `Kernel::confirm(&latch)`.
+- **Embedders:** `JobStatus` gains a `Latched` variant (exhaustive matches must
+  handle it) and `JobInfo` gains a `latch: Option<LatchRequest>` field.
 - **Recursion is depth-guarded (`MAX_RECURSION_DEPTH` = 48)** (GH #46/#47, tuned
-  by #48). Command substitution, shell-function calls, `.kai` script execution,
-  and `source`/`.` all re-enter the statement engine on the native stack; a
-  runaway or mutually recursive script now returns a loud `maximum recursion
-  depth exceeded` error instead of overflowing the stack (a `SIGSEGV`/abort with
-  no diagnostic). Two new `pub const`s let embedders size their runtime:
-  `MAX_RECURSION_DEPTH` and the paired `RECOMMENDED_STACK_SIZE` (12 MiB) — the
-  cap trips before `cap × per-level-stack` can exceed the floor. #48's smaller
-  interpreter frames let the cap rise (32→48) and the floor drop (16→12 MiB)
-  together while keeping the same safety margin. The guard only fires *before* an
-  overflow on a thread that meets that floor — the reference REPL now sizes its
-  tokio worker threads (`thread_stack_size`) and its `block_on` driver thread to
-  it; embedders should too (see `docs/EMBEDDING.md`).
+  by #48) — a runaway or mutually recursive script now returns a loud `maximum
+  recursion depth exceeded` error instead of a `SIGSEGV` with no diagnostic.
+- Command substitution, shell-function calls, `.kai` script execution, and
+  `source`/`.` all re-enter the statement engine on the native stack.
+- Two new `pub const`s let embedders size their runtime: `MAX_RECURSION_DEPTH`
+  and the paired `RECOMMENDED_STACK_SIZE` (12 MiB). The cap trips before
+  `cap × per-level-stack` can exceed the floor.
+- #48's smaller interpreter frames let the cap rise from 32 to 48 and the floor
+  drop from 16 to 12 MiB together, keeping the same safety margin.
+- The guard only fires *before* an overflow on a thread that meets that floor.
+  The reference REPL sizes its tokio worker threads (`thread_stack_size`) and
+  its `block_on` driver thread to it; embedders should too (see
+  `docs/EMBEDDING.md`).
 
 ### Changed
-- **Interpreter allocation/stack pass** (GH #48). The native stack consumed per
+- **Interpreter allocation/stack pass** (GH #48) — the native stack consumed per
   statement-engine re-entry level (`$(…)`, shell functions, `source`) is cut
-  ~46% (release ~92 → ~50 KB/level; debug similarly), shrinking the interpreter's
-  hot futures by boxing the cold dispatch branches, the per-command
+  ~46%: release ~92 KB/level down to ~50 KB, debug similarly.
+- The saving comes from boxing the cold dispatch branches, the per-command
   `ExecContext`/scope snapshots, and `ExecResult`'s structured-output field, and
-  by dropping the per-command tracing spans on the recursion ring. The two
-  interpreter crates (`kaish-kernel`, `kaish-types`) also build at
-  `opt-level = 1` in dev/test now (contained compile-time cost, ~7× smaller debug
-  stack). A new `recursion_stack_cost_tests` probe measures the per-level cost.
-  This leaves headroom to raise `MAX_RECURSION_DEPTH` or lower
-  `RECOMMENDED_STACK_SIZE` as a follow-up (GH #46/#47).
+  from dropping the per-command tracing spans on the recursion ring.
+- `kaish-kernel` and `kaish-types` now build at `opt-level = 1` in dev and test
+  — a contained compile-time cost for a ~7× smaller debug stack. A new
+  `recursion_stack_cost_tests` probe measures the per-level cost.
 - **Removed the internal per-command/per-pipeline tracing spans** from the hot
-  execution ring (GH #48) — coarse spans remain on the outer execute entries, so
-  embedders consuming kaish's `tracing` output now see one execution span per
+  execution ring (GH #48); coarse spans remain on the outer execute entries.
+- Embedders consuming kaish's `tracing` output now see one execution span per
   top-level call rather than one per nested command. Observability-shape change,
   not a behavior change.
 - **BREAKING (embedders):** `ExecContext.tool_schemas` is now `Arc<[ToolSchema]>`
   instead of `Vec<ToolSchema>` (GH #48) — the ~70-entry schema catalog is shared
   by refcount rather than deep-cloned into every per-command context.
-  `set_tool_schemas` still accepts a `Vec` (converts internally) and all read
-  sites are unaffected (deref coercion to `&[ToolSchema]`); only direct field
-  assignment/mutation of the public field needs `.into()`.
+- `set_tool_schemas` still accepts a `Vec` and all read sites are unaffected
+  (deref coercion to `&[ToolSchema]`); only direct assignment to the public
+  field needs `.into()`.
 - **Embedders:** `JobStatus`, `JobInfo`, and `ToolResult` are now
-  `#[non_exhaustive]` (GH #93, part of item 3/4 plus a hygiene pass) —
-  construct them via their constructors (`JobInfo::new()` +
-  `.with_output_file()`/`.with_pid()`/`.with_latch()`; `ToolResult::success()`/
-  `.failure()`/`.with_data()` plus the new `.with_output()`/
-  `.with_content_type()`/`.with_baggage()`/`.with_latch()`/`.with_did_spill()`/
-  `.with_original_code()`) and add a `_` arm to any exhaustive match — future
-  variants/fields won't break you.
+  `#[non_exhaustive]` (GH #93 items 3 and 4, plus a hygiene pass) — add a `_`
+  arm to any exhaustive match, and construct them through their constructors.
+  Future variants and fields won't break you.
+- The constructors are `JobInfo::new()` plus
+  `.with_output_file()`/`.with_pid()`/`.with_latch()`, and
+  `ToolResult::success()`/`.failure()`/`.with_data()` plus the new
+  `.with_output()`, `.with_content_type()`, `.with_baggage()`, `.with_latch()`,
+  `.with_did_spill()`, and `.with_original_code()`.
 
 ### Fixed
 - **A backgrounded confirmation latch can no longer be destroyed silently**
-  (GH #96 follow-up). `jobs --cleanup` used to reap a latched job like any
-  completed one, and `kill %N` removed it outright — both silently dropped the
-  stored `LatchRequest`, leaving the gated operation permanently
-  unconfirmable. `jobs --cleanup` now keeps latched jobs and says so; `kill
-  %N` on a latched job refuses with a pointer to the nonce; the new `kill
-  --discard %N` abandons the gate explicitly and loudly (the gated operation
-  never runs).
+  (GH #96 follow-up). `jobs --cleanup` reaped a latched job like any completed
+  one and `kill %N` removed it outright, both dropping the stored
+  `LatchRequest` and leaving the gated operation permanently unconfirmable.
+- `jobs --cleanup` now keeps latched jobs and says so; `kill %N` on a latched
+  job refuses with a pointer to the nonce; the new `kill --discard %N` abandons
+  the gate explicitly and loudly, and the gated operation never runs.
 - **README install instructions pointed at a crate that doesn't exist.**
   `cargo install kaish` fails — there is no `kaish` package on crates.io; the
   binary named `kaish` ships in the `kaish-repl` crate. The README now says
-  `cargo install kaish-repl` (and was restructured for first-time visitors
-  alongside; the exit-code table and output contract moved to
-  `docs/EMBEDDING.md`, trash thresholds to `docs/LANGUAGE.md`).
+  `cargo install kaish-repl`.
+- The README was restructured for first-time visitors alongside: the exit-code
+  table and output contract moved to `docs/EMBEDDING.md`, trash thresholds to
+  `docs/LANGUAGE.md`.
 - **`jq -s`/`--slurp` now wraps the `.data` pipeline path in an array-of-one,
-  matching real jq** (GH #93 item 2). Real `jq -s` always wraps its input in
-  an array, even a single document. On kaish's structured `.data` shortcut
-  (a scalar or record handed over by an upstream stage like `fromjson`),
-  `-s` was a no-op, so `<produces scalar .data> | jq -s length` diverged from
-  real jq. It now wraps the incoming value in a one-element array before
-  applying the filter, same as the text path; plain `jq` (no `-s`) on the
-  `.data` path is unchanged.
+  matching real jq** (GH #93 item 2). On the structured `.data` shortcut — a
+  scalar or record from an upstream stage like `fromjson` — `-s` was a no-op, so
+  `<scalar .data> | jq -s length` diverged.
+- Plain `jq` with no `-s` on the `.data` path is unchanged.
 - **Deep recursion no longer crashes the process** (GH #46). `f() { f; }; f`,
   mutual recursion, and deeply nested `$(...)` aborted with a bare stack
   overflow; they now hit the depth guard above and fail loudly.
-- **`$(...)` in a redirect target now works on a bare `Kernel::execute`** (GH
-  #90). Command substitution in a redirect target or heredoc body (`echo x >
-  $(gen)`, `cat < $(gen)`, `cmd > $(gen)` in a pipeline stage) only ran when the
-  kernel was Arc-attached via `into_arc` — the REPL. A bare `Kernel::execute`
-  (every embedder holding a `Kernel` by value, and the whole test harness) left
-  `ctx.dispatcher` unset, so the target silently fell back to a sync evaluator
-  that can't run `$()` and failed with "could not evaluate redirect target".
-  The redirect evaluator now takes the dispatcher the runner already holds, so
-  the behavior no longer depends on how the kernel was constructed.
-- **Binary (`Value::Bytes`) now goes loud at every remaining text sink** (GH
-  #93 item 1), not just the primary ones 0.11.0 fixed. A path-coercing builtin
-  positional (`mkdir`/`cp`/`rm`/`ls`/`find`/`grep`/`sed`/`uniq`/`jq`/`tree`/
-  `write`/`ln`/`patch`/`checksum`/`cmp`/`spawn`/`cd`/`awk`/etc.), a
-  `[[ -f $x ]]`/`test -f $x` file-test path, an exported env var reaching a
-  spawned process, a redirect target (`cmd > $x`), a `case $x in`/`==`/`in`
-  operand, and `exec`'s own argv all used to silently mishandle a binary
-  operand instead of erroring — most stringified it into the `[binary: N
-  bytes]` placeholder (a wrong path, a wrong env var value, a comparison
-  against placeholder text instead of the real bytes), and a few (`cat`/
-  `head`/`tail`/`wc`/`sed`/`uniq`/`jq`/`cd`/`awk`) instead silently dropped it
-  and fell back to reading stdin or `$HOME`. All now error clearly instead.
-- **`&>` (`RedirectKind::Both`) streams structured output like `>`/`>>`** (GH
-  #93 item 6) instead of building the whole output as one `String` first —
-  aligns it with the lazy `take_output_for_stream`/`write_canonical` path the
+- **`$(...)` in a redirect target now works on a bare `Kernel::execute`**
+  (GH #90). A redirect target or heredoc body (`echo x > $(gen)`,
+  `cat < $(gen)`, `cmd > $(gen)` in a pipeline stage) only ran it when the
+  kernel was Arc-attached via `into_arc` — the REPL.
+- Everywhere else — every embedder holding a `Kernel` by value, and the whole
+  test harness — `ctx.dispatcher` was unset, so the target fell back to a sync
+  evaluator that can't run `$()` and failed with "could not evaluate redirect
+  target".
+- The redirect evaluator now takes the dispatcher the runner already holds.
+- **Binary (`Value::Bytes`) now goes loud at every remaining text sink**
+  (GH #93 item 1), not just the primary ones 0.11.0 fixed.
+- Newly covered: a path-coercing builtin positional (`mkdir`, `cp`, `rm`, `ls`,
+  `find`, `grep`, `sed`, `uniq`, `jq`, `tree`, `write`, `ln`, `patch`,
+  `checksum`, `cmp`, `spawn`, `cd`, `awk`, …), a `[[ -f $x ]]`/`test -f $x` file
+  test, an exported env var reaching a spawned process, a redirect target
+  (`cmd > $x`), a `case $x in`/`==`/`in` operand, and `exec`'s own argv.
+- Most of those stringified it into the `[binary: N bytes]` placeholder — a
+  wrong path, a wrong env var value, a comparison against placeholder text. A
+  few (`cat`, `head`, `tail`, `wc`, `sed`, `uniq`, `jq`, `cd`, `awk`) instead
+  dropped it and fell back to reading stdin or `$HOME`.
+- **`&>` (`RedirectKind::Both`) streams structured output like `>`/`>>`**
+  (GH #93 item 6) instead of building the whole output as one `String` first,
+  aligning it with the lazy `take_output_for_stream`/`write_canonical` path the
   plain stdout redirects already use.
-- **`grep -r PATTERN FILE`** (a file operand, not a directory) now searches
-  that file instead of silently finding nothing (GH #105). `-r`/`-R` used to
-  treat every operand as a walk root; a file has nothing "under" it, so the
-  walk collected zero entries → 0 matches, exit 1, no error — a false negative
-  a model reads as "not found". `-r` now governs only how *directories* expand:
-  files are searched directly, directories walked, and a mixed `grep -r p file
-  dir` operand list does both.
+- **`grep -r PATTERN FILE`** (a file operand, not a directory) now searches that
+  file instead of finding nothing (GH #105). `-r`/`-R` treated every operand as
+  a walk root, and a file has nothing "under" it.
+- The walk collected zero entries: 0 matches, exit 1, no error — a false
+  negative a model reads as "not found".
+- `-r` now governs only how *directories* expand: files are searched directly,
+  directories walked, and a mixed `grep -r p file dir` operand list does both.
 - **A backslash-escaped quote in a `${VAR:-default}` default word no longer
-  corrupts the value** (GH #93 item 5). `${UNSET:-"hello \"world\""}` used to
-  toggle quote-tracking state on the escaped inner `"` (any `"`/`'` flipped
-  state regardless of a preceding `\`), mangling the default to `hello
-  \world\`. Escape handling now tracks context, matching bash: outside any
-  quotes both `\"` and `\'` unescape (so the `'it'\''s'` → `it's` embedding
-  idiom resolves); inside double quotes only `\"` unescapes while `\'` stays
-  literal (`"a\'b"` → `a\'b`, since `'` is an ordinary character there); and
-  single-quoted default words remain a fully literal region (zero escape
-  processing, zero interpolation).
+  corrupts the value** (GH #93 item 5). `${UNSET:-"hello \"world\""}` mangled to
+  `hello \world\`, because any `"`/`'` flipped quote-tracking state regardless
+  of a preceding `\`.
+- Escape handling now tracks context, matching bash: outside any quotes both
+  `\"` and `\'` unescape, so the `'it'\''s'` → `it's` embedding idiom resolves.
+- Inside double quotes only `\"` unescapes; `\'` stays literal (`"a\'b"` →
+  `a\'b`), since `'` is an ordinary character there.
+- A single-quoted default word remains a fully literal region — zero escape
+  processing, zero interpolation.
 - **`ToolResult` no longer drops `did_spill`/`original_code` crossing the
   backend seam** (GH #93 item 3). `ExecResult` already tracked whether the
   output limiter capped a result and its pre-spill exit code; `ToolResult` had
-  neither field, so a backend-registered tool's (kaijutsu, an MCP engine)
-  capped result silently looked uncapped by the time it reached the kernel, in
-  both `ExecResult`↔`ToolResult` directions. Both fields now round-trip intact.
+  neither field.
+- A backend-registered tool's capped result looked uncapped by the time it
+  reached the kernel. Both fields now round-trip intact in both
+  `ExecResult`↔`ToolResult` directions.
 
 ## [0.11.0] - 2026-07-04
 

@@ -1,6 +1,6 @@
 //! Read-side traversal for native collections: `${xs[0]}`, `${r[key]}`,
 //! `${r[$k]}`, `${r["weird-key"]}`, `${xs[-1]}`, `${xs[0:2]}`, `${a[b][c]}`,
-//! and `${#…}` length. See docs/arrays-and-hashes.md.
+//! and `${#…}` length. See `docs/LANGUAGE.md`, "Read access".
 //!
 //! Values are constructed with `fromjson` (the JSON ingress bridge) so these
 //! tests exercise the ACCESS surface before the literal-construction grammar
@@ -256,8 +256,8 @@ async fn out_of_bounds_index_is_a_loud_error() {
 
 #[tokio::test]
 async fn missing_record_key_is_a_loud_error() {
-    // A missing key is loud, not a silent empty (use `[[ k in $r ]]` to test
-    // presence). Decision recorded in docs/arrays-and-hashes.md.
+    // A missing key is loud, not a silent empty — use `[[ k in $r ]]` to test
+    // presence. See `docs/LANGUAGE.md`, "Read access".
     let k = setup().await;
     let (_, code, err) =
         run(&k, r#"u=$(fromjson '{"name":"amy"}'); echo ${u[nope]}"#).await;
@@ -337,8 +337,8 @@ async fn undefined_root_in_string_is_empty() {
 
 #[tokio::test]
 async fn collection_vs_scalar_equality_is_a_loud_error() {
-    // `[[ $list == banana ]]` must NOT be silently false — it's the trap `in`
-    // exists to close. See docs/arrays-and-hashes.md (comparison decision).
+    // `[[ $list == banana ]]` must NOT be silently false — it is the trap `in`
+    // exists to close. See `docs/LANGUAGE.md`, "Membership".
     let k = setup().await;
     let result = k
         .execute(r#"x=$(fromjson '["a","b"]'); if [[ $x == banana ]]; then echo hit; fi"#)
@@ -512,10 +512,10 @@ async fn for_loop_over_envelope_shaped_elements_stays_a_record() {
 }
 
 // ── Membership: `[[ e in $coll ]]` / `[[ e not in $coll ]]` ────────────────
-// See docs/arrays-and-hashes.md — "Membership `in` is collection-only": a
-// list tests element membership (typed equality), a record tests key
+// A list tests element membership (typed equality), a record tests key
 // membership, and a scalar/string RHS is a loud error (mirrors the
 // collection-vs-scalar `==`/`!=` traps above, same LOUD contract).
+// See `docs/LANGUAGE.md`, "Membership".
 
 #[tokio::test]
 async fn element_in_list_is_true() {
@@ -807,8 +807,9 @@ async fn membership_bool_element() {
 }
 
 // ── Shape guard: `typeof` / `[[ -list ]]` / `[[ -record ]]` ────────────────
-// See docs/arrays-and-hashes.md, decision F: the antidote to the
-// keys-on-list footgun and the API-shape-variance trap (Teaching note #12).
+// An API call sometimes returns a list and sometimes a single record, so
+// check the shape before committing to `keys`/`values` or a `for` loop over
+// it. See `docs/LANGUAGE.md`, "Shape guards".
 
 #[tokio::test]
 async fn typeof_on_a_list() {
