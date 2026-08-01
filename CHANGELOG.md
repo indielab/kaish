@@ -10,6 +10,23 @@ breaking entries are marked **BREAKING**.
 
 ## [Unreleased]
 
+### Added
+- **Writing style guide** (`docs/style.md`) plus a `Terms` glossary in `README.md`
+  and `CLAUDE.md`. kaish is a strict subset of `sh`; the prose style is a strict
+  subset of English, chosen for the same reason. Inspired by ASD-STE100 Simplified
+  Technical English, but not STE — the approved dictionary is copyrighted and
+  aerospace-shaped, so we keep the structure and our own term list instead. These
+  are weights, not gates: there is no linter, and text is groomed at the point of
+  touch rather than rewritten in bulk.
+
+### Fixed
+- `help limits` stated the recursion depth cap as 32; the actual cap is 48
+  (`MAX_RECURSION_DEPTH`). Agent-facing help text now matches the kernel.
+- `cp` and `mv` published no description at all for `-n`/`--no-clobber`, and a
+  mangled two-line description for `--confirm` — both doc comments sat on the
+  `confirm` field. The tool schema an embedder ships to a model now describes
+  each flag correctly.
+
 ## [0.13.0] - 2026-07-18
 
 ### Added
