@@ -748,7 +748,8 @@ impl ExecContext {
     ///
     /// The result includes structured data in `.data` for programmatic access:
     /// ```json
-    /// {"nonce": "a3f7b2c1", "command": "rm", "paths": [...], "hint": "rm --confirm=a3f7b2c1 file", "ttl": 60}
+    /// {"nonce": "4b1e0d9a7c3f28e6b5a0c1d4e7f2938a", "command": "rm", "paths": [...],
+    ///  "hint": "rm --confirm=4b1e0d9a7c3f28e6b5a0c1d4e7f2938a file", "ttl": 60}
     /// ```
     pub fn latch_result(
         &self,

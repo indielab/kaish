@@ -37,10 +37,11 @@ impl NonceScope {
 
 /// A store for confirmation nonces with TTL-based expiration.
 ///
-/// Nonces are 8-character hex strings that gate dangerous operations.
+/// Nonces are 32-character hex strings that gate dangerous operations.
 /// They remain valid until their TTL expires — not consumed on validation —
-/// making operations idempotent: a retried `rm --confirm=abc123 bigdir/`
-/// works if the nonce hasn't expired.
+/// making operations idempotent: a retried
+/// `rm --confirm=4b1e0d9a7c3f28e6b5a0c1d4e7f2938a bigdir/` works if the nonce
+/// hasn't expired.
 #[derive(Clone, Debug)]
 pub struct NonceStore {
     inner: Arc<Mutex<NonceStoreInner>>,
@@ -94,15 +95,15 @@ impl NonceStore {
 
     /// Issue a new nonce for the given command and paths.
     ///
-    /// Returns a 32-character hex string (128 bits from the OS CSPRNG). Opportunistically
-    /// GCs expired nonces.
+    /// Returns a 32-character hex string (128 bits from the OS CSPRNG). Removes
+    /// nonces past their TTL on the way through.
     ///
     /// # Errors
     ///
     /// Propagates `getrandom::Error` if the OS entropy source fails. There is
     /// deliberately no fallback: a guessable nonce would let an attacker
-    /// forge a `--confirm` for a destructive op, so callers must fail loudly
-    /// rather than silently degrade (see `generate_nonce`).
+    /// forge a `--confirm` for a destructive operation, so callers must fail
+    /// loudly rather than silently degrade (see `generate_nonce`).
     pub fn issue(&self, command: &str, paths: &[&str]) -> Result<String, getrandom::Error> {
         let nonce = generate_nonce()?;
         let now = Instant::now();
@@ -188,11 +189,6 @@ impl Default for NonceStore {
 /// There is deliberately **no fallback** to a weaker generator: if the OS
 /// cannot supply entropy, issuing a nonce fails loudly (propagated to the
 /// caller) rather than silently emitting a guessable confirmation token.
-///
-/// Rate-limiting repeated wrong `--confirm` guesses is explicitly out of
-/// scope here — it needs a request/attempt-identity model that doesn't exist
-/// yet (a rejected guess doesn't currently identify which issued nonce it
-/// was aimed at). Deferred, not implemented, in this change.
 fn generate_nonce() -> Result<String, getrandom::Error> {
     let mut entropy = [0u8; 16];
     getrandom::fill(&mut entropy)?;

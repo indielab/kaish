@@ -1005,10 +1005,10 @@ mod tests {
         let id = manager.spawn("gated".to_string(), async {
             let mut result = ExecResult::failure(2, "confirmation required");
             result.latch = Some(Box::new(kaish_types::result::LatchRequest {
-                nonce: "a3f7b2c1".to_string(),
+                nonce: "4b1e0d9a7c3f28e6b5a0c1d4e7f2938a".to_string(),
                 command: "rm".to_string(),
                 paths: vec!["x".to_string()],
-                hint: "rm --confirm=a3f7b2c1 x".to_string(),
+                hint: "rm --confirm=4b1e0d9a7c3f28e6b5a0c1d4e7f2938a x".to_string(),
                 tool: "rm".to_string(),
                 argv: vec!["x".to_string()],
                 ttl: 60,
@@ -1139,10 +1139,10 @@ mod tests {
 
         let mut gated = ExecResult::failure(2, "rm: confirmation required (latch enabled)");
         gated.latch = Some(Box::new(LatchRequest {
-            nonce: "a3f7b2c1".to_string(),
+            nonce: "4b1e0d9a7c3f28e6b5a0c1d4e7f2938a".to_string(),
             command: "rm".to_string(),
             paths: vec!["precious.txt".to_string()],
-            hint: "rm --confirm=\"a3f7b2c1\" precious.txt".to_string(),
+            hint: "rm --confirm=\"4b1e0d9a7c3f28e6b5a0c1d4e7f2938a\" precious.txt".to_string(),
             tool: "rm".to_string(),
             argv: vec!["precious.txt".to_string()],
             ttl: 60,

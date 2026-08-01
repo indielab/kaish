@@ -925,10 +925,10 @@ mod tests {
         // reachable, nested under `data`, alongside the error/code envelope.
         let mut result = ExecResult::failure(2, "rm: confirmation required (latch enabled)");
         result.data = Some(crate::value::Value::Json(serde_json::json!({
-            "nonce": "a3f7b2c1",
+            "nonce": "4b1e0d9a7c3f28e6b5a0c1d4e7f2938a",
             "command": "rm",
             "paths": ["important.dat"],
-            "hint": "rm --confirm=\"a3f7b2c1\" important.dat",
+            "hint": "rm --confirm=\"4b1e0d9a7c3f28e6b5a0c1d4e7f2938a\" important.dat",
             "ttl": 60,
         })));
 
@@ -937,11 +937,11 @@ mod tests {
         let parsed: serde_json::Value = serde_json::from_str(&out).expect("valid JSON");
         assert_eq!(parsed["error"], "rm: confirmation required (latch enabled)");
         assert_eq!(parsed["code"], 2);
-        assert_eq!(parsed["data"]["nonce"], "a3f7b2c1");
+        assert_eq!(parsed["data"]["nonce"], "4b1e0d9a7c3f28e6b5a0c1d4e7f2938a");
         assert_eq!(parsed["data"]["ttl"], 60);
         // .data mirrors the serialized envelope (nonce reachable from the struct too).
         match &formatted.data {
-            Some(crate::value::Value::Json(v)) => assert_eq!(v["data"]["nonce"], "a3f7b2c1"),
+            Some(crate::value::Value::Json(v)) => assert_eq!(v["data"]["nonce"], "4b1e0d9a7c3f28e6b5a0c1d4e7f2938a"),
             other => panic!("expected nested JSON data, got {other:?}"),
         }
     }
@@ -959,10 +959,10 @@ mod tests {
         result.set_output(Some(OutputData::text("[1] Latched\n")));
         assert!(result.has_output(), "precondition: this result DOES have output");
         result.latch = Some(Box::new(LatchRequest {
-            nonce: "a3f7b2c1".to_string(),
+            nonce: "4b1e0d9a7c3f28e6b5a0c1d4e7f2938a".to_string(),
             command: "rm".to_string(),
             paths: vec!["precious.txt".to_string()],
-            hint: "rm --confirm=\"a3f7b2c1\" precious.txt".to_string(),
+            hint: "rm --confirm=\"4b1e0d9a7c3f28e6b5a0c1d4e7f2938a\" precious.txt".to_string(),
             tool: "rm".to_string(),
             argv: vec!["precious.txt".to_string()],
             ttl: 60,
@@ -973,7 +973,7 @@ mod tests {
         let out = formatted.text_out().into_owned();
         let parsed: serde_json::Value = serde_json::from_str(&out).expect("valid JSON");
         assert_eq!(
-            parsed["latch"]["nonce"], "a3f7b2c1",
+            parsed["latch"]["nonce"], "4b1e0d9a7c3f28e6b5a0c1d4e7f2938a",
             "the nonce must be reachable from a latched result that also has \
              output, not just the no-output error path: {parsed}"
         );

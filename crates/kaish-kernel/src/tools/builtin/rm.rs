@@ -119,7 +119,10 @@ impl Tool for Rm {
             [
                 ("Remove a file", "rm temp.txt"),
                 ("Remove directory recursively", "rm -rf build/"),
-                ("Confirm latched removal", "rm --confirm=a3f7b2c1 bigfile.bin"),
+                (
+                    "Confirm latched removal",
+                    "rm --confirm=4b1e0d9a7c3f28e6b5a0c1d4e7f2938a bigfile.bin",
+                ),
             ],
         )
     }

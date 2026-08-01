@@ -11,12 +11,11 @@ breaking entries are marked **BREAKING**.
 ## [Unreleased]
 
 ### Security
-- **Confirmation nonces (`--confirm=<nonce>` on `rm`, overwrites, `kaish-trash empty`)
-  now come from the OS CSPRNG.** Previously derived from `RandomState` +
-  wall-clock nanoseconds folded into 32 bits (8 hex chars) — guessable/collidable
-  in a hostile setting. Now 16 bytes from `getrandom` rendered as 32 lowercase
-  hex chars (128 bits); entropy failure is a hard error, never a silent
-  fallback. Format-compatible (still an opaque hex string) and non-breaking.
+- Confirmation nonces (`--confirm=<nonce>` on `rm`, overwrites, `kaish-trash empty`) are 128 bits from the OS CSPRNG rendered as 32 lowercase hex chars, replacing a non-cryptographic hash truncated to 32 bits — 32 bits is a guessable gate on a command that deletes files.
+- Issuing a nonce exits 1 with `could not obtain system entropy` when `getrandom` fails — there is no fallback generator, because a predictable nonce confirms the operation it exists to gate.
+
+### Changed
+- **BREAKING:** `NonceStore::issue` returns `Result<String, getrandom::Error>` instead of `String` — entropy failure has to reach the caller, and the old signature had nowhere to put it.
 
 ## [0.13.0] - 2026-07-18
 

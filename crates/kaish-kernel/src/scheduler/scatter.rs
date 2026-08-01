@@ -975,10 +975,10 @@ mod tests {
 
         let mut r = ExecResult::failure(2, "rm: confirmation required (latch enabled)");
         r.latch = Some(Box::new(LatchRequest {
-            nonce: "a3f7b2c1".to_string(),
+            nonce: "4b1e0d9a7c3f28e6b5a0c1d4e7f2938a".to_string(),
             command: "rm".to_string(),
             paths: vec!["precious.txt".to_string()],
-            hint: "rm --confirm=\"a3f7b2c1\" precious.txt".to_string(),
+            hint: "rm --confirm=\"4b1e0d9a7c3f28e6b5a0c1d4e7f2938a\" precious.txt".to_string(),
             tool: "rm".to_string(),
             argv: vec!["precious.txt".to_string()],
             ttl: 60,
@@ -991,7 +991,7 @@ mod tests {
         assert_eq!(row["ok"], false);
         assert_eq!(row["code"], 2);
         assert_eq!(
-            row["latch"]["nonce"], "a3f7b2c1",
+            row["latch"]["nonce"], "4b1e0d9a7c3f28e6b5a0c1d4e7f2938a",
             "the latch nonce must ride the row: {row}"
         );
         assert_eq!(row["latch"]["command"], "rm");

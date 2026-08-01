@@ -930,10 +930,10 @@ mod tests {
 
     fn latch_req(paths: &[&str]) -> LatchRequest {
         LatchRequest {
-            nonce: "a3f7b2c1".to_string(),
+            nonce: "4b1e0d9a7c3f28e6b5a0c1d4e7f2938a".to_string(),
             command: "rm".to_string(),
             paths: paths.iter().map(|p| (*p).to_string()).collect(),
-            hint: "rm --confirm=\"a3f7b2c1\" important.dat".to_string(),
+            hint: "rm --confirm=\"4b1e0d9a7c3f28e6b5a0c1d4e7f2938a\" important.dat".to_string(),
             tool: "rm".to_string(),
             argv: paths.iter().map(|p| (*p).to_string()).collect(),
             ttl: 60,
@@ -947,7 +947,7 @@ mod tests {
         result.latch = Some(Box::new(latch_req(&["important.dat"])));
 
         let req = result.latch_request().expect("a latch request");
-        assert_eq!(req.nonce, "a3f7b2c1");
+        assert_eq!(req.nonce, "4b1e0d9a7c3f28e6b5a0c1d4e7f2938a");
         assert_eq!(req.command, "rm");
         assert_eq!(req.paths, vec!["important.dat".to_string()]);
         assert_eq!(req.ttl, 60);
@@ -958,10 +958,10 @@ mod tests {
     fn latch_request_handles_command_only_empty_paths() {
         let mut result = ExecResult::failure(2, "kaish-trash empty: confirmation required");
         result.latch = Some(Box::new(LatchRequest {
-            nonce: "deadbeef".to_string(),
+            nonce: "4b1e0d9a7c3f28e6b5a0c1d4e7f2938a".to_string(),
             command: "kaish-trash empty".to_string(),
             paths: vec![],
-            hint: "kaish-trash empty --confirm=deadbeef".to_string(),
+            hint: "kaish-trash empty --confirm=4b1e0d9a7c3f28e6b5a0c1d4e7f2938a".to_string(),
             tool: "kaish-trash".to_string(),
             argv: vec!["--".to_string(), "empty".to_string()],
             ttl: 60,
