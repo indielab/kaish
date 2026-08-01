@@ -264,13 +264,14 @@ Hard-won rules that aren't obvious from the code. Violating these silently break
 
 - **No legacy dual-representations.** Delete old code the moment it's superseded —
   no compatibility shims, no parallel old/new types. Fix call sites immediately.
-- **Defer out-of-scope work to GitHub Issues**, not inline `TODO`s in code or
-  scratch notes. New deferrals discovered *outside* an active PR go to
-  `gh issue create` (GH is the transparent surface contributors see); scoped
-  deferrals found *while building a PR* go in the PR body so they carry with the
-  change, then to GH Issues if they outlive it. (`docs/issues.md`, the old backlog
-  file, was verified entry-by-entry, migrated to GH Issues #175–#203, and deleted
-  on 2026-07-16.)
+- **Fix it now, or carry it in the PR body — don't file an issue.** When you find
+  a small problem, the cheapest correct move is usually to fix it while you are
+  already in the file. When a fix is genuinely out of scope, write it into the PR
+  body so it travels with the change; **a merged PR is a sufficient record**, and
+  the merge commit keeps it searchable. Reserve `gh issue create` for work that
+  outlives the PR and that nobody is about to pick up — a real backlog item, not
+  a granular nit. Issue churn costs more attention than it saves. Never leave
+  inline `TODO`s in code.
 - **Test builtins through `kernel.execute(...)`, not a builtin's direct
   `.execute()`.** Direct calls skip the dispatch chain (arg binding, `--json`,
   output limits) and pass while the real path is broken.
