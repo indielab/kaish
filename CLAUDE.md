@@ -83,6 +83,9 @@ fixture IS the test failing). `cargo clippy --all` alone skips test targets — 
 ### Code Style
 
 - Comments only for non-obvious intent or complex behavior
+- **`///` on a builtin argument is published to agents** — `params_from_clap` copies it
+  into `ParamSchema.description` and the kernel ships it to the model. Describe the
+  flag's behavior there; implementation notes go in `//` comments.
 - Avoid `mod.rs` in new modules — use `src/module_name.rs` (legacy `mod.rs` files remain; don't add more)
 - Full words for names, avoid abbreviations
 - Tokio for all async. Blocking in async: `tokio::task::block_in_place(|| ...)`
@@ -168,6 +171,59 @@ The builtin list in `help builtins` is generated dynamically from tool schemas.
 `syntax.md` is **generated** from the Syntax fragments in `kaish-help/src/fragments.rs` —
 edit the fragments, then `cargo run -p kaish-help --example regen_syntax` (a drift test
 fails if it's stale). `limits.md` and the deeper `docs/LANGUAGE.md` still need manual updates.
+
+## Writing style
+
+kaish is a strict subset of `sh`, chosen so muscle memory transfers. Our prose is a
+strict subset of English, chosen for the same reason. Full guide: `docs/style.md`.
+**These are weights, not gates** — there is no linter. Groom the text you touch; we are
+not scheduling a rewrite.
+
+- **Subset, not dialect** — keep the vocabulary small; this constrains distinct words, not
+  length. Avoid metaphors that name a mental act as a physical one ("reach for"). `muscle
+  memory` and `footgun` are load-bearing and stay; do not add more.
+- **One term, one meaning** — a synonym reads as a new concept. Terms that carry a
+  guarantee go in the table below.
+- **State the number** — exact exit code, size, flag, default, condition. "Spills to a file
+  and exits 3", never "fails". Agents act on our numbers.
+- **Fail loud** — constraint and consequence at the front of the sentence, no hedging. The
+  first sentence must work alone; readers skim and the onboarding spine truncates at 3500
+  chars.
+- **Keep the why** — `<rule> — <why>`; the clause after the dash is load-bearing. Split a
+  tangled sentence rather than dropping the rationale, and never invent a rationale the
+  source does not record. There is no word budget. Tables carry the same weights and get
+  longer, which is the correct trade.
+- **Do not leak the kernel** — the test is whether the reader needs the internal to predict
+  behavior, not whether the sentence names one. When you touch a builtin, audit every `///`
+  on its clap struct (see Code Style).
+
+Full weight applies to help content, `fragments.rs` bodies, and builtin schema text
+(`description`, `about`, example labels, `///` argument docs). Partial weight to
+`LANGUAGE.md`/`EMBEDDING.md`/`NAMING.md`. Terms only to `README.md` and the design docs.
+`devlog.md`, `signoff.md`, `designing-syntax-with-llms.md`, and `arrays-and-hashes.md`
+are exempt — they tell a story and need a voice. kaibo and kaish-extras adopt this by
+reference as they evolve; kaijutsu is exempt.
+
+### Terms
+
+Terms that carry a guarantee. **This table is the source**; `README.md` mirrors it for
+readers and must be kept in step. The list grows when we find a collision, not in advance —
+every entry below was verified to be in real use in the governed prose.
+
+| Term | Part of speech | Meaning |
+|---|---|---|
+| loud, fail loud | adjective, verb phrase | An error is explicit and immediate. kaish never continues on a wrong assumption. |
+| silently | adverb | Used only in the negative, to name behavior kaish refuses. |
+| builtin | noun | A tool that runs inside the kernel process. |
+| external command | noun | A program the kernel runs through `PATH`. |
+| kernel | noun | The execution core. Not the OS kernel. |
+| mount | noun, verb | A path prefix bound to a filesystem, or the act of binding one. |
+| typed | adjective | A value keeps its JSON type through substitution. It is not stringified. |
+| overlay | noun, adjective | Copy-on-write mode. Writes land in a virtual upper layer until committed. |
+| trash | noun, verb | Recoverable deletion under `set -o trash`. A trash failure is an error, never a permanent delete. |
+| nonce | noun | The confirmation token a latch-gated operation requires. |
+| spill | verb, noun | To write oversize output to a file, or the file that results. |
+| latch | noun, verb | The confirmation hold that a destructive operation waits on. |
 
 ## Changelog
 
