@@ -11,6 +11,28 @@ breaking entries are marked **BREAKING**.
 ## [Unreleased]
 
 ### Added
+- **`JobId`/`JobStatus`/`JobInfo` (kaish-types) now derive `Serialize`/`Deserialize`**
+  (GH #241) — the last type family in kaish-types without serde.
+- `schemars::JsonSchema` on those types sits behind the `schema` feature, matching
+  `OutputData`'s gating.
+- `JobId` serializes `#[serde(transparent)]` as a bare integer.
+- `JobStatus`'s pinned wire spelling is lowercase (`"running"`/`"stopped"`/`"done"`/
+  `"latched"`/`"failed"`), matching the existing `/v/jobs/N/status` text vocabulary.
+- `Display` stays capitalized for human-facing text — the `jobs` table and the
+  `[N]+ Done ...` notifications.
+- **`JobInfo` gained `exit_code: Option<i64>`, `started_at: SystemTime`,
+  `finished_at: Option<SystemTime>`, and `pgids: Vec<u32>`** (GH #243) — an embedder
+  reads how a job exited and how long it ran without blocking on `wait`.
+- `pgids` reports the real OS process groups a job spawned; `pid` remains
+  TTY-stopped-only and is usually `None` for an embedder-created job.
+- Timestamps come from `kaish_types::clock::system_now()`, not `SystemTime::now()`,
+  so they stay valid on `wasm32-unknown-unknown`.
+- **`JobManager::try_result(JobId) -> Option<ExecResult>`** (GH #243) — a
+  non-blocking read of a finished job's result; the only prior path was the
+  blocking `JobManager::wait`.
+- **`StreamStats` (kaish-kernel scheduler) now derives `Serialize`/`Deserialize`**,
+  schema-gated `JsonSchema` too — flagged in the same audit as the job types
+  (GH #241/#247).
 - **`kill` accepts the bash/POSIX signal shorthand** (GH #198) — `kill -9 %1`,
   `kill -STOP %1`, `kill -SIGSTOP %1`, case-insensitive, alongside the existing
   `--signal NAME`/`-s NAME`.
@@ -24,6 +46,15 @@ breaking entries are marked **BREAKING**.
   its dictionary is copyrighted and aerospace-shaped, so we keep our own terms.
 
 ### Changed
+- **`jobs --json` now emits the serialized `JobInfo`** plus a bolted-on `path`
+  field, rather than a hand-built mirror.
+- `status` in that output is lowercase (`"failed"`, not `"Failed"`), in line with
+  `/v/jobs/N/status`'s existing `done:0`/`failed:42` vocabulary — the two disagreed
+  before.
+- Rows gain `exit_code`/`started_at`/`finished_at`/`pgids`, each present only when
+  set — `exit_code`/`finished_at` absent for a still-running job, `pgids` absent
+  when empty.
+- `path` (`/v/jobs/N/`) is unchanged, and human-facing output is untouched.
 - **Retired the "passes `shellcheck --enable=all`" claim** (GH #201) — no
   ShellCheck dialect models `[[ ]]` (SC3010), `<<<` (SC3011), typed data, or
   collections.

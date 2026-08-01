@@ -372,6 +372,40 @@ async fn test_jobs_builtin_shows_background_job() {
     );
 }
 
+/// GH #243(a) end-to-end: `jobs --json` for a job that exited non-zero used
+/// to report only `{"status":"Failed"}` — the audit verified the exit code
+/// was recoverable only by blocking on `wait` or string-parsing
+/// `/v/jobs/N/status`. Routed through `kernel.execute()` (not the builtin's
+/// `.execute()` directly, per CLAUDE.md) so the whole dispatch chain —
+/// background spawn, `JobManager`, `JobInfo` serde, the `jobs` builtin's
+/// `--json` row — is exercised, not just the unit-level pieces.
+#[tokio::test]
+async fn jobs_json_carries_exit_code_for_failed_job() {
+    let kernel = setup().await;
+    kernel
+        .execute("bgfail() { return 42; }; bgfail & wait %1")
+        .await
+        .expect("execute");
+
+    let result = kernel.execute("jobs --json").await.expect("execute");
+    assert!(result.ok(), "jobs --json failed: {}", result.err);
+
+    let json: serde_json::Value =
+        serde_json::from_str(&result.text_out()).expect("jobs --json must be valid JSON");
+    let rows = json.as_array().expect("jobs --json is an array of rows");
+    assert_eq!(rows.len(), 1, "expected exactly one job row: {json}");
+
+    // GH #241: the pinned lowercase wire spelling, not the capitalized
+    // Display string ("Failed") the old hand-rolled row used to emit.
+    assert_eq!(rows[0]["status"], "failed");
+    assert_eq!(
+        rows[0]["exit_code"], 42,
+        "the exit code must survive onto jobs --json: {}",
+        rows[0]
+    );
+    assert_eq!(rows[0]["path"], "/v/jobs/1/");
+}
+
 /// `wait %N` — the bash jobspec form — must parse (it was a lexer error) and
 /// wait for the named background job end-to-end.
 #[tokio::test]
