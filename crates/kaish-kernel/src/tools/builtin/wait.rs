@@ -19,7 +19,9 @@ struct WaitArgs {
     global: GlobalFlags,
 
     /// Job id, with or without the `%` prefix (`%1` or `1`). Waits for every
-    /// background job when omitted. A non-numeric id exits 1.
+    /// background job when omitted. A non-numeric id exits 1. A stopped job
+    /// cannot finish: waiting on one exits 1 — resume it with `bg` or `fg`
+    /// first.
     job: Vec<String>,
 }
 
