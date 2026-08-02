@@ -103,6 +103,10 @@ breaking entries are marked **BREAKING**.
   its dictionary is copyrighted and aerospace-shaped, so we keep our own terms.
 
 ### Changed
+- **BREAKING:** `StandingGrant` is one-shot by default — `max_uses` defaults to
+  `Some(1)` in `StandingGrant::new` (which no longer takes a `max_uses`
+  parameter) and on the wire (an omitted field is 1, never unlimited); widening
+  is explicit via `with_max_uses(n)` / `unlimited_uses()`.
 - **BREAKING:** `NonceStore::issue` returns `Result<String, getrandom::Error>`
   instead of `String` — entropy failure has to reach the caller, and the old
   signature had nowhere to put it.
