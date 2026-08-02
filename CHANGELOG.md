@@ -11,6 +11,11 @@ breaking entries are marked **BREAKING**.
 ## [Unreleased]
 
 ### Added
+- **`kaish_types::approval`** (ledger PR 1, `docs/approval-ledger.md`) — pure-data
+  vocabulary for the upcoming approval ledger: `RequestId`/`Token`/`AttemptId`/
+  `OperationId` identity types, `ApprovalRequest` + builder, `Grant`/`GrantTerms`/
+  `Grounds`, `StandingGrant`, `Decision`/`Outcome`, and the internally-tagged
+  `LedgerEntry` log. Additive; no gate site uses it yet.
 - **`JobId`/`JobStatus`/`JobInfo` (kaish-types) now derive `Serialize`/`Deserialize`**
   (GH #241) — the last type family in kaish-types without serde.
 - `schemars::JsonSchema` on those types sits behind the `schema` feature, matching

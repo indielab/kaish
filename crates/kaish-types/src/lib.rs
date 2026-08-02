@@ -4,6 +4,11 @@
 //! It exists so that consumers (kaijutsu, external tools) can work with kaish's
 //! type system without pulling kaish-kernel's ~60 transitive deps.
 
+// `approval` is deliberately NOT in the flat re-export block below: its names
+// are generic (Token, Grant, Resource, Outcome, Decision) and would collide at
+// the crate root. Consumers write `kaish_types::approval::RequestId`, like
+// `clock`.
+pub mod approval;
 pub mod backend;
 pub mod bytes;
 pub mod clock;
