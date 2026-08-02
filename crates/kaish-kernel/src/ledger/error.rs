@@ -73,7 +73,7 @@ pub enum LedgerError {
         state: RequestState,
     },
     /// The OS could not supply entropy for a new credential. No fallback —
-    /// see `nonce.rs`'s identical stance on `generate_nonce`.
+    /// a guessable credential is worse than a loud failure.
     CredentialUnavailable(String),
     /// The live index is at its configured capacity — no request-level quota
     /// distinction.

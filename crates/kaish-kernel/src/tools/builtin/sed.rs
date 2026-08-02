@@ -53,7 +53,7 @@ struct SedArgs {
     #[arg(short = 'i', long = "in-place")]
     in_place: bool,
 
-    /// Confirmation nonce for a approval-gated in-place overwrite.
+    /// Approval token for a gated in-place overwrite (`--confirm=<token>`).
     #[arg(long = "confirm")]
     confirm: Option<String>,
 

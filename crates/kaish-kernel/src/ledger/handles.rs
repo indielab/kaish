@@ -145,7 +145,8 @@ impl Ledger {
     /// # Errors
     ///
     /// Only if the OS cannot supply entropy for the ledger's id epoch (spec
-    /// §A.2) — the same no-fallback stance `nonce.rs` takes on credentials.
+    /// §A.2) — the same no-fallback stance credentials get: loud, never a
+    /// weaker source.
     pub fn build(
         config: LedgerConfig,
         sink: Option<Arc<dyn LedgerSink>>,

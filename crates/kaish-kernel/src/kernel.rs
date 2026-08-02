@@ -1047,7 +1047,7 @@ impl Kernel {
     ///
     /// Everything [`Kernel::new`] fails on, plus a ledger that cannot mint
     /// its id epoch because the OS supplied no entropy. There is no fallback
-    /// — see `nonce.rs`'s identical stance.
+    /// — a guessable id epoch is worse than failing to build.
     pub fn build(config: KernelConfig) -> Result<(Self, crate::ledger::ApproverHandle)> {
         let kernel = Self::new(config)?;
         let authority = kernel.approvals.authority.clone();
