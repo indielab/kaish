@@ -1005,26 +1005,34 @@ The `/v/approvals` mount (read-only; writes `Unsupported`; tokens always redacte
 4. **Should `Irreversible` refuse `--confirm` entirely?** Token delivery now follows approval authority (§D.3), which closes the agent-self-redemption hole. The residual: even a human-held token is a bearer credential; should `RiskClass::Irreversible` require the out-of-band `Kernel::grant`/`approvals grant` path and reject `--confirm`, making irreversible approvals principal-bound rather than token-bound? Cost: breaks the "re-run the hint" muscle memory for exactly the operations where that muscle memory is most dangerous — which may be the argument *for* it.
 
 ---
-
 ## H. Separation of duties — who may approve, and where the boundary is real
 
-*(Added 2026-08-01 from the migration conversation. Motivating question: how do
-ledger approvals work via CLI, how do we keep a smart model from approving its
-own operations, and how do we scope the inverse — a small fast model doing
-per-command clearance?)*
+*(Added 2026-08-01 from the migration conversation, reworked same day for
+clarity. Motivating questions: how do approvals work when a model drives the
+CLI, how do we keep a smart model from approving its own operations, and how
+do we scope the inverse — a small fast model doing per-command clearance?)*
 
-### H.1 The channel principle
+### H.1 The name and the key
 
-**Approval is a property of the channel it arrives on, not of any text.** A
-model replays anything that enters its transcript — a token printed to stdout,
-echoed by a prompt, or visible in a file the model can read is a token the
-model holds, no matter what the surrounding prose says. So no wording, token
-format, or convention makes an in-band secret safe from the session it was
-issued to. This is already the design's spine: authority-less sessions receive
-the tokenless view (§D.3), the kernel keeps the credential, and the public
-`ApprovalRequestView` has no credential field to leak. §H just names the
-consequence: every enforcement question reduces to *which connection can post
-the grant*, never *who knows the magic string*.
+The old latch nonce was one string doing two jobs: it *identified* the request
+and it *redeemed* it. The ledger splits those (§E.1):
+
+- **`RequestId`** is the request's **name**. Public by design — safe to print,
+  put in a tool result, hand to anyone. Everything about the request except
+  redemption works by name: inspect it, renew it, approve it, deny it.
+- **`Token`** is the **key**. A secret credential the kernel holds; it exists
+  in-band only on the exit-2 surface of a session that holds approval
+  authority (§D.3). An authority-less session never sees it — not redacted
+  out, never present.
+
+This split is what makes every flow below enforceable. A gated model holds
+the *name* of its request and can talk about it freely; it never holds the
+*key*. And the governing principle: **approval is a property of the channel
+it arrives on, not of any text.** A model replays anything that enters its
+transcript — a key printed to stdout, echoed by a prompt, or readable in a
+file is a key the model holds, whatever the surrounding prose says. So every
+enforcement question reduces to *which connection can post the grant*, never
+*who knows the magic string*.
 
 ### H.2 The enforcement ladder
 
@@ -1036,144 +1044,172 @@ is honest about what it does not hold against.
    defaults `false` for `agent()`/`agent_with_root()`/`isolated()`;
    `ApproverHandle` is non-constructible from script or tool code. Holds
    against command-level agents and portable tools. Does not hold against
-   hostile loaded Rust or a hostile embedder — stated threat model (§D.3), not
-   a gap.
+   hostile loaded Rust or a hostile embedder — stated threat model (§D.3),
+   not a gap.
 2. **The session boundary (embedder wiring).** A multi-session embedder
    assigns principals and hands authority to some sessions and not others.
-   kaijutsu is the motivating case: the model session posts requests; the
-   human UI session — or a clearance-model session (§H.4) — holds the
-   `ApproverHandle`. This tier is as strong as the embedder's session
-   authentication and no stronger; the kernel enforces the split but trusts
-   the embedder's principal assignment.
+   The kernel enforces the split; it trusts the embedder's principal
+   assignment, so this tier is as strong as the embedder's session
+   authentication and no stronger. The kaibo and kaijutsu walkthroughs below
+   both live here.
 3. **The OS boundary (user-added).** When it matters, the approval side runs
    where the model's process cannot reach: a separate process, a socket with
    its own permissions, a different uid, a sandbox that denies the model's
-   side the approval surface entirely. kaish supplies the seams — exit 2 with
-   a request id, a pluggable `Approver`, `LedgerSink` for a durable record —
-   and the user supplies the walls. Sandboxed agent environments (the
-   codex-style direction) are where this tier gets cheap; the design should
-   assume they improve and not contort tiers 1–2 to imitate them.
+   side the approval surface entirely. One binary serves the REPL, `kaish
+   -c`, and an MCP server, so the boundary is never *which binary* — it is
+   session configuration plus whatever walls the user adds. kaish supplies
+   the seams (exit 2 with a request id, a pluggable `Approver`, `LedgerSink`
+   for a durable record); sandboxed agent environments (the codex-style
+   direction) are where this tier gets cheap, and the design should assume
+   they improve rather than contort tiers 1–2 to imitate them.
 
-### H.3 CLI mode with a model at the wheel
+### H.3 Walkthrough: a model driving the bare CLI
 
-One binary serves the REPL, `kaish -c`, and an MCP server — so the boundary
-cannot be *which binary*; it is session configuration, set at kernel
-construction and pinned (§E.3's `latch_pinned` generalized: authority is never
-settable from script).
+A model runs kaish directly — the REPL or `kaish -c` — in a session
+constructed without authority. A gated operation posts to the ledger and
+exits 2 carrying the RequestId, the full structured request (operation, risk
+class, resources, transitions), and no key. The model cannot proceed and
+cannot self-redeem. What it *can* do is relay — the exit-2 message tells it
+exactly what to say: `pending approval <request-id> — an operator must grant
+it`. Then, by where the human sits:
 
-The flow when a model drives the CLI: a gated operation exits 2 with the
-request id and **no token**; the model cannot proceed and cannot self-redeem.
-What it *can* do is relay — the exit-2 message tells it exactly what to say:
-`pending approval <request-id> — an operator must grant it`. The model pauses
-and points the human at the approval path. Then, by where the human sits:
-
-- **Human shares the kernel** (kaijutsu, a REPL the human is watching): the
-  human grants from their own seat — `approvals grant <id>` in an
+- **Human shares the kernel** (a REPL the human is watching): the human
+  grants from their own seat — `approvals grant <id>` in an
   authority-holding session, or the `TerminalApprover` prompt (§C.3), which
   renders to the terminal precisely so the approval affordance is not the
   model's output stream.
 - **The kernel is transient** (the model ran `kaish -c` inside its own
-  sandbox): there is nothing durable to grant against, and that is the honest
-  answer — the human re-runs the operation from their own unsandboxed shell,
-  where they hold authority. The request record still tells them exactly what
-  was attempted, against which resources, with which transitions. A
-  cross-invocation grant path (durable ledger + control socket) is possible on
-  top of `LedgerSink` but is deliberately not designed here; do not build it
-  speculatively.
+  sandbox): there is nothing durable to grant against, and that is the
+  honest answer — the human re-runs the operation from their own shell,
+  where they hold authority. The request record still tells them exactly
+  what was attempted, against which resources. A cross-invocation grant path
+  (durable ledger + control socket) is possible on top of `LedgerSink` but
+  is deliberately not designed here; do not build it speculatively.
 
-A single human and a single model sharing one pty is below the resolution of
-tiers 1–2: the kernel cannot tell who typed. That case belongs to tier 3 (the
-harness's own approval prompt, or a sandbox) and the doc should never claim
+One human and one model sharing one pty is below the resolution of tiers
+1–2: the kernel cannot tell who typed. That case belongs to tier 3 (the
+harness's own approval prompt, or a sandbox) and this doc never claims
 otherwise.
 
-### H.4 The clearance officer — a small model as `Approver::decide`
+### H.4 Walkthrough: kaibo — the client model holds the authority
 
-The inverse direction: a haiku-class model doing per-command clearance sits
-exactly in the decision chain's stage 3 (§C.2). The boundaries that make it
-safe are structural, not prompt-side:
+kaibo's `run_kaish` gives a subagent a kernel session with no authority. The
+subagent hits a gated operation; the tool result returns exit 2 with the
+RequestId and the structured request — which lands in front of the **client
+model** driving kaibo. The client model reads the request and judges it:
+"yeah, that's good" or "no, bad subagent." It approves through a dedicated
+tool call **the subagent does not have** — kaibo, as the embedder, holds the
+authority and calls the kernel's approval side. The control holds because
+the two models sit on different channels: the subagent's session can name
+its request and nothing more; the approval tool exists only on the client
+model's side of the MCP boundary.
+
+The approval tool has two shapes, and an embedder picks per call:
+
+- **Grant** (`Kernel::grant(id)`): authorization is posted; the *subagent*
+  re-runs the operation and redeems it. Keeps the subagent in the loop —
+  right when the client model wants the subagent to notice, adapt, retry.
+- **Confirm** (`Kernel::confirm(&req)`): the kernel replays the exact
+  captured invocation itself and the operation completes without the
+  subagent lifting a finger. Smoother, but only `Exact`-captured
+  invocations are replayable (review synthesis, revision 5).
+
+The key never crosses the MCP boundary in either direction — the client
+model approves by name, and no "send the token to the approver" path should
+ever be added for this case.
+
+### H.5 Walkthrough: kaijutsu — the human approves via the UI
+
+The agent session calls kaish; a gated operation fires kaijutsu's approval
+hook; kaijutsu pops a dialog; the human clicks go; the click reaches the
+kernel's approval side and the ledger posts the grant. That flow has two
+shapes in the design, and kaijutsu will likely want both:
+
+- **Blocking** — the hook is `Approver::decide` (§C.2 stage 3). The gated
+  operation never returns exit 2 at all: it *waits*, under a patient hold so
+  the watchdog does not fire, while the dialog is up. The click makes
+  `decide` return `Grant` and the operation proceeds inline. The agent never
+  sees a pause it has to reason about. Right for foreground work with the
+  human at the screen; bound it with a decide budget (say five minutes).
+- **Deferred** — `decide` returns `Defer` (or its budget expires). Exit 2
+  surfaces, the job sits `Latched`, the dialog can fire whenever, and the
+  human's later click hits `Kernel::confirm`, which replays. Right for
+  background jobs and walked-away humans. This is today's latch flow, kept.
+
+Either way the ledger entries are the same — `Requested`, `Granted`,
+`Redeemed`, `Settled`, with the human's principal on the grant. Only *who
+waits* differs.
+
+### H.6 The clearance officer — a small model as `Approver::decide`
+
+The inverse of §H.4: there the big client model clears for a constrained
+worker; here a haiku-class model does per-command clearance for a bigger
+one. It sits in the decision chain's stage 3 (§C.2), and the boundaries that
+make it safe are structural, not prompt-side:
 
 - **Scope by chain position, not by prompt.** A stage-2 `policy` wrapper
-  force-`Defer`s (or denies) everything the clearance model must not decide —
-  `RiskClass::Irreversible` escalates to a human without the model ever being
-  asked. Telling the model "never approve irreversible operations" is tier-0
-  theater; filtering what reaches it is enforcement.
+  force-`Defer`s (or denies) everything the clearance model must not decide
+  — `RiskClass::Irreversible` escalates to a human without the model ever
+  being asked. Telling the model "never approve irreversible operations" is
+  tier-0 theater; filtering what reaches it is enforcement.
 - **Input discipline.** The clearance model reads the *structured* request —
   operation, risk class, resources, transitions, principal — and treats
-  requester-authored strings (`reason`, `hint`) as untrusted display text, the
-  same rule §C.3 already applies to humans (`hint` is *display only*).
-  Requester prose is an injection channel into the approver; fence it or
-  exclude it.
+  requester-authored strings (`reason`, `hint`) as untrusted display text,
+  the same rule §C.3 already applies to humans. Requester prose is an
+  injection channel into the approver; fence it or exclude it.
 - **Output discipline.** `Grant(GrantTerms::once_for(req))`, `Deny`, or
   `Defer` — a clearance model never issues standing grants and never widens
   terms beyond the request in front of it.
-- **Identity and audit.** The clearance model is its own principal; its grants
-  carry `Grounds` naming it, so `approvals log` reads "granted by
-  clearance-haiku: <reason>" and the record distinguishes machine clearance
-  from human judgment.
+- **Identity and audit.** The clearance model is its own principal; its
+  grants carry `Grounds` naming it, so `approvals log` distinguishes machine
+  clearance from human judgment.
 - **Never both hats.** The clearance session holds authority and posts no
   requests; the worker session posts requests and holds no authority. One
   session with both roles is self-approval with extra steps.
 
-### H.5 Self-approval: capability first, principal-distinctness as policy
+### H.7 Self-approval: capability first, principal-distinctness as policy
 
 The primitive is the **capability** (`with_approval_authority`, the
 `ApproverHandle`), not identity — because a solo human at the REPL is
 legitimately both requester and approver, and a blanket approver≠requester
-invariant would break the oldest flow in the system. Principal-distinctness is
-instead an opt-in policy for multi-principal embedders:
+invariant would break the oldest flow in the system. Principal-distinctness
+is instead an opt-in policy for multi-principal embedders:
 `deny_self_approval` — a grant whose issuing principal equals the request's
 principal is refused, loud, naming both. Its job is catching
 *misconfiguration* (an agent session accidentally granted authority), not
-resisting an attacker. Either way the ledger records both principals on every
-grant, so even where the policy is off, self-approval is visible in the record
-rather than silent.
+resisting an attacker. Either way the ledger records both principals on
+every grant, so even where the policy is off, self-approval is visible in
+the record rather than silent.
 
-### H.6 Stacked approvals and a client-model approver (the kaibo-coder sketch)
+### H.8 What these use cases ask of the API
 
-*(Amy, same conversation — "just dreaming here, but it impacts our design
-goals." Recorded as design pressure, not commitment.)*
+The walkthroughs above are use cases, not requirements — kaish's job is the
+right API (Amy, 2026-08-01: *"kaish focuses on the right api"*). What they
+ask of it:
 
-Two embedder shapes stress §H from opposite ends:
-
-- **kaijutsu** hooks the approval and gives the human a popup. That is
-  `Approver::decide` (§C.2 stage 3) doing exactly what it was designed for —
-  nothing new to build, the patient hold already covers think time.
-- **kaibo-coder** (the later chapter): a worker kernel with **no general CLI**
-  — an essentials-only toolset (`cargo build`-class, possibly dynamic tools)
-  and no approval authority. Its requests **stack up** as `Requested` (stage-4
-  defer is already the async path), and the approver is the **client model on
-  the far side of the MCP boundary** — the orchestrating model, not the human,
-  reviews the pending set and approves **in bulk**. Same structure as §H.4
-  inverted: there the small model clears for the big one; here the big client
-  model clears for the constrained worker. Authority still follows the
-  channel; the MCP connection is the tier-2 boundary.
-
-What this asks of the design, beyond what is already drawn:
-
-1. **Batch grant is UX, not a ledger primitive.** `approvals grant` should
-   take multiple ids (or a filter over the pending set); the ledger still
-   posts per-request entries, so bulk approval changes no invariant and the
-   record stays per-operation.
-2. **A request must be judgeable from structure alone.** The reviewing model
-   sees operation + risk class + resources + transitions — never a shell
-   command, because the worker has none and dynamic tools post their own
-   operations through `ToolCtx::request_approval` (PR 5). This hardens the
-   §A.6 taxonomy rule from "nice for audit" to load-bearing: if an operation's
-   resources don't carry enough to judge it, bulk review degrades to
-   rubber-stamping.
-3. **The tokenless view suffices for a remote approver.** The client model
-   grants by request-id over its authority channel; the token never crosses
-   the MCP boundary in either direction. §D.3 already provides this — worth
-   stating that no "send the token to the approver" path should ever be added
-   for this case.
-4. **Standing-before beats bulk-after for the repetitive tail.** A queue of
-   forty identical `cargo.build` approvals invites rubber-stamping; the better
-   move is the client model issuing one scoped `StandingGrant`
-   (operation-and-resource patterns, `max_uses`, expiry) and letting the
-   novel remainder come through for individual review. One rule entry plus
+1. **Batch grant is UX, not a ledger primitive.** A client model reviewing a
+   stacked queue (`approvals list --pending`) wants `approvals grant` to
+   take multiple ids or a filter; the ledger still posts per-request
+   entries, so bulk approval changes no invariant and the record stays
+   per-operation.
+2. **A request must be judgeable from structure alone.** Every approver in
+   §H.3–H.6 — human, client model, clearance model — judges operation + risk
+   class + resources + transitions, never a shell command string. A
+   narrow-toolset worker (a future kaibo-coder: essentials like `cargo
+   build`, possibly dynamic tools) has no command line to show, and dynamic
+   tools post their own operations through `ToolCtx::request_approval`
+   (PR 5). This hardens the §A.6 taxonomy rule from "nice for audit" to
+   load-bearing: if an operation's resources don't carry enough to judge it,
+   review degrades to rubber-stamping.
+3. **The name-only view suffices for every remote approver.** Grant and
+   confirm work by RequestId; the key never travels to the approval side.
+4. **Standing-before beats bulk-after for the repetitive tail.** Forty
+   identical `cargo.build` approvals invite rubber-stamping; the better move
+   is one scoped `StandingGrant` (operation-and-resource patterns,
+   `max_uses`, expiry) issued by whoever holds authority, with the novel
+   remainder coming through for individual review. One rule entry plus
    countable uses is a *better* audit record than forty stamps.
 5. **A model approver is never silent in the record.** Grants carry the
-   client model's principal and grounds — "granted (standing, issued by
-   <client-model>)" or "granted in bulk by <client-model>" is readable in
-   `approvals log`. Rubber-stamping may happen; invisible rubber-stamping
-   cannot.
+   approving principal and grounds, so `approvals log` reads "granted by
+   <client-model>" or "granted (standing, issued by <client-model>)".
+   Rubber-stamping may happen; invisible rubber-stamping cannot.
