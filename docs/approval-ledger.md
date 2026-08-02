@@ -18,7 +18,11 @@ rather than kept as a separate revision list. Migrated from kaish-extras to kais
 on 2026-08-01 because this is a kernel feature and the design belongs with the kernel.
 Key decisions by Amy, 2026-08-01: delete the latch with no compatibility layer, keep the
 key path free of special cases, wire kaijutsu first, make `fs.*` observability an opt-in
-subscription. The first hardening PR (CSPRNG tokens) landed as kaish #259 on 2026-08-02.
+subscription. A second cross-model consistency review followed the redraft; its findings
+and Amy's 2026-08-02 rulings — pure bearer keys, one successful settlement per grant,
+double-click-friendly `RequestId`s, `confirm` on the kernel with the handle as an argument —
+are folded in the same way. The first hardening PR (CSPRNG tokens) landed as kaish #259 on
+2026-08-02.
 
 **The decision archaeology lives in `git log docs/approval-ledger.md`** — the original
 draft, the review synthesis, the correction layers, and the conversations behind each
@@ -53,9 +57,9 @@ document uses; it does not use synonyms for them.
 |---|---|
 | **ledger** | The append-only log of approval facts plus the live state it indexes. One per kernel process (§B.1). |
 | **request** | One privileged operation asking to proceed. Posted by the implementation side. |
-| **grant** | One decision to allow a request. Posted by the approval side. Carries expiry, a redemption limit, and conditions. |
+| **grant** | One decision to allow a request. Posted by the approval side. Carries expiry and conditions, and authorizes exactly one *successful* settlement (§A.1). |
 | **name** (`RequestId`) | The request's public identifier. Everything except redemption works by name (§A.2). |
-| **key** (`Token`) | The redemption credential. Kernel-held, never a field of any public type, retrievable only through an `ApproverHandle` (§A.2, §E.1). |
+| **key** (`Token`) | The redemption credential. A pure bearer credential: kernel-held, never a field of any public type, retrievable only through an `ApproverHandle`, and good for whoever presents it (§A.2, §E.1). |
 | **attempt** | One execution reserved against a grant. Has its own id and its own terminal outcome (§A.1). |
 | **redeem** | To reserve an attempt, by presenting a key or an internal redemption context. |
 | **settle** | To record an attempt's outcome. Idempotent by `AttemptId`. |
@@ -111,7 +115,7 @@ split is the load-bearing property; everything else in this document serves it.
 | Posting side | Held by | Entries it may post |
 |---|---|---|
 | **Obligations** | the implementation side — kernel gate sites, plugins via `ToolCtx` (`Requester`) | `Requested`, `Redeemed`, `Settled` |
-| **Authorizations** | the approval side — human via REPL, `Approver` hook, standing policy, embedder (`ApproverHandle`) | `Granted`, `Denied`, `StandingIssued`, `StandingRevoked` |
+| **Authorizations** | the approval side — human via REPL, `Approver` hook, standing policy, embedder (`ApproverHandle`) | `Granted`, `Denied`, `KeyRetrieved`, `StandingIssued`, `StandingRevoked` |
 | **Derived** | the ledger itself, on observation | `Expired`, `Refused`, `Voided`, `Abandoned`, `TokenRejected` |
 
 This is enforced by types, not convention. One log, three handles:
@@ -139,9 +143,16 @@ else. There is no method on either that produces a `Grant`. That is the whole se
 model, and violating it is a compile error — which is the standard we want, given that
 "the agent turns off its own gate" is the failure mode we are actually defending against.
 
-**Attempts are first-class.** A grant may authorize more than one execution
-(`max_redemptions`), so "the operation ran" is not a fact about a request — it is a fact
-about an *attempt*. Every redemption allocates an `AttemptId`, and every terminal entry
+**A grant authorizes exactly one successful settlement.** There is no redemption limit to
+configure, because there is no case for a second success: repetition is a `StandingGrant`
+(§C.4), which counts its uses and is auditable, or a fresh request. A **failed** attempt
+does not consume the grant — a transient failure, a flaky terminal, or an agent retrying is
+the honest retry ergonomic the latch's reusable nonce was reaching for, and it survives
+here without the second-success hazard.
+
+**Attempts are therefore first-class.** One request can have several attempts (each failed
+one followed by another), so "the operation ran" is not a fact about a request — it is a
+fact about an *attempt*. Every redemption allocates an `AttemptId`, and every terminal entry
 names it. Without that, two `Redeemed(r)` followed by one `Settled(r)` is unmatchable and
 the rule below is uncheckable.
 
@@ -154,15 +165,17 @@ pub struct AttemptId(u64);
 **The balance rule**, stated once, precisely:
 
 > An operation may execute **iff** a redemption reserved an attempt against a chain
-> `Requested(r) → Granted(g)` where `g.request == r.id`, `g` had not expired,
-> `g.max_redemptions` was `None` or above the count already reserved, and **every condition
-> in `g.conditions` evaluated true against the world it observed**. Reservation appends
-> `Redeemed{request, attempt}`; the attempt ends with exactly one
+> `Requested(r) → Granted(g)` where `g.request == r.id`, `g` had not expired, **no attempt
+> against `g` had settled successfully or with `Outcome::Unknown`** (either closes the
+> chain — §B.2), **no other attempt against `g` was still live**, and **every condition in
+> `g.conditions` evaluated true against the world it observed**.
+> Reservation appends `Redeemed{request, attempt, by}`; the attempt ends with exactly one
 > `Settled{request, attempt, outcome}` or `Abandoned{request, attempt, reason}`.
 >
 > The ledger is consistent when: every `Redeemed` has exactly one live `Granted` ancestor;
-> every `Granted` has exactly one `Requested` ancestor; every `AttemptId` appears in
-> exactly one `Redeemed` and exactly one terminal entry. An unmatched pair is a kernel bug
+> every `Granted` has exactly one `Requested` ancestor; every `Granted` has at most one
+> successfully-settled attempt; every `AttemptId` appears in exactly one `Redeemed` and
+> exactly one terminal entry. An unmatched pair is a kernel bug
 > — `debug_assert!` in debug, `LedgerError::InvariantViolated` in release, and **never**
 > "proceed".
 
@@ -186,16 +199,20 @@ credential never leaves the kernel:
 
 ```rust
 /// The request's NAME. Public, stable, safe to log, safe to print, safe to keep
-/// forever. Format: "{ledger_epoch:8hex}-{seq}" e.g. "9c1a4f2e-42". Short-form
-/// ("42") accepted by CLI surfaces when unambiguous within the session.
+/// forever. Format: "req_{ledger_epoch:8hex}_{seq}" e.g. "req_9c1a4f2e_42".
+/// Underscores throughout and no other separator, because a hyphen ends a
+/// terminal's double-click selection and this id exists to be copied; the
+/// "req_" prefix makes it self-identifying in a log line. There is no short
+/// form: ids are printed in full and accepted in full, so an id can never be
+/// ambiguous between sessions sharing a ledger.
 pub struct RequestId(String);
 
 /// The redemption CREDENTIAL. 128 bits from `getrandom`, 32 lowercase hex.
-/// Lives ONLY in the kernel's credential index, keyed by `RequestId` and bound
-/// to the requesting principal and session. It is never a field of any
-/// `LedgerEntry`, never a field of any public type, and never serialized to a
-/// sink or the VFS. It is retrievable through `ApproverHandle::token_for` and
-/// nowhere else, and it is dropped when the chain closes (§B.2).
+/// Lives ONLY in the kernel's credential index, keyed by `RequestId`. It is
+/// never a field of any `LedgerEntry`, never a field of any public type, and
+/// never serialized to a sink or the VFS. It is retrievable through
+/// `ApproverHandle::token_for` and nowhere else, and it is dropped when the
+/// chain closes (§B.2).
 pub struct Token(String);
 ```
 
@@ -219,10 +236,20 @@ tokenless *by construction*:
 pub struct ApprovalRequestView { /* every §A.3 field; there is no credential field to omit */ }
 ```
 
-The credential is bound to the requesting principal and session: a token presented by a
-different principal is rejected and appends `TokenRejected`, so a leaked token is not a
-transferable bearer credential across sessions. Within a session it is a bearer credential
-and the design says so plainly (§E.1).
+**The key is a pure bearer credential.** Whoever presents it redeems, from whichever
+session, whatever principal they are. Binding it to the requesting principal and session
+was considered and rejected (Amy, 2026-08-02): an authority-holding session could then
+retrieve a key it was not allowed to use, and delegation could only ever return the key to
+the original requester — two special cases in the one path that must not have any, and
+tunneling a key back to a model is a flow that has to work. Bearer is simple and it is the
+same rule everywhere.
+
+**Accountability is the record, not the mechanism.** Retrieval requires an `ApproverHandle`
+and appends `KeyRetrieved{request, by}`; presentation appends `Redeemed{request, attempt,
+by}` naming the principal that presented it. So a key that moves leaves two entries and a
+name at each end. The blast radius is carried by the two limits that do not depend on who
+holds the key: a grant authorizes exactly one successful settlement (§A.1), and it expires
+at `not_after`.
 
 **Threat model, stated once.** The ledger protects against command-level agents and
 portable tools: an agent that can run any shell command, write any file, and read any
@@ -334,10 +361,9 @@ pub struct Grant {
     /// `TokenRejected` with the grant it was aimed at. The credential itself is
     /// never in an entry (§A.2).
     pub token_prefix: String,
-    /// `Some(1)` is the default for `RiskClass::Irreversible`. `None` means
-    /// unlimited within `not_after` — today's reusable-nonce ergonomics,
-    /// kept for the retry-idempotency case that motivated it.
-    pub max_redemptions: Option<u32>,
+    // There is no redemption limit field. Every grant authorizes exactly one
+    // successful settlement; failed attempts do not consume it (§A.1). A rule
+    // that should fire repeatedly is a StandingGrant with `max_uses` (§C.4).
     /// Preconditions re-verified at redemption. Defaults to exactly the
     /// transitions declared on the request's resources. An approver may
     /// **narrow** (add or tighten) and may never **widen** — enforced at
@@ -382,11 +408,14 @@ pub enum LedgerEntry {
     Granted     { seq: u64, at: SystemTime, grant: Grant },
     Denied      { seq: u64, at: SystemTime, request: RequestId, by: Principal, reason: String },
     Expired     { seq: u64, at: SystemTime, request: RequestId, what: Expiring },
-    /// An attempt was reserved. `uses_after` is the grant's redemption count
-    /// after this reservation, so the record shows exhaustion approaching.
-    /// `observed` is what the condition check saw, and when.
+    /// The approval side retrieved the key. Appended on every retrieval, so a
+    /// key that leaves the kernel has a name attached to its departure (§A.2).
+    KeyRetrieved { seq: u64, at: SystemTime, request: RequestId, by: Principal },
+    /// An attempt was reserved. `by` is the principal that presented the key or
+    /// held the redemption context — the other half of the accountability pair
+    /// (§A.2). `observed` is what the condition check saw, and when.
     Redeemed    { seq: u64, at: SystemTime, request: RequestId, attempt: AttemptId,
-                  uses_after: u32, observed: Vec<Observation> },
+                  by: Principal, observed: Vec<Observation> },
     /// Preconditions no longer hold. Voids the grant and reserves NO attempt.
     /// This is `cas_overwrite`'s "file changed since the gate checked it",
     /// generalized.
@@ -399,10 +428,16 @@ pub enum LedgerEntry {
     Voided      { seq: u64, at: SystemTime, request: RequestId, reason: String },
     StandingIssued  { seq: u64, at: SystemTime, grant: StandingGrant },
     StandingRevoked { seq: u64, at: SystemTime, id: StandingId, by: Principal, reason: String },
-    /// A bad credential was presented. Carries the running count; five in a
-    /// window voids the request (§F.3).
+    /// A bad credential was presented. `request` is `Some` when the presenting
+    /// draft matched a live request (so the count means something) and `None`
+    /// when it matched nothing. Carries the running count; the fifth rejection
+    /// against one request voids it (§F.3).
     TokenRejected   { seq: u64, at: SystemTime, request: Option<RequestId>, attempts: u32 },
 }
+
+/// Names a resource without its transition claim: the pair an `Observation`
+/// or a match result points at.
+pub struct ResourceRef { pub kind: String, pub id: String }
 
 pub struct Observation { pub resource: ResourceRef, pub claim: StateClaim, pub at: SystemTime }
 
@@ -460,8 +495,9 @@ futures were spawned.
 
 Everything that must be exclusive happens inside that one section:
 
-- reserving an attempt against a grant (checking liveness and `max_redemptions` and
-  allocating the `AttemptId`);
+- reserving an attempt against a grant — checking that the grant is live, that no attempt
+  against it has settled successfully, that no other attempt against it is still live, and
+  allocating the `AttemptId`;
 - consuming a standing grant's `max_uses`;
 - posting a decision (`Granted`/`Denied`) against a request that has none;
 - materializing a derived entry.
@@ -475,7 +511,8 @@ per key; a second attempt appends nothing and returns `Ok`.
 | `Expired` | `(request_id, what)` — one for the request TTL, one for the grant `not_after` |
 | `Voided` | `request_id` |
 | `Redeemed` | `attempt_id`, allocated by the reservation itself |
-| `Settled` / `Abandoned` | `attempt_id`, or `request_id` for a request-level `Abandoned` |
+| `Settled` / attempt-level `Abandoned` | `attempt_id` |
+| request-level `Abandoned` (`attempt: None`) | `request_id` |
 
 **Condition evaluation happens outside the critical section**, because it is I/O
 (`StateResolver::observe`, §B.4). The observation is carried *into* the transaction and
@@ -508,10 +545,12 @@ stateDiagram-v2
     Requested --> Abandoned : job discarded / session shutdown
     Requested --> Voided    : 5 rejected credentials
 
-    Granted --> Granted   : reserve another attempt (max_redemptions not reached)
+    Granted --> Granted   : reserve another attempt (the previous one settled in failure)
     Granted --> Voided    : conditions failed (Refused) — world moved
+    Granted --> Voided    : 5 rejected credentials
     Granted --> Expired   : grant not_after
     Granted --> Abandoned : job discarded / session shutdown
+    Granted --> [*]       : an attempt settled successfully — the chain closes
 
     Expired --> [*] : renewable — a NEW request links via `supersedes`
     Denied --> [*]
@@ -530,18 +569,36 @@ stateDiagram-v2
     Abandoned --> [*]
 ```
 
+```rust
+pub enum AttemptState { Reserved, Settled, Abandoned }
+```
+
 The two attempt terminals differ in what the ledger knows. `Settled` means something
 reported: an exit code, an error, or `Outcome::Unknown` when the executor went away and the
 guard said so (§C.1). `Abandoned` means nothing ever reported and the sweep closed the
 chain. Neither means "no effect happened".
 
-A request is **closed** when it can no longer authorize an execution *and* every attempt it
-spawned is terminal. It can no longer authorize when it is `Denied`/`Expired`/`Voided`/
-`Abandoned`, or when its grant set `max_redemptions: Some(n)` and all `n` attempts are
-terminal. A grant with `max_redemptions: None` stays live until its `not_after`, which the
-sweep materializes. Only closed chains are evictable (§D.4) — which is why a single-use
-auto-grant costs the live index nothing beyond the operation's own duration. A refused
+**Success is what closes a chain.** A request is closed when an attempt settled successfully
+(`Outcome::Exit(0)`) or with `Outcome::Unknown` (see below), or when it can no longer
+authorize an execution — `Denied`, `Expired`, `Voided`, `Abandoned` — and every attempt it
+spawned is terminal. Nothing stays live because
+a limit was never reached: there is no limit to reach (§A.1). Only closed chains are
+evictable (§D.4), which is why the common case — one request, one grant, one attempt, one
+success — costs the live index nothing beyond the operation's own duration. A refused
 redemption reserves no attempt, so there is nothing to settle for it.
+
+A **reported failure** — `Outcome::Exit(non-zero)` or `Outcome::Error` — leaves the chain
+live until the grant's `not_after`, so an agent that retries has something to retry against.
+That window is the one place a grant outlives its first attempt, and it is bounded by expiry
+rather than by a count. `Outcome::Unknown` does **not** reopen the grant: the executor
+vanished and the effects are unknown, so the honest next step is a fresh request whose
+conditions are observed again, not a retry against an authorization whose premise nobody
+can check.
+
+The honest hazard in retry-on-failure: a multi-resource operation can fail after mutating
+some of its resources, so a second attempt is not always a repeat of the first. §I records
+that as an open requirement — it is a property of the operation, not of the ledger, and the
+ledger's answer is that both attempts are in the record with their outcomes.
 
 ### B.3 The transition table (this is the test matrix)
 
@@ -553,11 +610,17 @@ Request level:
 | `Requested` | `grant` | `Granted` | `Granted` | — |
 | `Requested` | `deny` | `Denied` | `Denied` | — |
 | `Requested` | TTL elapsed (observed) | `Expired` | `Expired{what: Request}` | — |
-| `Requested` | `redeem` | ✗ | `TokenRejected` | `LedgerError::NotAuthorized` — exit 1, loud |
-| `Granted` | `redeem`, conditions hold | `Granted` | `Redeemed{attempt}` | — |
+| `Requested` | `redeem` before any decision | ✗ | `TokenRejected{Some}` | `LedgerError::NotAuthorized` — exit 1, loud; no grant exists, so no key does either |
+| `Requested`/`Granted` | bad key, draft matches this request | unchanged | `TokenRejected{Some, attempts: n}` | `LedgerError::NotAuthorized` — exit 1, loud |
+| `Requested`/`Granted` | 5th bad key against this request | `Voided` | `TokenRejected{Some, attempts: 5}` + `Voided` | request is dead; a later *good* key fails naming the void |
+| any | bad key, draft matches no live request | unchanged | `TokenRejected{None}` | `LedgerError::NotAuthorized` — exit 1, loud; no request's state moves and no count advances |
+| `Granted` | `redeem`, conditions hold | `Granted` | `Redeemed{attempt, by}` | — |
 | `Granted` | `redeem`, condition fails | `Voided` | `Refused` + `Voided` | operation must re-request |
-| `Granted` | `redeem`, uses exhausted | `Granted` | none | `LedgerError::Exhausted` — exit 1, loud |
-| `Granted` | `redeem`, wrong principal | `Granted` | `TokenRejected` | `LedgerError::NotAuthorized` — exit 1, loud |
+| `Granted` | `redeem` while an attempt is live | `Granted` | none | `LedgerError::AttemptInFlight` — exit 1, loud |
+| `Granted` | `redeem` after a successful settlement | closed | none | reports the settled outcome and does **not** re-execute (§B.4) |
+| `Granted` | attempt settles `Exit(0)` | closed | `Settled` | — |
+| `Granted` | attempt settles non-zero / `Error` | `Granted` | `Settled` | grant stays live until `not_after`; retry may redeem again |
+| `Granted` | attempt settles `Unknown` | closed | `Settled` | effects unknown — a retry needs a fresh request |
 | `Granted` | `not_after` elapsed | `Expired` | `Expired{what: Grant}` | — |
 | `Granted` | `grant` again | ✗ | none | `LedgerError::AlreadyDecided` |
 | `Denied`/`Voided`/`Abandoned` | anything | ✗ | none | `LedgerError::Terminal` |
@@ -567,7 +630,7 @@ Attempt level:
 
 | From | Event | To | Entry appended | If illegal |
 |---|---|---|---|---|
-| — | reservation commits | `Reserved` | `Redeemed{attempt}` | — |
+| — | reservation commits | `Reserved` | `Redeemed{attempt, by}` | — |
 | `Reserved` | `settle(outcome)` | `Settled` | `Settled{attempt, outcome}` | — |
 | `Reserved` | guard dropped (§C.1) | `Settled` | `Settled{attempt, Unknown{Cancelled}}` | — |
 | `Reserved` | recovery sweep | `Abandoned` | `Abandoned{attempt, reason}` | — |
@@ -577,9 +640,10 @@ Attempt level:
 `Err(LedgerError)`, which the gate site converts to a failing `ExecResult` — there is no
 code path in which a rejected transition results in the operation proceeding. In debug
 builds, transitions that indicate a *kernel bug* (rather than a user/timing error)
-additionally `debug_assert!`. The distinction: `NotAuthorized`/`Exhausted`/`Terminal` are
-ordinary runtime outcomes; `InvariantViolated` (a `Settled` naming an unknown `AttemptId`, a
-`seq` gap, a grant whose conditions widened its request) is a bug and panics in debug.
+additionally `debug_assert!`. The distinction: `NotAuthorized`/`AttemptInFlight`/`Terminal`
+are ordinary runtime outcomes; `InvariantViolated` (a `Settled` naming an unknown
+`AttemptId`, a second successful settlement against one grant, a `seq` gap, a grant whose
+conditions widened its request) is a bug and panics in debug.
 
 ### B.4 Replay, redemption correlation, and the precondition check
 
@@ -600,13 +664,27 @@ attempt *first*:
 struct RedemptionContext { request_id: RequestId, attempt_id: AttemptId }
 ```
 
-`ApproverHandle::confirm(&RequestId)` reserves an attempt against the granted request and
-dispatches the captured invocation with that `RedemptionContext` on the `ExecContext`. When
-the gate site builds its fresh draft, `request_approval` sees the context and **matches the
-draft against the granted operation and resources** before accepting it. A mismatch is loud
-(`LedgerError::DraftMismatch`, exit 1) — the replay did not turn into the operation that was
-approved. The `--confirm=<token>` path runs the same matcher after validating the
-credential, so there is one acceptance contract and not two.
+`Kernel::confirm(&ApproverHandle, &RequestId)` reserves an attempt against the granted
+request and dispatches the captured invocation with that `RedemptionContext` on the
+`ExecContext`. When the gate site builds its fresh draft, `request_approval` sees the context
+and **matches the draft against the granted operation and resources** before accepting it. A
+mismatch is loud (`LedgerError::DraftMismatch`, exit 1) — the replay did not turn into the
+operation that was approved. The `--confirm=<token>` path runs the same matcher after
+validating the credential, so there is one acceptance contract and not two.
+
+**`confirm` lives on the kernel and takes the handle as an argument.** Replay is an
+execution, and executions belong to the kernel — an `ApproverHandle` is a ledger capability
+and has no executor to dispatch with. Making the handle a required argument is what keeps
+`confirm` an authority action: the signature cannot be satisfied without one, so there is no
+bridge to it from anything holding only a `Kernel`. Pure-record operations — `grant`,
+`deny`, `grant_standing`, `revoke_standing`, `subscribe`, `token_for` — stay methods on the
+handle (§D.2).
+
+**A key presented after a successful settlement does not re-execute.** The kernel reports
+the settled outcome instead: the recorded exit code, with a message naming when it settled.
+This is a deliberate break with the latch, where re-presenting a nonce silently ran the
+operation again. A retry that arrives after success now gets the truth ("this already ran,
+here is what it did") rather than a second deletion.
 
 **Only exactly-captured invocations are replayable.** Today the dispatch seam substitutes
 an empty argv when it has nothing (`kernel.rs:3310-3321`), which is a silent fallback into a
@@ -627,8 +705,8 @@ pub enum Capture {
 ```
 
 `confirm` on anything but `Exact` fails loud and names which variant it found. Those
-requests are still grantable and still redeemable by their principal with
-`--confirm=<token>`; what they are not is replayable by someone else.
+requests are still grantable and still redeemable by presenting the key with
+`--confirm=<token>`; what they are not is replayable by the approval side.
 
 **What generalizes is `cas_overwrite`.** Today (`crates/kaish-kernel/src/tools/context.rs:269-292`)
 the pattern is: snapshot bytes at gate time, re-read at write time, loud `InvalidOperation`
@@ -733,7 +811,11 @@ dropped-future callback (`ctx.rs:82-101`). So settlement is a **guard the dispat
 - On normal return it settles with `Outcome::Exit(code)` — one place, no forgetting.
 - Its `Drop` best-effort-settles with `Outcome::Unknown { cause: Cancelled }` by pushing
   the record onto a **synchronous outbox** (a mutex-guarded queue, no `.await` in `Drop`)
-  which the ledger drains on its next append and on its sweep tick.
+  which the ledger drains on its next append and on its sweep tick. `Drop` pushes
+  **unconditionally** — it does not first check whether the attempt already settled, because
+  that check would need the ledger lock in a destructor. Idempotency by `AttemptId` (§A.1)
+  absorbs the duplicate: a push for an already-terminal attempt appends nothing when it
+  drains.
 - A process that dies before draining leaves `Reserved` attempts, which the recovery sweep
   (§D.4) closes as `Abandoned`, naming the sweep in its `reason`.
 
@@ -869,9 +951,9 @@ ledger must not tax it by default.
 - **`observe`** — matching operations post `Requested` + immediate `Granted{Observe}` and
   proceed; they never defer, never block, never prompt. This is "record everything" with no
   permission semantics. Mechanically it is a standing rule with `Grounds::Observe` (§A.4)
-  that auto-grants each matching request **single-use**, so the chain closes as soon as the
-  operation settles and the entries become evictable (§B.2). It needs no new state-machine
-  surface — the `Grounds` variant, the subscription registry, and the fast-path filter are
+  that auto-grants each matching request, so the chain closes as soon as the operation
+  settles successfully — or at `not_after` if it never does — and the entries become
+  evictable (§B.2). It needs no new state-machine surface — the `Grounds` variant, the subscription registry, and the fast-path filter are
   the whole feature.
 - **`enforce`** — matching operations go through the real decision chain (§C.2). This is
   what `set -o latch` becomes: an enforce subscription over `fs.*`. The cutover (§H, PR 5)
@@ -987,21 +1069,27 @@ placeholder is substituted by a frontend holding an `ApproverHandle` (§D.3).
 .with_principal(Principal)
 .with_approver_handle(ApproverHandle)        // this session may grant; absent = it may not
 .with_policy_pinned(bool)                    // script can't disable an enforce subscription
+.with_deny_self_approval(bool)               // refuse a grant whose principal is the requester's
+                                             // (default false; for multi-principal embedders — §E.7)
 .with_state_resolver(Arc<dyn StateResolver>) // per resource kind
 
 // Kernel — construction mints exactly one authority capability
 fn build(config: KernelConfig) -> (Kernel, ApproverHandle);
 fn approvals(&self) -> Approvals;                          // read side, no authority
 async fn renew(&self, id: &RequestId) -> Result<ApprovalRequestView>;  // requester action
+/// Reserve an attempt and replay the captured invocation. The handle is a
+/// required argument: replay is an execution (kernel) authorized by the
+/// approval side (handle), and the signature is what enforces that (§B.4).
+async fn confirm(&self, by: &ApproverHandle, id: &RequestId) -> Result<ExecResult>;
 
 // ApproverHandle — the approval side. Not constructible any other way.
+// Pure-record operations only; nothing here dispatches an execution.
 async fn grant(&self, id: &RequestId, terms: GrantTerms) -> Result<()>;
 async fn deny(&self, id: &RequestId, reason: &str) -> Result<()>;
 async fn grant_standing(&self, g: StandingGrant) -> Result<StandingId>;
 async fn revoke_standing(&self, id: &StandingId, reason: &str) -> Result<()>;
 async fn subscribe(&self, s: Subscription) -> Result<SubscriptionId>;   // §C.5
-fn token_for(&self, id: &RequestId) -> Option<Token>;      // retrieval is authority's privilege
-async fn confirm(&self, id: &RequestId) -> Result<ExecResult>;          // reserve + replay
+fn token_for(&self, id: &RequestId) -> Option<Token>;      // appends KeyRetrieved (§A.2)
 
 // Approvals (read side)
 fn pending(&self) -> Vec<ApprovalRequestView>;    // the primitive the inventory asks for
@@ -1019,11 +1107,10 @@ grants. That is the same capability, passed or withheld, and it is why "approval
 in this document means "holds an `ApproverHandle`".
 
 `confirm` keeps its semantics — replay the exact captured invocation, retire the
-originating job on success — and moves from `Kernel` to `ApproverHandle`, because replaying
-a granted request without presenting a credential is an authority action and putting it on
-`Kernel` would leave a bridge to it from anything holding a kernel. The replay executes
-with `req.context.traceparent` as the parent, so an out-of-band approval nests under the
-trace that requested it, and it is refused on any `Capture` variant but `Exact` (§B.4).
+originating job on success — and keeps its home on `Kernel`, gaining the handle as a
+required first argument (§B.4). The replay executes with `req.context.traceparent` as the
+parent, so an out-of-band approval nests under the trace that requested it, and it is
+refused on any `Capture` variant but `Exact` (§B.4).
 
 ### D.3 Script and agent surface
 
@@ -1048,12 +1135,13 @@ differs is what a frontend can *retrieve*:
   asserts that (§H).
 
 This is also the answer to "should `Irreversible` refuse `--confirm` entirely?" — **no**
-(Amy, 2026-08-01). A second, principal-bound-only redemption path for `Irreversible` would
-fork the redemption contract exactly where predictability matters most. The bearer risk is
-handled where it belongs: `Irreversible` grants default to single-use (§F.3), the
-credential is bound to the requesting principal and session (§A.2), and retrieving it
-requires authority. An operator who hands a key to an irreversible operation is making that
-choice deliberately, and the ledger records it.
+(Amy, 2026-08-01). A second redemption path for `Irreversible` alone would fork the
+redemption contract exactly where predictability matters most, and `Irreversible` is no
+longer a special case anyway: **every** grant is good for one successful settlement (§A.1).
+The bearer risk is handled where it belongs — one success, an expiry, retrieval that
+requires authority and appends `KeyRetrieved`, and a presentation that appends the
+presenting principal. An operator who hands a key to an irreversible operation is making
+that choice deliberately, and both ends of the handoff are in the record.
 
 New builtin, `approvals`, a subcommand tool (`ToolSchema.subcommands`, clap per the house
 pattern):
@@ -1064,7 +1152,7 @@ pattern):
 | `approvals show <id>` | full request + decision + attempt chain |
 | `approvals log [--since <seq>]` | the retained entries, seq-ordered; the record §E reads |
 | `approvals renew <id>` | post a superseding request; loud if the world already moved |
-| `approvals grant <id> [--once]` | **requires an `ApproverHandle` on the session** |
+| `approvals grant <id> [--until <duration>]` | **requires an `ApproverHandle` on the session**; there is no `--once` flag, because every grant is once (§A.1) |
 | `approvals deny <id> [--reason R]` | requires the handle |
 | `approvals revoke <standing-id>` | requires the handle |
 
@@ -1176,7 +1264,10 @@ The old latch nonce was one string doing two jobs: it *identified* the request a
   name: inspect it, renew it, approve it, deny it.
 - **`Token`** is the **key**. A secret credential the kernel holds; no public type has a
   field for it, and only a session holding an `ApproverHandle` can retrieve it (§D.3). An
-  authority-less session never sees it — not redacted out, never present.
+  authority-less session never sees it — not redacted out, never present. It is a **bearer**
+  credential: whoever presents it redeems, from any session (§A.2). That is what makes
+  handing one over a deliberate act rather than a routing detail, and both the retrieval and
+  the presentation are named in the record.
 
 This split is what makes every flow below enforceable. A gated model holds the *name* of
 its request and can talk about it freely; it never holds the *key*. And the governing
@@ -1273,7 +1364,7 @@ nothing more; the approval tool exists only on the client model's side of the MC
 After judging, the client model has two ways to complete the operation. `grant(id)` is the
 enabling record update under both — it authorizes, but something still has to redeem:
 
-- **Confirm** (`ApproverHandle::confirm(&id)`): the kernel replays the exact captured
+- **Confirm** (`Kernel::confirm(&handle, &id)`): the kernel replays the exact captured
   invocation itself and the operation completes without the subagent lifting a finger.
   Smoothest, but only `Capture::Exact` invocations are replayable (§B.4).
 - **Key handoff — the subagent unlocks itself.** The client model's authority lets it
@@ -1399,7 +1490,7 @@ reader who knows the latch can find the concept they are looking for.
 | `kaish-trash empty`'s unconditional gate | an always-enforced operation, independent of any subscription |
 | `latch_result` | `ctx.request_approval` (kernel-internal helper on top) |
 | `gate_overwrites` | unchanged signature; reimplemented on `request_approval`, with `cas_overwrite`'s snapshot digest becoming a `Condition` |
-| `Kernel::confirm(&req)` | `ApproverHandle::confirm(&request_id)` — same replay semantics (§D.2) |
+| `Kernel::confirm(&req)` | `Kernel::confirm(&handle, &request_id)` — same replay semantics, authority now in the signature (§B.4) |
 
 **What the latch could not express**, and why the mapping is a rewrite rather than a rename:
 a nonce has no principal, no wall-clock record, no decision provenance, no per-resource
@@ -1428,7 +1519,8 @@ those is a field above.
 | `--json` envelope key `"latch"` | `"approval"` |
 | `KernelConfig::with_nonce_store(NonceStore)` | `KernelConfig::with_ledger(Ledger)` |
 | `kaish_kernel::nonce::{NonceStore, NonceScope}` | removed |
-| `Kernel::confirm(&req)` | `ApproverHandle::confirm(&request_id)` |
+| `Kernel::confirm(&req)` | `Kernel::confirm(&handle, &request_id)` |
+| re-presenting a nonce after success re-ran the operation | a key presented after a successful settlement reports the settled outcome and does not re-execute (§B.4) |
 | `/v/jobs/{id}/latch` | `/v/jobs/{id}/approval` |
 | `JobInfo.latch: Option<LatchRequest>` | `JobInfo.approval: Option<ApprovalRequestView>` |
 
@@ -1448,11 +1540,16 @@ generator.
 
 **2. The rejected-attempt limit.** #259 deferred this deliberately: a wrong `--confirm`
 guess did not identify which nonce it was aimed at, so a counter had nowhere principled to
-attach. `Grant.token_prefix` and `TokenRejected{request, attempts}` fix that.
-`max_token_attempts` (default 5) rejected presentations against a request append
-`TokenRejected` and then `Voided` the request. A *correct* credential presented after the
-void fails loud with "request voided after 5 invalid attempts" — the operator learns
-something happened.
+attach. The draft matcher (§B.4) is what fixes it — a presentation arrives with a fresh
+draft, and the draft names the request even when the key is wrong. So a bad key whose draft
+matches live request R appends `TokenRejected{request: Some(R), attempts: n}` and counts
+against R; a bad key matching no live request appends `TokenRejected{request: None}` and
+counts against nothing, so a guesser cannot void a request it cannot describe.
+
+`max_token_attempts` defaults to **5**: the **fifth** rejection against one request appends
+its `TokenRejected` and then `Voided`. A *correct* key presented after the void fails loud
+with "request voided after 5 invalid attempts" — the operator learns something happened,
+rather than a valid key mysteriously not working.
 
 **3. Pinning the policy.** `set +o latch` from script code is the hole that makes the whole
 thing advisory. `Scope.policy_pinned`, seeded from `KernelConfig::with_policy_pinned`, never
@@ -1466,13 +1563,18 @@ script-reachable policy mutation the ledger adds. This was originally planned as
 standalone PR against `NonceStore`; it moved into the cutover because hardening a structure
 that is about to be deleted is wasted motion (§H).
 
-**4. Single-use for irreversible operations.** `RiskClass::Irreversible` defaults its grants
-to `max_redemptions: Some(1)`. `trash.empty`, `git.push` with force, and `git.reset --hard`
-are `Irreversible`. `Reversible`/`Recoverable` operations — `rm` under trash, gated
-overwrites — keep unlimited redemption within the grant window, preserving the
-idempotent-retry ergonomics that motivated the current design (`nonce.rs:124`, tests at
-`:209-217`). The distinction is the whole point of having a risk class: idempotent retry is
-a feature when the operation is undoable and a bug when it is not.
+**4. Single successful redemption, universally.** Today's nonce is reusable within its TTL
+(`nonce.rs:124`, tests at `:209-217`), so one approval can run a destructive operation
+repeatedly and silently. Under the ledger every grant authorizes exactly one *successful*
+settlement — no risk-class exception, no configurable limit (§A.1). The ergonomic that
+reuse was protecting is kept by the narrower rule that a **failed** attempt does not consume
+the grant, so a transient failure or a dropped terminal still retries inside `not_after`.
+`RiskClass` stops carrying redemption policy entirely and goes back to being what an
+approver reads and a policy matches on.
+
+Repetition that is genuinely wanted has a first-class home: a `StandingGrant` with
+`max_uses` (§C.4), which is a rule with a name, a count, and an entry — an auditable
+multi-use form, which a reusable key never was.
 
 **5. Adjacent, not in this design's path.** These are real and tracked in the PR that
 touches them, not blockers here:
@@ -1513,14 +1615,15 @@ measurable: it is the `approval.decide` span's duration, and the spans are corre
 | `approval.request` | info | `ExecContext::request_approval` | `approval.request_id`, `approval.operation`, `approval.risk`, `approval.resource_count`, `approval.principal`, `job_id` | Closes when the request is posted and the fast stages have run — **not** held across an out-of-band wait. |
 | `approval.decide` | info | around `Approver::decide` only | `approval.request_id`, `approval.stage` (`standing`\|`policy`\|`human`), `approval.decision`, `approval.grounds`, `approval.decided_by` | This is where decision latency lives, including a human's 40 seconds. Linked to `approval.request`, not nested in it. |
 | `approval.attempt` | debug | reservation through settlement | `approval.request_id`, `approval.attempt_id`, `approval.conditions_checked`, `approval.outcome` | The execution half. Records `err` on refusal. Debug because it is per-execution. |
-| `approval.confirm` | info | `ApproverHandle::confirm` | `approval.request_id`, `approval.attempt_id`, `approval.tool` | `confirm` sits *outside* the `execute_argv` span it then creates, so this correctly parents the replay. |
+| `approval.confirm` | info | `Kernel::confirm` | `approval.request_id`, `approval.attempt_id`, `approval.tool` | `confirm` sits *outside* the `execute_argv` span it then creates, so this correctly parents the replay. |
 
 ### Events
 
 Emitted at the append site, one per entry variant:
 
 `approval.requested` (info) · `approval.granted` (info) · `approval.denied` (info) ·
-`approval.expired` (info) · `approval.redeemed` (debug) · `approval.refused` (**warn** —
+`approval.expired` (info) · `approval.key_retrieved` (info, carries `approval.retrieved_by`)
+· `approval.redeemed` (debug) · `approval.refused` (**warn** —
 preconditions failed, the world moved under an approval) · `approval.settled` (info) ·
 `approval.abandoned` (**warn** — an attempt ended with `Outcome::Unknown`, so effects are
 unknown) · `approval.voided` (warn) · `approval.standing_issued` (info) ·
@@ -1564,18 +1667,22 @@ Add `kaish-types::approval`: `RequestId`, `Token`, `AttemptId`, `OperationId`, `
 `Resource`, `StateClaim`, `Transition`, `Principal`, `Capture`, `Invocation`,
 `RequestContext`, `ApprovalRequest` + builder, `ApprovalRequestView`, `Grant`, `GrantTerms`,
 `Grounds`, `Condition`, `Observation`, `StandingGrant`, `ResourcePattern`, `Subscription`,
-`Decision`, `Outcome`, `LostCause`, `LedgerEntry`, `RequestState`, `AttemptState`, plus the
-id newtypes (`StandingId`, `SubscriptionId`) and the small enums they name (`PrincipalKind`,
-`Expiring`, `ResourceRef`, `OperationPattern`). Pure data plus serde; no behavior. Additive, not breaking. Pattern *matching* stays out (it needs
-`kaish-glob`, which `kaish-types` must not depend on) — only the pattern data lives here.
+`Decision`, `Outcome`, `LostCause`, `LedgerEntry`, `RequestState`, `AttemptState`
+(`Reserved`/`Settled`/`Abandoned`), `ResourceRef` (kind + id), plus the id newtypes
+(`StandingId`, `SubscriptionId`) and the small enums they name (`PrincipalKind`, `Expiring`,
+`OperationPattern`). Pure data plus serde; no behavior. Additive, not breaking. Pattern
+*matching* stays out (it needs `kaish-glob`, which `kaish-types` must not depend on) — only
+the pattern data lives here.
 
 *Tests that prove it:* serde round-trip for every `LedgerEntry` variant including the
 internal tag; **no public type in the module has a field of type `Token`** (an API-surface
-snapshot test — this is the §A.2 boundary, and it is checkable); an `ApprovalRequest` with
-an empty operation fails to build; `OperationId::namespaced` rejects the reserved
-`fs.`/`trash.` prefixes; `StateClaim::Unspecified` never compares equal to a concrete claim;
-builder-drafted requests carry no principal and no capture (proving those are
-kernel-stamped).
+snapshot test — this is the §A.2 boundary, and it is checkable); `Grant` has no redemption-
+limit field (the single-success rule is structural, not configurable — §A.1); a `RequestId`
+renders as `req_<8hex>_<seq>` and contains no hyphen, and a short form is rejected on parse;
+an `ApprovalRequest` with an empty operation fails to build; `OperationId::namespaced`
+rejects the reserved `fs.`/`trash.` prefixes; `StateClaim::Unspecified` never compares equal
+to a concrete claim; builder-drafted requests carry no principal and no capture (proving
+those are kernel-stamped).
 
 ---
 
@@ -1583,23 +1690,31 @@ kernel-stamped).
 
 `Ledger`, the `Requester`/`Approvals`/`ApproverHandle` split, both state machines, the
 §B.1 linearization contract, attempt reservation and idempotent settlement, the credential
-index, the rejected-attempt limit #259 deferred, partitioned retention, `LedgerSink` with
-bounded-queue backpressure, `LedgerConfig`, the invariant checks, the recovery sweep, and
-the `ApproverHandle` methods. Wired to **no gate sites** — a self-contained subsystem with
-no observable behavior change. Additive, not breaking.
+index with `KeyRetrieved`, the rejected-attempt limit #259 deferred, partitioned retention,
+`LedgerSink` with bounded-queue backpressure, `LedgerConfig`, the invariant checks, and the
+recovery sweep. The `ApproverHandle`'s **pure-record** methods land here — `grant`, `deny`,
+`grant_standing`, `revoke_standing`, `token_for`. `Kernel::confirm(&handle, id)` does
+**not**: it dispatches an execution, and there is nothing to replay until gate sites exist,
+so it lands with the cutover (PR 5). Wired to **no gate sites** — a self-contained subsystem
+with no observable behavior change. Additive, not breaking.
 
 *Tests:* the §B.3 transition tables as an rstest matrix, with every illegal transition
 asserted to return the specific `LedgerError` **and** to leave the state unchanged; two
-concurrent redemptions of a `max_redemptions: Some(1)` grant produce exactly one `Redeemed`
-and one `Exhausted`; settling the same `AttemptId` twice appends one entry and returns `Ok`;
-a derived event posted twice appends once; the live index fails loud rather than evicting a
-live chain, and a full sink queue returns `LedgerUnavailable` rather than blocking or
-dropping; `Requester` has no method producing a `Grant` and `ApproverHandle` has no public
-constructor (compile-fail tests via `trybuild`); wall-clock jumps forward and backward
-neither extend nor void a grant; `seq` is gap-free under concurrent posts from 16 tasks;
-the recovery sweep closes a `Redeemed` with no successor as `Abandoned`; the sixth bad
-credential presentation voids the request and a subsequent *good* one fails naming the
-void.
+concurrent redemptions of one grant produce exactly one `Redeemed` and one
+`AttemptInFlight`; after an attempt settles non-zero a second redemption succeeds, and after
+one settles `Exit(0)` a second presentation reports the settled outcome without a new
+`Redeemed`; a second successful settlement against one grant is `InvariantViolated`;
+settling the same `AttemptId` twice appends one entry and returns `Ok`; a derived event
+posted twice appends once; the live index fails loud rather than evicting a live chain, and
+a full sink queue returns `LedgerUnavailable` rather than blocking or dropping; `Requester`
+has no method producing a `Grant` and `ApproverHandle` has no public constructor
+(compile-fail tests via `trybuild`); `token_for` appends `KeyRetrieved` naming the retriever,
+and a key redeems from a principal other than the requester's (bearer, by design — §A.2);
+wall-clock jumps forward and backward neither extend nor void a grant; `seq` is gap-free
+under concurrent posts from 16 tasks; the recovery sweep closes a `Redeemed` with no
+successor as `Abandoned`; the **fifth** bad credential presentation voids the request and a
+subsequent *good* one fails naming the void, while five bad presentations matching no live
+request void nothing.
 
 ---
 
@@ -1649,10 +1764,13 @@ Reimplement `latch_result`, `gate_overwrites`, `rm`'s `decide_rm_action`, and `k
 empty` on `request_approval` — ten gate sites, rewritten in ledger vocabulary. Apply the
 §F.2 rename table across `ExecResult`, `JobInfo`, the `--json` envelope, and the VFS path.
 `set -o latch` becomes the whole-namespace `fs.*` enforce policy (no glob, no `observe` —
-those are PR 8); `set +o latch` removes it and is refused under a pin. Carry the §F.3
-hardening that belongs with the cutover: the policy
-pin and single-use-for-`Irreversible`. Add `RedemptionContext` correlation and the `Capture`
-status so replay stops substituting an empty argv. Insta snapshots updated in the same PR.
+those are PR 8); `set +o latch` removes it and is refused under a pin. Land
+`Kernel::confirm(&handle, &id)` here — this is the first PR with something to replay — along
+with `RedemptionContext` correlation and the `Capture` status, so replay stops substituting
+an empty argv. Carry the §F.3 hardening that belongs with the cutover: the policy pin, and
+the end of reusable redemption (one successful settlement per grant, a key presented after
+success reporting the settled outcome instead of re-running it). Insta snapshots updated in
+the same PR.
 
 **Write the operation matrix first** — operation × trash × approval × reversible ×
 foreground/background/direct → expected entries and expected failure behavior — and land it
@@ -1673,7 +1791,9 @@ survives a `$(…)` cmdsub, a pipeline stage, a background job, and a `.kai` scr
 the `set +o latch` and `flags=["o"] positional=["latch"]` parse paths are refused; a replay
 whose fresh draft does not match the granted operation fails `DraftMismatch` rather than
 posting a second request; `confirm` on a `Capture::Unavailable` request fails naming the
-variant; trash still wins over the gate per `decide_mutation_action`.
+variant; **re-presenting a key after a successful `rm` reports the settled outcome and the
+file is deleted exactly once** (the behavior change the latch's reusable nonce hid — this
+test is the point of the item); trash still wins over the gate per `decide_mutation_action`.
 
 Changelog: one `**BREAKING:**` bullet per renamed surface, plus the mapping table.
 
@@ -1745,12 +1865,15 @@ permanent home.
 
 ## I. Open questions
 
-1. **Retention defaults.** 1024 live requests and 256 per principal are guesses. Live
-   chains are what fail loud when exhausted, and auto-granted chains close immediately, so
-   the numbers should only bind on a session that gates thousands of operations and settles
-   none. If that intuition is wrong the default is too small. Open until a real workload
-   says otherwise; the metric (`ledger.live_requests`) exists so the answer is measurable
-   rather than argued.
+1. **Retention defaults.** 1024 live requests and 256 per principal are guesses. What a live
+   chain now costs is bounded on both ends: a chain closes on its first successful
+   settlement (§A.1, §B.2), and one that never settles expires at `not_after`. So the
+   numbers bind only on a session holding many *undecided* requests at once, which is the
+   case worth measuring. Open until a real workload says otherwise; the metric
+   (`ledger.live_requests`) exists so the answer is measurable rather than argued.
+
+   *Dissolved by the single-success rule:* the earlier worry that an unlimited grant would
+   occupy the live index until `not_after` no matter what. There is no unlimited grant.
 2. **Standing-grant matching semantics.** §C.4 fixes all-or-nothing, exact-kind, and
    globbed-id, and the gpt review's remaining questions have no recorded answer: set versus
    multiset semantics for duplicate resources; whether one pattern may match several
@@ -1774,6 +1897,13 @@ permanent home.
 re-litigated from the reviews: whether an ungated `fs.*` operation posts at all — no, the
 unsubscribed path is free (§C.5); whether a span stays open across a human's decision — no,
 short linked spans (§G); and whether `Irreversible` should refuse `--confirm` — no, the key
-path has no special cases and single-use grants plus authority-gated retrieval carry the
-bearer risk (§D.3, §E.1). Both reviews recommended the opposite on that last one; Amy
-declined it on 2026-08-01 and the reason is in §D.3.
+path has no special cases, and one-success-per-grant plus authority-gated retrieval carry
+the bearer risk for every risk class alike (§D.3, §E.1). Both reviews recommended the
+opposite on that last one; Amy declined it on 2026-08-01 and the reason is in §D.3.
+
+Settled on 2026-08-02 and likewise recorded in the body: the key is a **pure bearer**
+credential, with accountability carried by `KeyRetrieved` and `Redeemed{by}` rather than by
+binding (§A.2); a grant authorizes exactly **one successful settlement**, with failed
+attempts free to retry (§A.1, §F.3); `RequestId` is `req_<8hex>_<seq>` with no short form
+(§A.2); and `confirm` stays on the kernel with the `ApproverHandle` as a required argument
+(§B.4).
