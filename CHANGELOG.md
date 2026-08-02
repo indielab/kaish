@@ -86,6 +86,11 @@ breaking entries are marked **BREAKING**.
   no timeout.
 - `bg`'s reaper waits with `WUNTRACED`, so a resumed job that stops again returns to
   `Stopped` instead of being reported `Running` forever.
+- **`wait %N` on a stopped job fails immediately** — "job N is stopped and cannot
+  finish — resume it with bg or fg, then wait" — instead of polling forever.
+- **A job that stops while `wait`/`wait_all` is polling it no longer hangs the
+  waiter** — the stopped guard sits inside the poll loop now, closing the
+  sub-200ms window the snapshot filter above left open.
 - **`apply_spill_contract` is idempotent.** Applying it twice used to overwrite the
   captured `original_code` with 3, losing the real exit code.
 - **`wait`'s published flag description no longer claims it accepts a PID.** There

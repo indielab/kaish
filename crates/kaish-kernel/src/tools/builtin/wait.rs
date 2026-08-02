@@ -19,7 +19,9 @@ struct WaitArgs {
     global: GlobalFlags,
 
     /// Job id, with or without the `%` prefix (`%1` or `1`). Waits for every
-    /// background job when omitted. A non-numeric id exits 1.
+    /// background job when omitted. A non-numeric id exits 1. A stopped job
+    /// cannot finish: waiting on one exits 1 — resume it with `bg` or `fg`
+    /// first.
     job: Vec<String>,
 }
 
@@ -88,7 +90,21 @@ impl Tool for Wait {
                         let status = classify(id, &result, &mut any_failed, &mut latch);
                         output.push_str(&format!("[{}] {}\n", id, status));
                     }
-                    None => return ExecResult::failure(1, format!("wait: job {} not found", id)),
+                    // `wait` returns None for a missing job AND for a stopped
+                    // one (a stopped job can never finish; polling it hung
+                    // forever). Tell them apart for the error text.
+                    None => {
+                        if manager.get(id).await.is_some() {
+                            return ExecResult::failure(
+                                1,
+                                format!(
+                                    "wait: job {} is stopped and cannot finish — resume it with bg or fg, then wait",
+                                    id
+                                ),
+                            );
+                        }
+                        return ExecResult::failure(1, format!("wait: job {} not found", id));
+                    }
                 }
             }
 
@@ -323,5 +339,35 @@ mod tests {
         let result = Wait.execute(ToolArgs::new(), &mut ctx).await;
         assert!(!result.ok()); // Overall result fails if any job failed
         assert!(result.text_out().contains("Failed"));
+    }
+
+    /// `wait %N` on a stopped job errors with the resume instruction, not
+    /// "not found" — the builtin distinguishes None-because-stopped from
+    /// None-because-missing.
+    #[tokio::test]
+    async fn test_wait_on_stopped_job_gives_actionable_error() {
+        let mut ctx = make_ctx();
+        let manager = Arc::new(JobManager::new());
+        ctx.set_job_manager(manager.clone());
+
+        let id = manager
+            .register_stopped("sleep 30".to_string(), 4242, 4242)
+            .await;
+
+        let mut args = ToolArgs::new();
+        args.positional.push(Value::Int(id.0 as i64));
+
+        let result = Wait.execute(args, &mut ctx).await;
+        assert!(!result.ok(), "waiting on a stopped job must fail loud");
+        assert!(
+            result.err.contains("stopped and cannot finish"),
+            "error must say the job is stopped: {}",
+            result.err
+        );
+        assert!(
+            result.err.contains("bg or fg"),
+            "error must say how to resume: {}",
+            result.err
+        );
     }
 }
