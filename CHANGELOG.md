@@ -82,6 +82,10 @@ breaking entries are marked **BREAKING**.
 - **A Ctrl-Z'd job no longer hangs `Kernel::shutdown` forever.** A stopped job can
   never become done, so `wait_all` now skips it instead of polling it at 10ms with
   no timeout.
+- `bg`'s reaper waits with `WUNTRACED`, so a resumed job that stops again returns to
+  `Stopped` instead of being reported `Running` forever.
+- **`apply_spill_contract` is idempotent.** Applying it twice used to overwrite the
+  captured `original_code` with 3, losing the real exit code.
 - **`wait`'s published flag description no longer claims it accepts a PID.** There
   is no PID path; a bare `2` means job 2.
 - **`cargo doc` builds the workspace with zero warnings**, and CI now denies them —
