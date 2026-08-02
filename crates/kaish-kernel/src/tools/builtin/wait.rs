@@ -340,4 +340,34 @@ mod tests {
         assert!(!result.ok()); // Overall result fails if any job failed
         assert!(result.text_out().contains("Failed"));
     }
+
+    /// `wait %N` on a stopped job errors with the resume instruction, not
+    /// "not found" — the builtin distinguishes None-because-stopped from
+    /// None-because-missing.
+    #[tokio::test]
+    async fn test_wait_on_stopped_job_gives_actionable_error() {
+        let mut ctx = make_ctx();
+        let manager = Arc::new(JobManager::new());
+        ctx.set_job_manager(manager.clone());
+
+        let id = manager
+            .register_stopped("sleep 30".to_string(), 4242, 4242)
+            .await;
+
+        let mut args = ToolArgs::new();
+        args.positional.push(Value::Int(id.0 as i64));
+
+        let result = Wait.execute(args, &mut ctx).await;
+        assert!(!result.ok(), "waiting on a stopped job must fail loud");
+        assert!(
+            result.err.contains("stopped and cannot finish"),
+            "error must say the job is stopped: {}",
+            result.err
+        );
+        assert!(
+            result.err.contains("bg or fg"),
+            "error must say how to resume: {}",
+            result.err
+        );
+    }
 }
