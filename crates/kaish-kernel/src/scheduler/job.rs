@@ -667,14 +667,27 @@ impl JobManager {
         }
     }
 
-    /// Wait for all jobs to complete, returning results in completion order.
+    /// Wait for all jobs that can still finish, returning results in completion
+    /// order.
+    ///
+    /// **Stopped jobs are skipped, and that is load-bearing.** A Ctrl-Z'd job is
+    /// registered by [`JobManager::register_stopped`] with no `JoinHandle` and no
+    /// result channel, and [`Job::is_done`] returns `false` for as long as it is
+    /// stopped — so nothing can ever make it done. Waiting on one here spun the
+    /// 10ms poll loop forever, and since [`crate::Kernel::shutdown`] calls this, a single
+    /// Ctrl-Z hung shutdown with no timeout and no escape. Skip them: `wait_all`
+    /// means "wait for everything that will finish", not "wait for everything".
+    ///
+    /// A caller that wants a stopped job to finish must resume it first (`bg`/`fg`).
     pub async fn wait_all(&self) -> Vec<(JobId, ExecResult)> {
         let mut results = Vec::new();
 
-        // Get all job IDs
         let ids: Vec<JobId> = {
             let jobs = self.jobs.lock().await;
-            jobs.keys().copied().collect()
+            jobs.iter()
+                .filter(|(_, job)| !job.stopped)
+                .map(|(id, _)| *id)
+                .collect()
         };
 
         for id in ids {
@@ -1507,5 +1520,40 @@ mod tests {
             .await
             .expect("wait must not hang after a prior waiter was dropped");
         assert_eq!(res.map(|r| r.code), Some(0), "B should see the completed job");
+    }
+
+    /// A Ctrl-Z'd job has no `JoinHandle` and no result channel, and `is_done()`
+    /// returns `false` while `stopped` — so nothing can ever make it done.
+    /// `wait_all` used to poll it forever at 10ms, and since `Kernel::shutdown`
+    /// calls `wait_all`, one Ctrl-Z hung shutdown with no timeout and no escape.
+    #[tokio::test]
+    async fn wait_all_skips_a_stopped_job_instead_of_hanging_forever() {
+        let manager = JobManager::new();
+
+        // No real process needed: `wait_all` decides on the `stopped` flag, and
+        // the hang was never about the pid.
+        let stopped = manager
+            .register_stopped("sleep 5".to_string(), 4242, 4242)
+            .await;
+
+        // A job that does finish, so this also proves we did not fix the hang by
+        // making `wait_all` skip everything.
+        let finisher = manager
+            .spawn("finisher".to_string(), async { ExecResult::success("ok") })
+            .await;
+
+        let results = tokio::time::timeout(Duration::from_secs(2), manager.wait_all())
+            .await
+            .expect("wait_all must not hang on a stopped job");
+
+        let ids: Vec<JobId> = results.iter().map(|(id, _)| *id).collect();
+        assert!(
+            !ids.contains(&stopped),
+            "a stopped job can never complete, so wait_all must skip it"
+        );
+        assert!(
+            ids.contains(&finisher),
+            "wait_all must still collect jobs that can finish"
+        );
     }
 }

@@ -148,11 +148,27 @@ impl Tool for Bg {
             let jobs = manager.clone();
             let pid = nix::unistd::Pid::from_raw(_pid_raw as i32);
             tokio::spawn(async move {
+                use nix::sys::wait::{WaitPidFlag, WaitStatus};
+                // WUNTRACED matters: a resumed job can be stopped AGAIN (a
+                // second Ctrl-Z, or SIGSTOP from anywhere). Without it the stop
+                // is invisible here, so the manager keeps reporting Running, the
+                // job is unreachable via `last_stopped()`, and this loop sleeps
+                // forever against a process that will never exit. `wait_all`
+                // then polls that job forever too — the same shutdown hang the
+                // `stopped` skip fixes, reached by a route the skip cannot see,
+                // because `resume_job` already cleared the flag.
+                let flags = WaitPidFlag::WNOHANG | WaitPidFlag::WUNTRACED;
                 loop {
-                    // Wait without WUNTRACED — we don't care about stops in bg
-                    match nix::sys::wait::waitpid(pid, Some(nix::sys::wait::WaitPidFlag::WNOHANG)) {
-                        Ok(nix::sys::wait::WaitStatus::Exited(_, _))
-                        | Ok(nix::sys::wait::WaitStatus::Signaled(_, _, _)) => break,
+                    match nix::sys::wait::waitpid(pid, Some(flags)) {
+                        Ok(WaitStatus::Exited(_, _)) | Ok(WaitStatus::Signaled(_, _, _)) => break,
+                        // Stopped again: hand the job back to the stopped state
+                        // so `jobs`, `fg`, and `last_stopped` all agree with the
+                        // OS, and stop polling. Resuming it spawns a fresh
+                        // reaper, so exiting here leaks nothing.
+                        Ok(WaitStatus::Stopped(_, _)) => {
+                            jobs.stop_job(job_id, _pid_raw, _pid_raw).await;
+                            return;
+                        }
                         // `StillAlive` (WNOHANG, nothing to report yet), any
                         // other transient status, or EINTR: keep polling.
                         Ok(_) | Err(nix::errno::Errno::EINTR) => {
