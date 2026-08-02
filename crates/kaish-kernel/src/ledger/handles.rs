@@ -153,6 +153,18 @@ impl Requester {
         ttl: Duration,
         job_id: Option<u64>,
     ) -> Result<ApprovalRequest, LedgerError> {
+        // A dropped guard's queued settlement can be the only thing standing
+        // between a closed-but-undrained chain and room for this post:
+        // `post_request` reads `live_count_total`/`live_count_by_principal`
+        // and reserves ring/sink capacity, both of which a drained close
+        // would relieve. Every append-producing method on this handle and
+        // `ApproverHandle` drains first for the same reason — not only the
+        // methods that read `live_attempt` directly (a review finding this
+        // PR's first pass missed: `cargo test` never sees a live_capacity: 1
+        // + a dropped guard + an immediate second post in the same breath,
+        // so a narrower drain set looked sufficient until it was pointed
+        // out).
+        self.0.drain_outbox();
         self.0.post_request(draft, principal, capture, context, ttl, job_id)
     }
 
@@ -261,6 +273,10 @@ impl Requester {
     /// action — the principal that owns the request may renew it without
     /// holding any authority.
     pub async fn renew(&self, id: &RequestId) -> Result<RequestId, LedgerError> {
+        // `renew` shares `post_request`'s capacity-checking path (review
+        // finding S5 unified them under one lock) — see `post_request`'s
+        // identical drain for why.
+        self.0.drain_outbox();
         self.0.renew(id)
     }
 }
@@ -309,12 +325,16 @@ impl ApproverHandle {
     /// already has a decision, or `LedgerError::Terminal` if it is no
     /// longer `Requested` for any other reason (expired, voided, ...).
     pub async fn grant(&self, id: &RequestId, terms: GrantTerms) -> Result<(), LedgerError> {
+        // `grant` appends and so reserves ring/sink capacity — the same
+        // stale-undrained-close concern as `post_request`.
+        self.0.drain_outbox();
         let decided_by = self.principal();
         self.0.grant(id, terms, decided_by, Grounds::Embedder).map(|_| ())
     }
 
     /// Decide no.
     pub async fn deny(&self, id: &RequestId, reason: &str) -> Result<(), LedgerError> {
+        self.0.drain_outbox();
         let by = self.principal();
         self.0.deny(id, reason.to_string(), by)
     }
@@ -327,12 +347,14 @@ impl ApproverHandle {
     /// **Pure record only** — matching a live request against this rule is
     /// PR 4's decision-chain job, not this method's.
     pub async fn grant_standing(&self, g: StandingGrant) -> Result<StandingId, LedgerError> {
+        self.0.drain_outbox();
         self.0.grant_standing(g)
     }
 
     /// Revoke a standing grant. Takes effect immediately for requests not
     /// yet granted; already-issued grants are unaffected (spec §C.4).
     pub async fn revoke_standing(&self, id: &StandingId, reason: &str) -> Result<(), LedgerError> {
+        self.0.drain_outbox();
         let by = self.principal();
         self.0.revoke_standing(*id, by, reason.to_string())
     }
@@ -342,6 +364,9 @@ impl ApproverHandle {
     /// retrieval is the one place authority matters on the key path (spec
     /// §D.3): everything else works by presenting whatever key you hold.
     pub fn token_for(&self, id: &RequestId) -> Option<Token> {
+        // Sync, like the rest of this method — `drain_outbox` is plain
+        // `Mutex` work with no `.await` inside it (see its doc).
+        self.0.drain_outbox();
         let by = self.principal();
         self.0.token_for(id, by)
     }

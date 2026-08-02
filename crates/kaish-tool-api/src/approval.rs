@@ -17,6 +17,23 @@ use kaish_types::ExecResult;
 /// What one execution reserved against a grant (spec §C.1). Exposes only its
 /// own two ids — never provenance: a tool cannot tell whether its grant came
 /// from a human, a policy hook, or a standing rule.
+///
+/// No public constructor outside `#[cfg(test)]` — see
+/// [`AttemptHandle::from_ids`]'s doc for why a `pub` one (even
+/// `#[doc(hidden)]`) would be a forgeable settlement capability. A doctest
+/// compiles with none of this crate's own `#[cfg(test)]` items visible (the
+/// same boundary a downstream crate sees), so this is a real compiled proof,
+/// not a comment:
+///
+/// ```compile_fail
+/// use kaish_tool_api::AttemptHandle;
+/// use kaish_types::approval::{AttemptId, RequestId};
+///
+/// // `from_ids` doesn't exist here — it's `#[cfg(test)] pub(crate)` in the
+/// // defining crate, invisible to a doctest (compiled as downstream code)
+/// // exactly as it would be to a real plugin crate.
+/// let _handle = AttemptHandle::from_ids(RequestId::parse("req_00000000_1").unwrap(), AttemptId::new(1));
+/// ```
 #[derive(Debug, Clone)]
 pub struct AttemptHandle {
     request: RequestId,
@@ -34,18 +51,26 @@ impl AttemptHandle {
         self.attempt
     }
 
-    /// Construct a handle from a real ledger reservation.
+    /// Test-only: build a handle from raw ids without a real reservation.
     ///
-    /// Not part of the supported public surface — present so the kernel's
-    /// `ExecContext` can hand back a handle for an attempt it actually
-    /// reserved, the same convention as
-    /// [`ToolCtx::as_any_mut`](crate::ToolCtx::as_any_mut). A handle
-    /// fabricated from guessed ids buys a tool nothing: `settle`/`redeem` on
-    /// the ledger side re-check the `(request, attempt)` pair against real
-    /// state, so a forged handle only ever fails loud, never grants standing
-    /// the caller doesn't hold.
-    #[doc(hidden)]
-    pub fn from_ids(request: RequestId, attempt: AttemptId) -> Self {
+    /// Deliberately **not** exposed outside `#[cfg(test)]` — unlike
+    /// [`ToolCtx::as_any_mut`](crate::ToolCtx::as_any_mut), this is not a
+    /// documented escape hatch for trusted callers. `settle`'s job is to
+    /// finalize whatever `(request, attempt)` pair names a live `Reserved`
+    /// attempt; unlike `redeem`, it does not — and structurally cannot —
+    /// verify that the caller is the one who reserved it, so a `pub`
+    /// constructor here (even `#[doc(hidden)]`) would let any code holding a
+    /// `&mut dyn ToolCtx` settle *any* live attempt in the ledger by
+    /// guessing or observing its ids, not just its own. `ApprovalOutcome`'s
+    /// only real producer is the kernel's own `ExecContext`, which never
+    /// needs this constructor: PR 3 wires no decision chain, so nothing
+    /// today ever returns `Authorized`. When PR 4's decision chain starts
+    /// returning `Authorized` for real, minting the handle needs an
+    /// unforgeable capability (e.g. a per-reservation token bound to the
+    /// execution that redeemed it), which is that PR's job — not a
+    /// cross-crate id constructor.
+    #[cfg(test)]
+    pub(crate) fn from_ids(request: RequestId, attempt: AttemptId) -> Self {
         Self { request, attempt }
     }
 }

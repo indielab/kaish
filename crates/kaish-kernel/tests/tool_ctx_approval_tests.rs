@@ -14,7 +14,8 @@ use kaish_kernel::vfs::{MemoryFs, VfsRouter};
 use kaish_kernel::{ExecContext, LedgerAccess};
 use kaish_tool_api::{ApprovalOutcome, Tool, ToolArgs, ToolCtx};
 use kaish_types::approval::{
-    ApprovalRequest, Capture, GrantTerms, Outcome, Principal, PrincipalKind, RequestState, RiskClass,
+    ApprovalRequest, Capture, GrantTerms, Observation, Outcome, Principal, PrincipalKind, RequestState,
+    ResourceRef, RiskClass, StateClaim,
 };
 
 fn ctx_with_memory_fs() -> ExecContext {
@@ -91,11 +92,25 @@ async fn kernel_request_approval_with_no_ledger_wired_is_unsupported() {
 mod plugin_dangerous {
     use async_trait::async_trait;
     use kaish_tool_api::{ExecResult, Tool, ToolArgs, ToolCtx, ToolSchema};
-    use kaish_types::approval::{ApprovalRequest, RiskClass};
+    use kaish_types::approval::{ApprovalRequest, Resource, RiskClass, StateClaim};
+
+    /// The transition this fixture claims — public so the surrounding test
+    /// can build a matching `Observation` at redemption time without
+    /// duplicating the literal claim.
+    pub fn ref_resource() -> Resource {
+        Resource::transition(
+            "git.ref",
+            "refs/heads/agent/dangerous",
+            StateClaim::Exact("a1b2c3d".to_string()),
+            StateClaim::Exact("d4e5f6a".to_string()),
+        )
+    }
 
     /// A synthetic `plugin.dangerous` operation — stands in for a real
     /// out-of-tree plugin (kaish-git's own gated operations) that has no
-    /// `kaish-kernel` dependency at all.
+    /// `kaish-kernel` dependency at all. Declares one transition-bearing
+    /// resource so the end-to-end test exercises §B.4's redemption-time
+    /// condition check, not just the trivial no-resources case.
     pub struct PluginDangerous;
 
     #[async_trait]
@@ -111,6 +126,7 @@ mod plugin_dangerous {
         async fn execute(&self, _args: ToolArgs, ctx: &mut dyn ToolCtx) -> ExecResult {
             let draft = match ApprovalRequest::builder("plugin.dangerous")
                 .risk(RiskClass::Irreversible)
+                .resource(ref_resource())
                 .reason("fixture: gates a synthetic dangerous operation")
                 .hint("plugin-dangerous --confirm=<token>")
                 .build()
@@ -157,22 +173,28 @@ async fn plugin_dangerous_fixture_gates_end_to_end_through_tool_api_alone() {
     //    `approvals` builtin, PR 7), and a plugin has no path to this
     //    `ApproverHandle` at all. `GrantTerms::once_for` needs an
     //    `ApprovalRequest`, not the tokenless view the fixture got back;
-    //    re-stamping an equivalent one from the view's own fields (which
-    //    are exactly the request's fields minus the credential) is the
-    //    legitimate way to reach it from outside the ledger crate.
-    let terms_source = ApprovalRequest::builder("plugin.dangerous")
+    //    re-stamping an equivalent one from the view's own fields — this
+    //    MUST include `view.resources`, not just operation/risk, or
+    //    `once_for`'s derived conditions silently narrow to nothing and the
+    //    real ledger's `find_widened_condition` check (§A.4) would reject
+    //    the grant the moment the fixture declares a real resource (a gap a
+    //    review round caught: the fixture originally declared none, so the
+    //    omission was invisible) — is the legitimate way to reach an
+    //    `ApprovalRequest` from outside the ledger crate.
+    let mut terms_draft = ApprovalRequest::builder("plugin.dangerous")
         .risk(RiskClass::Irreversible)
         .build()
-        .unwrap()
-        .stamp(
-            view.id.clone(),
-            view.principal.clone(),
-            view.capture.clone(),
-            view.context.clone(),
-            view.requested_at,
-            view.ttl,
-            view.job_id,
-        );
+        .unwrap();
+    terms_draft.resources = view.resources.clone();
+    let terms_source = terms_draft.stamp(
+        view.id.clone(),
+        view.principal.clone(),
+        view.capture.clone(),
+        view.context.clone(),
+        view.requested_at,
+        view.ttl,
+        view.job_id,
+    );
     let not_after = SystemTime::now() + Duration::from_secs(300);
     approver
         .grant(&view.id, GrantTerms::once_for(&terms_source, not_after))
@@ -185,8 +207,19 @@ async fn plugin_dangerous_fixture_gates_end_to_end_through_tool_api_alone() {
     //    draft matcher to correlate a fresh re-invocation back to this
     //    request, which has no gate site to call it from yet (see this
     //    PR's decisions list). Driven directly through the ledger handles
-    //    here, standing in for what PR 5 will automate.
-    let attempt = requester.redeem(&view.id, agent("agent-1"), Vec::new()).await.unwrap();
+    //    here, standing in for what PR 5 will automate. The observation
+    //    proves the redemption-time condition check (§B.4) actually runs
+    //    against the fixture's declared transition, not an unconditioned
+    //    no-op grant.
+    let observed = vec![Observation {
+        resource: ResourceRef {
+            kind: "git.ref".to_string(),
+            id: "refs/heads/agent/dangerous".to_string(),
+        },
+        claim: StateClaim::Exact("a1b2c3d".to_string()),
+        at: SystemTime::now(),
+    }];
+    let attempt = requester.redeem(&view.id, agent("agent-1"), observed).await.unwrap();
 
     // 4. Settle.
     let appended = requester.settle(&attempt, Outcome::Exit(0)).await.unwrap();

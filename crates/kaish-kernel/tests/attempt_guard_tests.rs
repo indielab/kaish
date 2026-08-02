@@ -135,3 +135,65 @@ async fn explicit_settle_before_drop_wins_and_the_drop_push_is_a_no_op() {
         "the explicit settle must win — the guard's later Drop push must be an idempotent no-op"
     );
 }
+
+/// Regression for a gap a review round caught: draining only at the top of
+/// `settle`/`redeem`/`redeem_with_token`/`abandon_request`/`sweep` (the
+/// methods that read `live_attempt` directly) is not enough. `post_request`
+/// reads `live_count_total`/`live_count_by_principal` and reserves ring/sink
+/// capacity — both of which a closed-but-undrained chain still occupies —
+/// so it needs the same drain, even though it never touches `live_attempt`
+/// itself. At `live_capacity: 1`, a dropped guard's queued `Unknown` must
+/// not make the very next `post_request` see the ledger as full.
+#[tokio::test]
+async fn dropped_attempt_guard_does_not_falsely_exhaust_capacity_for_the_next_post() {
+    let config = LedgerConfig {
+        live_capacity: 1,
+        ..Default::default()
+    };
+    let (requester, approvals, approver) = Ledger::build(config, None).unwrap();
+
+    let req_a = requester
+        .post_request(
+            draft("plugin.dangerous"),
+            agent("agent-1"),
+            Capture::DirectExecution,
+            RequestContext::default(),
+            Duration::from_secs(60),
+            None,
+        )
+        .await
+        .unwrap();
+    approver.grant(&req_a.id, GrantTerms::once_for(&req_a, far_future())).await.unwrap();
+    let attempt = requester.redeem(&req_a.id, agent("agent-1"), Vec::new()).await.unwrap();
+
+    // Drop without an explicit settle and without any intervening drain
+    // (no `force_drain`, no `redeem`/`settle`/`abandon_request` call) —
+    // exactly the gap: only `post_request` itself stands between this and
+    // the next post.
+    drop(AttemptGuard::new(requester.clone(), attempt));
+
+    let req_b = requester
+        .post_request(
+            draft("plugin.dangerous"),
+            agent("agent-1"),
+            Capture::DirectExecution,
+            RequestContext::default(),
+            Duration::from_secs(60),
+            None,
+        )
+        .await;
+    assert!(
+        req_b.is_ok(),
+        "post_request must drain the dropped guard's queued settlement itself — \
+         request A's chain closed via Unknown and must not still count against \
+         live_capacity: 1, got {req_b:?}"
+    );
+
+    // Confirm the mechanism, not just the outcome: A really did close.
+    assert_eq!(approvals.state(&req_a.id), Some(RequestState::Granted));
+    let chain_a = approvals.get(&req_a.id).unwrap();
+    assert!(matches!(
+        chain_a.attempts[0].outcome,
+        Some(Outcome::Unknown { cause: LostCause::Cancelled })
+    ));
+}
