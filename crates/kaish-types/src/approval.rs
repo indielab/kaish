@@ -1,25 +1,23 @@
 //! The approval-ledger vocabulary: pure data plus serde, no behavior.
 //!
-//! This module is PR 1 of the approval-ledger effort (`docs/approval-ledger.md`,
-//! §H). It defines the types every later PR builds on — requests, grants, the
-//! append-only [`LedgerEntry`] log, and the small id/enum types they name — with
-//! no ledger, no state machine, and no I/O. The ledger core (`Ledger`, the
-//! `Requester`/`Approvals`/`ApproverHandle` split, the transition tables) lands
-//! in `kaish-kernel` (PR 2 onward); nothing here depends on it or on
-//! `kaish-glob`, so a [`ResourcePattern`] carries pattern *data* only — no
-//! matching.
+//! These are the types the approval ledger (`docs/approval-ledger.md` — the
+//! "spec" cited throughout this module) is spoken in: requests, grants, the
+//! append-only [`LedgerEntry`] log, and the small id/enum types they name.
+//! There is deliberately no ledger here — no state machine, no I/O, no
+//! matching. The ledger core (`Ledger`, the `Requester`/`Approvals`/
+//! `ApproverHandle` split, the transition tables) belongs to `kaish-kernel`,
+//! and nothing here depends on it or on `kaish-glob` — a [`ResourcePattern`]
+//! carries pattern *data* only.
 //!
-//! Two structural guarantees worth reading before touching this module:
+//! Two structural guarantees hold everywhere in this module:
 //!
-//! - **[`Token`] never appears as a field of any other type here, and never
+//! - **[`Token`] is never a field of any other type here, and never
 //!   implements `Serialize`/`Deserialize`.** The redemption credential lives
-//!   only in the kernel's credential index, keyed by [`RequestId`] (spec §A.2).
-//!   A struct in this module that grew a `token: Token` field and derived
-//!   `Serialize` would fail to compile — that is the enforcement, not a
-//!   convention (this crate has no `trybuild` dependency, so there is no
-//!   compile-fail test asserting it directly; the exhaustive field
-//!   destructures in the tests below are the narrower, checkable half of
-//!   the same guarantee, one per wide record).
+//!   only in the kernel's credential index, keyed by [`RequestId`] (spec
+//!   §A.2). Adding a `token: Token` field to any serialized type fails to
+//!   compile — `Token` has no serde impls to derive against. The exhaustive
+//!   field destructures in this module's tests pin each wide record's field
+//!   list, so a new field cannot land unreviewed.
 //! - **[`ApprovalRequestDraft`] has no `principal`, `capture`, `id`, `context`,
 //!   or `requested_at` field.** A plugin building a request through
 //!   [`ApprovalRequest::builder`] cannot forge any of them — the draft type has
