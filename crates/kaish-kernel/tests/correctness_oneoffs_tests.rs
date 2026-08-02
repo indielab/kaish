@@ -50,6 +50,81 @@ async fn grep_c_multifile_exits_1_only_if_no_file_matches() {
     assert_eq!(code, 0, "a match in any file must exit 0");
 }
 
+#[tokio::test]
+async fn grep_c_multifile_prints_per_file_counts() {
+    // GNU parity: `grep -c` over multiple files prints one `name:count` line
+    // per file, zero counts included — not a single aggregate total.
+    let tmp = tempfile::tempdir().unwrap();
+    std::fs::write(tmp.path().join("a.txt"), "alpha\nalpha\n").unwrap();
+    std::fs::write(tmp.path().join("b.txt"), "beta\n").unwrap();
+    let kernel = kernel_at(tmp.path());
+
+    let (out, code) = run(&kernel, "grep -c alpha a.txt b.txt").await;
+    assert_eq!(out, "a.txt:2\nb.txt:0");
+    assert_eq!(code, 0);
+
+    // All-zero counts still print per file, with exit 1.
+    let (out, code) = run(&kernel, "grep -c zzz a.txt b.txt").await;
+    assert_eq!(out, "a.txt:0\nb.txt:0");
+    assert_eq!(code, 1);
+}
+
+#[tokio::test]
+async fn grep_c_recursive_prints_per_file_counts() {
+    let tmp = tempfile::tempdir().unwrap();
+    std::fs::create_dir(tmp.path().join("d")).unwrap();
+    std::fs::write(tmp.path().join("d/a.txt"), "alpha\n").unwrap();
+    std::fs::write(tmp.path().join("d/b.txt"), "alpha\nalpha\nbeta\n").unwrap();
+    let kernel = kernel_at(tmp.path());
+
+    // Display follows grep's existing single-walk-root convention: the root
+    // (`d/`) is stripped from names, matching the match-line display.
+    let (out, code) = run(&kernel, "grep -rc alpha d").await;
+    assert_eq!(code, 0);
+    let mut lines: Vec<&str> = out.lines().collect();
+    lines.sort_unstable();
+    assert_eq!(lines, vec!["a.txt:1", "b.txt:2"]);
+}
+
+#[tokio::test]
+async fn grep_c_precedence_and_max_count_multifile() {
+    let tmp = tempfile::tempdir().unwrap();
+    std::fs::write(tmp.path().join("a.txt"), "x\nx\nx\nx\nx\n").unwrap();
+    std::fs::write(tmp.path().join("b.txt"), "x\ny\n").unwrap();
+    let kernel = kernel_at(tmp.path());
+
+    // -q wins over -c: no output at all, exit reports match presence.
+    let (out, code) = run(&kernel, "grep -qc x a.txt b.txt").await;
+    assert_eq!(out, "", "quiet must suppress count lines");
+    assert_eq!(code, 0);
+    let (out, code) = run(&kernel, "grep -qc zzz a.txt b.txt").await;
+    assert_eq!(out, "");
+    assert_eq!(code, 1);
+
+    // -l wins over -c: filenames with matches, not name:count lines.
+    let (out, code) = run(&kernel, "grep -lc x a.txt b.txt").await;
+    assert_eq!(out, "a.txt\nb.txt");
+    assert_eq!(code, 0);
+
+    // --max-count caps each file's count independently (GNU per-file cap).
+    let (out, code) = run(&kernel, "grep -c --max-count 2 x a.txt b.txt").await;
+    assert_eq!(out, "a.txt:2\nb.txt:1");
+    assert_eq!(code, 0);
+}
+
+#[tokio::test]
+async fn grep_c_unreadable_operand_still_counts_the_readable_ones() {
+    let tmp = tempfile::tempdir().unwrap();
+    std::fs::write(tmp.path().join("real.txt"), "alpha\n").unwrap();
+    let kernel = kernel_at(tmp.path());
+
+    // The missing explicit operand is exit 2 on stderr, and the readable
+    // file's count line still prints.
+    let (out, code) = run(&kernel, "grep -c alpha missing.txt real.txt").await;
+    assert_eq!(code, 2, "an unreadable explicit operand is exit 2");
+    assert_eq!(out, "real.txt:1", "the readable file still gets its count");
+}
+
 // ───────────────────── $(cmd) trailing-whitespace trim ─────────────────────
 
 #[tokio::test]

@@ -75,6 +75,8 @@ breaking entries are marked **BREAKING**.
   only checker that sees them.
 
 ### Fixed
+- **`grep -c` over multiple files prints a `name:count` line per file** (GNU
+  parity), zero counts included — it used to print one aggregate total.
 - **`kill` signals every target, not just the first.** `kill %1 %2` used to signal
   `%1`, drop `%2` silently, and exit 0.
 - A failing target no longer stops the rest, and the exit code is 1 if any target

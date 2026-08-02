@@ -790,6 +790,7 @@ impl Grep {
         let mut total_rich: Vec<serde_json::Value> = Vec::new();
         let mut total_matches: usize = 0;
         let mut files_with_matches = Vec::new();
+        let mut count_lines = Vec::new();
         let mut error_text = String::new();
 
         let opts = GrepOptions {
@@ -834,6 +835,12 @@ impl Grep {
                 }
             };
 
+            if count_only {
+                // GNU parity: one `name:count` line per searched file, zero
+                // counts included.
+                count_lines.push(format!("{}:{}", display_name, render.match_count));
+            }
+
             if render.match_count > 0 {
                 total_matches += render.match_count;
                 files_with_matches.push(display_name.clone());
@@ -859,9 +866,14 @@ impl Grep {
                 ExecResult::with_output(OutputData::text(files_with_matches.join("\n") + "\n"))
             }
         } else if count_only {
-            // GNU `grep -c` over multiple files prints a per-file/total count
-            // but still exits 1 when nothing matched in any file.
-            let mut r = ExecResult::with_output(OutputData::text(format!("{}\n", total_matches)));
+            // GNU `grep -c` over multiple files prints a `name:count` line per
+            // file but still exits 1 when nothing matched in any file.
+            let text = if count_lines.is_empty() {
+                String::new()
+            } else {
+                count_lines.join("\n") + "\n"
+            };
+            let mut r = ExecResult::with_output(OutputData::text(text));
             if total_matches == 0 {
                 r.code = 1;
             }
