@@ -27,6 +27,24 @@ breaking entries are marked **BREAKING**.
   self-contained — wired to no gate site, so no existing kaish surface changes
   behavior. `ToolCtx::request_approval` and the gate-site cutover follow in later
   PRs.
+- **`ToolCtx::request_approval`/`approvals`/`settle_with`** (ledger PR 3,
+  `docs/approval-ledger.md`) — plugins become first-class approval-ledger gate
+  producers. `#[async_trait]` on `kaish-tool-api`'s `ToolCtx`; all three methods
+  are defaulted (fail-closed `Unsupported`, an empty `Approvals` view, and a
+  no-op), so an existing implementor compiles unchanged. New
+  `kaish_tool_api::{ApprovalOutcome, AttemptHandle, Approvals}` — a plugin
+  depending on only `kaish-tool-api` can gate an operation with no
+  `kaish-kernel` dependency and no `as_any_mut` downcast. `ExecContext` gained
+  real implementations behind a new optional `ledger_access` field (`None`
+  everywhere in production — there is no `KernelConfig::with_ledger` yet, PR
+  4), and the dispatcher's drop-safe `AttemptGuard`, whose `Drop` queues a
+  best-effort `Outcome::Unknown` settlement onto a synchronous outbox the
+  ledger drains on `settle`/`redeem`/`redeem_with_token`/`abandon_request` and
+  on its sweep tick — a cancelled or panicking tool never leaves an attempt
+  looking like it silently succeeded. `ExecResult` gained a new `approval`
+  field (alongside the existing `latch`, untouched) carrying the pending
+  view's control-plane payload. Wired to no gate site — additive, no
+  observable behavior change anywhere else in kaish.
 - **`JobId`/`JobStatus`/`JobInfo` (kaish-types) now derive `Serialize`/`Deserialize`**
   (GH #241) — the last type family in kaish-types without serde.
 - `schemars::JsonSchema` on those types sits behind the `schema` feature, matching
