@@ -8,6 +8,7 @@ use clap::{CommandFactory, Parser};
 use crate::ast::Value;
 use crate::interpreter::{ExecResult, OutputData, OutputNode};
 use crate::trash::TrashBackend;
+use crate::ledger::KernelOperation;
 use crate::tools::{schema_from_clap, ExecContext, ToolCtx, GlobalFlags, Tool, ToolArgs, ToolSchema};
 
 /// KaishTrash tool: manage the system trash.
@@ -17,7 +18,7 @@ pub struct KaishTrash;
 #[derive(Parser, Debug)]
 #[command(name = "kaish-trash", about = "Manage the freedesktop.org Trash")]
 struct KaishTrashArgs {
-    /// Confirmation nonce for empty (--confirm=NONCE).
+    /// Approval token for `empty` (`--confirm=<token>`).
     #[arg(id = "confirm", long = "confirm")]
     _confirm: Option<String>,
 
@@ -148,26 +149,32 @@ async fn cmd_empty(args: &ToolArgs, ctx: &mut ExecContext) -> ExecResult {
         _ => None,
     });
 
-    // Empty always requires nonce confirmation (inherently destructive)
-    if let Some(nonce) = &confirm {
-        match ctx.verify_nonce(nonce, "kaish-trash empty", &[]) {
-            Ok(()) => {
-                let trash = match get_backend(ctx, "empty") {
-                    Ok(t) => t,
-                    Err(e) => return e,
-                };
-                match trash.purge_all().await {
-                    Ok(0) => ExecResult::with_output(OutputData::text("trash is already empty")),
-                    Ok(_) => ExecResult::with_output(OutputData::text("trash emptied")),
-                    Err(e) => ExecResult::failure(1, format!("kaish-trash empty: {}", e)),
-                }
-            }
-            Err(e) => ExecResult::failure(1, format!("kaish-trash empty: {}", e)),
-        }
-    } else {
-        ctx.latch_result("kaish-trash empty", &[], "emptying trash is destructive", |nonce| {
-            format!("kaish-trash empty --confirm=\"{}\"", nonce)
-        })
+    // `trash.empty` gates every time, independent of any subscription or
+    // policy (spec §F.1): it discards the recovery net that makes every other
+    // fs.* operation survivable, so it is not something a session can turn
+    // off. This is also why the dispatch seam captures the invocation
+    // unconditionally — see `kernel.rs`'s capture site.
+    if let Err(result) = ctx
+        .request_gate(
+            KernelOperation::TrashEmpty,
+            &[],
+            "emptying the trash is irreversible",
+            "kaish-trash empty --confirm=<token>".to_string(),
+            confirm.as_deref(),
+        )
+        .await
+    {
+        return crate::tools::prefix_error("kaish-trash empty", result);
+    }
+
+    let trash = match get_backend(ctx, "empty") {
+        Ok(t) => t,
+        Err(e) => return e,
+    };
+    match trash.purge_all().await {
+        Ok(0) => ExecResult::with_output(OutputData::text("trash is already empty")),
+        Ok(_) => ExecResult::with_output(OutputData::text("trash emptied")),
+        Err(e) => ExecResult::failure(1, format!("kaish-trash empty: {}", e)),
     }
 }
 
@@ -198,12 +205,12 @@ async fn cmd_config(args: &ToolArgs, ctx: &mut ExecContext) -> ExecResult {
     // Show current config
     let enabled = ctx.scope.trash_enabled();
     let max_size = ctx.scope.trash_max_size();
-    let latch = ctx.scope.latch_enabled();
+    let enforce = ctx.scope.fs_enforce();
 
     let nodes = vec![
         OutputNode::new("enabled").with_cells(vec![enabled.to_string()]),
         OutputNode::new("max_size").with_cells(vec![format_size(max_size)]),
-        OutputNode::new("latch").with_cells(vec![latch.to_string()]),
+        OutputNode::new("latch").with_cells(vec![enforce.to_string()]),
     ];
 
     ExecResult::with_output(OutputData::table(

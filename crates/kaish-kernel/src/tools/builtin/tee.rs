@@ -6,6 +6,7 @@ use std::path::Path;
 
 use crate::backend::WriteMode;
 use crate::interpreter::ExecResult;
+use crate::ledger::KernelOperation;
 use crate::tools::{schema_from_clap, ExecContext, ToolCtx, GlobalFlags, Tool, ToolArgs, ToolSchema};
 
 /// Tee tool: duplicate stdin to stdout and files.
@@ -19,7 +20,7 @@ struct TeeArgs {
     #[arg(id = "append", short = 'a', long = "append")]
     _append: bool,
 
-    /// Confirmation nonce for a latch-gated overwrite.
+    /// Approval token for a gated overwrite (`--confirm=<token>`).
     #[arg(long = "confirm")]
     confirm: Option<String>,
 
@@ -83,9 +84,13 @@ impl Tool for Tee {
         // trash the prior content is snapshotted before we write below.
         let targets: Vec<(String, bool)> = paths.iter().map(|p| (p.clone(), append)).collect();
         let snapshots = match ctx
-            .gate_overwrites("tee", &targets, parsed.confirm.as_deref(), |nonce, joined| {
-                format!("tee --confirm=\"{nonce}\" {joined}")
-            })
+            .gate_overwrites(
+                KernelOperation::FsOverwrite,
+                "tee",
+                &targets,
+                parsed.confirm.as_deref(),
+                |joined| format!("tee --confirm=<token> {joined}"),
+            )
             .await
         {
             Ok(s) => s,

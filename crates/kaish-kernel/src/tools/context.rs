@@ -6,15 +6,20 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
-use kaish_types::approval::{Capture, Invocation, Principal, RequestContext};
+use kaish_types::approval::{
+    ApprovalRequest, ApprovalRequestDraft, AttemptId, Capture, Invocation, Observation, Outcome,
+    Principal, RequestContext, RequestId, Resource, ResourceRef,
+};
 
 use crate::ast::Value;
 use crate::backend::{KernelBackend, LocalBackend};
 use crate::dispatch::PipelinePosition;
 use crate::ignore_config::IgnoreConfig;
 use crate::interpreter::{ExecResult, Scope};
-use crate::ledger::{Approvals, Requester};
-use crate::nonce::NonceStore;
+use crate::ledger::{
+    Approvals, AttemptGuard, ChainContext, ChainOutcome, DecisionChain, KernelOperation, LedgerError,
+    Requester,
+};
 use crate::output_limit::OutputLimitConfig;
 use crate::scheduler::{JobManager, PipeReader, PipeWriter, StderrStream};
 use crate::tools::ToolRegistry;
@@ -117,11 +122,6 @@ pub struct ExecContext {
     /// When `false`, external commands (PATH lookup, `exec`, `spawn`) are blocked.
     /// Only kaish builtins and backend-registered tools (MCP) are available.
     pub allow_external_commands: bool,
-    /// Confirmation nonce store for latch-gated operations.
-    ///
-    /// Arc-shared across pipeline stages so nonces issued in one stage
-    /// can be validated in another.
-    pub nonce_store: NonceStore,
     /// Trash backend for safe file deletion.
     ///
     /// Always present when the kernel creates the context (even if `set -o trash`
@@ -159,10 +159,11 @@ pub struct ExecContext {
 
     /// The command currently executing, captured at the dispatch seam as
     /// `(dispatch_name, argv)` where `argv` is the canonical `ToolArgs::to_argv`.
-    /// A latch producer (`latch_result`/`gate_overwrites`) stamps this into the
-    /// `LatchRequest` so `Kernel::confirm` can replay the *exact* invocation with
-    /// `--confirm=<nonce>` — no re-parsing of the human `hint`. `None` for a
-    /// direct `tool.execute` call in a unit test (no dispatch seam ran).
+    /// A gate site stamps this into the request's `Capture` so
+    /// `Kernel::confirm` can replay the *exact* invocation — no re-parsing of
+    /// the human `hint`. `None` for a direct `tool.execute` call in a unit
+    /// test (no dispatch seam ran), which records `Capture::DirectExecution`
+    /// rather than a silently empty argv.
     ///
     /// Boxed to keep `ExecContext` lean: it is cloned/rebuilt at every recursion
     /// level (pipeline stages, `$(...)`, functions), so an inline `(String,
@@ -200,6 +201,44 @@ pub struct ExecContext {
     /// return `Unsupported`: no `KernelConfig::with_ledger` exists yet
     /// (that builder is PR 4), so nothing sets this outside a test.
     pub ledger_access: Option<LedgerAccess>,
+
+    /// Kernel-internal replay correlation (`docs/approval-ledger.md` §B.4).
+    /// `Kernel::confirm` reserves the attempt against an already-granted
+    /// request and stamps it here before dispatching the captured
+    /// invocation; the gate site's fresh draft is then *matched* against
+    /// that request rather than posting a second one. Consumed by the first
+    /// gate it reaches, so a replayed command with two gates cannot reuse
+    /// one authorization twice.
+    ///
+    /// Never crosses a public API and never reaches a tool.
+    pub(crate) redemption: Option<RedemptionContext>,
+
+    /// Why capturing this invocation failed, when it did (spec §B.4). Set at
+    /// the dispatch seam in place of the empty argv the latch substituted;
+    /// a request posted with this set records `Capture::CaptureFailed`, and
+    /// `confirm` refuses to replay it naming the variant.
+    pub(crate) capture_failure: Option<String>,
+
+    /// Attempts reserved during this invocation, each in its drop-safe
+    /// guard (spec §C.1). The dispatch seam settles them with the real exit
+    /// code when `tool.execute()` returns; dropping this context instead —
+    /// a cancelled future, a panic — settles them `Unknown{Cancelled}`,
+    /// because a tool that was interrupted may already have written.
+    ///
+    /// Also the ownership record `settle_with` checks: a tool may report an
+    /// outcome for an attempt *this* context reserved and no other.
+    pub(crate) attempts: Vec<AttemptGuard>,
+}
+
+/// Kernel-internal correlation between a replay and the request it fulfills
+/// (`docs/approval-ledger.md` §B.4). Never crosses a public API, never
+/// reaches a tool.
+#[derive(Debug, Clone)]
+pub(crate) struct RedemptionContext {
+    /// The granted request being replayed.
+    pub request_id: RequestId,
+    /// The attempt `Kernel::confirm` already reserved against it.
+    pub attempt_id: AttemptId,
 }
 
 /// Everything [`ExecContext`]'s `ToolCtx::request_approval` needs to post a
@@ -212,17 +251,22 @@ pub struct LedgerAccess {
     pub requester: Requester,
     /// The read side, for `ToolCtx::approvals`.
     pub approvals: Approvals,
-    /// Who this context's requests are attributed to.
-    ///
-    /// A fixed value for now — `KernelConfig::with_principal` (PR 4) is what
-    /// will let an embedder set this per session, the same stopgap
-    /// `ApproverHandle`'s PR-2-era placeholder principal already documents.
+    /// The four-stage decision chain (spec §C.2) a fresh request runs
+    /// through. Holds the ledger's authority internally; nothing reachable
+    /// from script or tool code can get that authority back out of it.
+    pub chain: Arc<DecisionChain>,
+    /// The backgrounded job this context runs on behalf of, stamped onto
+    /// every request it posts. **The one stamping site** — `Job::approval()`
+    /// and `wait` both read it back off the record rather than each
+    /// re-stamping their own copy.
+    pub job_id: Option<u64>,
+    /// Who this context's requests are attributed to. Set by
+    /// `KernelConfig::with_principal`.
     pub principal: Principal,
     /// How long a posted request stays live with no decision, when this
     /// context posts one. `ExecContext` has no access to the `LedgerConfig`
     /// that minted `requester` (only the handle), so this is threaded
-    /// alongside it rather than re-derived — see this PR's decisions list
-    /// for why.
+    /// alongside it rather than re-derived.
     pub request_ttl: Duration,
 }
 
@@ -233,14 +277,14 @@ pub(crate) enum MutationAction {
     Proceed,
     /// Snapshot the prior content to trash, then write.
     TrashFirst,
-    /// Gate behind a confirmation nonce (exit 2 until `--confirm`).
-    Latch,
+    /// Hold behind an approval request (exit 2 until it is granted).
+    Gate,
 }
 
 /// Prior content the gate snapshotted, keyed by resolved path, for callers that
 /// compare-and-swap their overwrite against it (see `overwrite_checked`). Only
 /// gated existing targets that were trash-snapshotted appear; a new file, an
-/// append, an excluded/ungated path, or a latch-only target is absent — the
+/// append, an excluded/ungated path, or a gate-only target is absent — the
 /// caller writes those without a CAS expectation.
 pub(crate) type GateSnapshots = std::collections::HashMap<PathBuf, Vec<u8>>;
 
@@ -254,28 +298,107 @@ pub(crate) type GateSnapshots = std::collections::HashMap<PathBuf, Vec<u8>>;
 /// None`, so they are handled by the no-real-path gating path, not here — there
 /// is deliberately no lexical `/v` exclusion. Mount-coverage routing delegates
 /// unclaimed `/v/*` to the embedder's backend, whose *real* content under `/v`
-/// (a real path like `/v/cas/blob.bin`) must keep the trash/latch safety net; a
+/// (a real path like `/v/cas/blob.bin`) must keep the trash/approval safety net; a
 /// `/v` prefix exclusion here would silently strip it.
 pub(crate) fn is_trash_excluded(real_path: Option<&Path>) -> bool {
     matches!(real_path, Some(rp) if rp.starts_with("/tmp"))
 }
 
-/// Decide how to gate a truncating overwrite, mirroring `rm`'s trash/latch
+/// The resource references a draft names, as the draft matcher compares them.
+pub(crate) fn resource_refs(draft: &ApprovalRequestDraft) -> Vec<ResourceRef> {
+    let mut refs: Vec<ResourceRef> = draft.resources.iter().map(|r| r.to_ref()).collect();
+    refs.sort_by(|a, b| (&a.kind, &a.id).cmp(&(&b.kind, &b.id)));
+    refs.dedup();
+    refs
+}
+
+/// Whether a fresh draft describes the operation and resources that were
+/// approved (spec §B.4). Set semantics on resources, matching how a standing
+/// grant covers them (§C.4): a duplicate imposes no extra requirement.
+///
+/// `Err(detail)` names the first difference, because "this replay is not what
+/// was approved" is only actionable if it says *how*.
+pub(crate) fn draft_matches(
+    draft: &ApprovalRequestDraft,
+    operation: &kaish_types::approval::OperationId,
+    resources: &[Resource],
+) -> Result<(), String> {
+    if draft.operation != *operation {
+        return Err(format!(
+            "it requests {} where {operation} was approved",
+            draft.operation
+        ));
+    }
+    let mut approved: Vec<ResourceRef> = resources.iter().map(|r| r.to_ref()).collect();
+    approved.sort_by(|a, b| (&a.kind, &a.id).cmp(&(&b.kind, &b.id)));
+    approved.dedup();
+    let presented = resource_refs(draft);
+    if presented != approved {
+        return Err(format!(
+            "it touches [{}] where [{}] was approved",
+            render_refs(&presented),
+            render_refs(&approved)
+        ));
+    }
+    Ok(())
+}
+
+fn render_refs(refs: &[ResourceRef]) -> String {
+    refs.iter()
+        .map(|r| format!("{}:{}", r.kind, r.id))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+/// Map a ledger failure at redemption onto the outcome a gate site returns.
+/// `AlreadySettled` is the one that matters most: a key presented after a
+/// successful settlement reports what already happened instead of running the
+/// operation a second time (spec §B.4).
+fn approval_error(id: RequestId, err: LedgerError) -> kaish_tool_api::ApprovalOutcome {
+    use kaish_tool_api::ApprovalOutcome;
+    match err {
+        LedgerError::Refused { id, detail } => ApprovalOutcome::Refused { request: id, detail },
+        LedgerError::LiveCapacity { .. }
+        | LedgerError::LiveCapacityPerPrincipal { .. }
+        | LedgerError::RingAtCapacity
+        | LedgerError::SinkUnavailable(_)
+        | LedgerError::CredentialUnavailable(_) => ApprovalOutcome::LedgerUnavailable {
+            reason: err.to_string(),
+        },
+        other => ApprovalOutcome::Denied {
+            request: id,
+            reason: other.to_string(),
+        },
+    }
+}
+
+/// Prefix a gate result's diagnostic with the command that raised it, the way
+/// every other builtin error reads (`rm: …`), without disturbing the typed
+/// control-plane payload riding alongside it.
+pub(crate) fn prefix_error(command: &str, mut result: ExecResult) -> ExecResult {
+    if !result.err.is_empty() && !result.err.starts_with(command) {
+        result.err = format!("{command}: {}", result.err);
+    }
+    result
+}
+
+/// Decide how to gate a truncating overwrite, mirroring `rm`'s trash/approval
 /// priority. Pure so the decision table is unit-testable in isolation.
 ///
 /// - A non-existent target or an append has nothing to lose → `Proceed`.
 /// - A real path under `/tmp` (host scratch) is excluded (matches `rm`) → `Proceed`.
-/// - Trash wins over latch (trash IS the safety net): `TrashFirst` when trash
-///   is on **and** the prior content fits under `trash_max_size` (a file too
-///   big to snapshot can't be backed up, so it falls through, exactly like
-///   `rm`); else `Latch` when latch is on; else `Proceed`.
+/// - Trash wins over the gate (trash IS the safety net): `TrashFirst` when
+///   trash is on **and** the prior content fits under `trash_max_size` (a
+///   file too big to snapshot can't be backed up, so it falls through,
+///   exactly like `rm`); else `Gate` when the `fs.*` enforce policy is on;
+///   else `Proceed`.
 ///
 /// An overlay/in-memory target has `real_path == None`, so it is *not* excluded
 /// and stays gated — the protection is about agent-operation safety, not just
 /// real-FS data (Amy, 2026-06-17).
 pub(crate) fn decide_mutation_action(
     trash_enabled: bool,
-    latch_enabled: bool,
+    enforce: bool,
     real_path: Option<&Path>,
     target_exists: bool,
     is_append: bool,
@@ -291,8 +414,8 @@ pub(crate) fn decide_mutation_action(
     if trash_enabled && file_size <= trash_max_size {
         return MutationAction::TrashFirst;
     }
-    if latch_enabled {
-        return MutationAction::Latch;
+    if enforce {
+        return MutationAction::Gate;
     }
     MutationAction::Proceed
 }
@@ -357,7 +480,6 @@ impl ExecContext {
             ignore_config: IgnoreConfig::none(),
             output_limit: OutputLimitConfig::none(),
             allow_external_commands: true,
-            nonce_store: NonceStore::new(),
             trash_backend: None,
             #[cfg(all(unix, feature = "subprocess"))]
             terminal_state: None,
@@ -370,6 +492,9 @@ impl ExecContext {
             #[cfg(all(feature = "localfs", feature = "overlay"))]
             overlay_handle: None,
             ledger_access: None,
+            redemption: None,
+            capture_failure: None,
+            attempts: Vec::new(),
         }
     }
 
@@ -398,7 +523,6 @@ impl ExecContext {
             ignore_config: IgnoreConfig::none(),
             output_limit: OutputLimitConfig::none(),
             allow_external_commands: true,
-            nonce_store: NonceStore::new(),
             trash_backend: None,
             #[cfg(all(unix, feature = "subprocess"))]
             terminal_state: None,
@@ -411,6 +535,9 @@ impl ExecContext {
             #[cfg(all(feature = "localfs", feature = "overlay"))]
             overlay_handle: None,
             ledger_access: None,
+            redemption: None,
+            capture_failure: None,
+            attempts: Vec::new(),
         }
     }
 
@@ -436,7 +563,6 @@ impl ExecContext {
             ignore_config: IgnoreConfig::none(),
             output_limit: OutputLimitConfig::none(),
             allow_external_commands: true,
-            nonce_store: NonceStore::new(),
             trash_backend: None,
             #[cfg(all(unix, feature = "subprocess"))]
             terminal_state: None,
@@ -449,6 +575,9 @@ impl ExecContext {
             #[cfg(all(feature = "localfs", feature = "overlay"))]
             overlay_handle: None,
             ledger_access: None,
+            redemption: None,
+            capture_failure: None,
+            attempts: Vec::new(),
         }
     }
 
@@ -474,7 +603,6 @@ impl ExecContext {
             ignore_config: IgnoreConfig::none(),
             output_limit: OutputLimitConfig::none(),
             allow_external_commands: true,
-            nonce_store: NonceStore::new(),
             trash_backend: None,
             #[cfg(all(unix, feature = "subprocess"))]
             terminal_state: None,
@@ -487,6 +615,9 @@ impl ExecContext {
             #[cfg(all(feature = "localfs", feature = "overlay"))]
             overlay_handle: None,
             ledger_access: None,
+            redemption: None,
+            capture_failure: None,
+            attempts: Vec::new(),
         }
     }
 
@@ -515,7 +646,6 @@ impl ExecContext {
             ignore_config: IgnoreConfig::none(),
             output_limit: OutputLimitConfig::none(),
             allow_external_commands: true,
-            nonce_store: NonceStore::new(),
             trash_backend: None,
             #[cfg(all(unix, feature = "subprocess"))]
             terminal_state: None,
@@ -528,6 +658,9 @@ impl ExecContext {
             #[cfg(all(feature = "localfs", feature = "overlay"))]
             overlay_handle: None,
             ledger_access: None,
+            redemption: None,
+            capture_failure: None,
+            attempts: Vec::new(),
         }
     }
 
@@ -553,7 +686,6 @@ impl ExecContext {
             ignore_config: IgnoreConfig::none(),
             output_limit: OutputLimitConfig::none(),
             allow_external_commands: true,
-            nonce_store: NonceStore::new(),
             trash_backend: None,
             #[cfg(all(unix, feature = "subprocess"))]
             terminal_state: None,
@@ -566,6 +698,9 @@ impl ExecContext {
             #[cfg(all(feature = "localfs", feature = "overlay"))]
             overlay_handle: None,
             ledger_access: None,
+            redemption: None,
+            capture_failure: None,
+            attempts: Vec::new(),
         }
     }
 
@@ -745,7 +880,6 @@ impl ExecContext {
             ignore_config: self.ignore_config.clone(),
             output_limit: self.output_limit.clone(),
             allow_external_commands: self.allow_external_commands,
-            nonce_store: self.nonce_store.clone(),
             trash_backend: self.trash_backend.clone(),
             #[cfg(all(unix, feature = "subprocess"))]
             terminal_state: self.terminal_state.clone(),
@@ -766,6 +900,12 @@ impl ExecContext {
             // Ledger access is shared: a pipeline stage gates through the
             // same ledger as its parent.
             ledger_access: self.ledger_access.clone(),
+            // Per-invocation: a child stage correlates its own replay and
+            // owns its own reservations. Copying either would let one gate's
+            // authorization travel to another command.
+            redemption: None,
+            capture_failure: None,
+            attempts: Vec::new(),
         }
     }
 
@@ -778,112 +918,365 @@ impl ExecContext {
         self.ignore_config.build_filter(root, &fs).await
     }
 
-    /// Validate a confirmation nonce against a command and paths.
-    ///
-    /// Thin wrapper on `NonceStore::validate` for ergonomic use from builtins.
-    pub fn verify_nonce(&self, nonce: &str, command: &str, paths: &[&str]) -> Result<(), String> {
-        self.nonce_store.validate(nonce, command, paths)
+    /// Record that capturing this invocation failed, so a gate site posts
+    /// `Capture::CaptureFailed` rather than a silently empty argv that
+    /// `confirm` would replay as the wrong command (spec §B.4).
+    pub(crate) fn set_capture_failed(&mut self, reason: String) {
+        self.current_invocation = None;
+        self.capture_failure = Some(reason);
     }
 
-    /// Issue a nonce and build the standard exit-2 latch result.
+    /// Correlate the next gate this context reaches with an attempt already
+    /// reserved against `request` (spec §B.4). Kernel-internal —
+    /// `Kernel::confirm` is the only caller.
+    pub(crate) fn set_redemption(&mut self, request_id: RequestId, attempt_id: AttemptId) {
+        self.redemption = Some(RedemptionContext {
+            request_id,
+            attempt_id,
+        });
+    }
+
+    /// Drop any replay correlation. Called whatever the replay's outcome: a
+    /// stale correlation would let the *next* command adopt an
+    /// authorization that was not for it.
+    pub(crate) fn clear_redemption(&mut self) {
+        self.redemption = None;
+    }
+
+    /// Move the replay correlation into the per-command snapshot. Taking
+    /// rather than cloning is what keeps one authorization to one dispatch.
+    pub(crate) fn take_redemption(&mut self) -> Option<RedemptionContext> {
+        self.redemption.take()
+    }
+
+    /// Receive a replay correlation moved out of the kernel's own context.
+    pub(crate) fn adopt_redemption(&mut self, redemption: Option<RedemptionContext>) {
+        self.redemption = redemption;
+    }
+
+    /// Request approval for one kernel operation — the single call every
+    /// gate site makes (`docs/approval-ledger.md` §C.1).
     ///
-    /// `reason` explains why confirmation is needed (e.g., `"latch enabled"`,
-    /// `"emptying trash is destructive"`). The `confirm_hint` closure receives
-    /// the nonce string so each tool can format its own re-run command.
+    /// `paths` are the resolved paths the operation would touch; they become
+    /// the request's `path` resources. `reason` says why the gate fired and
+    /// `hint` is the display-only re-run template (untrusted producer text,
+    /// spec §C.3 — it never carries a credential). `presented` is the
+    /// `--confirm=<token>` value when the caller supplied one.
     ///
-    /// The result includes structured data in `.data` for programmatic access:
-    /// ```json
-    /// {"nonce": "4b1e0d9a7c3f28e6b5a0c1d4e7f2938a", "command": "rm", "paths": [...],
-    ///  "hint": "rm --confirm=4b1e0d9a7c3f28e6b5a0c1d4e7f2938a file", "ttl": 60}
-    /// ```
-    pub fn latch_result(
-        &self,
-        command: &str,
+    /// `Ok(attempt)` means an attempt is reserved and the caller may perform
+    /// the operation; it settles automatically when the invocation returns.
+    /// `Err(result)` is what the caller **must return verbatim** — exit 2
+    /// with the pending request, or exit 1 naming a denial, a refusal, or a
+    /// settled outcome. Never fall through to the operation on `Err`.
+    pub(crate) async fn request_gate(
+        &mut self,
+        operation: KernelOperation,
         paths: &[&str],
         reason: &str,
-        confirm_hint: impl FnOnce(&str) -> String,
-    ) -> ExecResult {
-        // Entropy failure is fatal — never emit a guessable confirmation
-        // token (see `nonce::generate_nonce`). Mirrors `mktemp`'s handling of
-        // the same underlying `getrandom` failure mode.
-        let nonce = match self.nonce_store.issue(command, paths) {
-            Ok(nonce) => nonce,
+        hint: String,
+        presented: Option<&str>,
+    ) -> Result<kaish_tool_api::AttemptHandle, ExecResult> {
+        let mut builder = ApprovalRequest::builder(operation.as_str())
+            .risk(operation.risk())
+            .reason(reason)
+            .hint(hint);
+        for path in paths {
+            // No transition claim: PR 5 is a pure migration, and
+            // redemption-time state verification (the `StateResolver` that
+            // makes a claim checkable) is ledger PR 6. A resource with no
+            // transition implies no condition, so a grant over it is
+            // unconditioned — and the record says so.
+            builder = builder.resource(Resource::plain("path", *path));
+        }
+        let draft = match builder.build() {
+            Ok(draft) => draft,
+            // Unreachable in practice — every `KernelOperation` id is
+            // well-formed and non-empty (proven in `ledger::operation`'s
+            // tests) — but a build failure must never mean "proceed".
             Err(e) => {
-                return ExecResult::failure(1, format!("{command}: could not obtain system entropy: {e}"));
+                return Err(ExecResult::failure(
+                    1,
+                    format!("{operation}: could not build the approval request: {e}"),
+                ))
             }
         };
-        let ttl = self.nonce_store.ttl().as_secs();
-        let authorized = if paths.is_empty() {
-            String::new()
-        } else {
-            format!("\nAuthorized: {}", paths.join(", "))
-        };
-        let hint = confirm_hint(&nonce);
-
-        let mut result = ExecResult::failure(2, format!(
-            "{command}: confirmation required ({reason}){authorized}\nTo confirm, run: {hint}\nNonce expires in {ttl} seconds."
-        ));
-        // Stamp the exact invocation captured at the dispatch seam so
-        // `Kernel::confirm` can replay it precisely. `None` (a direct
-        // `tool.execute` in a unit test, no seam) leaves tool/argv empty — such
-        // a latch is confirmable only via the `hint` string, not `confirm`.
-        let (tool, argv) = self.current_invocation.as_deref().cloned().unwrap_or_default();
-        // The latch request rides its own typed control-plane field, distinct
-        // from the data-plane `.data`. `ExecResult::latch_request` reads it back.
-        result.latch = Some(Box::new(crate::interpreter::LatchRequest {
-            nonce,
-            command: command.to_string(),
-            paths: paths.iter().map(|p| (*p).to_string()).collect(),
-            hint,
-            tool,
-            argv,
-            ttl,
-            // Unknown at this dispatch-seam construction site — a
-            // *backgrounded* invocation gets this stamped later by
-            // `Job::latch()` when the job is queried through the JobManager
-            // (see scheduler/job.rs). A foreground latch never gets one.
-            job_id: None,
-        }));
-        result
+        self.gate(draft, presented).await.proceed()
     }
 
-    /// Gate a batch of truncating overwrites through latch + trash, the way
-    /// `rm` gates deletes — so `tee`/`patch`/`sed -i` can't silently clobber a
-    /// file with no recoverable prior copy and no confirmation.
+    /// The one acceptance contract behind every approval (spec §B.4): a
+    /// replay correlated by [`RedemptionContext`], a presented
+    /// `--confirm=<token>`, and a fresh request all land here, and the same
+    /// draft matcher decides whether the operation in hand is the operation
+    /// that was approved.
+    pub(crate) async fn gate(
+        &mut self,
+        draft: ApprovalRequestDraft,
+        presented: Option<&str>,
+    ) -> kaish_tool_api::ApprovalOutcome {
+        use kaish_tool_api::ApprovalOutcome;
+
+        let Some(access) = self.ledger_access.clone() else {
+            return ApprovalOutcome::Unsupported;
+        };
+
+        // ── The replay path ─────────────────────────────────────────
+        // `Kernel::confirm` already reserved the attempt; this draft must
+        // describe the operation that was granted, or the replay turned into
+        // something else on its way here.
+        if let Some(redemption) = self.redemption.take() {
+            return self.authorize_replay(&access, redemption, &draft).await;
+        }
+
+        // ── The bearer-key path ─────────────────────────────────────
+        // The draft names the request; the key authorizes it. A wrong key
+        // still counts against the request the draft describes, which is
+        // what gives the rejected-attempt limit somewhere to attach (§F.3).
+        if let Some(key) = presented {
+            return self.present_key(&access, key, &draft).await;
+        }
+
+        // ── A fresh request ─────────────────────────────────────────
+        let capture = self.capture();
+        let request = match access
+            .requester
+            .post_request(
+                draft,
+                access.principal.clone(),
+                capture,
+                RequestContext::default(),
+                access.request_ttl,
+                access.job_id,
+            )
+            .await
+        {
+            Ok(request) => request,
+            Err(err) => {
+                return ApprovalOutcome::LedgerUnavailable {
+                    reason: err.to_string(),
+                }
+            }
+        };
+
+        let outcome = {
+            let chain_ctx = ChainContext::new(&*self, self.cancel.clone());
+            access.chain.decide(&request, &chain_ctx).await
+        };
+        match outcome {
+            Ok(ChainOutcome::Granted { .. }) => {
+                self.reserve(&access, &request.id, Vec::new()).await
+            }
+            Ok(ChainOutcome::Denied { reason, .. }) => ApprovalOutcome::Denied {
+                request: request.id,
+                reason,
+            },
+            Ok(ChainOutcome::Deferred) => ApprovalOutcome::Pending(Box::new(request.into())),
+            Ok(ChainOutcome::Cancelled) => ApprovalOutcome::Cancelled {
+                request: request.id,
+            },
+            Err(err) => ApprovalOutcome::LedgerUnavailable {
+                reason: err.to_string(),
+            },
+        }
+    }
+
+    /// How this invocation was captured, for a replay by the approval side
+    /// (spec §B.4). `DirectExecution` is a `tool.execute` with no dispatch
+    /// seam above it — grantable and redeemable by key, but not replayable.
+    fn capture(&self) -> Capture {
+        if let Some(reason) = &self.capture_failure {
+            return Capture::CaptureFailed {
+                reason: reason.clone(),
+            };
+        }
+        match self.current_invocation.as_deref() {
+            Some((tool, argv)) => Capture::Exact(Invocation {
+                tool: tool.clone(),
+                argv: argv.clone(),
+            }),
+            None => Capture::DirectExecution,
+        }
+    }
+
+    /// Accept an attempt `Kernel::confirm` already reserved, once the fresh
+    /// draft is shown to describe the granted request.
+    async fn authorize_replay(
+        &mut self,
+        access: &LedgerAccess,
+        redemption: RedemptionContext,
+        draft: &ApprovalRequestDraft,
+    ) -> kaish_tool_api::ApprovalOutcome {
+        use kaish_tool_api::ApprovalOutcome;
+
+        let Some(chain) = access.approvals.get(&redemption.request_id) else {
+            return ApprovalOutcome::LedgerUnavailable {
+                reason: LedgerError::NotFound(redemption.request_id).to_string(),
+            };
+        };
+        if let Err(detail) = draft_matches(draft, &chain.request.operation, &chain.request.resources)
+        {
+            // Settle the attempt `confirm` reserved rather than leaving it
+            // in flight: a failed attempt does not consume the grant, so the
+            // operator can correct the replay and try again inside
+            // `not_after` (spec §A.1).
+            let _ = access
+                .requester
+                .settle_by_ids(
+                    &redemption.request_id,
+                    redemption.attempt_id,
+                    Outcome::Exit(1),
+                )
+                .await;
+            return ApprovalOutcome::Refused {
+                request: redemption.request_id.clone(),
+                detail: LedgerError::DraftMismatch {
+                    request: redemption.request_id,
+                    detail,
+                }
+                .to_string(),
+            };
+        }
+        ApprovalOutcome::Authorized(self.adopt(
+            access,
+            redemption.request_id,
+            redemption.attempt_id,
+        ))
+    }
+
+    /// Redeem by presenting a bearer credential, resolving which request the
+    /// presentation is for from the draft itself (spec §F.3 item 2).
+    async fn present_key(
+        &mut self,
+        access: &LedgerAccess,
+        key: &str,
+        draft: &ApprovalRequestDraft,
+    ) -> kaish_tool_api::ApprovalOutcome {
+        use kaish_tool_api::ApprovalOutcome;
+
+        let Some(id) = access.approvals.match_draft(&draft.operation, &resource_refs(draft)) else {
+            // A key describing no request kaish has ever seen counts against
+            // nothing — a guesser cannot void a request it cannot describe.
+            access.requester.reject_unmatched_key();
+            return ApprovalOutcome::Unmatched {
+                detail: format!(
+                    "no approval request for {} over [{}]",
+                    draft.operation,
+                    render_refs(&resource_refs(draft))
+                ),
+            };
+        };
+        match access
+            .requester
+            .redeem_with_token(&id, key, access.principal.clone(), Vec::new())
+            .await
+        {
+            Ok(attempt) => {
+                let attempt_id = attempt.attempt_id();
+                ApprovalOutcome::Authorized(self.adopt(access, id, attempt_id))
+            }
+            Err(err) => approval_error(id, err),
+        }
+    }
+
+    /// Reserve an attempt against a request this execution just had granted.
+    async fn reserve(
+        &mut self,
+        access: &LedgerAccess,
+        id: &RequestId,
+        observed: Vec<Observation>,
+    ) -> kaish_tool_api::ApprovalOutcome {
+        use kaish_tool_api::ApprovalOutcome;
+        match access
+            .requester
+            .redeem(id, access.principal.clone(), observed)
+            .await
+        {
+            Ok(attempt) => {
+                let attempt_id = attempt.attempt_id();
+                ApprovalOutcome::Authorized(self.adopt(access, id.clone(), attempt_id))
+            }
+            Err(err) => approval_error(id.clone(), err),
+        }
+    }
+
+    /// Take ownership of a reserved attempt: wrap it in its drop-safe guard
+    /// (so an interrupted invocation settles `Unknown`, never silently) and
+    /// hand the tool a handle naming it.
+    fn adopt(
+        &mut self,
+        access: &LedgerAccess,
+        request: RequestId,
+        attempt: AttemptId,
+    ) -> kaish_tool_api::AttemptHandle {
+        self.attempts.push(AttemptGuard::new(
+            access.requester.clone(),
+            crate::ledger::AttemptHandle::from_reservation(request.clone(), attempt),
+        ));
+        kaish_tool_api::AttemptHandle::from_reservation(request, attempt)
+    }
+
+    /// Settle every attempt this invocation reserved with its real exit code
+    /// — the dispatch seam's one call after `tool.execute()` returns (spec
+    /// §C.1). Draining the guards here is what makes the normal path a
+    /// reported `Exit(code)` rather than the `Unknown{Cancelled}` their
+    /// `Drop` would otherwise queue.
+    pub(crate) async fn settle_attempts(&mut self, code: i64) {
+        for guard in std::mem::take(&mut self.attempts) {
+            if let Err(err) = guard.settle(Outcome::Exit(code)).await {
+                // Already-terminal is an expected race (the tool reported its
+                // own richer outcome through `settle_with`); anything else is
+                // worth a trace so it is not silently lost.
+                tracing::debug!(error = %err, "settling a reserved attempt did not apply");
+            }
+        }
+    }
+
+    /// Gate a batch of truncating overwrites through the approval ledger +
+    /// trash, the way `rm` gates deletes — so `tee`/`patch`/`sed -i` can't
+    /// silently clobber a file with no recoverable prior copy and no
+    /// approval.
     ///
-    /// Each target is `(display_path, is_append)`. A path that doesn't exist yet
-    /// or is an append has nothing to lose and passes. For an existing file
-    /// under `set -o trash`, the prior content is copied to trash first (via
-    /// `trash_bytes`) so it's recoverable; the file is left in place for the
-    /// caller to overwrite. Under `set -o latch` (and trash off) the batch needs
-    /// `--confirm=<nonce>`: the first call returns an exit-2 latch result with
-    /// one nonce scoping every latched path.
+    /// Each target is `(display_path, is_append)`. A path that doesn't exist
+    /// yet or is an append has nothing to lose and passes. For an existing
+    /// file under `set -o trash`, the prior content is copied to trash first
+    /// (via `trash_bytes`) so it's recoverable; the file is left in place for
+    /// the caller to overwrite. Under the `fs.*` enforce policy (and trash
+    /// off) the batch needs approval: the first call returns an exit-2 result
+    /// with one request covering every gated path.
     ///
     /// `Ok(snapshots)` means every snapshot is done and the caller may write
     /// all targets; `snapshots` maps each trash-snapshotted target's resolved
     /// path to its prior bytes, so a byte-oriented caller can pass them as the
     /// `expected` to `overwrite_checked` for a binary-safe compare-and-swap.
-    /// `Err(result)` is what the caller must return verbatim (the latch prompt,
-    /// an invalid nonce, or a trash failure — never fall through to a
+    /// `Err(result)` is what the caller must return verbatim (the pending
+    /// request, a rejected key, or a trash failure — never fall through to a
     /// destructive overwrite on error).
     ///
-    /// `confirm_hint` builds the re-run command shown in the latch prompt, given
-    /// the nonce and the space-joined latched paths. Most callers want
-    /// `|nonce, joined| format!("{command} --confirm=\"{nonce}\" {joined}")`, but
-    /// a tool whose argv carries operands the operation can't run without — e.g.
+    /// `confirm_hint` builds the re-run command shown in the prompt, given
+    /// the space-joined gated paths. Most callers want
+    /// `|joined| format!("{command} --confirm=<token> {joined}")`, but a tool
+    /// whose argv carries operands the operation can't run without — e.g.
     /// `sed -i`'s expression — must reinject them here, or the advertised
     /// re-run will misbehave (or hang on stdin).
+    ///
+    /// `operation` is explicit rather than derived from `command`: spec §A.6
+    /// wants a new gate site to be a *compile* error until it names its
+    /// operation, and a string sniff on the command name would instead pick
+    /// a plausible wrong default in silence.
     pub async fn gate_overwrites(
         &mut self,
+        operation: KernelOperation,
         command: &str,
         targets: &[(String, bool)],
         confirm: Option<&str>,
-        confirm_hint: impl FnOnce(&str, &str) -> String,
+        confirm_hint: impl FnOnce(&str) -> String,
     ) -> Result<GateSnapshots, ExecResult> {
         let trash_enabled = self.scope.trash_enabled();
-        let latch_enabled = self.scope.latch_enabled();
-        // Fast path: both gates off, nothing to do.
-        if !trash_enabled && !latch_enabled {
+        let enforce = self.scope.fs_enforce();
+        // Fast path: nothing is subscribed and nothing is trashed, so this
+        // costs one branch and allocates nothing (spec §C.5 — a large tree
+        // must not pay a per-path ledger cost unless an operator asked for
+        // it).
+        if !trash_enabled && !enforce {
             return Ok(GateSnapshots::new());
         }
         let trash_max_size = self.scope.trash_max_size();
@@ -895,7 +1288,7 @@ impl ExecContext {
         }
         // Dedup by resolved path (keep first): a multi-file patch with an
         // explicit target lists the same file once per hunk-group, and we must
-        // not snapshot it N times or list it N times in the latch prompt.
+        // not snapshot it N times or list it N times in the request.
         let mut seen = std::collections::HashSet::new();
         let mut decided = Vec::with_capacity(targets.len());
         for (display, is_append) in targets {
@@ -920,7 +1313,7 @@ impl ExecContext {
             };
             let action = decide_mutation_action(
                 trash_enabled,
-                latch_enabled,
+                enforce,
                 real.as_deref(),
                 exists,
                 *is_append,
@@ -930,26 +1323,23 @@ impl ExecContext {
             decided.push(Decided { display: display.clone(), resolved, action });
         }
 
-        // Latch: one nonce scopes every latched path (subset confirmation).
-        let latched: Vec<&str> = decided
+        // One request covers every gated path in the batch.
+        let gated: Vec<&str> = decided
             .iter()
-            .filter(|d| matches!(d.action, MutationAction::Latch))
+            .filter(|d| matches!(d.action, MutationAction::Gate))
             .map(|d| d.display.as_str())
             .collect();
-        if !latched.is_empty() {
-            match confirm {
-                Some(nonce) => {
-                    if let Err(e) = self.verify_nonce(nonce, command, &latched) {
-                        return Err(ExecResult::failure(1, format!("{command}: {e}")));
-                    }
-                }
-                None => {
-                    let joined = latched.join(" ");
-                    return Err(self.latch_result(command, &latched, "latch enabled", |nonce| {
-                        confirm_hint(nonce, &joined)
-                    }));
-                }
-            }
+        if !gated.is_empty() {
+            let joined = gated.join(" ");
+            self.request_gate(
+                operation,
+                &gated,
+                "the fs.* enforce policy is on and this overwrite has no recoverable prior copy",
+                confirm_hint(&joined),
+                confirm,
+            )
+            .await
+            .map_err(|result| prefix_error(command, result))?;
         }
 
         // Snapshot prior content for every trash-first target before any write,
@@ -1187,48 +1577,22 @@ impl kaish_tool_api::ToolCtx for ExecContext {
         }
     }
 
-    /// Post an approval request against this context's ledger, if it has one
-    /// (`docs/approval-ledger.md` §D.1, ledger PR 3).
+    /// Post an approval request against this context's ledger and run it
+    /// through the decision chain (`docs/approval-ledger.md` §C.1, §C.2).
     ///
-    /// `None` (no `ledger_access`) is today's only production value — there
-    /// is no `KernelConfig::with_ledger` yet (PR 4) — and returns
-    /// `Unsupported`, the fail-closed default. With a ledger wired, this
-    /// always posts and returns `Pending`: PR 3 wires no decision chain (PR
-    /// 4's `Approver`), so every request defers, matching what a
-    /// non-interactive kernel with no approver configured does today (spec
-    /// §C.2, stage 4).
+    /// A context with no ledger returns `Unsupported`, the fail-closed
+    /// default. Otherwise the request is posted, decided, and — when a stage
+    /// granted — redeemed into a reserved attempt before this returns, so a
+    /// tool that gets `Authorized` may proceed immediately.
+    ///
+    /// A plugin presents no credential through this method: the
+    /// `--confirm=<token>` path is `ExecContext::request_gate`'s, and both
+    /// land on the same draft matcher.
     async fn request_approval(
         &mut self,
         req: kaish_types::approval::ApprovalRequestDraft,
     ) -> kaish_tool_api::ApprovalOutcome {
-        let Some(access) = self.ledger_access.clone() else {
-            return kaish_tool_api::ApprovalOutcome::Unsupported;
-        };
-        // Replayable iff a dispatch seam stamped the exact invocation;
-        // otherwise this is a direct `tool.execute()` call with no seam
-        // above it (spec's `Capture::DirectExecution` — a unit test).
-        let capture = match self.current_invocation.as_deref() {
-            Some((tool, argv)) => Capture::Exact(Invocation {
-                tool: tool.clone(),
-                argv: argv.clone(),
-            }),
-            None => Capture::DirectExecution,
-        };
-        // Trace-context capture is deferred: threading the live span's W3C
-        // headers into `RequestContext` needs `telemetry.rs` machinery this
-        // wire-to-no-gate-site PR doesn't add (see this PR's decisions
-        // list). The real gate sites (PR 5) should populate this properly.
-        let context = RequestContext::default();
-        match access
-            .requester
-            .post_request(req, access.principal, capture, context, access.request_ttl, None)
-            .await
-        {
-            Ok(request) => kaish_tool_api::ApprovalOutcome::Pending(Box::new(request.into())),
-            Err(err) => kaish_tool_api::ApprovalOutcome::LedgerUnavailable {
-                reason: err.to_string(),
-            },
-        }
+        self.gate(req, None).await
     }
 
     fn approvals(&self) -> kaish_tool_api::Approvals {
@@ -1238,10 +1602,29 @@ impl kaish_tool_api::ToolCtx for ExecContext {
         }
     }
 
+    /// Report a richer outcome for an attempt **this context reserved**.
+    ///
+    /// The ownership check is the security boundary, not the handle type:
+    /// `settle` has no way to prove who reserved an attempt, so without this
+    /// a tool holding any `&mut dyn ToolCtx` could settle another
+    /// execution's live attempt by naming its ids. A handle for an attempt
+    /// this context did not reserve is refused and traced.
     async fn settle_with(&mut self, attempt: &kaish_tool_api::AttemptHandle, outcome: kaish_types::approval::Outcome) {
         let Some(access) = self.ledger_access.clone() else {
             return;
         };
+        let owned = self.attempts.iter().any(|g| {
+            g.attempt().request_id() == attempt.request_id()
+                && g.attempt().attempt_id() == attempt.attempt_id()
+        });
+        if !owned {
+            tracing::warn!(
+                request = %attempt.request_id(),
+                attempt = %attempt.attempt_id(),
+                "settle_with names an attempt this execution did not reserve — refused"
+            );
+            return;
+        }
         if let Err(err) = access
             .requester
             .settle_by_ids(attempt.request_id(), attempt.attempt_id(), outcome)

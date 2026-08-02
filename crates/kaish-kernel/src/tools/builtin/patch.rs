@@ -17,6 +17,7 @@ use std::path::Path;
 use crate::ast::Value;
 use crate::backend::PatchOp;
 use crate::interpreter::{ExecResult, OutputData};
+use crate::ledger::KernelOperation;
 use crate::tools::builtin::get_path_string;
 use crate::tools::{schema_from_clap, ExecContext, ToolCtx, GlobalFlags, Tool, ToolArgs, ToolSchema};
 
@@ -43,7 +44,7 @@ struct PatchArgs {
     #[arg(long = "file")]
     file: Option<String>,
 
-    /// Confirmation nonce for a latch-gated overwrite.
+    /// Approval token for a gated overwrite (`--confirm=<token>`).
     #[arg(long = "confirm")]
     confirm: Option<String>,
 
@@ -166,9 +167,13 @@ impl Tool for Patch {
                 })
                 .collect();
             if let Err(blocked) = ctx
-                .gate_overwrites("patch", &targets, parsed.confirm.as_deref(), |nonce, joined| {
-                    format!("patch --confirm=\"{nonce}\" {joined}")
-                })
+                .gate_overwrites(
+                    KernelOperation::FsOverwrite,
+                    "patch",
+                    &targets,
+                    parsed.confirm.as_deref(),
+                    |joined| format!("patch --confirm=<token> {joined}"),
+                )
                 .await
             {
                 return blocked;

@@ -31,6 +31,7 @@ mod config;
 mod core;
 mod error;
 mod handles;
+mod operation;
 mod standing;
 
 pub use approver::{
@@ -40,4 +41,42 @@ pub use approver::{
 pub use attempt_guard::AttemptGuard;
 pub use config::{LedgerConfig, LedgerSink, LedgerSinkError};
 pub use error::LedgerError;
+pub use operation::KernelOperation;
 pub use handles::{ApproverHandle, AttemptHandle, AttemptView, Approvals, Ledger, RequestChain, Requester};
+
+/// Test-only: a stamped, tokenless view for exercising the control-plane
+/// `.approval` field (job rows, scatter rows, pipeline overrides) without
+/// standing up a live ledger. In-crate unit tests only — an integration test
+/// gets a real view from a real ledger.
+#[cfg(test)]
+pub(crate) fn sample_view(
+    operation: KernelOperation,
+    paths: &[&str],
+) -> kaish_types::approval::ApprovalRequestView {
+    use kaish_types::approval::{
+        ApprovalRequest, Capture, Invocation, Principal, PrincipalKind, RequestContext, RequestId,
+        Resource,
+    };
+    let draft = ApprovalRequest::builder(operation.as_str())
+        .risk(operation.risk())
+        .reason("the fs.* enforce policy is on")
+        .hint(format!("rm --confirm=<token> {}", paths.join(" ")));
+    paths
+        .iter()
+        .fold(draft, |b, p| b.resource(Resource::plain("path", *p)))
+        .build()
+        .expect("a well-formed draft")
+        .stamp(
+            RequestId::new(0x0badcafe, 1),
+            Principal::new("session", PrincipalKind::Agent),
+            Capture::Exact(Invocation {
+                tool: "rm".to_string(),
+                argv: paths.iter().map(|p| (*p).to_string()).collect(),
+            }),
+            RequestContext::default(),
+            std::time::UNIX_EPOCH,
+            std::time::Duration::from_secs(60),
+            None,
+        )
+        .into()
+}

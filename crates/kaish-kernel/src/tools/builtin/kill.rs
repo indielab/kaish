@@ -66,8 +66,8 @@ struct KillArgs {
     #[arg(short = 's', long, default_value_t = String::from("TERM"))]
     signal: String,
 
-    /// Abandon a latched (confirmation-pending) job. Without this flag, kill
-    /// refuses to destroy a job's pending confirmation gate. Conflicts with
+    /// Abandon a latched (approval-pending) job. Without this flag, kill
+    /// refuses to destroy a job's pending approval request. Conflicts with
     /// a signal (--signal/-s, or a shorthand): discarding a gate delivers
     /// nothing to anyone.
     #[arg(long, conflicts_with = "signal")]
@@ -327,13 +327,13 @@ async fn kill_one(
             Some(m) => m.clone(),
             None => return ExecResult::failure(1, "kill: no job manager"),
         };
-        // A latched job's cached result is the only handle to its pending
-        // confirmation — killing it would silently destroy the gate
+        // A latched job's cached result is the only reference to its pending
+        // approval request — killing it would silently destroy the gate
         // (GH #96). Refuse unless the caller explicitly discards.
         //
         // TOCTOU note: a Running job can race into Latched between this
         // check and kill_job's cancel+remove. That's acceptable — the
-        // guard protects an already-visible confirmation request from
+        // guard protects an already-visible approval request from
         // accidental destruction; a job killed while still running is the
         // caller's stated intent, whatever it was about to become.
         if manager.is_latched(job_id).await {
@@ -341,15 +341,17 @@ async fn kill_one(
                 return ExecResult::failure(
                     1,
                     format!(
-                        "kill: job {job_id} is latched awaiting confirmation — \
-                         fulfill it (see /v/jobs/{job_id}/latch) or abandon it \
-                         with: kill --discard %{job_id}"
+                        "kill: job {job_id} is latched awaiting approval — \
+                         fulfill it (see /v/jobs/{job_id}/approval) or abandon \
+                         it with: kill --discard %{job_id}"
                     ),
                 );
             }
             manager.cancel(job_id).await;
             manager.remove(job_id).await;
-            return ExecResult::success(format!("kill: discarded pending latch for job {job_id}"));
+            return ExecResult::success(format!(
+                "kill: discarded the pending approval request for job {job_id}"
+            ));
         }
         return kill_job(&manager, job_id, signal_name).await;
     }

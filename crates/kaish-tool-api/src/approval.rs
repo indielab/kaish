@@ -18,22 +18,13 @@ use kaish_types::ExecResult;
 /// own two ids — never provenance: a tool cannot tell whether its grant came
 /// from a human, a policy hook, or a standing rule.
 ///
-/// No public constructor outside `#[cfg(test)]` — see
-/// `AttemptHandle::from_ids`'s doc for why a `pub` one (even
-/// `#[doc(hidden)]`) would be a forgeable settlement capability. A doctest
-/// compiles with none of this crate's own `#[cfg(test)]` items visible (the
-/// same boundary a downstream crate sees), so this is a real compiled proof,
-/// not a comment:
-///
-/// ```compile_fail
-/// use kaish_tool_api::AttemptHandle;
-/// use kaish_types::approval::{AttemptId, RequestId};
-///
-/// // `from_ids` doesn't exist here — it's `#[cfg(test)] pub(crate)` in the
-/// // defining crate, invisible to a doctest (compiled as downstream code)
-/// // exactly as it would be to a real plugin crate.
-/// let _handle = AttemptHandle::from_ids(RequestId::parse("req_00000000_1").unwrap(), AttemptId::new(1));
-/// ```
+/// A handle is a *name*, not a capability. [`Self::from_reservation`] is
+/// `#[doc(hidden)] pub` because the kernel lives in another crate and must
+/// build one for an attempt it just reserved — so the boundary that makes
+/// settlement safe is on the consuming side instead: `ToolCtx::settle_with`
+/// refuses any handle naming an attempt the calling execution did not
+/// reserve, and `redeem` re-checks the grant. Naming someone else's attempt
+/// therefore buys nothing.
 #[derive(Debug, Clone)]
 pub struct AttemptHandle {
     request: RequestId,
@@ -51,26 +42,18 @@ impl AttemptHandle {
         self.attempt
     }
 
-    /// Test-only: build a handle from raw ids without a real reservation.
+    /// Name an attempt the ledger reserved. Not part of the supported
+    /// public surface — for the kernel's own `ToolCtx` implementation, which
+    /// reserves the attempt and then has to hand the tool a handle for it
+    /// across a crate boundary.
     ///
-    /// Deliberately **not** exposed outside `#[cfg(test)]` — unlike
-    /// [`ToolCtx::as_any_mut`](crate::ToolCtx::as_any_mut), this is not a
-    /// documented escape hatch for trusted callers. `settle`'s job is to
-    /// finalize whatever `(request, attempt)` pair names a live `Reserved`
-    /// attempt; unlike `redeem`, it does not — and structurally cannot —
-    /// verify that the caller is the one who reserved it, so a `pub`
-    /// constructor here (even `#[doc(hidden)]`) would let any code holding a
-    /// `&mut dyn ToolCtx` settle *any* live attempt in the ledger by
-    /// guessing or observing its ids, not just its own. `ApprovalOutcome`'s
-    /// only real producer is the kernel's own `ExecContext`, which never
-    /// needs this constructor: PR 3 wires no decision chain, so nothing
-    /// today ever returns `Authorized`. When PR 4's decision chain starts
-    /// returning `Authorized` for real, minting the handle needs an
-    /// unforgeable capability (e.g. a per-reservation token bound to the
-    /// execution that redeemed it), which is that PR's job — not a
-    /// cross-crate id constructor.
-    #[cfg(test)]
-    pub(crate) fn from_ids(request: RequestId, attempt: AttemptId) -> Self {
+    /// A handle built here for an attempt the caller did not reserve is
+    /// inert: `ToolCtx::settle_with`'s implementation checks that the
+    /// attempt belongs to the calling execution before settling it, and
+    /// `redeem` re-checks the grant, so a guessed or observed pair of ids
+    /// authorizes nothing and settles nothing.
+    #[doc(hidden)]
+    pub fn from_reservation(request: RequestId, attempt: AttemptId) -> Self {
         Self { request, attempt }
     }
 }
@@ -109,6 +92,19 @@ pub enum ApprovalOutcome {
     LedgerUnavailable {
         /// Why.
         reason: String,
+    },
+    /// Cancellation fired before a decision could be recorded. Nothing was
+    /// granted; the execution is already unwinding.
+    Cancelled {
+        /// The request that was posted before the cancellation.
+        request: RequestId,
+    },
+    /// A credential was presented for an operation no live or retained
+    /// request describes (spec §B.4's draft matcher). Nothing was redeemed,
+    /// and the presentation counted against no request.
+    Unmatched {
+        /// What was presented, as the matcher saw it.
+        detail: String,
     },
 }
 
@@ -152,6 +148,14 @@ impl ApprovalOutcome {
             Self::LedgerUnavailable { reason } => {
                 Err(ExecResult::failure(1, format!("approval ledger unavailable: {reason}")))
             }
+            Self::Cancelled { request } => Err(ExecResult::failure(
+                1,
+                format!("request {request} was cancelled before a decision was recorded"),
+            )),
+            Self::Unmatched { detail } => Err(ExecResult::failure(
+                1,
+                format!("the presented key matches no approval request — {detail}"),
+            )),
         }
     }
 }

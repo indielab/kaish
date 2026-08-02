@@ -97,7 +97,7 @@ pub(crate) async fn apply_redirects(
                 // redirect), or a structured result leaks past `x=$(cmd >&2)`
                 // and `cmd >&2 | consumer`. Unconditional so a .data-only,
                 // empty-.out result is cleared too. clear_stdout preserves a
-                // control-plane latch request.
+                // control-plane approval request.
                 result.clear_stdout();
             }
             RedirectKind::StdoutOverwrite => {
@@ -692,14 +692,14 @@ impl PipelineRunner {
         // stage must not be swallowed by a later stage's nominal success —
         // `rm x | echo done` used to exit 0 with `.latch` dropped even though
         // `rm` genuinely gated (the op never ran; only its stderr text hinted at
-        // the gate). First latch wins if more than one stage gates, mirroring
-        // `wait.rs`'s `classify()` "first latch wins" precedent — captured here
-        // in stage order, so the first `Some` set below IS the first stage.
+        // the gate). The first gate wins if more than one stage gates,
+        // mirroring `wait.rs`'s `classify()` precedent — captured here in
+        // stage order, so the first `Some` set below IS the first stage.
         let mut gated: Option<ExecResult> = None;
         for (i, handle) in handles.into_iter().enumerate() {
             match handle.await {
                 Ok((result, stage_ctx)) => {
-                    if result.latch.is_some() {
+                    if result.approval.is_some() {
                         gated.get_or_insert_with(|| result.clone());
                     }
                     if i == last_idx {
@@ -719,7 +719,7 @@ impl PipelineRunner {
 
         // A pending gate is a control-plane fact about the WHOLE pipeline, not
         // stage-local trivia — override the last stage's nominal result so the
-        // exit code (2) and the structured `.latch` both survive.
+        // exit code (2) and the structured `.approval` both survive.
         if let Some(gate) = gated {
             last_result = gate;
         }

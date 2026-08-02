@@ -13,6 +13,7 @@ use std::path::Path;
 
 use crate::ast::Value;
 use crate::backend::PatchOp;
+use crate::ledger::KernelOperation;
 use crate::tools::builtin::get_path_string;
 use crate::tools::builtin::regex_dialect::{append_dialect_hint, bre_metas_to_ere};
 use crate::interpreter::{ExecResult, OutputData};
@@ -232,9 +233,13 @@ impl Tool for Sed {
             }
             let targets: Vec<(String, bool)> = files.iter().map(|f| (f.clone(), false)).collect();
             if let Err(blocked) = ctx
-                .gate_overwrites("sed", &targets, confirm.as_deref(), |nonce, joined| {
-                    format!("{hint_prefix} --confirm=\"{nonce}\" {joined}")
-                })
+                .gate_overwrites(
+                    KernelOperation::FsOverwrite,
+                    "sed",
+                    &targets,
+                    confirm.as_deref(),
+                    |joined| format!("{hint_prefix} --confirm=<token> {joined}"),
+                )
                 .await
             {
                 return blocked;

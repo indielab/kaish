@@ -83,6 +83,15 @@ pub struct AttemptHandle {
 }
 
 impl AttemptHandle {
+    /// Name an attempt the ledger already reserved. Kernel-internal: the
+    /// only callers are this module's own redemption paths and
+    /// `ExecContext`, which needs to build the guard for an attempt it just
+    /// reserved. Naming an attempt does not authorize it — `settle` still
+    /// refuses ids that name nothing live, and `redeem` re-checks the grant.
+    pub(crate) fn from_reservation(request: RequestId, attempt: AttemptId) -> Self {
+        Self { request, attempt }
+    }
+
     /// The request this attempt was reserved against.
     pub fn request_id(&self) -> &RequestId {
         &self.request
@@ -278,6 +287,13 @@ impl Requester {
         self.0.abandon_request(id, reason.into())
     }
 
+    /// Record a credential presentation whose draft named no request the
+    /// ledger can identify (spec §F.3 item 2). It counts against nothing —
+    /// a guesser cannot void a request it cannot describe.
+    pub fn reject_unmatched_key(&self) {
+        self.0.record_unmatched_key();
+    }
+
     /// Renew an `Expired` request: post a new `Requested` carrying the
     /// original's operation, resources, capture, principal, and trace
     /// context, linked via `supersedes` (spec §B.5). Renewal is a requester
@@ -322,6 +338,23 @@ impl Approvals {
     /// Every live standing grant.
     pub fn standing(&self) -> Vec<StandingGrant> {
         self.0.as_ref().map(|inner| inner.standing()).unwrap_or_default()
+    }
+
+    /// Which request a fresh draft describes: same operation, same
+    /// resource-reference set, newest first (spec §B.4's draft matcher).
+    ///
+    /// This is how a presented credential names its request without a blind
+    /// reverse lookup on the key — so a *wrong* key still counts against the
+    /// right request, which is what gives the rejected-attempt limit
+    /// somewhere principled to attach (§F.3 item 2). Closed chains match
+    /// too, so a key presented after a successful settlement reports what
+    /// already happened instead of running the operation again.
+    pub fn match_draft(
+        &self,
+        operation: &kaish_types::approval::OperationId,
+        refs: &[kaish_types::approval::ResourceRef],
+    ) -> Option<RequestId> {
+        self.0.as_ref().and_then(|inner| inner.match_draft(operation, refs))
     }
 
     /// The retained log, seq-cursored: every retained entry with
@@ -451,6 +484,15 @@ impl ApproverHandle {
     pub fn with_principal(mut self, principal: Principal) -> Self {
         self.2 = principal;
         self
+    }
+
+    /// This handle's own read side — for an authority that needs to look at
+    /// the request it is about to act on (`Kernel::confirm` reads the
+    /// capture). Grants nothing beyond what [`Approvals`] already grants;
+    /// taking it from the handle is what proves the request belongs to the
+    /// ledger the caller holds authority over.
+    pub fn approvals_view(&self) -> Approvals {
+        Approvals(Some(Arc::clone(&self.0)))
     }
 
     /// The principal recorded as deciding/retrieving through this handle.

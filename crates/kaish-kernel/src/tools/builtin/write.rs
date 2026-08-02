@@ -6,6 +6,7 @@ use std::path::Path;
 
 use crate::ast::Value;
 use crate::interpreter::{ExecResult, OutputData};
+use crate::ledger::KernelOperation;
 use crate::tools::builtin::get_path_string;
 use crate::tools::{schema_from_clap, ExecContext, ToolCtx, GlobalFlags, Tool, ToolArgs, ToolSchema};
 
@@ -24,7 +25,7 @@ struct WriteArgs {
     #[arg(long)]
     content: Option<String>,
 
-    /// Confirmation nonce for a latch-gated overwrite.
+    /// Approval token for a gated overwrite (`--confirm=<token>`).
     #[arg(long = "confirm")]
     confirm: Option<String>,
 
@@ -93,9 +94,13 @@ impl Tool for Write {
         // are off). On latch this returns an exit-2 nonce result; under trash
         // the prior content is snapshotted and returned for the CAS below.
         let snapshots = match ctx
-            .gate_overwrites("write", &[(path.clone(), false)], parsed.confirm.as_deref(), |nonce, joined| {
-                format!("write --confirm=\"{nonce}\" {joined}")
-            })
+            .gate_overwrites(
+                KernelOperation::FsOverwrite,
+                "write",
+                &[(path.clone(), false)],
+                parsed.confirm.as_deref(),
+                |joined| format!("write --confirm=<token> {joined}"),
+            )
             .await
         {
             Ok(s) => s,

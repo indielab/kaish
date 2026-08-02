@@ -1,7 +1,9 @@
 //! rm — Remove files and directories.
 //!
-//! Supports confirmation latch (`set -o latch`) and trash-on-delete
-//! (`set -o trash`) for safe autonomous operation.
+//! Gated by the approval ledger's `fs.*` enforce policy (`set -o latch`) and
+//! by trash-on-delete (`set -o trash`) for safe autonomous operation. Trash
+//! wins over the gate — the trash IS the recovery net, so a delete it can
+//! catch needs no approval.
 
 use async_trait::async_trait;
 use clap::{CommandFactory, Parser};
@@ -9,6 +11,7 @@ use std::path::{Path, PathBuf};
 
 use crate::backend::BackendError;
 use crate::interpreter::ExecResult;
+use crate::ledger::KernelOperation;
 use crate::tools::{is_trash_excluded, schema_from_clap, ExecContext, ToolCtx, GlobalFlags, Tool, ToolArgs, ToolSchema};
 
 /// clap-derived argv layer for rm.
@@ -27,7 +30,7 @@ struct RmArgs {
     #[arg(short = 'f', long = "force")]
     force: bool,
 
-    /// Confirmation nonce for latch-gated operations.
+    /// Approval token for a gated delete (`--confirm=<token>`).
     #[arg(long = "confirm")]
     confirm: Option<String>,
 
@@ -48,14 +51,14 @@ enum RmAction {
     Trash(PathBuf),
     /// Permanent delete (via backend).
     Delete,
-    /// Latch gate: return exit code 2 with nonce.
-    Latch,
+    /// Hold behind an approval request (exit 2 until it is granted).
+    Gate,
 }
 
 /// Determine the rm action based on trash/latch settings and file properties.
 fn decide_rm_action(
     trash_enabled: bool,
-    latch_enabled: bool,
+    enforce: bool,
     real_path: Option<&Path>,
     file_size: Option<u64>,
     trash_max_size: u64,
@@ -66,10 +69,10 @@ fn decide_rm_action(
     // *through* the link, so trashing a symlink would move its TARGET to trash —
     // exactly the follow-the-symlink hazard we're closing. The link itself is
     // trivially recreatable, so symlinks bypass trash and are unlinked directly.
-    // Latch still applies (it gates on the kaish path, not the resolved target).
+    // The gate still applies (it gates on the kaish path, not the resolved target).
     if is_symlink {
-        if latch_enabled {
-            return RmAction::Latch;
+        if enforce {
+            return RmAction::Gate;
         }
         return RmAction::Delete;
     }
@@ -88,9 +91,9 @@ fn decide_rm_action(
                 if size <= trash_max_size {
                     return RmAction::Trash(rp.to_path_buf());
                 }
-                // File too big for trash — fall through to latch check
-                if latch_enabled {
-                    return RmAction::Latch;
+                // File too big for trash — fall through to the gate check
+                if enforce {
+                    return RmAction::Gate;
                 }
                 return RmAction::Delete;
             }
@@ -98,8 +101,8 @@ fn decide_rm_action(
         // Virtual path (no real path) or excluded path — fall through
     }
 
-    if latch_enabled {
-        return RmAction::Latch;
+    if enforce {
+        return RmAction::Gate;
     }
 
     RmAction::Delete
@@ -154,12 +157,13 @@ impl Tool for Rm {
         let confirm = parsed.confirm.clone();
 
         let trash_enabled = ctx.scope.trash_enabled();
-        let latch_enabled = ctx.scope.latch_enabled();
+        let enforce = ctx.scope.fs_enforce();
         let trash_max_size = ctx.scope.trash_max_size();
 
-        // Collect per-path decisions in one pass so latch can issue ONE nonce
-        // that authorizes the whole batch (NonceScope.paths is a set; one
-        // nonce validates any subset). Stat-failures short-circuit unless -f.
+        // Collect per-path decisions in one pass so ONE approval request
+        // covers the whole batch — a request names its resources as a set, and
+        // a grant authorizes exactly that set. Stat-failures short-circuit
+        // unless -f.
         struct Decision {
             path: String,
             resolved: PathBuf,
@@ -189,7 +193,7 @@ impl Tool for Rm {
             let is_symlink = entry.as_ref().is_some_and(|s| s.is_symlink());
             let action = decide_rm_action(
                 trash_enabled,
-                latch_enabled,
+                enforce,
                 real_path.as_deref(),
                 file_size,
                 trash_max_size,
@@ -204,27 +208,30 @@ impl Tool for Rm {
             return ExecResult::success("");
         }
 
-        // If ANY decision is Latch, issue one nonce for the full set of
-        // latched paths so the user can re-run with `--confirm=NONCE` on the
-        // same argv. Without a valid nonce, return the latch error listing
-        // every path that triggered it.
-        let latched_paths: Vec<&str> = decisions
+        // If ANY decision is Gate, one request covers the full set of gated
+        // paths so the operator approves the batch once and the user re-runs
+        // the same argv with `--confirm=<token>`. Without an approval, return
+        // the pending request listing every path that raised it.
+        let gated_paths: Vec<&str> = decisions
             .iter()
-            .filter(|d| matches!(d.action, RmAction::Latch))
+            .filter(|d| matches!(d.action, RmAction::Gate))
             .map(|d| d.path.as_str())
             .collect();
-        if !latched_paths.is_empty() {
-            if let Some(nonce) = &confirm {
-                if let Err(e) = ctx.verify_nonce(nonce, "rm", &latched_paths) {
-                    return ExecResult::failure(1, format!("rm: {}", e));
-                }
-                // Nonce valid — fall through and execute each decision.
-            } else {
-                let joined = latched_paths.join(" ");
-                return ctx.latch_result("rm", &latched_paths, "latch enabled", |nonce| {
-                    format!("rm --confirm=\"{}\" {}", nonce, joined)
-                });
+        if !gated_paths.is_empty() {
+            let joined = gated_paths.join(" ");
+            if let Err(result) = ctx
+                .request_gate(
+                    KernelOperation::FsRemove,
+                    &gated_paths,
+                    "the fs.* enforce policy is on and the trash cannot catch this delete",
+                    format!("rm --confirm=<token> {joined}"),
+                    confirm.as_deref(),
+                )
+                .await
+            {
+                return crate::tools::prefix_error("rm", result);
             }
+            // Authorized — fall through and execute each decision.
         }
 
         // Execute each decision. Continue past per-path errors so users see
@@ -248,7 +255,7 @@ impl Tool for Rm {
                         )
                     })
                 }
-                RmAction::Latch | RmAction::Delete => {
+                RmAction::Gate | RmAction::Delete => {
                     // Single recursive remover lives on the backend (symlink-safe:
                     // it lstats the recurse decision and unlinks links directly).
                     match ctx.backend.remove(Path::new(&d.resolved), recursive).await {

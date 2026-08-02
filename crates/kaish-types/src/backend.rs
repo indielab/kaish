@@ -10,7 +10,8 @@ use serde_json::Value as JsonValue;
 use thiserror::Error;
 
 use crate::output::OutputData;
-use crate::result::{json_to_value_no_envelope, value_to_json, ExecResult, LatchRequest};
+use crate::approval::ApprovalRequestView;
+use crate::result::{json_to_value_no_envelope, value_to_json, ExecResult};
 use crate::tool::ToolSchema;
 
 /// Result type for backend operations.
@@ -255,11 +256,11 @@ pub struct ToolResult {
     pub content_type: Option<String>,
     /// Opaque key-value context (propagated from ExecResult).
     pub baggage: BTreeMap<String, String>,
-    /// A pending confirmation-latch request (propagated from ExecResult), so a
-    /// backend-tool latch survives the ExecResult↔ToolResult roundtrip. Its own
-    /// typed field — never folded into `data`. Boxed to match `ExecResult.latch`
+    /// A pending approval request (propagated from ExecResult), so a
+    /// backend-tool gate survives the ExecResult↔ToolResult roundtrip. Its own
+    /// typed field — never folded into `data`. Boxed to match `ExecResult.approval`
     /// (keeps the roundtrip a direct move; see that field for why).
-    pub latch: Option<Box<LatchRequest>>,
+    pub approval: Option<Box<ApprovalRequestView>>,
 }
 
 impl ToolResult {
@@ -275,7 +276,7 @@ impl ToolResult {
             original_code: None,
             content_type: None,
             baggage: BTreeMap::new(),
-            latch: None,
+            approval: None,
         }
     }
 
@@ -291,7 +292,7 @@ impl ToolResult {
             original_code: None,
             content_type: None,
             baggage: BTreeMap::new(),
-            latch: None,
+            approval: None,
         }
     }
 
@@ -307,7 +308,7 @@ impl ToolResult {
             original_code: None,
             content_type: None,
             baggage: BTreeMap::new(),
-            latch: None,
+            approval: None,
         }
     }
 
@@ -334,9 +335,9 @@ impl ToolResult {
         self
     }
 
-    /// Set the pending confirmation-latch request, returning self for chaining.
-    pub fn with_latch(mut self, latch: Option<LatchRequest>) -> Self {
-        self.latch = latch.map(Box::new);
+    /// Set the pending approval request, returning self for chaining.
+    pub fn with_approval(mut self, approval: Option<ApprovalRequestView>) -> Self {
+        self.approval = approval.map(Box::new);
         self
     }
 
@@ -387,7 +388,7 @@ impl From<ExecResult> for ToolResult {
             original_code: exec.original_code,
             content_type: exec.content_type,
             baggage: exec.baggage,
-            latch: exec.latch,
+            approval: exec.approval,
         }
     }
 }
@@ -412,7 +413,7 @@ impl From<ToolResult> for ExecResult {
         exec.original_code = result.original_code;
         exec.content_type = result.content_type;
         exec.baggage = result.baggage;
-        exec.latch = result.latch;
+        exec.approval = result.approval;
         exec
     }
 }
@@ -503,29 +504,20 @@ mod tests {
         let mut baggage = BTreeMap::new();
         baggage.insert("k".to_string(), "v".to_string());
 
-        let latch = LatchRequest {
-            nonce: "n".to_string(),
-            command: "rm".to_string(),
-            paths: vec!["f".to_string()],
-            hint: "rm --confirm=n f".to_string(),
-            tool: "rm".to_string(),
-            argv: vec!["f".to_string()],
-            ttl: 60,
-            job_id: None,
-        };
+        let approval = crate::approval::sample_view("fs.remove", &["f"]);
 
         let result = ToolResult::success("hi")
             .with_output(Some(OutputData::text("hi")))
             .with_content_type("text/plain")
             .with_baggage(baggage.clone())
-            .with_latch(Some(latch.clone()))
+            .with_approval(Some(approval.clone()))
             .with_did_spill(true)
             .with_original_code(Some(2));
 
         assert!(result.output.is_some());
         assert_eq!(result.content_type.as_deref(), Some("text/plain"));
         assert_eq!(result.baggage, baggage);
-        assert_eq!(result.latch.as_deref(), Some(&latch));
+        assert_eq!(result.approval.as_deref(), Some(&approval));
         assert!(result.did_spill);
         assert_eq!(result.original_code, Some(2));
     }

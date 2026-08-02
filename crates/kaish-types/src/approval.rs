@@ -1369,6 +1369,36 @@ impl LedgerEntry {
     }
 }
 
+/// Test-only: a stamped, tokenless view, for exercising the control-plane
+/// `.approval` field on `ExecResult`/`ToolResult`/`JobInfo` without standing
+/// up a live ledger. One builder shared by every module's tests so the shape
+/// under test cannot drift between them.
+#[cfg(test)]
+pub(crate) fn sample_view(operation: &str, paths: &[&str]) -> ApprovalRequestView {
+    let draft = ApprovalRequest::builder(operation)
+        .risk(RiskClass::Irreversible)
+        .reason("the fs.* enforce policy is on")
+        .hint(format!("{operation} --confirm=<token> {}", paths.join(" ")));
+    paths
+        .iter()
+        .fold(draft, |b, p| b.resource(Resource::plain("path", *p)))
+        .build()
+        .expect("a well-formed draft")
+        .stamp(
+            RequestId::new(0x0badcafe, 1),
+            Principal::new("session", PrincipalKind::Agent),
+            Capture::Exact(Invocation {
+                tool: operation.split('.').next().unwrap_or(operation).to_string(),
+                argv: paths.iter().map(|p| (*p).to_string()).collect(),
+            }),
+            RequestContext::default(),
+            std::time::UNIX_EPOCH,
+            Duration::from_secs(60),
+            None,
+        )
+        .into()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -6,7 +6,7 @@ use std::time::SystemTime;
 use serde::{Deserialize, Serialize};
 
 use crate::clock;
-use crate::result::LatchRequest;
+use crate::approval::ApprovalRequestView;
 
 /// Unique identifier for a background job.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -40,10 +40,15 @@ pub enum JobStatus {
     Stopped,
     /// Job completed successfully.
     Done,
-    /// Job is blocked on an unfulfilled confirmation latch (exit 2 with a
-    /// stored `LatchRequest` — `rm x &` under `set -o latch`). Distinct from
-    /// `Failed`: the op is *held*, not errored, and can still be fulfilled via
-    /// `Kernel::confirm` with the request surfaced on `JobInfo.latch`.
+    /// Job is held on an unsatisfied approval gate (exit 2 with a stored
+    /// `ApprovalRequestView` — `rm x &` under the `fs.*` enforce policy).
+    /// Distinct from `Failed`: the op is *held*, not errored, and can still
+    /// be fulfilled via `Kernel::confirm` with the request surfaced on
+    /// `JobInfo.approval`.
+    ///
+    /// The name and its wire spelling `"latched"` are pinned
+    /// (`docs/approval-ledger.md` §F.2) — the ledger renames the mechanism,
+    /// not this status.
     Latched,
     /// Job failed with an error.
     Failed,
@@ -81,12 +86,13 @@ pub struct JobInfo {
     /// actually covers embedder-spawned externals.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pid: Option<u32>,
-    /// The pending confirmation-latch request when the job is gated
-    /// (`JobStatus::Latched`) — the control-plane surface an embedder reads to
-    /// fulfill a *backgrounded* destructive op via `Kernel::confirm`. `None`
-    /// for any non-latched job. GH #96.
+    /// The pending approval request when the job is held
+    /// (`JobStatus::Latched`) — the control-plane surface an embedder reads
+    /// to fulfill a *backgrounded* destructive op via `Kernel::confirm`.
+    /// `None` for any job that is not held. Tokenless by construction
+    /// (`docs/approval-ledger.md` §A.2). GH #96.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub latch: Option<LatchRequest>,
+    pub approval: Option<ApprovalRequestView>,
     /// The job's exit code, once finished. `None` while `Running`/`Stopped`.
     /// GH #243: previously the only way to learn *how* a job failed was to
     /// string-parse `failed:{code}` off `/v/jobs/N/status` or block on
@@ -121,7 +127,7 @@ pub struct JobInfo {
 
 impl JobInfo {
     /// Create a `JobInfo` with the required fields; `output_file`/`pid`/
-    /// `latch`/`exit_code`/`finished_at` default to `None`, `pgids` to empty,
+    /// `approval`/`exit_code`/`finished_at` default to `None`, `pgids` to empty,
     /// and `started_at` to now (callers that track a job's real start time —
     /// i.e. `JobManager` — override it via [`Self::with_started_at`]). Chain
     /// the `with_*` setters to fill in the rest.
@@ -135,7 +141,7 @@ impl JobInfo {
             status,
             output_file: None,
             pid: None,
-            latch: None,
+            approval: None,
             exit_code: None,
             started_at: clock::system_now(),
             finished_at: None,
@@ -155,9 +161,9 @@ impl JobInfo {
         self
     }
 
-    /// Set the pending confirmation-latch request (see [`Self::latch`]).
-    pub fn with_latch(mut self, latch: Option<LatchRequest>) -> Self {
-        self.latch = latch;
+    /// Set the pending approval request (see [`Self::approval`]).
+    pub fn with_approval(mut self, approval: Option<ApprovalRequestView>) -> Self {
+        self.approval = approval;
         self
     }
 
@@ -199,7 +205,7 @@ mod tests {
         assert_eq!(info.status, JobStatus::Running);
         assert!(info.output_file.is_none());
         assert!(info.pid.is_none());
-        assert!(info.latch.is_none());
+        assert!(info.approval.is_none());
         assert!(info.exit_code.is_none());
         assert!(info.finished_at.is_none());
         assert!(info.pgids.is_empty());
@@ -221,14 +227,14 @@ mod tests {
         let info = JobInfo::new(JobId(2), "sleep 1", JobStatus::Done)
             .with_output_file(Some(PathBuf::from("job-output.txt")))
             .with_pid(Some(1234))
-            .with_latch(None)
+            .with_approval(None)
             .with_exit_code(Some(0))
             .with_started_at(started)
             .with_finished_at(Some(finished))
             .with_pgids(vec![4242, 4243]);
         assert_eq!(info.output_file, Some(PathBuf::from("job-output.txt")));
         assert_eq!(info.pid, Some(1234));
-        assert!(info.latch.is_none());
+        assert!(info.approval.is_none());
         assert_eq!(info.exit_code, Some(0));
         assert_eq!(info.started_at, started);
         assert_eq!(info.finished_at, Some(finished));
@@ -274,19 +280,10 @@ mod tests {
         }
     }
 
-    // ── serde: JobInfo round-trip, including the latch payload ──
+    // ── serde: JobInfo round-trip, including the approval payload ──
 
-    fn sample_latch() -> LatchRequest {
-        LatchRequest {
-            nonce: "a3f7b2c1".to_string(),
-            command: "rm".to_string(),
-            paths: vec!["precious.txt".to_string()],
-            hint: "rm --confirm=\"a3f7b2c1\" precious.txt".to_string(),
-            tool: "rm".to_string(),
-            argv: vec!["precious.txt".to_string()],
-            ttl: 60,
-            job_id: Some(3),
-        }
+    fn sample_approval() -> ApprovalRequestView {
+        crate::approval::sample_view("fs.remove", &["precious.txt"])
     }
 
     #[test]
@@ -296,7 +293,7 @@ mod tests {
         let info = JobInfo::new(JobId(3), "rm precious.txt &", JobStatus::Latched)
             .with_output_file(Some(PathBuf::from("job-output.txt")))
             .with_pid(Some(4321))
-            .with_latch(Some(sample_latch()))
+            .with_approval(Some(sample_approval()))
             .with_exit_code(Some(2))
             .with_started_at(started)
             .with_finished_at(Some(finished))
@@ -305,22 +302,25 @@ mod tests {
         let json = serde_json::to_string(&info).unwrap();
         let back: JobInfo = serde_json::from_str(&json).unwrap();
         assert_eq!(back, info, "JobInfo must round-trip byte-for-byte: {json}");
-        // The latch payload specifically must survive — it's the "model" the
+        // The approval payload specifically must survive — it's the "model" the
         // rest of the job surface copies (control-plane field beside status).
-        assert_eq!(back.latch.as_ref().unwrap().nonce, "a3f7b2c1");
+        assert_eq!(
+            back.approval.as_ref().unwrap().operation.as_str(),
+            "fs.remove"
+        );
         assert_eq!(back.status, JobStatus::Latched);
     }
 
     #[test]
     fn job_info_omits_unset_optional_fields_from_the_wire() {
         // A plain running job (the common case) must not carry dead weight:
-        // no output_file/pid/latch/exit_code/finished_at, no pgids array.
+        // no output_file/pid/approval/exit_code/finished_at, no pgids array.
         let info = JobInfo::new(JobId(4), "sleep 5", JobStatus::Running);
         let json = serde_json::to_value(&info).unwrap();
         let obj = json.as_object().unwrap();
         assert!(!obj.contains_key("output_file"), "{json}");
         assert!(!obj.contains_key("pid"), "{json}");
-        assert!(!obj.contains_key("latch"), "{json}");
+        assert!(!obj.contains_key("approval"), "{json}");
         assert!(!obj.contains_key("exit_code"), "{json}");
         assert!(!obj.contains_key("finished_at"), "{json}");
         assert!(!obj.contains_key("pgids"), "{json}");
