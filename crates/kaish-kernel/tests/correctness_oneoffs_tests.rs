@@ -86,6 +86,45 @@ async fn grep_c_recursive_prints_per_file_counts() {
     assert_eq!(lines, vec!["a.txt:1", "b.txt:2"]);
 }
 
+#[tokio::test]
+async fn grep_c_precedence_and_max_count_multifile() {
+    let tmp = tempfile::tempdir().unwrap();
+    std::fs::write(tmp.path().join("a.txt"), "x\nx\nx\nx\nx\n").unwrap();
+    std::fs::write(tmp.path().join("b.txt"), "x\ny\n").unwrap();
+    let kernel = kernel_at(tmp.path());
+
+    // -q wins over -c: no output at all, exit reports match presence.
+    let (out, code) = run(&kernel, "grep -qc x a.txt b.txt").await;
+    assert_eq!(out, "", "quiet must suppress count lines");
+    assert_eq!(code, 0);
+    let (out, code) = run(&kernel, "grep -qc zzz a.txt b.txt").await;
+    assert_eq!(out, "");
+    assert_eq!(code, 1);
+
+    // -l wins over -c: filenames with matches, not name:count lines.
+    let (out, code) = run(&kernel, "grep -lc x a.txt b.txt").await;
+    assert_eq!(out, "a.txt\nb.txt");
+    assert_eq!(code, 0);
+
+    // --max-count caps each file's count independently (GNU per-file cap).
+    let (out, code) = run(&kernel, "grep -c --max-count 2 x a.txt b.txt").await;
+    assert_eq!(out, "a.txt:2\nb.txt:1");
+    assert_eq!(code, 0);
+}
+
+#[tokio::test]
+async fn grep_c_unreadable_operand_still_counts_the_readable_ones() {
+    let tmp = tempfile::tempdir().unwrap();
+    std::fs::write(tmp.path().join("real.txt"), "alpha\n").unwrap();
+    let kernel = kernel_at(tmp.path());
+
+    // The missing explicit operand is exit 2 on stderr, and the readable
+    // file's count line still prints.
+    let (out, code) = run(&kernel, "grep -c alpha missing.txt real.txt").await;
+    assert_eq!(code, 2, "an unreadable explicit operand is exit 2");
+    assert_eq!(out, "real.txt:1", "the readable file still gets its count");
+}
+
 // ───────────────────── $(cmd) trailing-whitespace trim ─────────────────────
 
 #[tokio::test]
