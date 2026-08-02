@@ -19,7 +19,7 @@ use kaish_types::ExecResult;
 /// from a human, a policy hook, or a standing rule.
 ///
 /// No public constructor outside `#[cfg(test)]` — see
-/// [`AttemptHandle::from_ids`]'s doc for why a `pub` one (even
+/// `AttemptHandle::from_ids`'s doc for why a `pub` one (even
 /// `#[doc(hidden)]`) would be a forgeable settlement capability. A doctest
 /// compiles with none of this crate's own `#[cfg(test)]` items visible (the
 /// same boundary a downstream crate sees), so this is a real compiled proof,
