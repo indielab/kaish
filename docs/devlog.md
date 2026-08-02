@@ -15,6 +15,68 @@ before it ships.
 
 ---
 
+## The ledger lands in lanes, and the second family earns its seat (2026-08-02)
+
+Four PRs of the approval ledger's nine-PR plan landed in one day — types (#274),
+core (#275, hardened by #277), ToolCtx (#279), and the Approver chain (#278) —
+built by four agent lanes across two overlapping sessions, and the day's real
+story is what the review structure caught.
+
+The spec work was Amy's: the redraft (#271) settled the decisions the lanes then
+built against without re-litigating — a pure-bearer key with accountability in
+the `KeyRetrieved` record rather than key-holder identity; one successful
+settlement per grant, universally (`max_redemptions` deleted; re-presenting a
+key after success reports the settled outcome and never re-executes);
+`req_<8hex>_<seq>` ids with no short form; and authority in the signature —
+`Kernel::build → (Kernel, ApproverHandle)`. Every lane's "decisions made where
+the spec was ambiguous" section traces back to how much that pre-work
+constrained the search space: the ambiguities left were real ones, worth
+flagging, and none contradicted a settled call.
+
+The core PR is why two-family review is now the standing bar for foundational
+ledger PRs. The building lane's own pre-PR review (or-glm) found two
+commit-or-nothing violations and the PR merged green — and then a second review
+round from a different family (gpt) came back "do not merge as-is" with four
+blockers or-glm had cleared: the clock sampled before the lock (a contended
+caller decided against the instant it called in, not the instant it committed);
+a sweep that could `mark_closed` twice and quietly widen the live-capacity
+gate; terminal entries refusable by ring/sink capacity — an operation that
+already *ran* could be told its own settlement didn't fit, leaving the attempt
+unsettleable forever; and condition-widening never validated. The merge had
+landed mid-round (two sessions, one branch — the coordinating session watched
+the "merged" worktree's files change under it and correctly refused to clean it
+up), so the fixes landed as #277 minutes later. No harm done, but the ordering
+lesson stuck alongside the review lesson: verify a lane is actually finished
+before treating its PR as finished.
+
+The pattern repeated on the parallel lanes, gpt catching what deepseek cleared
+both times: on #279, a dropped guard's undrained settlement could make the next
+request see a falsely-full ledger, and a `#[doc(hidden)]` constructor whose doc
+claimed forged handles "fail loud" when `settle` never checked ownership; on
+#278, a cancellation landing between the post-`decide` check and the ledger
+commit still posted a `Granted` entry. That last one got the day's best fix
+shape: the window can't close without threading cancellation through the
+ledger's boundary, so the guarantee was restated as an outcome — a cancelled
+execution never leaves a live grant; `undo_if_cancelled` abandons the request
+loudly and the record keeps both the decision and its undoing.
+
+Two lanes also paid a full CI round trip each for the same one-line failure:
+rustdoc's `-D warnings` leg catching a broken intra-doc link that all five
+documented local gates miss. CLAUDE.md's Build Commands now carry the doc gate
+with the reason attached.
+
+The lanes converged cleanly: the PR3×PR4 collision came down to one conflict
+worth thinking about — PR 4 refactored `grant` into a delegation to
+`grant_with_grounds` while PR 3 pushed `drain_outbox()` into `grant` — and the
+drain moved into the delegate, because the delegate is what appends. Left on
+the books, flagged in the PR bodies rather than fixed: `commit_terminal`'s
+unreachable fallback traces under the ledger guard (a deadlock path exactly
+when diagnosing an invariant failure), and `renew` doesn't re-observe
+transitions until PR 6's resolver exists. Next: the PR 5 cutover — the latch
+becomes the ledger, `NonceStore` is deleted, and the census of everything that
+touches is regenerated fresh rather than trusted from a dead session's
+scratchpad.
+
 ## The review cascade: every layer of stale prose hid a bug (2026-08-01 → 2026-08-02)
 
 It started as a writing exercise. Amy asked for a Simplified-Technical-English-style
