@@ -89,7 +89,14 @@ impl RequestId {
         if !seq_ok {
             return Err(RequestIdParseError::BadSeq(s.to_string()));
         }
-        Ok(Self(s.to_string()))
+        // Re-render instead of storing the input: equality and lookup are
+        // string-based, so "req_9c1a4f2e_042" must become the canonical
+        // "req_9c1a4f2e_42" or a hand-typed leading zero fails `approvals
+        // grant` with "not found" against a kernel-allocated id.
+        let seq: u64 = seq_str
+            .parse()
+            .map_err(|_| RequestIdParseError::BadSeq(s.to_string()))?;
+        Ok(Self(format!("req_{epoch_hex}_{seq}")))
     }
 
     /// The id's text form, e.g. `"req_9c1a4f2e_42"`.
@@ -677,9 +684,12 @@ pub struct ApprovalRequestDraft {
 }
 
 impl ApprovalRequestDraft {
-    /// Stamp the fields only the kernel can supply, turning a draft into a
-    /// postable [`ApprovalRequest`]. Pure field assembly — no I/O, no
-    /// validation beyond what the draft already carries.
+    /// Stamp the kernel-supplied fields, turning a draft into a postable
+    /// [`ApprovalRequest`]. Pure field assembly — no I/O, no validation
+    /// beyond what the draft already carries. This method is `pub` and does
+    /// not itself gate who calls it: the guarantee is that a *draft* cannot
+    /// carry these fields, and the kernel's `request_approval` seam (ledger
+    /// PR 3) is the one place real values enter.
     // One argument per kernel-stamped field (spec §D.1's exact list) reads
     // clearer here than a stamping-context struct for a 7-argument leaf
     // constructor with no optional subsets.
@@ -972,6 +982,7 @@ pub enum SubscriptionMode {
 /// An `Approver`'s verdict on a request (spec §C.2).
 #[non_exhaustive]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum Decision {
     /// Grant, on these terms.
     Grant(GrantTerms),
@@ -1765,6 +1776,51 @@ mod tests {
                 attempts: 3,
             },
         ]
+    }
+
+    #[test]
+    fn request_level_abandoned_and_bogus_token_round_trip() {
+        // The two Option-None shapes the main fixture doesn't cover: a request
+        // abandoned before any attempt was reserved, and a bad key that
+        // matched no live request at all.
+        let at = SystemTime::UNIX_EPOCH;
+        for entry in [
+            LedgerEntry::Abandoned {
+                seq: 1,
+                at,
+                request: RequestId::new(0x9c1a4f2e, 7),
+                attempt: None,
+                reason: "session shutdown before decision".to_string(),
+            },
+            LedgerEntry::TokenRejected {
+                seq: 2,
+                at,
+                request: None,
+                attempts: 1,
+            },
+        ] {
+            let json = serde_json::to_value(&entry).expect("serialize");
+            let back: LedgerEntry = serde_json::from_value(json).expect("deserialize");
+            assert_eq!(entry, back);
+        }
+    }
+
+    #[test]
+    fn request_id_parse_canonicalizes_leading_zero_seq() {
+        let id = RequestId::parse("req_9c1a4f2e_042").expect("valid full form");
+        assert_eq!(id.as_str(), "req_9c1a4f2e_42");
+        assert_eq!(id, RequestId::parse("req_9c1a4f2e_42").expect("canonical"));
+    }
+
+    #[test]
+    fn decision_wire_spellings_are_snake_case() {
+        let deny = Decision::Deny {
+            reason: "nope".to_string(),
+        };
+        let json = serde_json::to_value(&deny).expect("serialize");
+        assert!(json.get("deny").is_some(), "expected snake_case tag: {json}");
+        let defer = serde_json::to_value(Decision::Defer).expect("serialize");
+        assert_eq!(defer, serde_json::json!("defer"));
     }
 
     const EXPECTED_TAGS: &[&str] = &[
