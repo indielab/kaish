@@ -918,6 +918,31 @@ impl ExecContext {
         self.ignore_config.build_filter(root, &fs).await
     }
 
+    /// Test-only: wire a fresh, standalone ledger onto this context and hand
+    /// back its authority, so a unit test can drive a real gate (post →
+    /// grant → redeem → settle) without standing up a whole kernel. A
+    /// context built by `Kernel::assemble` already has one.
+    #[cfg(test)]
+    pub(crate) fn wire_test_ledger(&mut self) -> crate::ledger::ApproverHandle {
+        let (requester, approvals, authority) =
+            crate::ledger::Ledger::build(crate::ledger::LedgerConfig::default(), None)
+                .expect("the test ledger must mint an id epoch");
+        let chain = Arc::new(crate::ledger::DecisionChain::new(
+            authority.clone(),
+            approvals.clone(),
+            None,
+        ));
+        self.ledger_access = Some(LedgerAccess {
+            requester,
+            approvals,
+            chain,
+            principal: Principal::new("test-session", kaish_types::approval::PrincipalKind::Agent),
+            request_ttl: crate::ledger::LedgerConfig::default().request_ttl,
+            job_id: None,
+        });
+        authority
+    }
+
     /// Record that capturing this invocation failed, so a gate site posts
     /// `Capture::CaptureFailed` rather than a silently empty argv that
     /// `confirm` would replay as the wrong command (spec §B.4).
@@ -1703,7 +1728,7 @@ mod tests {
 
     #[test]
     fn latch_gates_when_trash_off() {
-        assert_eq!(decide(false, true, Some("/work/f"), true, false), MutationAction::Latch);
+        assert_eq!(decide(false, true, Some("/work/f"), true, false), MutationAction::Gate);
     }
 
     #[test]
@@ -1725,7 +1750,7 @@ mod tests {
     fn overlay_no_real_path_stays_gated() {
         // No real path (overlay/in-memory) is NOT excluded — still trash-first.
         assert_eq!(decide(true, true, None, true, false), MutationAction::TrashFirst);
-        assert_eq!(decide(false, true, None, true, false), MutationAction::Latch);
+        assert_eq!(decide(false, true, None, true, false), MutationAction::Gate);
     }
 
     #[test]
@@ -1736,7 +1761,7 @@ mod tests {
         let cap = 10u64;
         assert_eq!(
             decide_mutation_action(true, true, Some(Path::new("/work/f")), true, false, big, cap),
-            MutationAction::Latch
+            MutationAction::Gate
         );
         assert_eq!(
             decide_mutation_action(true, false, Some(Path::new("/work/f")), true, false, big, cap),

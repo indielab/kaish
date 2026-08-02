@@ -1,6 +1,5 @@
 ---
 source: crates/kaish-kernel/tests/ledger_core_tests.rs
-assertion_line: 708
 expression: block
 ---
 impl Requester {
@@ -129,6 +128,13 @@ impl Requester {
         // `AttemptInFlight` check.
         self.0.drain_outbox();
         self.0.abandon_request(id, reason.into())
+    }
+
+    /// Record a credential presentation whose draft named no request the
+    /// ledger can identify (spec §F.3 item 2). It counts against nothing —
+    /// a guesser cannot void a request it cannot describe.
+    pub fn reject_unmatched_key(&self) {
+        self.0.record_unmatched_key();
     }
 
     /// Renew an `Expired` request: post a new `Requested` carrying the

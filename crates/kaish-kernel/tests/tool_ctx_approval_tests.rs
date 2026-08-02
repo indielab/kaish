@@ -9,7 +9,7 @@
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 
-use kaish_kernel::ledger::{Ledger, LedgerConfig};
+use kaish_kernel::ledger::{DecisionChain, Ledger, LedgerConfig};
 use kaish_kernel::vfs::{MemoryFs, VfsRouter};
 use kaish_kernel::{ExecContext, LedgerAccess};
 use kaish_tool_api::{ApprovalOutcome, Tool, ToolArgs, ToolCtx};
@@ -28,15 +28,25 @@ fn agent(id: &str) -> Principal {
     Principal::new(id, PrincipalKind::Agent)
 }
 
+/// A decision chain with no `Approver` installed — stages 1 and 4 only, which
+/// is a kernel with no decision hook: no standing rule means Defer means
+/// exit 2 (spec §C.2).
+fn chain_over(approver: &kaish_kernel::ledger::ApproverHandle) -> std::sync::Arc<DecisionChain> {
+    let (_, approvals, authority) = approver.join();
+    std::sync::Arc::new(DecisionChain::new(authority, approvals, None))
+}
+
 #[tokio::test]
 async fn kernel_request_approval_round_trips_a_request_through_the_ledger() {
-    let (requester, approvals, _approver) = Ledger::build(LedgerConfig::default(), None).unwrap();
+    let (requester, approvals, approver) = Ledger::build(LedgerConfig::default(), None).unwrap();
     let mut ctx = ctx_with_memory_fs();
     ctx.ledger_access = Some(LedgerAccess {
         requester,
         approvals: approvals.clone(),
+        chain: chain_over(&approver),
         principal: agent("agent-1"),
         request_ttl: Duration::from_secs(60),
+        job_id: None,
     });
 
     let draft = ApprovalRequest::builder("plugin.dangerous")
@@ -152,8 +162,10 @@ async fn plugin_dangerous_fixture_gates_end_to_end_through_tool_api_alone() {
     ctx.ledger_access = Some(LedgerAccess {
         requester: requester.clone(),
         approvals: approvals.clone(),
+        chain: chain_over(&approver),
         principal: agent("agent-1"),
         request_ttl: Duration::from_secs(60),
+        job_id: None,
     });
     let tool = PluginDangerous;
 

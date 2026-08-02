@@ -975,9 +975,17 @@ mod tests {
         );
         assert_eq!(parsed["approval"]["operation"], "fs.remove");
         assert_eq!(parsed["code"], 2);
-        // The view is tokenless by construction (spec §A.2) — no credential
-        // reaches `--json`, which is why this envelope is safe to log.
-        assert!(!out.contains("token"), "the --json envelope must carry no credential: {out}");
+        // The view is tokenless by construction (spec §A.2): no *field* of the
+        // envelope is a credential, which is why it is safe to log. The hint
+        // deliberately contains the literal placeholder `<token>` — display
+        // text, not a secret — so this checks keys, not substrings.
+        let approval = parsed["approval"].as_object().expect("an approval object");
+        for forbidden in ["token", "nonce", "credential", "secret"] {
+            assert!(
+                !approval.contains_key(forbidden),
+                "the --json envelope must carry no {forbidden} field: {parsed}"
+            );
+        }
         // No .err was set (mirrors wait.rs), so the rendered text becomes the
         // diagnostic `error` field.
         assert_eq!(parsed["error"], "[1] Latched\n");
