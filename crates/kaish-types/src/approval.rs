@@ -576,6 +576,7 @@ pub struct ApprovalRequest {
     /// text (spec §C.3) — never contains a credential.
     pub hint: String,
     /// Wall-clock post time.
+    #[serde(with = "crate::rfc3339::system_time")]
     pub requested_at: SystemTime,
     /// How long the request stays live with no decision.
     pub ttl: Duration,
@@ -628,6 +629,7 @@ pub struct ApprovalRequestView {
     /// See [`ApprovalRequest::hint`].
     pub hint: String,
     /// See [`ApprovalRequest::requested_at`].
+    #[serde(with = "crate::rfc3339::system_time")]
     pub requested_at: SystemTime,
     /// See [`ApprovalRequest::ttl`].
     pub ttl: Duration,
@@ -810,6 +812,7 @@ pub struct Grant {
     /// Why the decision was made, and by which mechanism.
     pub grounds: Grounds,
     /// The grant expires at this time if unredeemed.
+    #[serde(with = "crate::rfc3339::system_time")]
     pub not_after: SystemTime,
     /// First 4 hex characters of the credential, for correlating a
     /// `TokenRejected` with the grant it was aimed at. The credential itself
@@ -824,6 +827,7 @@ pub struct Grant {
     /// narrow (add or tighten) and may never widen — enforced at post time.
     pub conditions: Vec<Condition>,
     /// Wall-clock decision time.
+    #[serde(with = "crate::rfc3339::system_time")]
     pub decided_at: SystemTime,
 }
 
@@ -837,6 +841,7 @@ pub struct Grant {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct GrantTerms {
     /// The grant expires at this time if unredeemed.
+    #[serde(with = "crate::rfc3339::system_time")]
     pub not_after: SystemTime,
     /// Preconditions re-verified at redemption.
     pub conditions: Vec<Condition>,
@@ -900,6 +905,7 @@ pub struct Observation {
     /// What was observed.
     pub claim: StateClaim,
     /// When it was observed.
+    #[serde(with = "crate::rfc3339::system_time")]
     pub at: SystemTime,
 }
 
@@ -921,6 +927,11 @@ pub struct StandingGrant {
     /// Maximum number of successful uses, if bounded.
     pub max_uses: Option<u32>,
     /// When this rule stops matching, if it expires.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "crate::rfc3339::opt_system_time"
+    )]
     pub expires_at: Option<SystemTime>,
     /// Who issued this rule.
     pub issued_by: Principal,
@@ -1097,6 +1108,7 @@ pub enum LedgerEntry {
         /// Monotonic per-ledger sequence number.
         seq: u64,
         /// Wall-clock post time.
+        #[serde(with = "crate::rfc3339::system_time")]
         at: SystemTime,
         /// The posted request.
         request: ApprovalRequest,
@@ -1106,6 +1118,7 @@ pub enum LedgerEntry {
         /// Monotonic per-ledger sequence number.
         seq: u64,
         /// Wall-clock post time.
+        #[serde(with = "crate::rfc3339::system_time")]
         at: SystemTime,
         /// The posted grant.
         grant: Grant,
@@ -1115,6 +1128,7 @@ pub enum LedgerEntry {
         /// Monotonic per-ledger sequence number.
         seq: u64,
         /// Wall-clock post time.
+        #[serde(with = "crate::rfc3339::system_time")]
         at: SystemTime,
         /// The denied request.
         request: RequestId,
@@ -1128,6 +1142,7 @@ pub enum LedgerEntry {
         /// Monotonic per-ledger sequence number.
         seq: u64,
         /// Wall-clock post time.
+        #[serde(with = "crate::rfc3339::system_time")]
         at: SystemTime,
         /// The expired request.
         request: RequestId,
@@ -1141,6 +1156,7 @@ pub enum LedgerEntry {
         /// Monotonic per-ledger sequence number.
         seq: u64,
         /// Wall-clock post time.
+        #[serde(with = "crate::rfc3339::system_time")]
         at: SystemTime,
         /// The request whose key was retrieved.
         request: RequestId,
@@ -1152,6 +1168,7 @@ pub enum LedgerEntry {
         /// Monotonic per-ledger sequence number.
         seq: u64,
         /// Wall-clock post time.
+        #[serde(with = "crate::rfc3339::system_time")]
         at: SystemTime,
         /// The request being redeemed.
         request: RequestId,
@@ -1170,6 +1187,7 @@ pub enum LedgerEntry {
         /// Monotonic per-ledger sequence number.
         seq: u64,
         /// Wall-clock post time.
+        #[serde(with = "crate::rfc3339::system_time")]
         at: SystemTime,
         /// The request whose redemption was refused.
         request: RequestId,
@@ -1183,6 +1201,7 @@ pub enum LedgerEntry {
         /// Monotonic per-ledger sequence number.
         seq: u64,
         /// Wall-clock post time.
+        #[serde(with = "crate::rfc3339::system_time")]
         at: SystemTime,
         /// The request this attempt belongs to.
         request: RequestId,
@@ -1196,6 +1215,7 @@ pub enum LedgerEntry {
         /// Monotonic per-ledger sequence number.
         seq: u64,
         /// Wall-clock post time.
+        #[serde(with = "crate::rfc3339::system_time")]
         at: SystemTime,
         /// The request abandoned.
         request: RequestId,
@@ -1212,6 +1232,7 @@ pub enum LedgerEntry {
         /// Monotonic per-ledger sequence number.
         seq: u64,
         /// Wall-clock post time.
+        #[serde(with = "crate::rfc3339::system_time")]
         at: SystemTime,
         /// The request voided.
         request: RequestId,
@@ -1223,6 +1244,7 @@ pub enum LedgerEntry {
         /// Monotonic per-ledger sequence number.
         seq: u64,
         /// Wall-clock post time.
+        #[serde(with = "crate::rfc3339::system_time")]
         at: SystemTime,
         /// The standing grant issued.
         grant: StandingGrant,
@@ -1232,6 +1254,7 @@ pub enum LedgerEntry {
         /// Monotonic per-ledger sequence number.
         seq: u64,
         /// Wall-clock post time.
+        #[serde(with = "crate::rfc3339::system_time")]
         at: SystemTime,
         /// The standing grant revoked.
         id: StandingId,
@@ -1245,6 +1268,7 @@ pub enum LedgerEntry {
         /// Monotonic per-ledger sequence number.
         seq: u64,
         /// Wall-clock post time.
+        #[serde(with = "crate::rfc3339::system_time")]
         at: SystemTime,
         /// `Some` when the presenting draft matched a live request (so the
         /// count means something); `None` when it matched nothing.
@@ -1803,6 +1827,24 @@ mod tests {
             let back: LedgerEntry = serde_json::from_value(json).expect("deserialize");
             assert_eq!(entry, back);
         }
+    }
+
+    #[test]
+    fn ledger_entry_timestamps_serialize_as_rfc3339_utc_strings() {
+        // Same wire convention JobInfo pinned in kaish PR #273: every
+        // SystemTime on the serde surface is an RFC 3339 UTC string.
+        let entry = LedgerEntry::KeyRetrieved {
+            seq: 1,
+            at: SystemTime::UNIX_EPOCH,
+            request: RequestId::new(0x9c1a4f2e, 7),
+            by: Principal::new("amy", PrincipalKind::Human),
+        };
+        let json = serde_json::to_value(&entry).expect("serialize");
+        assert_eq!(
+            json.get("at").and_then(|v| v.as_str()),
+            Some("1970-01-01T00:00:00.000Z"),
+            "at must be an RFC 3339 string, got: {json}"
+        );
     }
 
     #[test]
