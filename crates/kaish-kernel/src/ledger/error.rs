@@ -10,7 +10,7 @@
 
 use std::fmt;
 
-use kaish_types::approval::{Outcome, RequestId, RequestState, StandingId};
+use kaish_types::approval::{Outcome, RequestId, RequestState, ResourceRef, StandingId, StateClaim};
 
 /// Why a ledger transaction did not commit. Every non-`InvariantViolated`
 /// variant is an ordinary runtime outcome, not a bug (spec §B.3).
@@ -98,9 +98,23 @@ pub enum LedgerError {
     /// ledger has stopped accepting new obligations until an operator
     /// restarts it (spec §D.4 — a sink error fails the request closed).
     SinkUnavailable(String),
-    /// A kernel bug: an unmatched `Redeemed`/terminal pair, a `seq` gap, a
-    /// second successful settlement against one grant, or a grant whose
-    /// conditions widened its request. Never means "proceed" (spec §A.1).
+    /// A `Grant` was posted whose `conditions` drop or alter a transition
+    /// claim the request itself declared — an approver may narrow (add or
+    /// tighten) and may never widen (spec §A.4). This is an ordinary
+    /// runtime outcome, not a bug: it is entirely reachable from an
+    /// embedder-supplied `GrantTerms` and carries no `debug_assert!`,
+    /// unlike [`Self::InvariantViolated`].
+    ConditionsWidened {
+        /// The request whose declared transition would have been widened.
+        request: RequestId,
+        /// The resource whose condition was missing or altered.
+        resource: ResourceRef,
+        /// What the request declared and the grant failed to preserve.
+        expected: StateClaim,
+    },
+    /// A kernel bug: an unmatched `Redeemed`/terminal pair, a `seq` gap, or
+    /// a second successful settlement against one grant. Never means
+    /// "proceed" (spec §A.1).
     InvariantViolated(String),
 }
 
@@ -162,6 +176,11 @@ impl fmt::Display for LedgerError {
             Self::SinkUnavailable(reason) => {
                 write!(f, "approval ledger audit sink unavailable: {reason}")
             }
+            Self::ConditionsWidened { request, resource, expected } => write!(
+                f,
+                "grant for request {request} widens the request's declared transition on {}:{} (expected {expected:?} preserved) — an approver may narrow, never widen",
+                resource.kind, resource.id
+            ),
             Self::InvariantViolated(detail) => {
                 write!(f, "approval ledger invariant violated: {detail}")
             }

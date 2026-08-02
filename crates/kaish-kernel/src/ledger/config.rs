@@ -20,8 +20,14 @@ pub struct LedgerConfig {
     /// Per-principal share of `live_capacity` — one principal cannot starve
     /// the others. Default 256.
     pub live_capacity_per_principal: usize,
-    /// Retained entries in the audit ring, oldest evicted first — but never
-    /// an entry belonging to a still-live request (spec §D.4). Default 4096.
+    /// Retained entries in the audit ring — never an entry belonging to a
+    /// still-live request (spec §D.4), and never a terminal entry
+    /// (`Settled`, or attempt-level `Abandoned`) for work that already ran,
+    /// whose room is reserved at redemption time and is therefore never
+    /// competed for. Eviction picks the *oldest evictable* entry, not
+    /// strictly the oldest overall — a single long-lived request sitting at
+    /// the front of the ring must not be able to permanently block eviction
+    /// of closed entries behind it. Default 4096.
     pub retained_entries: usize,
     /// Bounded sink queue depth. Default 1024 entries.
     pub sink_queue: usize,
@@ -71,20 +77,40 @@ impl std::error::Error for LedgerSinkError {}
 
 /// An export destination for the ledger's append-only log (spec §D.4).
 ///
-/// `post` must be fast and non-blocking — the ledger calls it from a
-/// background task that drains a bounded queue (`LedgerConfig::sink_queue`)
-/// so a slow sink applies backpressure (`LedgerError::SinkUnavailable` at the
-/// next obligation post) rather than blocking the async executor. A sink that
-/// fronts something slow (a network log) should buffer internally and return
-/// `Ok`, accepting the buffering risk explicitly — the kernel will not make
-/// that call silently.
+/// **The exact delivery contract**, precisely, because it has real edges:
 ///
-/// An `Err` here is treated as the sink itself being broken: the ledger
-/// stops accepting new obligations (fails closed) rather than continuing to
-/// produce audit entries it cannot deliver. There is no retry — a tripped
-/// sink stays tripped for the life of the ledger.
+/// - `post` must be fast and non-blocking. Every entry is delivered through
+///   a *reserved* [`tokio::sync::mpsc::OwnedPermit`], taken synchronously
+///   (never awaited) when the entry is admitted, so `post` itself always has
+///   a guaranteed queue slot waiting and only ever needs to do its own I/O —
+///   never any capacity negotiation with the ledger.
+/// - A bounded background task drains the queue (`LedgerConfig::sink_queue`
+///   deep) and calls `post` once per entry, in commit order. While the
+///   queue has room, admitting a new entry never blocks on the sink at all.
+/// - **Backpressure fails new obligations closed, never the sink itself.**
+///   Once the queue's `sink_queue` permits are all reserved, the *next*
+///   obligation (`post_request`, `grant`, `deny`, ...) is refused with
+///   `LedgerError::SinkUnavailable` rather than blocking the async executor
+///   or silently dropping the entry. A sink fronting something slow (a
+///   network log) that cannot tolerate this should buffer internally and
+///   return `Ok` quickly, accepting the buffering risk explicitly — the
+///   kernel will not make that tradeoff on the embedder's behalf.
+/// - **A terminal entry (`Settled`, or attempt-level `Abandoned`) is never
+///   refused by this backpressure.** Its queue slot is reserved together
+///   with the `Redeemed` entry that started its attempt, before the attempt
+///   is ever allowed to begin — an operation that already ran must always
+///   be able to record what happened (spec §D.4 / review finding B3).
+/// - **An `Err` here trips the sink for the life of the ledger — there is no
+///   retry.** The background task sets an internal failed flag and stops
+///   consuming; every entry still queued behind the one that failed (plus
+///   the one that failed) is counted as undelivered and surfaced in later
+///   `SinkUnavailable` messages ("N audit entries undelivered" — review
+///   finding S3), so the loss is accounted, never silent. The ledger then
+///   refuses every new obligation until the process restarts — an
+///   unrecorded privileged operation is exactly the corruption this design
+///   refuses to risk.
 pub trait LedgerSink: Send + Sync {
-    /// Append one entry. See the trait doc for the non-blocking contract and
-    /// what an `Err` does to the ledger.
+    /// Append one entry. See the trait doc for the exact delivery,
+    /// backpressure, and failure contract.
     fn post(&self, entry: &LedgerEntry) -> Result<(), LedgerSinkError>;
 }
