@@ -950,7 +950,8 @@ impl Kernel {
     /// mints (`docs/approval-ledger.md` §D.2).
     ///
     /// The authority is in the signature because that is what enforces the
-    /// separation: the only way to obtain an [`ApproverHandle`] is to build
+    /// separation: the only way to obtain an
+    /// [`ApproverHandle`](crate::ledger::ApproverHandle) is to build
     /// a kernel, and the embedder then decides which sessions get a clone
     /// (through [`KernelConfig::with_approver_handle`]). A session built
     /// without one has no method that grants.
