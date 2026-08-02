@@ -881,6 +881,15 @@ impl GrantTerms {
         let conditions = req.resources.iter().filter_map(Resource::to_condition).collect();
         Self { not_after, conditions }
     }
+
+    /// Build terms directly from an explicit condition list. The only other
+    /// external constructor for this `#[non_exhaustive]` type besides
+    /// [`Self::once_for`] — an approver that narrows (adds or tightens)
+    /// beyond the request's declared transitions, rather than accepting
+    /// them verbatim, needs this rather than a struct literal.
+    pub fn new(not_after: SystemTime, conditions: Vec<Condition>) -> Self {
+        Self { not_after, conditions }
+    }
 }
 
 /// Why a request was granted, and by which mechanism (spec §A.4).
