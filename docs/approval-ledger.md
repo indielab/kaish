@@ -626,6 +626,13 @@ Request level:
 | `Denied`/`Voided`/`Abandoned` | anything | ✗ | none | `LedgerError::Terminal` |
 | `Expired` | `renew` | new `Requested` | `Requested{supersedes}` | — |
 
+The `TokenRejected{Some}` rows above cover the *bearer-key* redemption form (a presented
+`--confirm=<token>` string, or its ledger-core equivalent). The internal-context form (the
+replay path, §B.4 — no credential is presented at all, only a `RedemptionContext`) has
+nothing to reject: `Requester::redeem` on a request with no live grant returns
+`LedgerError::NotAuthorized` directly, with no `TokenRejected` entry, because there was no
+key to count a rejection against.
+
 Attempt level:
 
 | From | Event | To | Entry appended | If illegal |
@@ -1244,6 +1251,11 @@ tail and appends `Abandoned{attempt, reason: "process exited mid-attempt"}` for 
 `Redeemed` with no terminal successor. A periodic sweep does the same for attempts whose
 guard was dropped without draining the outbox (§C.1). Without that sweep, a ledger
 accumulates permanently unbalanced chains and the invariant becomes unenforceable.
+Restart-time recovery *from* the sink is explicitly deferred: `LedgerSink` (§D.4, as
+shipped in ledger PR 2) is post-only — there is nothing to read back through it — so
+construction-time reconstruction from prior sink output needs a separate, future
+recovery-source API, consistent with §B.1's "v1 is in-process only, no durability claim."
+The periodic sweep (in-process, no restart involved) is what ledger PR 2 actually ships.
 
 ---
 

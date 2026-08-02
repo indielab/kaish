@@ -29,8 +29,7 @@ use std::time::Duration;
 use async_trait::async_trait;
 use kaish_tool_api::PatientGuard;
 use kaish_types::approval::{
-    ApprovalRequest, ApprovalRequestView, Condition, Decision, Grant, GrantTerms, Grounds,
-    Principal, PrincipalKind, StateClaim,
+    ApprovalRequest, ApprovalRequestView, Decision, Grant, Grounds, Principal, PrincipalKind,
 };
 use tokio_util::sync::CancellationToken;
 
@@ -356,12 +355,11 @@ impl DecisionChain {
         let principal = approver.principal();
         match decision {
             Decision::Grant(terms) => {
-                if let Some(detail) = widens(request, &terms) {
-                    return Err(LedgerError::GrantWidensRequest {
-                        id: request.id.clone(),
-                        detail,
-                    });
-                }
+                // Terms that drop or alter a condition the request declared
+                // are refused by the ledger itself (`LedgerError::
+                // ConditionsWidened`, spec §A.4) — the check lives at the
+                // one place every grant passes through, not here, so an
+                // approver cannot route around it.
                 let grounds = match stage {
                     // The rule that matched is the approver itself — the
                     // trait gives a policy hook no way to name a finer rule,
@@ -394,32 +392,4 @@ impl DecisionChain {
             _ => Ok(ChainOutcome::Deferred),
         }
     }
-}
-
-/// Whether `terms` authorize more than `request` asked for (spec §A.4: an
-/// approver may narrow and may never widen). Returns the reason when it
-/// does, `None` when it does not.
-///
-/// Widening is dropping or weakening a condition the request declared: the
-/// request said "only if `refs/heads/main` is still `a1b2c3d`", and the
-/// grant says nothing about `refs/heads/main`, or says any value will do.
-/// Adding conditions, or replacing an `Unspecified` claim with a concrete
-/// one, is narrowing and always allowed.
-fn widens(request: &ApprovalRequest, terms: &GrantTerms) -> Option<String> {
-    for required in request.resources.iter().filter_map(|r| r.to_condition()) {
-        if required.expected_from == StateClaim::Unspecified {
-            continue;
-        }
-        let covered = terms
-            .conditions
-            .iter()
-            .any(|c: &Condition| c.resource == required.resource && c.expected_from == required.expected_from);
-        if !covered {
-            return Some(format!(
-                "the request conditions {}:{} on {:?} and the grant does not",
-                required.resource.kind, required.resource.id, required.expected_from
-            ));
-        }
-    }
-    None
 }

@@ -903,7 +903,7 @@ async fn an_approver_that_drops_a_declared_condition_is_refused() {
         .await
         .expect_err("a widening grant must be refused");
     assert!(
-        matches!(&err, LedgerError::GrantWidensRequest { id, .. } if id == &request.id),
+        matches!(&err, LedgerError::ConditionsWidened { request: id, .. } if id == &request.id),
         "got {err:?}"
     );
     assert_eq!(
