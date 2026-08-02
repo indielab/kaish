@@ -913,7 +913,7 @@ impl crate::kernel::ArgValueSource for SyncEvalSource<'_> {
 }
 
 /// Build ToolArgs from AST Args, evaluating expressions — the reduced sync
-/// wrapper around the shared [`crate::kernel::bind_tool_args`] core. Used by
+/// wrapper around the shared `crate::kernel::bind_tool_args` core. Used by
 /// scatter/gather's own option parsing (`run_scatter_gather`, below —
 /// before any worker forks, so it can't recurse back into
 /// `PipelineRunner::run` for command substitution) and the `#[cfg(test)]`
@@ -923,7 +923,7 @@ impl crate::kernel::ArgValueSource for SyncEvalSource<'_> {
 /// flag/positional-binding logic that could — and did — drift from it (no
 /// undeclared-space-flag guard, no glued-short-flag handling, no
 /// `consumes`/`repeatable` accumulation). Now it's a thin wrapper: the
-/// binding logic itself is shared via [`SyncEvalSource`], and only
+/// binding logic itself is shared via `SyncEvalSource`, and only
 /// expression evaluation differs (this context can't run `$(...)`).
 pub async fn build_tool_args(
     args: &[Arg],

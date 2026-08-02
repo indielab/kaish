@@ -18,7 +18,8 @@ struct WaitArgs {
     #[command(flatten)]
     global: GlobalFlags,
 
-    /// Job specifier (e.g. `%1`) or PID; waits for all background jobs when omitted.
+    /// Job id, with or without the `%` prefix (`%1` or `1`). Waits for every
+    /// background job when omitted. A non-numeric id exits 1.
     job: Vec<String>,
 }
 

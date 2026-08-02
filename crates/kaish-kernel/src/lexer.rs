@@ -3020,7 +3020,7 @@ pub fn parse_string_literal(source: &str) -> Result<String, LexerError> {
 }
 
 /// Parse a variable reference, extracting the path segments.
-/// Input: "${VAR.field[0].nested}" → ["VAR", "field", "[0]", "nested"]
+/// Input: `"${VAR.field[0].nested}"` → `["VAR", "field", "[0]", "nested"]`
 ///
 /// The `[...]` collector is quote-aware (GH #183): a subscript opening with
 /// `"` or `'` consumes verbatim up to its OWN matching closing quote before

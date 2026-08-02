@@ -105,7 +105,7 @@ pub fn get_help(topic: &HelpTopic, tool_schemas: &[ToolSchema]) -> String {
 /// Format help for a single tool, or `None` if no such tool is registered.
 ///
 /// The composition surface uses this; the `Unknown topic…` fallback lives in
-/// [`format_tool_help`] for the `help <topic>` command path.
+/// `format_tool_help` for the `help <topic>` command path.
 pub fn tool_help(name: &str, schemas: &[ToolSchema]) -> Option<String> {
     let schema = schemas.iter().find(|s| s.name == name)?;
     let mut output = String::new();

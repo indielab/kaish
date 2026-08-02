@@ -108,7 +108,7 @@ pub struct LatchRequest {
     /// a dependency-light leaf with no notion of `JobId` — that type lives in
     /// `kaish-kernel`'s scheduler module, which depends on `kaish-types`, not
     /// the other way around. `kaish-kernel` re-wraps this as `JobId(id)` at
-    /// the two call sites that care ([`JobManager`]'s `Job::latch()` stamps
+    /// the two call sites that care (`JobManager`'s `Job::latch()` stamps
     /// it; `Kernel::confirm` reads it back to retire the originating job
     /// after a successful replay). Skipped on the wire when absent, so a
     /// foreground latch's `--json` shape is unchanged.

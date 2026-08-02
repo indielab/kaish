@@ -9,7 +9,7 @@
 //!
 //! - [`topic`] — the `help <topic>` command / embedder-prompt compatibility surface:
 //!   [`get_help`], [`list_topics`], [`HelpTopic`]. Whole embedded markdown docs.
-//! - [`compose`] — the composition surface: a concept-organized [`Fragment`] model
+//! - [`compose`](mod@compose) — the composition surface: a concept-organized [`Fragment`] model
 //!   ([`Concept`] / [`Variant`] / [`Audience`] / [`Depth`] / locale) assembled by
 //!   [`compose`](compose::compose) via [`Selector`]s and ready-made [`Recipe`]s.
 //!

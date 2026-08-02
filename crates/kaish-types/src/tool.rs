@@ -495,7 +495,7 @@ impl ToolArgs {
     /// [`Value::Bytes`] — binary can't cross the argv/text stringification
     /// boundary (GH #164, closing the root cause behind GH #120's stringified
     /// `[binary: N bytes]` placeholder). A **positional** `Value::Bytes` does
-    /// NOT error here; see [`value_to_argv_token`]'s doc comment for why.
+    /// NOT error here; see `value_to_argv_token`'s doc comment for why.
     ///
     /// See the clap builtin pattern in CLAUDE.md (Contributor conventions).
     ///
@@ -508,7 +508,7 @@ impl ToolArgs {
     /// Like [`to_argv`](Self::to_argv), but skips the given **named** keys
     /// entirely — neither the key's flag token nor its value appears in the
     /// rendered argv, and (crucially) a `Value::Bytes` under an excluded key
-    /// is never passed to [`render_named_value`], so it can never trip
+    /// is never passed to `render_named_value`, so it can never trip
     /// [`ToolArgvError::BinaryNamedValue`].
     ///
     /// Use this when a builtin deliberately reads one of its own named
@@ -529,7 +529,7 @@ impl ToolArgs {
     /// to exempt. A positional's clap-reflected field is already a
     /// validation-only sink nobody reads (see CLAUDE.md's clap-builtin
     /// convention), so a positional `Value::Bytes` never needed an
-    /// exemption in the first place — [`value_to_argv_token`] renders it as
+    /// exemption in the first place — `value_to_argv_token` renders it as
     /// an inert placeholder rather than erroring. If a future case needs to
     /// exclude a flag or positional too, that is new design, not an
     /// extension of this helper.
@@ -587,7 +587,7 @@ impl ToolArgs {
 /// deferred as "Phase 2" at the time and closed here (GH #164).
 ///
 /// Deliberately does **not** cover positional `Value::Bytes` — see
-/// [`value_to_argv_token`]'s doc comment for why a positional binary value
+/// `value_to_argv_token`'s doc comment for why a positional binary value
 /// stays safe to render as a placeholder rather than error.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 #[non_exhaustive]

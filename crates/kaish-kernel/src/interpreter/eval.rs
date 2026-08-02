@@ -786,7 +786,8 @@ pub fn value_to_string(value: &Value) -> String {
 /// command may already have captured the user's real bytes (e.g. `b=$(cat
 /// blob)` stores a `Value::Bytes` — `cat` emits raw bytes for non-UTF-8
 /// content), and the placeholder throws those bytes away where the data should
-/// be. Valid-UTF-8 bytes coerce (mirroring [`ExecResult::try_text_out`]);
+/// be. Valid-UTF-8 bytes coerce (mirroring
+/// [`ExecResult::try_text_out`](crate::interpreter::ExecResult::try_text_out));
 /// everything else is a loud error. In practice `Value::Bytes` only ever holds
 /// non-UTF-8 content (the producer coercion in `ExecResult::success_text_or_bytes`
 /// keeps valid UTF-8 as text), so this errors whenever a `Bytes` value reaches a

@@ -1716,7 +1716,7 @@ impl Kernel {
         self.run_inner(input, opts, None, Some(on_output)).await
     }
 
-    /// Execute with a **lazy** standard input fed as a [`PipeReader`].
+    /// Execute with a **lazy** standard input fed as a [`PipeReader`](crate::PipeReader).
     ///
     /// Unlike [`ExecuteOptions::with_stdin`] (a pre-read buffer), this never
     /// forces the input to be drained before execution: the reader seeds the
