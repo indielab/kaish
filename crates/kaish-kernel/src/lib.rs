@@ -20,6 +20,7 @@ pub mod duration;
 pub mod help;
 pub mod ignore_config;
 pub mod interpreter;
+pub mod ledger;
 pub mod output_limit;
 pub mod kernel;
 pub mod lexer;

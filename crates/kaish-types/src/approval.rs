@@ -831,6 +831,32 @@ pub struct Grant {
     pub decided_at: SystemTime,
 }
 
+impl Grant {
+    /// Build a `Grant` from its terms plus the decision provenance. The only
+    /// constructor this `#[non_exhaustive]` type has outside this crate —
+    /// `token_prefix` is computed by the caller from the freshly minted
+    /// [`Token`] (never stored here — spec §A.2), so it is threaded through
+    /// rather than derived from anything already on `terms`.
+    pub fn from_terms(
+        request: RequestId,
+        decided_by: Principal,
+        grounds: Grounds,
+        terms: GrantTerms,
+        token_prefix: String,
+        decided_at: SystemTime,
+    ) -> Self {
+        Self {
+            request,
+            decided_by,
+            grounds,
+            not_after: terms.not_after,
+            token_prefix,
+            conditions: terms.conditions,
+            decided_at,
+        }
+    }
+}
+
 /// The terms an [`Decision::Grant`] carries before the kernel turns them
 /// into a full [`Grant`] (which also records `request`, `decided_by`, and
 /// `decided_at`).
@@ -937,6 +963,36 @@ pub struct StandingGrant {
     pub issued_by: Principal,
     /// Why this rule exists.
     pub reason: String,
+}
+
+impl StandingGrant {
+    /// Build a not-yet-issued standing grant. `id` is a placeholder —
+    /// `ApproverHandle::grant_standing` overwrites it with a
+    /// ledger-allocated [`StandingId`] when the rule is issued (spec §C.4);
+    /// there is no separate draft type here for the same reason
+    /// [`ApprovalRequestDraft`] exists for [`ApprovalRequest`]. The only
+    /// external constructor for this `#[non_exhaustive]` type.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(
+        operations: Vec<OperationPattern>,
+        resources: Vec<ResourcePattern>,
+        principal: Option<Principal>,
+        max_uses: Option<u32>,
+        expires_at: Option<SystemTime>,
+        issued_by: Principal,
+        reason: impl Into<String>,
+    ) -> Self {
+        Self {
+            id: StandingId::new(0),
+            operations,
+            resources,
+            principal,
+            max_uses,
+            expires_at,
+            issued_by,
+            reason: reason.into(),
+        }
+    }
 }
 
 /// A resource-matching pattern (`{ kind: "git.ref", pattern:
@@ -1277,6 +1333,31 @@ pub enum LedgerEntry {
         /// rejection against one request voids it (spec §F.3).
         attempts: u32,
     },
+}
+
+impl LedgerEntry {
+    /// This entry's monotonic per-ledger sequence number. Matched
+    /// exhaustively *here*, inside the defining crate — a variant added
+    /// without extending this match is a compile error, unlike a
+    /// downstream `#[non_exhaustive]` match that would need a silent
+    /// wildcard arm (spec §A.6's anti-drift template, applied to `seq`).
+    pub fn seq(&self) -> u64 {
+        match self {
+            Self::Requested { seq, .. }
+            | Self::Granted { seq, .. }
+            | Self::Denied { seq, .. }
+            | Self::Expired { seq, .. }
+            | Self::KeyRetrieved { seq, .. }
+            | Self::Redeemed { seq, .. }
+            | Self::Refused { seq, .. }
+            | Self::Settled { seq, .. }
+            | Self::Abandoned { seq, .. }
+            | Self::Voided { seq, .. }
+            | Self::StandingIssued { seq, .. }
+            | Self::StandingRevoked { seq, .. }
+            | Self::TokenRejected { seq, .. } => *seq,
+        }
+    }
 }
 
 #[cfg(test)]
