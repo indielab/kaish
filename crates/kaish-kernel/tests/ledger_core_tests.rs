@@ -250,13 +250,19 @@ async fn condition_failure_refuses_and_voids_reserving_no_attempt() {
 
 #[tokio::test]
 async fn redeem_while_an_attempt_is_in_flight_is_rejected() {
-    let (requester, _approvals, approver) = Ledger::build(LedgerConfig::default(), None).unwrap();
+    let (requester, approvals, approver) = Ledger::build(LedgerConfig::default(), None).unwrap();
     let req = post(&requester, "fs.remove", Duration::from_secs(60)).await;
     approver.grant(&req.id, terms(&req, far_future())).await.unwrap();
-    let _attempt = requester.redeem(&req.id, agent("agent-1"), Vec::new()).await.unwrap();
+    let attempt = requester.redeem(&req.id, agent("agent-1"), Vec::new()).await.unwrap();
+    let before = approvals.log(0).len();
 
     let err = requester.redeem(&req.id, agent("agent-1"), Vec::new()).await.unwrap_err();
     assert!(matches!(err, LedgerError::AttemptInFlight(id) if id == req.id));
+    assert_eq!(approvals.state(&req.id), Some(RequestState::Granted), "state must not move");
+    assert_eq!(approvals.log(0).len(), before, "a rejected in-flight redemption must append nothing");
+    let chain = approvals.get(&req.id).unwrap();
+    assert_eq!(chain.attempts.len(), 1, "no second attempt was reserved");
+    assert_eq!(chain.attempts[0].attempt, attempt.attempt_id());
 }
 
 #[tokio::test]
@@ -332,10 +338,11 @@ async fn granting_an_already_decided_request_is_rejected() {
     let (requester, approvals, approver) = Ledger::build(LedgerConfig::default(), None).unwrap();
     let req = post(&requester, "fs.remove", Duration::from_secs(60)).await;
     approver.grant(&req.id, terms(&req, far_future())).await.unwrap();
-    let before = approvals.log(0).len();
+    let before = approvals.log(0).clone();
     let err = approver.grant(&req.id, terms(&req, far_future())).await.unwrap_err();
     assert!(matches!(err, LedgerError::AlreadyDecided(id) if id == req.id));
-    assert_eq!(approvals.log(0).len(), before, "no new entry from the rejected second decision");
+    assert_eq!(approvals.state(&req.id), Some(RequestState::Granted), "state must not move");
+    assert_eq!(approvals.log(0), before, "no new entry from the rejected second decision — the log is byte-for-byte unchanged");
 }
 
 #[tokio::test]
@@ -345,18 +352,53 @@ async fn terminal_states_reject_any_further_transition_and_leave_state_unchanged
         let (requester, approvals, approver) = Ledger::build(LedgerConfig::default(), None).unwrap();
         let req = post(&requester, "fs.remove", Duration::from_secs(60)).await;
         approver.deny(&req.id, "no").await.unwrap();
+        let before = approvals.log(0).clone();
         let err = approver.deny(&req.id, "no again").await.unwrap_err();
         assert!(matches!(err, LedgerError::Terminal { state: RequestState::Denied, .. }));
         assert_eq!(approvals.state(&req.id), Some(RequestState::Denied));
+        assert_eq!(approvals.log(0), before, "a rejected second decision must append nothing");
     }
     // Abandoned.
     {
         let (requester, approvals, approver) = Ledger::build(LedgerConfig::default(), None).unwrap();
         let req = post(&requester, "fs.remove", Duration::from_secs(60)).await;
         requester.abandon_request(&req.id, "job discarded").await.unwrap();
+        let before = approvals.log(0).clone();
         let err = approver.grant(&req.id, terms(&req, far_future())).await.unwrap_err();
         assert!(matches!(err, LedgerError::Terminal { state: RequestState::Abandoned, .. }));
         assert_eq!(approvals.state(&req.id), Some(RequestState::Abandoned));
+        assert_eq!(approvals.log(0), before, "a grant against an abandoned request must append nothing");
+    }
+    // Voided (via redemption-time condition failure).
+    {
+        let (requester, approvals, approver) = Ledger::build(LedgerConfig::default(), None).unwrap();
+        let mut d = draft("git.push");
+        d.resources.push(Resource::transition(
+            "git.ref",
+            "refs/heads/main",
+            StateClaim::Exact("a1b2".to_string()),
+            StateClaim::Exact("c3d4".to_string()),
+        ));
+        let req = requester
+            .post_request(d, agent("agent-1"), Capture::DirectExecution, RequestContext::default(), Duration::from_secs(60), None)
+            .await
+            .unwrap();
+        approver.grant(&req.id, terms(&req, far_future())).await.unwrap();
+        let observed = vec![Observation {
+            resource: ResourceRef {
+                kind: "git.ref".to_string(),
+                id: "refs/heads/main".to_string(),
+            },
+            claim: StateClaim::Exact("moved".to_string()),
+            at: SystemTime::now(),
+        }];
+        requester.redeem(&req.id, agent("agent-1"), observed).await.unwrap_err();
+        assert_eq!(approvals.state(&req.id), Some(RequestState::Voided));
+        let before = approvals.log(0).clone();
+        let err = approver.grant(&req.id, terms(&req, far_future())).await.unwrap_err();
+        assert!(matches!(err, LedgerError::Terminal { state: RequestState::Voided, .. }));
+        assert_eq!(approvals.state(&req.id), Some(RequestState::Voided));
+        assert_eq!(approvals.log(0), before, "a grant against a voided request must append nothing");
     }
 }
 
@@ -377,10 +419,13 @@ async fn renew_only_succeeds_from_expired_and_links_via_supersedes() {
 
 #[tokio::test]
 async fn renew_on_a_non_expired_request_is_rejected() {
-    let (requester, _approvals, _approver) = Ledger::build(LedgerConfig::default(), None).unwrap();
+    let (requester, approvals, _approver) = Ledger::build(LedgerConfig::default(), None).unwrap();
     let req = post(&requester, "fs.remove", Duration::from_secs(60)).await;
+    let before = approvals.log(0).clone();
     let err = requester.renew(&req.id).await.unwrap_err();
     assert!(matches!(err, LedgerError::NotRenewable { .. }));
+    assert_eq!(approvals.state(&req.id), Some(RequestState::Requested), "state must not move");
+    assert_eq!(approvals.log(0), before, "a rejected renewal must post no superseding request");
 }
 
 // ─────────────────────── Attempt-level table ───────────────────────
@@ -395,6 +440,7 @@ async fn settling_the_same_attempt_twice_appends_one_entry_and_returns_ok() {
     let first = requester.settle(&attempt, Outcome::Exit(0)).await.unwrap();
     assert!(first, "first settlement appends an entry");
     let count_after_first = approvals.log(0).iter().filter(|e| matches!(e, LedgerEntry::Settled { .. })).count();
+    assert_eq!(count_after_first, 1, "exactly one Settled entry after the first settlement");
 
     let second = requester.settle(&attempt, Outcome::Exit(0)).await.unwrap();
     assert!(!second, "second settlement is a no-op");
