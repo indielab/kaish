@@ -674,7 +674,7 @@ impl JobManager {
     /// registered by [`JobManager::register_stopped`] with no `JoinHandle` and no
     /// result channel, and [`Job::is_done`] returns `false` for as long as it is
     /// stopped — so nothing can ever make it done. Waiting on one here spun the
-    /// 10ms poll loop forever, and since [`Kernel::shutdown`] calls this, a single
+    /// 10ms poll loop forever, and since [`crate::Kernel::shutdown`] calls this, a single
     /// Ctrl-Z hung shutdown with no timeout and no escape. Skip them: `wait_all`
     /// means "wait for everything that will finish", not "wait for everything".
     ///
