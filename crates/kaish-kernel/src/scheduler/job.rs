@@ -210,7 +210,7 @@ impl Job {
             // A gated destructive op (exit 2 with a stored approval
             // request) is *held*, not failed — surface it distinctly so
             // `Kernel::confirm` can still fulfill it (GH #96).
-            Some(r) if r.approval_request().is_some() => JobStatus::Latched,
+            Some(r) if r.approval_request().is_some() => JobStatus::Gated,
             Some(_) => JobStatus::Failed,
             None => JobStatus::Running,
         }
@@ -221,20 +221,20 @@ impl Job {
     /// Returns:
     /// - `"running"` if the job is still running
     /// - `"done:0"` if the job completed successfully
-    /// - `"latched"` if the job is held on an unsatisfied approval gate
+    /// - `"gated"` if the job is held on an unsatisfied approval gate
     /// - `"failed:{code}"` if the job failed with an exit code
     pub fn status_string(&mut self) -> String {
         self.try_poll();
         match &self.result {
             Some(r) if r.ok() => "done:0".to_string(),
-            Some(r) if r.approval_request().is_some() => "latched".to_string(),
+            Some(r) if r.approval_request().is_some() => "gated".to_string(),
             Some(r) => format!("failed:{}", r.code),
             None => "running".to_string(),
         }
     }
 
     /// The job's pending approval request, if it is held
-    /// (`JobStatus::Latched`). `None` otherwise. Backs `JobInfo.approval` and
+    /// (`JobStatus::Gated`). `None` otherwise. Backs `JobInfo.approval` and
     /// the `/v/jobs/{id}/approval` node so a backgrounded gate is fulfillable
     /// (#96).
     ///
@@ -790,11 +790,11 @@ impl JobManager {
     }
 
     /// Whether the job's cached result is a pending approval gate
-    /// (`JobStatus::Latched`). Consumers that would drop the job (`kill`,
+    /// (`JobStatus::Gated`). Consumers that would drop the job (`kill`,
     /// cleanup paths) check this so a held request is never destroyed
-    /// silently. Keeps the `latched` spelling the status itself keeps
+    /// silently. Keeps the `gated` spelling the status itself keeps
     /// (`docs/approval-ledger.md` §F.2).
-    pub async fn is_latched(&self, id: JobId) -> bool {
+    pub async fn is_gated(&self, id: JobId) -> bool {
         let mut jobs = self.jobs.lock().await;
         jobs.get_mut(&id).is_some_and(|job| job.approval().is_some())
     }
@@ -975,7 +975,7 @@ impl JobManager {
     /// Remove a job from tracking.
     ///
     /// NOTE: this bypasses the gate guard — a caller that might hit a held
-    /// job must check [`is_latched`](Self::is_latched) first (see the `kill`
+    /// job must check [`is_gated`](Self::is_gated) first (see the `kill`
     /// builtin), or the job's pending approval request is destroyed with it.
     /// `cleanup()` is the gate-safe bulk path.
     pub async fn remove(&self, id: JobId) {
@@ -1327,8 +1327,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_reap_finished_never_reaps_latched_jobs() {
-        // GH #131 / GH #96: a Latched job is "done" in the sense that its
+    async fn test_reap_finished_never_reaps_gated_jobs() {
+        // GH #131 / GH #96: a Gated job is "done" in the sense that its
         // future resolved, but it's held on a pending destructive-operation
         // gate — reaping it would silently destroy the only reference to the
         // approval request. Must never be auto-reaped or reported as a
@@ -1346,9 +1346,9 @@ mod tests {
         tx.send(gated).expect("send gated result");
         tokio::time::sleep(Duration::from_millis(10)).await;
 
-        // Confirm it's actually seen as Latched before reaping.
+        // Confirm it's actually seen as Gated before reaping.
         let info = manager.get(id).await.expect("job exists");
-        assert_eq!(info.status, JobStatus::Latched);
+        assert_eq!(info.status, JobStatus::Gated);
 
         let removed = manager.reap_finished().await;
         assert!(
@@ -1358,7 +1358,7 @@ mod tests {
         assert_eq!(
             manager.list().await.len(),
             1,
-            "the latched job must still be tracked so its gate can be fulfilled"
+            "the gated job must still be tracked so its gate can be fulfilled"
         );
     }
 

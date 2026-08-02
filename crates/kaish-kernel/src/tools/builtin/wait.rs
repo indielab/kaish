@@ -135,7 +135,7 @@ impl Tool for Wait {
 
 /// Classify one waited job's result into a display word, threading the
 /// aggregate `any_failed` flag and the first-seen held request. A gated job
-/// (the `fs.*` enforce policy, exit 2 with a stored request) is `Latched`,
+/// (the `fs.*` enforce policy, exit 2 with a stored request) is `Gated`,
 /// *not* `Failed` — the op is held, and the request must reach the caller so
 /// a backgrounded gate is fulfillable (GH #96).
 ///
@@ -157,7 +157,7 @@ fn classify(
         // `.approval` holds one, and an embedder waiting on multiple gated
         // jobs is an unusual pattern.
         held.get_or_insert(view);
-        "Latched"
+        "Gated"
     } else {
         *any_failed = true;
         "Failed"

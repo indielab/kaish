@@ -53,7 +53,7 @@ struct SedArgs {
     #[arg(short = 'i', long = "in-place")]
     in_place: bool,
 
-    /// Confirmation nonce for a latch-gated in-place overwrite.
+    /// Confirmation nonce for a approval-gated in-place overwrite.
     #[arg(long = "confirm")]
     confirm: Option<String>,
 
@@ -203,7 +203,7 @@ impl Tool for Sed {
 
         // In-place: edit each file operand on disk instead of streaming to
         // stdout. It is *always* a truncating overwrite of an existing file, so
-        // it routes through the same latch+trash gate as tee/patch. Editing a
+        // it routes through the same approval+trash gate as tee/patch. Editing a
         // stream in place is meaningless, so no operands is a loud error.
         if in_place {
             let operands = args.positional.get(file_pos..).unwrap_or(&[]);
@@ -219,7 +219,7 @@ impl Tool for Sed {
             }
 
             // Gate every target with one nonce before touching any file. The
-            // latch hint must reinject the flags the operation can't run without:
+            // the hint must reinject the flags the operation can't run without:
             // a bare `sed --confirm=… file` would read `file` as the expression
             // and then hang on stdin. Rebuild `-i [-n] -e '<expr>'…` so the
             // advertised re-run actually does the in-place edit.

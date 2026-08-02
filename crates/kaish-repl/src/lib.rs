@@ -688,9 +688,9 @@ fn resolve_prompt(repl: &Repl) -> String {
 /// one-line notification for each (matching the `jobs` builtin's own
 /// `[id] status command` line), and reap them.
 ///
-/// A `Latched` job is excluded by `reap_finished` itself — it's "done" in the
+/// A `Gated` job is excluded by `reap_finished` itself — it's "done" in the
 /// sense that its future resolved, but it's awaiting confirmation of a
-/// pending destructive-operation gate (`set -o latch`) and must stay tracked
+/// pending destructive-operation gate (`set -o approvals`) and must stay tracked
 /// until confirmed or explicitly discarded (GH #96), not be silently
 /// destroyed by an automatic background sweep (GH #131).
 fn notify_finished_jobs(repl: &Repl) {

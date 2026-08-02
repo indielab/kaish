@@ -66,7 +66,7 @@ struct KillArgs {
     #[arg(short = 's', long, default_value_t = String::from("TERM"))]
     signal: String,
 
-    /// Abandon a latched (approval-pending) job. Without this flag, kill
+    /// Abandon a gated (approval-pending) job. Without this flag, kill
     /// refuses to destroy a job's pending approval request. Conflicts with
     /// a signal (--signal/-s, or a shorthand): discarding a gate delivers
     /// nothing to anyone.
@@ -327,21 +327,21 @@ async fn kill_one(
             Some(m) => m.clone(),
             None => return ExecResult::failure(1, "kill: no job manager"),
         };
-        // A latched job's cached result is the only reference to its pending
+        // A gated job's cached result is the only reference to its pending
         // approval request — killing it would silently destroy the gate
         // (GH #96). Refuse unless the caller explicitly discards.
         //
-        // TOCTOU note: a Running job can race into Latched between this
+        // TOCTOU note: a Running job can race into Gated between this
         // check and kill_job's cancel+remove. That's acceptable — the
         // guard protects an already-visible approval request from
         // accidental destruction; a job killed while still running is the
         // caller's stated intent, whatever it was about to become.
-        if manager.is_latched(job_id).await {
+        if manager.is_gated(job_id).await {
             if !discard {
                 return ExecResult::failure(
                     1,
                     format!(
-                        "kill: job {job_id} is latched awaiting approval — \
+                        "kill: job {job_id} is gated awaiting approval — \
                          fulfill it (see /v/jobs/{job_id}/approval) or abandon \
                          it with: kill --discard %{job_id}"
                     ),

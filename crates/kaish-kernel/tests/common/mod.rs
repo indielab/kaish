@@ -32,11 +32,11 @@ use kaish_kernel::KernelConfig;
 #[cfg(feature = "localfs")]
 #[allow(dead_code)] // not every test binary that includes `common` uses this
 pub fn kernel_at(dir: &Path) -> Kernel {
-    // Force latch/trash off so `rm`-style tests are deterministic regardless of
-    // the developer's KAISH_LATCH / KAISH_TRASH env (which `repl()` reads).
+    // Force approvals/trash off so `rm`-style tests are deterministic regardless of
+    // the developer's KAISH_APPROVALS / KAISH_TRASH env (which `repl()` reads).
     let config = KernelConfig::repl()
         .with_cwd(dir.to_path_buf())
-        .with_latch(false)
+        .with_approvals(false)
         .with_trash(false);
     Kernel::new(config).expect("failed to create kernel")
 }

@@ -688,9 +688,9 @@ impl PipelineRunner {
         // (e.g., `echo "Alice" | read NAME`).
         let mut last_result = ExecResult::success("");
         let mut panics: Vec<String> = Vec::new();
-        // GH #125: a confirmation gate (`set -o latch`) raised by an EARLIER
+        // GH #125: a confirmation gate (`set -o approvals`) raised by an EARLIER
         // stage must not be swallowed by a later stage's nominal success —
-        // `rm x | echo done` used to exit 0 with `.latch` dropped even though
+        // `rm x | echo done` used to exit 0 with `.approval` dropped even though
         // `rm` genuinely gated (the op never ran; only its stderr text hinted at
         // the gate). The first gate wins if more than one stage gates,
         // mirroring `wait.rs`'s `classify()` precedent — captured here in
@@ -724,7 +724,7 @@ impl PipelineRunner {
             last_result = gate;
         }
 
-        // Checked LAST (so it wins over the latch override above): mirrors the
+        // Checked LAST (so it wins over the gate override above): mirrors the
         // existing precedent that ANY stage panicking overrides `last_result`
         // regardless of which stage, and keeps a gate raised earlier in the same
         // run HELD (unconfirmed) rather than presenting a ready-to-confirm nonce

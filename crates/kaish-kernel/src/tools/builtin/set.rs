@@ -1,14 +1,13 @@
-//! set — Set shell options (like set -e, set -o latch).
+//! set — Set shell options (like set -e, set -o approvals).
 //!
-//! `set -o latch` is the `fs.*` enforce policy over the approval ledger
+//! `set -o approvals` is the `fs.*` enforce policy over the approval ledger
 //! (`docs/approval-ledger.md` §C.5): every filesystem mutation with no
-//! recoverable prior copy goes through the decision chain. The option keeps
-//! its `latch` spelling — the ledger renames the mechanism, not the muscle
-//! memory (§F.2, §I.4).
+//! recoverable prior copy goes through the decision chain. It replaces
+//! `set -o latch`, which is retired along with the latch itself (§F.2, §I.4).
 //!
-//! Under `KernelConfig::with_policy_pinned` both `set -o latch` and
-//! `set +o latch` fail **loud** with exit 1 rather than silently doing
-//! nothing, because a silent no-op teaches an agent that its `set +o latch`
+//! Under `KernelConfig::with_policy_pinned` both `set -o approvals` and
+//! `set +o approvals` fail **loud** with exit 1 rather than silently doing
+//! nothing, because a silent no-op teaches an agent that its `set +o approvals`
 //! worked (§F.3 item 3).
 
 use async_trait::async_trait;
@@ -20,7 +19,7 @@ use crate::tools::{schema_from_clap, ExecContext, ToolCtx, GlobalFlags, Tool, To
 
 /// Refuse a script-side change to a pinned approval policy (spec §F.3 item
 /// 3). Exit 1 and a message naming the pin — loud, never a silent no-op,
-/// because an agent that believes its `set +o latch` worked will go on to do
+/// because an agent that believes its `set +o approvals` worked will go on to do
 /// something it thinks is ungated.
 fn refuse_if_pinned(ctx: &ExecContext) -> Option<ExecResult> {
     ctx.scope.policy_pinned().then(|| {
@@ -35,7 +34,7 @@ fn refuse_if_pinned(ctx: &ExecContext) -> Option<ExecResult> {
 ///
 /// Supports:
 /// - `-e` / `+e`: Enable/disable error-exit mode (exit on command failure)
-/// - `-o latch` / `+o latch`: Enable/disable the `fs.*` enforce policy for
+/// - `-o approvals` / `+o approvals`: Enable/disable the `fs.*` enforce policy for
 ///   dangerous ops — refused under a policy pin
 /// - `-o trash` / `+o trash`: Enable/disable trash-on-delete for rm
 ///
@@ -71,7 +70,7 @@ impl Tool for Set {
             [
                 ("Exit on error", "set -e"),
                 ("Disable exit on error", "set +e"),
-                ("Enable confirmation latch", "set -o latch"),
+                ("Enable approval gate", "set -o approvals"),
                 ("Enable trash-on-delete", "set -o trash"),
                 ("Disable glob expansion", "set +o glob"),
             ],
@@ -103,8 +102,8 @@ impl Tool for Set {
             if ctx.scope.error_exit_enabled() {
                 output.push_str("set -e\n");
             }
-            if ctx.scope.fs_enforce() {
-                output.push_str("set -o latch\n");
+            if ctx.scope.approvals_enabled() {
+                output.push_str("set -o approvals\n");
             }
             if ctx.scope.trash_enabled() {
                 output.push_str("set -o trash\n");
@@ -128,7 +127,7 @@ impl Tool for Set {
         }
 
         // Process positional args.
-        // From parser: PlusFlag("e") -> String("+e"), String("-o") followed by String("latch"), etc.
+        // From parser: PlusFlag("e") -> String("+e"), String("-o") followed by String("approvals"), etc.
         let positionals: Vec<&str> = args
             .positional
             .iter()
@@ -148,11 +147,11 @@ impl Tool for Set {
                     // Consume next positional as option name
                     if let Some(&name) = positionals.get(i + 1) {
                         match name {
-                            "latch" => {
+                            "approvals" => {
                                 if let Some(refusal) = refuse_if_pinned(ctx) {
                                     return refusal;
                                 }
-                                ctx.scope.set_fs_enforce(true)
+                                ctx.scope.set_approvals_enabled(true)
                             }
                             "trash" => ctx.scope.set_trash_enabled(true),
                             "glob" => ctx.scope.set_glob_enabled(true),
@@ -174,11 +173,11 @@ impl Tool for Set {
                 "+o" => {
                     if let Some(&name) = positionals.get(i + 1) {
                         match name {
-                            "latch" => {
+                            "approvals" => {
                                 if let Some(refusal) = refuse_if_pinned(ctx) {
                                     return refusal;
                                 }
-                                ctx.scope.set_fs_enforce(false)
+                                ctx.scope.set_approvals_enabled(false)
                             }
                             "trash" => ctx.scope.set_trash_enabled(false),
                             "glob" => ctx.scope.set_glob_enabled(false),
@@ -194,7 +193,7 @@ impl Tool for Set {
         }
 
         // Handle case where parser split `-o` into flags and the option name
-        // ended up as a bare positional (flags=["o"], positional=["latch"]).
+        // ended up as a bare positional (flags=["o"], positional=["approvals"]).
         // Only fire if no "-o" or "+o" appeared in positionals (which would have
         // already consumed the option name above).
         if args.flags.contains("o")
@@ -203,7 +202,7 @@ impl Tool for Set {
             // The first positional that matches a known option name gets enabled
             for &name in &positionals {
                 match name {
-                    "latch" => {
+                    "approvals" => {
                         // The same pin covers this path. The fallback only
                         // ever *enables* (there is no `+o` equivalent here),
                         // so the refusal a pin needs to carry is on the
@@ -213,7 +212,7 @@ impl Tool for Set {
                         if let Some(refusal) = refuse_if_pinned(ctx) {
                             return refusal;
                         }
-                        ctx.scope.set_fs_enforce(true);
+                        ctx.scope.set_approvals_enabled(true);
                         break;
                     }
                     "trash" => { ctx.scope.set_trash_enabled(true); break; }
@@ -329,45 +328,45 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn set_o_latch_turns_the_fs_enforce_policy_on() {
+    async fn set_o_approvals_turns_the_fs_enforce_policy_on() {
         let mut ctx = make_ctx();
-        assert!(!ctx.scope.fs_enforce());
+        assert!(!ctx.scope.approvals_enabled());
 
         let mut args = ToolArgs::new();
         args.positional.push(Value::String("-o".into()));
-        args.positional.push(Value::String("latch".into()));
+        args.positional.push(Value::String("approvals".into()));
 
         let result = Set.execute(args, &mut ctx).await;
         assert!(result.ok());
-        assert!(ctx.scope.fs_enforce());
+        assert!(ctx.scope.approvals_enabled());
     }
 
     #[tokio::test]
-    async fn set_plus_o_latch_turns_it_off() {
+    async fn set_plus_o_approvals_turns_it_off() {
         let mut ctx = make_ctx();
-        ctx.scope.set_fs_enforce(true);
+        ctx.scope.set_approvals_enabled(true);
 
         let mut args = ToolArgs::new();
         args.positional.push(Value::String("+o".into()));
-        args.positional.push(Value::String("latch".into()));
+        args.positional.push(Value::String("approvals".into()));
 
         let result = Set.execute(args, &mut ctx).await;
         assert!(result.ok());
-        assert!(!ctx.scope.fs_enforce());
+        assert!(!ctx.scope.approvals_enabled());
     }
 
     #[tokio::test]
-    async fn a_pin_refuses_set_plus_o_latch_loudly_and_leaves_the_policy_on() {
+    async fn a_pin_refuses_set_plus_o_approvals_loudly_and_leaves_the_policy_on() {
         // Spec §F.3 item 3: exit 1 naming the pin, never a silent no-op — an
-        // agent that believes its `set +o latch` worked will go on to do
+        // agent that believes its `set +o approvals` worked will go on to do
         // something it thinks is ungated.
         let mut ctx = make_ctx();
-        ctx.scope.set_fs_enforce(true);
+        ctx.scope.set_approvals_enabled(true);
         ctx.scope.set_policy_pinned(true);
 
         let mut args = ToolArgs::new();
         args.positional.push(Value::String("+o".into()));
-        args.positional.push(Value::String("latch".into()));
+        args.positional.push(Value::String("approvals".into()));
 
         let result = Set.execute(args, &mut ctx).await;
         assert_eq!(result.code, 1, "a pinned policy must refuse, loudly");
@@ -376,11 +375,11 @@ mod tests {
             "the refusal must name the pin: {}",
             result.err
         );
-        assert!(ctx.scope.fs_enforce(), "the policy must be unchanged");
+        assert!(ctx.scope.approvals_enabled(), "the policy must be unchanged");
     }
 
     #[tokio::test]
-    async fn a_pin_refuses_set_o_latch_too() {
+    async fn a_pin_refuses_set_o_approvals_too() {
         // A pin fixes the policy in both directions: an embedder that pinned
         // the gate OFF is equally entitled to that decision.
         let mut ctx = make_ctx();
@@ -388,17 +387,17 @@ mod tests {
 
         let mut args = ToolArgs::new();
         args.positional.push(Value::String("-o".into()));
-        args.positional.push(Value::String("latch".into()));
+        args.positional.push(Value::String("approvals".into()));
 
         let result = Set.execute(args, &mut ctx).await;
         assert_eq!(result.code, 1);
-        assert!(!ctx.scope.fs_enforce(), "the policy must be unchanged");
+        assert!(!ctx.scope.approvals_enabled(), "the policy must be unchanged");
     }
 
     #[tokio::test]
     async fn a_pin_refuses_the_flag_split_parse_path() {
         // The census's surprise 4: when the parser produces
-        // `flags=["o"] positional=["latch"]` the option never reaches the
+        // `flags=["o"] positional=["approvals"]` the option never reaches the
         // `-o` branch above. That path only ever *enables*, so it cannot
         // route around a pin by disabling — but it must not be able to
         // enable a pinned-off policy either.
@@ -407,12 +406,12 @@ mod tests {
 
         let mut args = ToolArgs::new();
         args.flags.insert("o".to_string());
-        args.positional.push(Value::String("latch".into()));
+        args.positional.push(Value::String("approvals".into()));
 
         let result = Set.execute(args, &mut ctx).await;
         assert_eq!(result.code, 1, "the fallback parse path must honor the pin");
         assert!(result.err.contains("pinned by the embedder"), "{}", result.err);
-        assert!(!ctx.scope.fs_enforce());
+        assert!(!ctx.scope.approvals_enabled());
     }
 
     #[tokio::test]
@@ -421,11 +420,11 @@ mod tests {
 
         let mut args = ToolArgs::new();
         args.flags.insert("o".to_string());
-        args.positional.push(Value::String("latch".into()));
+        args.positional.push(Value::String("approvals".into()));
 
         let result = Set.execute(args, &mut ctx).await;
         assert!(result.ok());
-        assert!(ctx.scope.fs_enforce());
+        assert!(ctx.scope.approvals_enabled());
     }
 
     #[tokio::test]
@@ -459,13 +458,13 @@ mod tests {
     #[tokio::test]
     async fn test_set_no_args_shows_all_options() {
         let mut ctx = make_ctx();
-        ctx.scope.set_fs_enforce(true);
+        ctx.scope.set_approvals_enabled(true);
         ctx.scope.set_trash_enabled(true);
 
         let args = ToolArgs::new();
         let result = Set.execute(args, &mut ctx).await;
         assert!(result.ok());
-        assert!(result.text_out().contains("set -o latch"));
+        assert!(result.text_out().contains("set -o approvals"));
         assert!(result.text_out().contains("set -o trash"));
     }
 

@@ -8,7 +8,7 @@
 //!    oracle for free.
 //!  - **The semantic contract that only the argv door can express**: tokens are
 //!    literal (no glob/`$VAR`/split), typed `Value`s ride through as positionals,
-//!    and the shared tail (`--json`, the confirmation latch, error codes) is
+//!    and the shared tail (`--json`, the approval gate, error codes) is
 //!    reachable.
 //!
 //! The classifier itself is unit-/property-tested in-crate
@@ -32,7 +32,7 @@ fn tempdir() -> tempfile::TempDir {
         .expect("tempdir under CARGO_TARGET_TMPDIR")
 }
 
-/// Real-FS kernel rooted at `dir`, latch/trash off by default (tests opt in).
+/// Real-FS kernel rooted at `dir`, approvals/trash off by default (tests opt in).
 fn kernel_at(dir: &Path) -> Kernel {
     kernel_and_authority_at(dir).0
 }
@@ -42,7 +42,7 @@ fn kernel_at(dir: &Path) -> Kernel {
 fn kernel_and_authority_at(dir: &Path) -> (Kernel, kaish_kernel::ledger::ApproverHandle) {
     let config = KernelConfig::repl()
         .with_cwd(dir.to_path_buf())
-        .with_latch(false)
+        .with_approvals(false)
         .with_trash(false);
     Kernel::build(config).expect("kernel")
 }
@@ -161,7 +161,7 @@ async fn typed_values_ride_through_as_positionals() {
 }
 
 // ============================================================================
-// Shared tail is reachable: --json, error codes, the confirmation latch
+// Shared tail is reachable: --json, error codes, the approval gate
 // ============================================================================
 
 #[tokio::test]
@@ -189,7 +189,7 @@ async fn request_timeout_interrupts_a_hung_command() {
     // for safety parity with the string door (a hung command can't run forever).
     let config = KernelConfig::repl()
         .with_cwd(tempdir().path().to_path_buf())
-        .with_latch(false)
+        .with_approvals(false)
         .with_trash(false)
         .with_request_timeout(Duration::from_millis(200));
     let kernel = Kernel::new(config).expect("kernel");
@@ -222,9 +222,9 @@ async fn an_approval_round_trips_through_the_argv_door() {
     std::fs::write(dir.path().join("precious.txt"), "data").unwrap();
     let (kernel, authority) = kernel_and_authority_at(dir.path());
 
-    // Turn the `fs.*` enforce policy on *via argv too* (`set -o latch`).
-    let enabled = kernel.execute_argv("set", &[s("-o"), s("latch")]).await.unwrap();
-    assert_eq!(enabled.code, 0, "set -o latch failed: {}", enabled.err);
+    // Turn the `fs.*` enforce policy on *via argv too* (`set -o approvals`).
+    let enabled = kernel.execute_argv("set", &[s("-o"), s("approvals")]).await.unwrap();
+    assert_eq!(enabled.code, 0, "set -o approvals failed: {}", enabled.err);
 
     // First rm is gated: exit 2, file untouched, the request on `.approval`.
     let gated = kernel.execute_argv("rm", &[s("precious.txt")]).await.unwrap();

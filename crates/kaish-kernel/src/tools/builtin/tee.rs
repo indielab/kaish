@@ -78,9 +78,9 @@ impl Tool for Tee {
             Err(e) => return ExecResult::failure(1, format!("tee: {e}")),
         };
 
-        // Gate truncating overwrites through latch + trash (no-op when both are
+        // Gate truncating overwrites through approvals + trash (no-op when both are
         // off). Append never gates (it doesn't destroy prior content); a new
-        // file just writes. On latch this returns an exit-2 nonce result; under
+        // file just writes. Under the enforce policy this returns an exit-2 pending-approval result; under
         // trash the prior content is snapshotted before we write below.
         let targets: Vec<(String, bool)> = paths.iter().map(|p| (p.clone(), append)).collect();
         let snapshots = match ctx

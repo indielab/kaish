@@ -1296,7 +1296,7 @@ impl ExecContext {
         confirm_hint: impl FnOnce(&str) -> String,
     ) -> Result<GateSnapshots, ExecResult> {
         let trash_enabled = self.scope.trash_enabled();
-        let enforce = self.scope.fs_enforce();
+        let enforce = self.scope.approvals_enabled();
         // Fast path: nothing is subscribed and nothing is trashed, so this
         // costs one branch and allocates nothing (spec §C.5 — a large tree
         // must not pay a per-path ledger cost unless an operator asked for
@@ -1702,14 +1702,14 @@ mod tests {
 
     fn decide(
         trash: bool,
-        latch: bool,
+        approvals: bool,
         real: Option<&str>,
         exists: bool,
         append: bool,
     ) -> MutationAction {
         // Default to a small file well under the cap; the size-cap behavior
         // has its own dedicated test below.
-        decide_mutation_action(trash, latch, real.map(Path::new), exists, append, 1, 10_000_000)
+        decide_mutation_action(trash, approvals, real.map(Path::new), exists, append, 1, 10_000_000)
     }
 
     #[test]
@@ -1721,13 +1721,13 @@ mod tests {
     }
 
     #[test]
-    fn trash_wins_over_latch_on_existing_file() {
+    fn trash_wins_over_the_gate_on_an_existing_file() {
         assert_eq!(decide(true, true, Some("/work/f"), true, false), MutationAction::TrashFirst);
         assert_eq!(decide(true, false, Some("/work/f"), true, false), MutationAction::TrashFirst);
     }
 
     #[test]
-    fn latch_gates_when_trash_off() {
+    fn the_policy_gates_when_trash_is_off() {
         assert_eq!(decide(false, true, Some("/work/f"), true, false), MutationAction::Gate);
     }
 
@@ -1742,7 +1742,7 @@ mod tests {
         assert_eq!(decide(true, true, Some("/tmp/scratch"), true, false), MutationAction::Proceed);
         // A *real* path under /v is NOT excluded: mount-coverage routing now
         // delegates unclaimed /v/* to the embedder's backend, so its real
-        // content under /v must keep the trash/latch safety net. Trash wins.
+        // content under /v must keep the trash/approval safety net. Trash wins.
         assert_eq!(decide(true, true, Some("/v/cas/blob.bin"), true, false), MutationAction::TrashFirst);
     }
 
@@ -1756,7 +1756,7 @@ mod tests {
     #[test]
     fn file_too_big_to_trash_falls_through_like_rm() {
         // Prior content larger than the cap can't be snapshotted, so trash is
-        // skipped: latch gates if on, else the overwrite proceeds unbacked.
+        // skipped: the policy gates if on, else the overwrite proceeds unbacked.
         let big = 100u64;
         let cap = 10u64;
         assert_eq!(

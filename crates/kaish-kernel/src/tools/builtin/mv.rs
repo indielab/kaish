@@ -99,9 +99,9 @@ impl Tool for Mv {
             }
         }
 
-        // Gate a direct file clobber (`mv SRC EXISTING_FILE`) through latch +
+        // Gate a direct file clobber (`mv SRC EXISTING_FILE`) through approvals +
         // trash. The gate snapshots the prior destination content to trash (the
-        // recovery copy) and handles the latch prompt; the move itself replaces
+        // recovery copy) and handles the approval prompt; the move itself replaces
         // it (an atomic same-mount `rename`, or unlink+write cross-mount), so no
         // CAS is threaded. Moving *into* a directory or a recursive merge isn't
         // a single-file truncation and stays ungated (documented residual).

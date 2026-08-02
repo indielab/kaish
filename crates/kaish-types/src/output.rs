@@ -542,7 +542,7 @@ pub enum OutputFormat {
 /// pending approval request (`.approval` is `Some`) — `{"error", "code",
 /// "data"?, "approval"}`. The ONE place a gate gets folded into `--json`
 /// output, so a held `wait` (which carries text output, e.g. `"[1]
-/// Latched\n"`) and a gated `rm` (bare exit-2 failure, no output at all)
+/// Gated\n"`) and a gated `rm` (bare exit-2 failure, no output at all)
 /// converge on the same shape instead of diverging by which branch of
 /// [`apply_output_format`] they happen to take. `error` is `result.err` if
 /// non-empty, else the rendered text — a gate result is always
@@ -953,14 +953,14 @@ mod tests {
     #[test]
     fn apply_output_format_surfaces_the_approval_even_when_result_has_output() {
         // GH #124 part 1: `wait %1`'s gate result carries BOTH text output
-        // (the "[1] Latched\n" status line, via `.output`/`.out`) AND
+        // (the "[1] Gated\n" status line, via `.output`/`.out`) AND
         // `.approval` — unlike `rm`'s bare exit-2 failure, which has no output
         // at all. The old code only merged the request into the JSON envelope
         // on the no-output error branch, so a result with output (like wait's)
         // took the has_output() branch instead and the request never appeared
         // under `--json`. Mirrors wait.rs::finish()'s exact construction.
-        let mut result = ExecResult::from_output(2, "[1] Latched\n", "");
-        result.set_output(Some(OutputData::text("[1] Latched\n")));
+        let mut result = ExecResult::from_output(2, "[1] Gated\n", "");
+        result.set_output(Some(OutputData::text("[1] Gated\n")));
         assert!(result.has_output(), "precondition: this result DOES have output");
         let view = crate::approval::sample_view("fs.remove", &["precious.txt"]);
         result.approval = Some(Box::new(view.clone()));
@@ -988,7 +988,7 @@ mod tests {
         }
         // No .err was set (mirrors wait.rs), so the rendered text becomes the
         // diagnostic `error` field.
-        assert_eq!(parsed["error"], "[1] Latched\n");
+        assert_eq!(parsed["error"], "[1] Gated\n");
         assert!(
             formatted.approval_request().is_some(),
             "the typed request must survive --json formatting"

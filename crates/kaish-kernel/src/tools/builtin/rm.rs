@@ -1,6 +1,6 @@
 //! rm — Remove files and directories.
 //!
-//! Gated by the approval ledger's `fs.*` enforce policy (`set -o latch`) and
+//! Gated by the approval ledger's `fs.*` enforce policy (`set -o approvals`) and
 //! by trash-on-delete (`set -o trash`) for safe autonomous operation. Trash
 //! wins over the gate — the trash IS the recovery net, so a delete it can
 //! catch needs no approval.
@@ -55,7 +55,7 @@ enum RmAction {
     Gate,
 }
 
-/// Determine the rm action based on trash/latch settings and file properties.
+/// Determine the rm action based on trash/approval settings and file properties.
 fn decide_rm_action(
     trash_enabled: bool,
     enforce: bool,
@@ -123,7 +123,7 @@ impl Tool for Rm {
                 ("Remove a file", "rm temp.txt"),
                 ("Remove directory recursively", "rm -rf build/"),
                 (
-                    "Confirm latched removal",
+                    "Confirm gated removal",
                     "rm --confirm=4b1e0d9a7c3f28e6b5a0c1d4e7f2938a bigfile.bin",
                 ),
             ],
@@ -157,7 +157,7 @@ impl Tool for Rm {
         let confirm = parsed.confirm.clone();
 
         let trash_enabled = ctx.scope.trash_enabled();
-        let enforce = ctx.scope.fs_enforce();
+        let enforce = ctx.scope.approvals_enabled();
         let trash_max_size = ctx.scope.trash_max_size();
 
         // Collect per-path decisions in one pass so ONE approval request
@@ -431,7 +431,7 @@ mod tests {
     async fn gated_ctx() -> (ExecContext, crate::ledger::ApproverHandle) {
         let mut ctx = make_ctx().await;
         let authority = ctx.wire_test_ledger();
-        ctx.scope.set_fs_enforce(true);
+        ctx.scope.set_approvals_enabled(true);
         (ctx, authority)
     }
 
@@ -790,7 +790,7 @@ mod tests {
     }
 
     #[test]
-    fn test_decide_rm_action_trash_small_with_latch() {
+    fn test_decide_rm_action_trash_small_with_approvals() {
         // Small file → trash catches it, latch irrelevant
         let real = PathBuf::from("/home/user/file.txt");
         let action = decide_rm_action(true, true, Some(&real), Some(100), 10_000_000, false, false);
@@ -805,7 +805,7 @@ mod tests {
     }
 
     #[test]
-    fn test_decide_rm_action_trash_large_with_latch() {
+    fn test_decide_rm_action_trash_large_with_approvals() {
         let real = PathBuf::from("/home/user/bigfile.bin");
         let action = decide_rm_action(true, true, Some(&real), Some(100_000_000), 10_000_000, false, false);
         assert_eq!(action, RmAction::Gate);
@@ -847,7 +847,7 @@ mod tests {
     }
 
     #[test]
-    fn test_decide_rm_action_dir_trashes_with_latch() {
+    fn test_decide_rm_action_dir_trashes_with_approvals() {
         let real = PathBuf::from("/home/user/mydir");
         // Directory always trashes when trash enabled — latch irrelevant
         let action = decide_rm_action(true, true, Some(&real), Some(0), 10_000_000, true, false);
@@ -868,14 +868,14 @@ mod tests {
     enum Outcome {
         Deleted,
         Trashed,
-        Latched,
+        Gated,
     }
 
     fn matrix_action_to_outcome(action: &RmAction) -> Outcome {
         match action {
             RmAction::Trash(_) => Outcome::Trashed,
             RmAction::Delete => Outcome::Deleted,
-            RmAction::Gate => Outcome::Latched,
+            RmAction::Gate => Outcome::Gated,
         }
     }
 
@@ -889,26 +889,26 @@ mod tests {
         // (trash, latch, size, is_dir, is_symlink) → expected outcome
         let cases = vec![
             (false, false, small, false, false, Outcome::Deleted),
-            (false, true,  small, false, false, Outcome::Latched),
+            (false, true,  small, false, false, Outcome::Gated),
             (true,  false, small, false, false, Outcome::Trashed),
             (true,  true,  small, false, false, Outcome::Trashed),   // trash catches small, latch irrelevant
             (false, false, large, false, false, Outcome::Deleted),
-            (false, true,  large, false, false, Outcome::Latched),
+            (false, true,  large, false, false, Outcome::Gated),
             (true,  false, large, false, false, Outcome::Deleted),    // too big for trash, no latch → delete
-            (true,  true,  large, false, false, Outcome::Latched),    // too big for trash + latch → gate
+            (true,  true,  large, false, false, Outcome::Gated),    // too big for trash + latch → gate
             // Directories always trash (size irrelevant)
             (true,  false, 0,     true,  false, Outcome::Trashed),
             (true,  true,  0,     true,  false, Outcome::Trashed),
             // Dir without trash enabled → normal flow
             (false, false, 0,     true,  false, Outcome::Deleted),
-            (false, true,  0,     true,  false, Outcome::Latched),
+            (false, true,  0,     true,  false, Outcome::Gated),
             // Symlinks NEVER trash (trashing follows to the target); they unlink
             // directly, but latch still gates. is_dir is moot for a symlink.
             (true,  false, small, false, true,  Outcome::Deleted),
-            (true,  true,  small, false, true,  Outcome::Latched),
+            (true,  true,  small, false, true,  Outcome::Gated),
             (true,  false, 0,     true,  true,  Outcome::Deleted),    // symlink-to-dir: still just unlink
             (false, false, small, false, true,  Outcome::Deleted),
-            (false, true,  small, false, true,  Outcome::Latched),
+            (false, true,  small, false, true,  Outcome::Gated),
         ];
 
         for (trash, latch, size, is_dir, is_symlink, expected) in cases {

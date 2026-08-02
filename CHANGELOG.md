@@ -103,6 +103,69 @@ breaking entries are marked **BREAKING**.
   its dictionary is copyrighted and aerospace-shaped, so we keep our own terms.
 
 ### Changed
+- **The confirmation latch is deleted; every destructive-op gate now runs through
+  the approval ledger** (ledger PR 5, `docs/approval-ledger.md` §F). The ten gate
+  sites (`rm`, `kaish-trash empty`, and the seven callers of `gate_overwrites`)
+  post a typed request naming an operation and its resources instead of issuing a
+  nonce. Trash still wins over the gate, and a trash failure is still loud and
+  still never falls through. §F.2's rename table, in full:
+
+  | Was | Becomes |
+  |---|---|
+  | `ExecResult.latch: Option<Box<LatchRequest>>` | `ExecResult.approval: Option<Box<ApprovalRequestView>>` |
+  | `ExecResult::latch_request()` | `ExecResult::approval_request()` |
+  | `--json` envelope key `"latch"` | `"approval"` |
+  | `KernelConfig::with_nonce_store(NonceStore)` | `KernelConfig::with_ledger(LedgerConfig)` / `with_ledger_sink(sink)` |
+  | `kaish_kernel::nonce::{NonceStore, NonceScope}` | removed |
+  | `Kernel::confirm(&req)` | `Kernel::confirm(&handle, &request_id)` |
+  | re-presenting a nonce after success re-ran the operation | a key presented after a successful settlement reports the settled outcome and does not re-execute |
+  | `/v/jobs/{id}/latch` | `/v/jobs/{id}/approval` |
+  | `JobInfo.latch: Option<LatchRequest>` | `JobInfo.approval: Option<ApprovalRequestView>` |
+  | `set -o latch` / `set +o latch` | `set -o approvals` / `set +o approvals` |
+  | `KAISH_LATCH` | `KAISH_APPROVALS` |
+  | `KernelConfig::with_latch(bool)` | `KernelConfig::with_approvals(bool)` |
+  | `JobStatus::Latched`, wire `"latched"` | `JobStatus::Gated`, wire `"gated"` |
+
+  Unchanged: exit code **2**, the `--confirm=<token>` flag spelling, and the
+  control-plane discipline (never folded into `.data`, survives `clear_stdout`,
+  survives the `ExecResult`/`ToolResult` roundtrip, overrides a later pipeline
+  stage's success, rides scatter rows).
+- **BREAKING:** `ExecResult.latch` and `ExecResult::latch_request()` are removed;
+  read `ExecResult.approval` / `approval_request()` instead. The payload is an
+  `ApprovalRequestView`, which is tokenless by construction — it names the request,
+  never its credential, so it is safe to log and serialize.
+- **BREAKING:** the `--json` envelope key for a gated result is `"approval"`, not
+  `"latch"`, and its payload is the request view rather than a nonce record.
+- **BREAKING:** `JobInfo.latch` is now `JobInfo.approval`, and `JobInfo::with_latch`
+  is `with_approval`. The VFS node `/v/jobs/{id}/latch` is `/v/jobs/{id}/approval`.
+- **BREAKING:** `JobStatus::Latched` is `JobStatus::Gated` and its wire spelling is
+  `"gated"` (also in `/v/jobs/{id}/status` and `jobs --json`) — the latch's word is
+  retired with the latch.
+- **BREAKING:** the shell option is `set -o approvals` / `set +o approvals`, the env
+  var is `KAISH_APPROVALS`, and the builder is `KernelConfig::with_approvals(bool)`.
+- **BREAKING:** `KernelConfig::with_nonce_store` is removed. Configure the ledger with
+  `with_ledger(LedgerConfig)` and `with_ledger_sink(sink)`; share one across kernels
+  with `with_approver_handle`, which adopts that handle's whole ledger. Setting both
+  is refused at build time rather than silently ignoring one.
+- **BREAKING:** `Kernel::confirm` takes `(&ApproverHandle, &RequestId)`. Authority is
+  in the signature, so there is no bridge to it from anything holding only a `Kernel`.
+  It refuses (exit 2) when the request's capture is not `Exact`, naming the variant.
+- **BREAKING:** `kaish_kernel::nonce` is removed, including `NonceStore` and
+  `NonceScope`. `NonceScope` had no in-tree consumer but was public API, so an
+  embedder building a custom confirmation UI on `NonceStore::lookup` has to move to
+  `Approvals::get`/`pending`.
+- **BREAKING:** a grant authorizes exactly **one successful** settlement. Re-presenting
+  a key after success reports the recorded outcome instead of running the operation
+  again — the latch's reusable nonce silently ran it twice. A *failed* attempt does
+  not consume the grant, so a transient failure still retries.
+- **An embedder can pin the approval policy.** `KernelConfig::with_policy_pinned(true)`
+  makes `set -o approvals` / `set +o approvals` fail with exit 1 naming the pin,
+  rather than silently doing nothing — a silent no-op teaches an agent that its
+  `set +o approvals` worked. The pin is copied into forks and pipeline stages and
+  survives `Kernel::reset`.
+- **A failed argv capture no longer becomes an empty replay.** The dispatch seam
+  records `Capture::CaptureFailed` instead of substituting an empty argv, so
+  `Kernel::confirm` refuses loudly rather than replaying the wrong command.
 - **BREAKING:** `NonceStore::issue` returns `Result<String, getrandom::Error>`
   instead of `String` — entropy failure has to reach the caller, and the old
   signature had nowhere to put it.

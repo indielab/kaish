@@ -197,7 +197,7 @@ pub const FRAGMENTS: &[Fragment] = &[
         Depth::Summary,
         None,
         "**Fail loud, not silent.** kaish prefers to error over corrupting data; \
-         destructive operations can require a confirmation nonce via `set -o latch`.",
+         destructive operations can require an approval via `set -o approvals`.",
     )
     .ranked(7),
     en(
@@ -579,34 +579,48 @@ sed 's/(a)\1/x/'                    # ERROR — no backreference IN a pattern
         "Shell Options",
         r#"```sh
 set -e                    # exit on first error
-set -o latch              # require nonce confirmation to delete/overwrite (exit code 2)
+set -o approvals          # require approval to delete/overwrite (exit code 2)
 set -o trash              # move rm'd / overwritten files to Trash
 set -o glob               # enable bare glob expansion (on by default)
-set +o latch              # disable latch
+set +o approvals          # disable approvals
 set +o trash              # disable trash
 set +o glob               # disable bare glob expansion
 ```
 
-Env vars: `KAISH_LATCH=1`, `KAISH_TRASH=1` enable at startup.
+Env vars: `KAISH_APPROVALS=1`, `KAISH_TRASH=1` enable at startup.
 
-**Latch:** Nonces scoped to (command, paths). A nonce for `rm A` rejects `rm B`.
-Confirmed paths must be subset of authorized paths. Exit code 2 = needs confirmation.
-Applies to `rm` and to truncating overwrites (`tee`, `patch`, `sed -i`) —
-confirm those with `--confirm=<nonce>`. `tee -a` append, new files, and
-`patch --dry-run` don't gate. The prompt prints to stderr (stdout stays empty);
-the nonce is on the result's typed `latch` field — surfaced under a `latch` key
-in the error envelope when `--json` is on.
+**Approvals:** `set -o approvals` gates every filesystem mutation with no
+recoverable prior copy. A gated command exits **2** and returns a typed
+approval request naming the operation (`fs.remove`, `fs.overwrite`,
+`fs.rename`) and the exact paths. Applies to `rm` and to truncating
+overwrites (`cp`, `dd`, `mv`, `patch`, `sed -i`, `tee`, `write`); `tee -a`
+append, new files, and `patch --dry-run` don't gate. `kaish-trash empty`
+gates **always**, whatever the option says — it discards the recovery net
+itself.
+
+Approve out of band, then re-run the same command with `--confirm=<token>`.
+A grant authorizes exactly **one successful** run: a key presented after
+success reports what already happened instead of running it again, while a
+failed attempt leaves the grant live to retry. The prompt prints to stderr
+(stdout stays empty); the request is on the result's typed `approval` field —
+surfaced under an `approval` key in the error envelope when `--json` is on.
+It never carries the token.
+
+An embedder can pin the policy so `set +o approvals` fails with exit 1
+instead of disarming the session.
 
 **Trash:** Files <= 10MB and directories always trash. `/tmp`, `/v/*` excluded.
-A truncating overwrite under `trash` snapshots the file's prior content first
-(recoverable from Trash). If trash fails, the op errors (no silent fallthrough to a
-destructive delete/overwrite). Configure threshold: `kaish-trash config max-size <bytes>`.
+Trash wins over approvals — a delete the trash can catch needs no approval,
+because the trash IS the recovery net. A truncating overwrite under `trash`
+snapshots the file's prior content first (recoverable from Trash). If trash
+fails, the op errors (no silent fallthrough to a destructive delete/overwrite).
+Configure threshold: `kaish-trash config max-size <bytes>`.
 
-**Nonce persistence:** The kernel creates a fresh nonce store by default.
-An embedder can share one store across `execute()` calls in a session, so a
-nonce from call 1 can confirm in call 2. The REPL keeps one kernel alive —
-nonces persist naturally. Embedders control this via
-`KernelConfig::with_nonce_store()`."#,
+**Across calls:** requests and grants live in the kernel's approval ledger,
+so a request raised in one `execute()` call is approvable and confirmable in
+a later one. The REPL keeps one kernel alive, so this is automatic; embedders
+share a ledger between kernels with
+`KernelConfig::with_approver_handle()`."#,
     ),
     syntax_section(
         "error-handling",

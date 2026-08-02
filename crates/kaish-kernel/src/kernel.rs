@@ -228,26 +228,26 @@ pub struct KernelConfig {
     pub allow_external_commands: bool,
 
     /// Enable the `fs.*` enforce policy for dangerous operations
-    /// (`set -o latch`).
+    /// (`set -o approvals`).
     ///
     /// When enabled, a destructive operation with no recoverable prior copy
     /// goes through the approval ledger's decision chain
     /// (`docs/approval-ledger.md` §C.5) instead of running. Can also be set
-    /// at runtime with `set -o latch` (unless pinned — see
-    /// [`Self::policy_pinned`]) or via `KAISH_LATCH=1`.
+    /// at runtime with `set -o approvals` (unless pinned — see
+    /// [`Self::policy_pinned`]) or via `KAISH_APPROVALS=1`.
     ///
-    /// The `latch` spelling is deliberate and pinned (spec §F.2, §I.4): the
-    /// ledger renames the mechanism, not the muscle memory.
-    pub latch_enabled: bool,
+    /// Named for the option it seeds: `set -o approvals`. The latch's
+    /// spelling was retired with the latch itself (spec §F.2, §I.4).
+    pub approvals_enabled: bool,
 
     /// Pin this session's approval policy so script code cannot change it
     /// (spec §F.3 item 3).
     ///
-    /// With this set, `set -o latch` and `set +o latch` both fail with exit
+    /// With this set, `set -o approvals` and `set +o approvals` both fail with exit
     /// 1 and a message naming the pin — loud, never a silent no-op, because
-    /// a silent no-op teaches an agent that its `set +o latch` worked. The
+    /// a silent no-op teaches an agent that its `set +o approvals` worked. The
     /// pin is copied into every fork and pipeline stage, so `$(set +o
-    /// latch)`, a background job, and a `.kai` script are all covered.
+    /// approvals)`, a background job, and a `.kai` script are all covered.
     pub policy_pinned: bool,
 
     /// Enable trash-on-delete for rm (set -o trash).
@@ -403,7 +403,7 @@ impl Default for KernelConfig {
                 ignore_config: crate::ignore_config::IgnoreConfig::none(),
                 output_limit: crate::output_limit::OutputLimitConfig::none(),
                 allow_external_commands: cfg!(feature = "subprocess"),
-                latch_enabled: std::env::var("KAISH_LATCH").is_ok_and(|v| v == "1"),
+                approvals_enabled: std::env::var("KAISH_APPROVALS").is_ok_and(|v| v == "1"),
                 policy_pinned: false,
                 trash_enabled: std::env::var("KAISH_TRASH").is_ok_and(|v| v == "1"),
                 ledger_config: None,
@@ -427,7 +427,7 @@ impl Default for KernelConfig {
                 ignore_config: crate::ignore_config::IgnoreConfig::none(),
                 output_limit: crate::output_limit::OutputLimitConfig::none(),
                 allow_external_commands: false,
-                latch_enabled: false,
+                approvals_enabled: false,
                 policy_pinned: false,
                 trash_enabled: false,
                 ledger_config: None,
@@ -457,7 +457,7 @@ impl KernelConfig {
             ignore_config: crate::ignore_config::IgnoreConfig::none(),
             output_limit: crate::output_limit::OutputLimitConfig::none(),
             allow_external_commands: cfg!(feature = "subprocess"),
-            latch_enabled: false,
+            approvals_enabled: false,
             policy_pinned: false,
             trash_enabled: false,
             ledger_config: None,
@@ -490,7 +490,7 @@ impl KernelConfig {
             ignore_config: crate::ignore_config::IgnoreConfig::none(),
             output_limit: crate::output_limit::OutputLimitConfig::none(),
             allow_external_commands: cfg!(feature = "subprocess"),
-            latch_enabled: false,
+            approvals_enabled: false,
             policy_pinned: false,
             trash_enabled: false,
             ledger_config: None,
@@ -531,7 +531,7 @@ impl KernelConfig {
             ignore_config: crate::ignore_config::IgnoreConfig::interactive(),
             output_limit: crate::output_limit::OutputLimitConfig::none(),
             allow_external_commands: cfg!(feature = "subprocess"),
-            latch_enabled: std::env::var("KAISH_LATCH").is_ok_and(|v| v == "1"),
+            approvals_enabled: std::env::var("KAISH_APPROVALS").is_ok_and(|v| v == "1"),
             policy_pinned: false,
             trash_enabled: std::env::var("KAISH_TRASH").is_ok_and(|v| v == "1"),
             ledger_config: None,
@@ -569,7 +569,7 @@ impl KernelConfig {
             ignore_config: crate::ignore_config::IgnoreConfig::agent(),
             output_limit: crate::output_limit::OutputLimitConfig::agent(),
             allow_external_commands: cfg!(feature = "subprocess"),
-            latch_enabled: std::env::var("KAISH_LATCH").is_ok_and(|v| v == "1"),
+            approvals_enabled: std::env::var("KAISH_APPROVALS").is_ok_and(|v| v == "1"),
             policy_pinned: false,
             trash_enabled: std::env::var("KAISH_TRASH").is_ok_and(|v| v == "1"),
             ledger_config: None,
@@ -600,7 +600,7 @@ impl KernelConfig {
             ignore_config: crate::ignore_config::IgnoreConfig::agent(),
             output_limit: crate::output_limit::OutputLimitConfig::agent(),
             allow_external_commands: cfg!(feature = "subprocess"),
-            latch_enabled: std::env::var("KAISH_LATCH").is_ok_and(|v| v == "1"),
+            approvals_enabled: std::env::var("KAISH_APPROVALS").is_ok_and(|v| v == "1"),
             policy_pinned: false,
             trash_enabled: std::env::var("KAISH_TRASH").is_ok_and(|v| v == "1"),
             ledger_config: None,
@@ -628,7 +628,7 @@ impl KernelConfig {
             ignore_config: crate::ignore_config::IgnoreConfig::none(),
             output_limit: crate::output_limit::OutputLimitConfig::none(),
             allow_external_commands: false,
-            latch_enabled: false,
+            approvals_enabled: false,
             policy_pinned: false,
             trash_enabled: false,
             ledger_config: None,
@@ -688,9 +688,9 @@ impl KernelConfig {
         self
     }
 
-    /// Turn the `fs.*` enforce policy on or off at startup (`set -o latch`).
-    pub fn with_latch(mut self, enabled: bool) -> Self {
-        self.latch_enabled = enabled;
+    /// Turn the `fs.*` enforce policy on or off at startup (`set -o approvals`).
+    pub fn with_approvals(mut self, enabled: bool) -> Self {
+        self.approvals_enabled = enabled;
         self
     }
 
@@ -1377,7 +1377,7 @@ impl Kernel {
         let no_host_side_channel =
             no_host_filesystem || matches!(config.vfs_mode, VfsMountMode::NoLocal);
 
-        let KernelConfig { name, cwd, skip_validation, interactive, ignore_config, mut output_limit, allow_external_commands, latch_enabled, policy_pinned, trash_enabled, ledger_config, ledger_sink, initial_vars, request_timeout, kill_grace, approval, .. } = config;
+        let KernelConfig { name, cwd, skip_validation, interactive, ignore_config, mut output_limit, allow_external_commands, approvals_enabled, policy_pinned, trash_enabled, ledger_config, ledger_sink, initial_vars, request_timeout, kill_grace, approval, .. } = config;
 
         let approvals = Self::build_approvals(approval, ledger_config, ledger_sink)?;
 
@@ -1430,7 +1430,7 @@ impl Kernel {
                 for (name, value) in initial_vars.clone() {
                     scope.set_exported(name, value);
                 }
-                scope.set_fs_enforce(latch_enabled);
+                scope.set_approvals_enabled(approvals_enabled);
                 scope.set_policy_pinned(policy_pinned);
                 scope.set_trash_enabled(trash_enabled);
                 scope
@@ -1850,7 +1850,7 @@ impl Kernel {
     /// wrapping the other. From argv classification onward `execute_argv` reuses
     /// the exact path a `Stmt::Command` takes — command resolution (aliases, user
     /// tools, `.kai` scripts, externals, backend tools), arg binding, the `--json`
-    /// transform, and the confirmation latch — so a latched `rm` still emits a
+    /// transform, and the approval gate — so a gated `rm` still emits a
     /// nonce and an `ls --json` still applies output formatting. The kernel's
     /// pre-execution *syntax* validator does not run: argv has no shell syntax to
     /// validate (a tool's own `validate()`/clap parse still runs at dispatch).
@@ -1923,7 +1923,7 @@ impl Kernel {
     /// job — `rm x &` reaching its gate), a successful replay also retires
     /// that job from the `JobManager` (GH #124 part 4) — mirroring the manual
     /// discard path (`kill --discard %N`), automated. A failed replay leaves
-    /// the job in place for inspection or retry. Guarded by `is_latched` so a
+    /// the job in place for inspection or retry. Guarded by `is_gated` so a
     /// stale or foreign `job_id` can never remove an unrelated running job.
     pub async fn confirm(
         &self,
@@ -1999,7 +1999,7 @@ impl Kernel {
             && let Some(id) = chain.request.job_id
         {
             let job_id = crate::scheduler::JobId(id);
-            if self.jobs.is_latched(job_id).await {
+            if self.jobs.is_gated(job_id).await {
                 self.jobs.remove(job_id).await;
             }
         }
@@ -5735,16 +5735,16 @@ impl Kernel {
     ///
     /// Clears in-memory variables and resets cwd to root. History is not
     /// cleared (it persists across resets). The kernel's `$$` identity, the
-    /// confirmation latch / trash-on-delete configuration, and any
+    /// approval gate / trash-on-delete configuration, and any
     /// frontend-seeded `initial_vars` (HOME/PATH/etc, from `KernelConfig`)
     /// are re-applied to the fresh scope rather than silently reverting to
-    /// defaults — an embedder that opted into `with_latch(true)` must not
+    /// defaults — an embedder that opted into `with_approvals(true)` must not
     /// find the gate quietly disabled after a `reset()` between requests.
     pub async fn reset(&self) -> Result<()> {
         {
             let mut scope = self.scope.write().await;
             let pid = scope.pid();
-            let fs_enforce = scope.fs_enforce();
+            let approvals_enabled = scope.approvals_enabled();
             let policy_pinned = scope.policy_pinned();
             let trash_enabled = scope.trash_enabled();
             let mut fresh = Scope::new();
@@ -5752,7 +5752,7 @@ impl Kernel {
             for (name, value) in self.initial_vars.clone() {
                 fresh.set_exported(name, value);
             }
-            fresh.set_fs_enforce(fs_enforce);
+            fresh.set_approvals_enabled(approvals_enabled);
             // The pin travels with the policy it pins — a `reset()` between
             // requests that dropped it would hand the next request an
             // unpinned session (spec §F.3 item 3).
@@ -7466,34 +7466,34 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_kernel_reset_preserves_latch_and_trash_config() {
-        // An embedder configuring `with_latch(true)` must not have the
+    async fn test_kernel_reset_preserves_approvals_and_trash_config() {
+        // An embedder configuring `with_approvals(true)` must not have the
         // confirmation gate silently disabled by a later `reset()` — that
         // would let a destructive command through with no nonce and no
-        // error, exactly the "silent fallback" the latch exists to prevent.
+        // error, exactly the "silent fallback" the gate exists to prevent.
         let kernel = Kernel::new(
             KernelConfig::transient()
-                .with_latch(true)
+                .with_approvals(true)
                 .with_skip_validation(true),
         )
         .expect("failed to create kernel");
 
         // Write and rm relative to `/` (reset()'s post-reset cwd) so the file
         // is reachable identically before and after reset.
-        kernel.execute("cd /; echo hi > latch-probe.txt").await.expect("setup write failed");
+        kernel.execute("cd /; echo hi > approvals-probe.txt").await.expect("setup write failed");
 
-        let before = kernel.execute("rm latch-probe.txt").await.expect("execute failed");
-        assert_eq!(before.code, 2, "latch should require confirmation before reset: {before:?}");
+        let before = kernel.execute("rm approvals-probe.txt").await.expect("execute failed");
+        assert_eq!(before.code, 2, "the gate should require approval before reset: {before:?}");
 
         kernel.reset().await.expect("reset failed");
 
         // reset() only clears scope/cwd (to `/`), not the VFS — the
-        // un-deleted probe file (the latch blocked the delete above) is
+        // un-deleted probe file (the gate blocked the delete above) is
         // still there.
-        let after = kernel.execute("rm latch-probe.txt").await.expect("execute failed");
+        let after = kernel.execute("rm approvals-probe.txt").await.expect("execute failed");
         assert_eq!(
             after.code, 2,
-            "latch must still require confirmation after reset, not silently disable: {after:?}"
+            "the gate must still require approval after reset, not silently disable: {after:?}"
         );
     }
 

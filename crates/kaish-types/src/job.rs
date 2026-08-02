@@ -23,7 +23,7 @@ impl std::fmt::Display for JobId {
 /// Status of a background job.
 ///
 /// Wire spelling (via `Serialize`/`Deserialize`) is lowercase — `"running"`,
-/// `"stopped"`, `"done"`, `"latched"`, `"failed"` — matching the existing
+/// `"stopped"`, `"done"`, `"gated"`, `"failed"` — matching the existing
 /// `/v/jobs/N/status` text vocabulary (`Job::status_string`), not the
 /// capitalized `Display` impl (which stays capitalized for human-facing
 /// text: the `jobs` table, `[N]+ Done ...` notifications). This is now the
@@ -46,10 +46,10 @@ pub enum JobStatus {
     /// be fulfilled via `Kernel::confirm` with the request surfaced on
     /// `JobInfo.approval`.
     ///
-    /// The name and its wire spelling `"latched"` are pinned
+    /// The name and its wire spelling `"gated"` are pinned
     /// (`docs/approval-ledger.md` §F.2) — the ledger renames the mechanism,
     /// not this status.
-    Latched,
+    Gated,
     /// Job failed with an error.
     Failed,
 }
@@ -60,7 +60,7 @@ impl std::fmt::Display for JobStatus {
             JobStatus::Running => write!(f, "Running"),
             JobStatus::Stopped => write!(f, "Stopped"),
             JobStatus::Done => write!(f, "Done"),
-            JobStatus::Latched => write!(f, "Latched"),
+            JobStatus::Gated => write!(f, "Gated"),
             JobStatus::Failed => write!(f, "Failed"),
         }
     }
@@ -87,7 +87,7 @@ pub struct JobInfo {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pid: Option<u32>,
     /// The pending approval request when the job is held
-    /// (`JobStatus::Latched`) — the control-plane surface an embedder reads
+    /// (`JobStatus::Gated`) — the control-plane surface an embedder reads
     /// to fulfill a *backgrounded* destructive op via `Kernel::confirm`.
     /// `None` for any job that is not held. Tokenless by construction
     /// (`docs/approval-ledger.md` §A.2). GH #96.
@@ -255,13 +255,13 @@ mod tests {
     #[test]
     fn job_status_json_spelling_is_lowercase() {
         // Pin the exact wire spelling. Deliberately lowercase, matching the
-        // existing `/v/jobs/N/status` vocabulary (`running`/`done:0`/`latched`/
+        // existing `/v/jobs/N/status` vocabulary (`running`/`done:0`/`gated`/
         // `failed:N`) rather than the capitalized `Display` impl — `Display`
         // stays capitalized for human-facing text (the `jobs` table).
         assert_eq!(serde_json::to_string(&JobStatus::Running).unwrap(), "\"running\"");
         assert_eq!(serde_json::to_string(&JobStatus::Stopped).unwrap(), "\"stopped\"");
         assert_eq!(serde_json::to_string(&JobStatus::Done).unwrap(), "\"done\"");
-        assert_eq!(serde_json::to_string(&JobStatus::Latched).unwrap(), "\"latched\"");
+        assert_eq!(serde_json::to_string(&JobStatus::Gated).unwrap(), "\"gated\"");
         assert_eq!(serde_json::to_string(&JobStatus::Failed).unwrap(), "\"failed\"");
     }
 
@@ -271,7 +271,7 @@ mod tests {
             JobStatus::Running,
             JobStatus::Stopped,
             JobStatus::Done,
-            JobStatus::Latched,
+            JobStatus::Gated,
             JobStatus::Failed,
         ] {
             let json = serde_json::to_string(&status).unwrap();
@@ -290,7 +290,7 @@ mod tests {
     fn job_info_round_trips_through_serde() {
         let started = std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1_700_000_000);
         let finished = started + std::time::Duration::from_secs(5);
-        let info = JobInfo::new(JobId(3), "rm precious.txt &", JobStatus::Latched)
+        let info = JobInfo::new(JobId(3), "rm precious.txt &", JobStatus::Gated)
             .with_output_file(Some(PathBuf::from("job-output.txt")))
             .with_pid(Some(4321))
             .with_approval(Some(sample_approval()))
@@ -308,7 +308,7 @@ mod tests {
             back.approval.as_ref().unwrap().operation.as_str(),
             "fs.remove"
         );
-        assert_eq!(back.status, JobStatus::Latched);
+        assert_eq!(back.status, JobStatus::Gated);
     }
 
     #[test]

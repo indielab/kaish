@@ -100,7 +100,7 @@ impl Tool for Jobs {
             let mut msg = format!("Cleaned up {} completed job(s)\n", removed);
             if held > 0 {
                 msg.push_str(&format!(
-                    "Kept {held} latched job(s) awaiting approval — \
+                    "Kept {held} gated job(s) awaiting approval — \
                      grant the request or abandon with kill --discard %N\n"
                 ));
             }
@@ -129,7 +129,7 @@ impl Tool for Jobs {
             "PATH".to_string(),
         ];
 
-        // rich_json rows carry `approval` for a `Latched` row (GH #124 part 2) —
+        // rich_json rows carry `approval` for a `Gated` row (GH #124 part 2) —
         // computed from `&jobs` before the text loop below consumes it by value.
         let rows = job_rows_json(&jobs);
         let output = OutputData::table(headers, nodes)
@@ -167,7 +167,7 @@ mod tests {
             crate::ledger::sample_view(crate::ledger::KernelOperation::FsRemove, &["precious.txt"]);
         view.job_id = Some(1);
         let jobs = vec![
-            JobInfo::new(JobId(1), "rm precious.txt", JobStatus::Latched)
+            JobInfo::new(JobId(1), "rm precious.txt", JobStatus::Gated)
                 .with_approval(Some(view.clone())),
             JobInfo::new(JobId(2), "sleep 5", JobStatus::Running),
         ];
@@ -177,8 +177,8 @@ mod tests {
         assert_eq!(rows[0]["id"], 1);
         // GH #241: the JSON spelling of JobStatus is lowercase, matching the
         // existing `/v/jobs/N/status` vocabulary — NOT the capitalized
-        // `Display` impl this row used to derive from (`"Latched"`).
-        assert_eq!(rows[0]["status"], "latched");
+        // `Display` impl this row used to derive from (`"Gated"`).
+        assert_eq!(rows[0]["status"], "gated");
         assert_eq!(rows[0]["path"], "/v/jobs/1/");
         assert_eq!(
             rows[0]["approval"]["id"], view.id.as_str(),

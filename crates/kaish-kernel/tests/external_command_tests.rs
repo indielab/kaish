@@ -846,7 +846,7 @@ async fn external_command_under_overlay_gives_friendly_virtual_cwd_error() {
     );
     let config = KernelConfig::agent_with_root(root.to_path_buf())
         .with_overlay(true)
-        .with_latch(false)
+        .with_approvals(false)
         .with_trash(false)
         .with_allow_external_commands(true)
         .with_initial_vars(vars);
@@ -895,7 +895,7 @@ async fn external_command_not_in_path_under_overlay_stays_generic_not_found() {
     );
     let config = KernelConfig::agent_with_root(root.to_path_buf())
         .with_overlay(true)
-        .with_latch(false)
+        .with_approvals(false)
         .with_trash(false)
         .with_allow_external_commands(true)
         .with_initial_vars(vars);

@@ -94,7 +94,7 @@ impl Tool for Dd {
                     Ok(n) => skip = n,
                     Err(e) => return ExecResult::failure(2, format!("dd: skip: {e}")),
                 },
-                // Confirmation nonce for a latch-gated `of=` overwrite (dd's
+                // Confirmation nonce for a approval-gated `of=` overwrite (dd's
                 // key=value idiom rather than the `--confirm` flag form).
                 "confirm" => confirm = Some(val.to_string()),
                 other => {
@@ -164,8 +164,8 @@ impl Tool for Dd {
             Some(out) => {
                 let out_resolved = ctx.resolve_path(&out);
 
-                // Gate the truncating `of=` overwrite through latch + trash. The
-                // latch re-run hint reinjects the operands `dd` can't run without
+                // Gate the truncating `of=` overwrite through approvals + trash. The
+                // the re-run hint reinjects the operands `dd` can't run without
                 // (otherwise the advertised command would do nothing).
                 let hint_cmd = {
                     let mut s = format!("dd if={input} of={out} bs={bs}");

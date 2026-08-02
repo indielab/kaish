@@ -107,7 +107,7 @@ impl Tool for Cp {
             }
         }
 
-        // Gate a direct file clobber (`cp SRC EXISTING_FILE`) through latch +
+        // Gate a direct file clobber (`cp SRC EXISTING_FILE`) through approvals +
         // trash. Copying *into* a directory or a recursive directory merge is
         // not a single-file truncation, so it stays ungated (documented
         // write-model residual). Only the named destination is gated here.

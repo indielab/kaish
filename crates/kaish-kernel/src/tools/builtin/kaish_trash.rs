@@ -205,12 +205,12 @@ async fn cmd_config(args: &ToolArgs, ctx: &mut ExecContext) -> ExecResult {
     // Show current config
     let enabled = ctx.scope.trash_enabled();
     let max_size = ctx.scope.trash_max_size();
-    let enforce = ctx.scope.fs_enforce();
+    let enforce = ctx.scope.approvals_enabled();
 
     let nodes = vec![
         OutputNode::new("enabled").with_cells(vec![enabled.to_string()]),
         OutputNode::new("max_size").with_cells(vec![format_size(max_size)]),
-        OutputNode::new("latch").with_cells(vec![enforce.to_string()]),
+        OutputNode::new("approvals").with_cells(vec![enforce.to_string()]),
     ];
 
     ExecResult::with_output(OutputData::table(
@@ -295,7 +295,7 @@ mod tests {
         // it gates with the enforce policy off, which is the default here.
         let mut ctx = make_ctx();
         ctx.wire_test_ledger();
-        assert!(!ctx.scope.fs_enforce(), "precondition: the policy is off");
+        assert!(!ctx.scope.approvals_enabled(), "precondition: the policy is off");
 
         let mut args = ToolArgs::new();
         args.positional.push(Value::String("empty".into()));

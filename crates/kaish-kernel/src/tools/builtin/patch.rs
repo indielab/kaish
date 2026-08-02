@@ -149,7 +149,7 @@ impl Tool for Patch {
 
         let groups = group_by_file(&hunks);
 
-        // Gate truncating overwrites through latch + trash (no-op when both are
+        // Gate truncating overwrites through approvals + trash (no-op when both are
         // off; skipped for --dry-run, which never writes). patch always rewrites
         // an existing file, so every target is a non-append overwrite; one nonce
         // scopes the whole set of files the diff touches. The snapshot copies

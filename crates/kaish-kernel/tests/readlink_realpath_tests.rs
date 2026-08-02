@@ -29,7 +29,7 @@ fn tempdir() -> tempfile::TempDir {
 fn kernel_at(dir: &Path) -> Kernel {
     let config = KernelConfig::repl()
         .with_cwd(dir.to_path_buf())
-        .with_latch(false)
+        .with_approvals(false)
         .with_trash(false);
     Kernel::new(config).expect("kernel")
 }

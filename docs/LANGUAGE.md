@@ -759,56 +759,67 @@ echo $((A > B))                 # 1
 
 ```sh
 set -e                          # exit on first error
-set -o latch                    # require nonce confirmation for destructive rm
+set -o approvals                # require approval for destructive rm/overwrite
 set -o trash                    # move rm'd files to freedesktop.org Trash
 set -o glob                     # enable bare glob expansion (on by default)
-set +o latch                    # disable latch
+set +o approvals                # disable approvals
 set +o trash                    # disable trash
 set +o glob                     # disable bare glob expansion
 ```
 
-Options compose orthogonally: with both enabled, small files go to Trash
-(no confirmation needed), large files require nonce confirmation.
+Options compose orthogonally, and **trash wins over approvals** — the trash IS
+the recovery net, so a delete it can catch needs no approval. With both
+enabled, small files go to Trash and large ones (too big to snapshot) need
+approval.
 
-Environment variables `KAISH_LATCH=1` and `KAISH_TRASH=1` enable at kernel startup.
+Environment variables `KAISH_APPROVALS=1` and `KAISH_TRASH=1` enable at kernel
+startup.
 
-When latch is enabled, `rm` returns **exit code 2** with a nonce:
+With approvals enabled, `rm` returns **exit code 2** with a pending request:
 ```sh
 $ rm important.dat
-rm: confirmation required (latch enabled)
-Authorized: important.dat
-To confirm, run: rm --confirm="4b1e0d9a7c3f28e6b5a0c1d4e7f2938a" important.dat
-Nonce expires in 60 seconds.
+rm: pending approval req_9c1a4f2e_42 — an operator must grant it
 ```
 
-**Latch output contract.** The prompt above is written to the result's **`err`
-channel** (what a frontend renders to stderr); **stdout is empty** — nothing was
-deleted, so there is no success output. The nonce is also attached as a
-first-class typed field, so a program driving the shell reads it from the result
-rather than scraping the stderr text. It is control-plane, distinct from the
-data-plane `.data`:
+**Approval output contract.** The message above is written to the result's
+**`err` channel** (what a frontend renders to stderr); **stdout is empty** —
+nothing was deleted, so there is no success output. The request is also
+attached as a first-class typed field, so a program driving the shell reads it
+from the result rather than scraping the stderr text. It is control-plane,
+distinct from the data-plane `.data`, and it is **tokenless**: the request
+names the operation, never its credential.
 
-- **No `--json`** — `ExecResult.latch` is the typed request
-  `Some(LatchRequest { nonce, command, paths, hint, ttl })` (embedders read it
-  via `latch_request()`).
+- **No `--json`** — `ExecResult.approval` is the typed request
+  `Some(ApprovalRequestView { id, operation, resources, hint, ttl, … })`
+  (embedders read it via `approval_request()`).
 
 - **`--json`** — the result is a non-zero exit with a diagnostic, so it's wrapped
   in the standard JSON error envelope; the request is surfaced under its own
-  `latch` key (never folded into `data`):
+  `approval` key (never folded into `data`):
 
   ```json
-  { "error": "rm: confirmation required (latch enabled)…",
+  { "error": "rm: pending approval req_9c1a4f2e_42 …",
     "code": 2,
-    "latch": { "nonce": "4b1e0d9a7c3f28e6b5a0c1d4e7f2938a", "command": "rm",
-               "paths": ["important.dat"], "hint": "...", "ttl": 60 } }
+    "approval": { "id": "req_9c1a4f2e_42", "operation": "fs.remove",
+                  "resources": [{ "kind": "path", "id": "important.dat" }],
+                  "hint": "rm --confirm=<token> important.dat" } }
   ```
 
 The same contract holds for the truncating-overwrite gate (`tee`, `patch`,
 `sed -i`, `write`, `cp`, `mv`, `dd of=`): exit 2, human prompt on the `err`
-channel, request on `.latch` (under the `latch` key with `--json`). `dd` confirms with its
-`confirm=<nonce>` key=value idiom rather than `--confirm=`; copying or moving
-*into* a directory (and recursive `cp -r`/`mv` of a tree) gates the named
-destination, not each child file.
+channel, request on `.approval` (under the `approval` key with `--json`). `dd`
+confirms with its `confirm=<token>` key=value idiom rather than `--confirm=`;
+copying or moving *into* a directory (and recursive `cp -r`/`mv` of a tree)
+gates the named destination, not each child file.
+
+`kaish-trash empty` gates **always**, independent of the option — it discards
+the recovery net that makes every other gated operation survivable.
+
+**Each gate site posts its own operation**, so a policy can tell them apart:
+`fs.remove` (`rm`), `fs.overwrite` (`cp`, `dd`, `patch`, `sed -i`, `tee`,
+`write`), `fs.rename` (`mv`), and `trash.empty`. The `fs.` and `trash.`
+namespaces belong to the kernel; a plugin's operations are namespaced under
+its own prefix.
 
 Files under 10MB and all directories go to trash (configurable via
 `kaish-trash config max-size`); larger files are deleted permanently. Excluded
@@ -825,16 +836,29 @@ cat /run/user/1000/kaish/spill/spill-xyz.txt
 set -o output-limit=8K
 ```
 
-Nonces are scoped to (command, paths) — a nonce for `rm fileA` cannot confirm
-`rm fileB`. They expire after 60 seconds and are not consumed on use (idempotent
-retries work).
+**Approving.** A request is decided out of band by whoever holds the session's
+approval authority (see `docs/EMBEDDING.md`). Once granted, re-run the same
+command with `--confirm=<token>`, or have the approval side replay the captured
+invocation with `Kernel::confirm`.
 
-**Nonce store lifecycle:** The kernel creates a fresh `NonceStore` by default.
-Frontends control persistence:
-- **REPL** — one kernel per session; nonces persist across commands naturally.
-- **Embedders** — pass a shared store via `KernelConfig::with_nonce_store()`
-  to get cross-call persistence (e.g. a nonce issued in one `execute()` call
-  confirmed in the next), or accept the default (fresh per kernel).
+A grant covers exactly the operation and resources that were requested — a
+grant for `rm fileA` cannot authorize `rm fileB` — and it authorizes exactly
+**one successful** run. A key presented after a successful run reports the
+recorded outcome instead of running the operation again; a *failed* attempt
+does not consume the grant, so a transient failure can be retried inside the
+grant's lifetime.
+
+**Lifecycle:** requests and grants live in the kernel's approval ledger, so a
+request raised in one `execute()` call is approvable and confirmable in a later
+one. A request nobody decides expires after 60 seconds, and the expiry is
+recorded rather than silently forgotten.
+
+- **REPL** — one kernel per session; requests persist across commands naturally.
+- **Embedders** — share one ledger across kernels with
+  `KernelConfig::with_approver_handle()`, or accept the default (a fresh ledger
+  per kernel). An embedder can also pin the policy with
+  `KernelConfig::with_policy_pinned(true)`, after which `set +o approvals`
+  fails with exit 1 instead of disarming the session.
 
 ## Glob Expansion
 
@@ -1132,7 +1156,7 @@ VFS mounts provide unified resource access:
 /v/                → in-memory scratch storage
 /v/bin/            → read-only builtin listing (invocable: /v/bin/echo hi)
 /v/blobs/          → in-memory blob storage
-/v/jobs/<id>/      → live background job state (stdout, stderr, status, command, latch)
+/v/jobs/<id>/      → live background job state (stdout, stderr, status, command, approval)
 /dev/              → synthetic devices: /dev/null, /dev/zero, /dev/urandom, /dev/random
 ```
 
@@ -1259,7 +1283,7 @@ These are documented limitations of the current implementation:
 
 ### Builtins
 
-- **`set` supports `-e`, `-o latch`, `-o trash`, `-o glob`, `-o output-limit[=SIZE]`** — Unlike bash, only these options are implemented. `set -o output-limit=8K` caps command output (see Output Size Limits); `set +o output-limit` disables it. `-u`, `-x`, `pipefail` and other bash set options are silently ignored for compatibility.
+- **`set` supports `-e`, `-o approvals`, `-o trash`, `-o glob`, `-o output-limit[=SIZE]`** — Unlike bash, only these options are implemented. `set -o output-limit=8K` caps command output (see Output Size Limits); `set +o output-limit` disables it. `-u`, `-x`, `pipefail` and other bash set options are silently ignored for compatibility.
 - **`ps` is Linux-only** — The process listing builtin reads from `/proc` and only works on Linux systems.
 - **`head`/`tail -c` counts bytes** — POSIX semantics, deliberately. A byte count can split a multi-byte UTF-8 sequence; use line-based forms (`-n`) for text.
 - **`sed` is a "muscle-memory" subset, not full sed** — kaish's `sed` deliberately implements the slice of GNU/BSD (AT&T) `sed` that humans and agents actually reach for by reflex — closest in spirit to **busybox** `sed`, which is a strong influence (the supported set was [chosen from a cross-model usability panel](designing-syntax-with-llms.md)). It covers:
@@ -1268,7 +1292,7 @@ These are documented limitations of the current implementation:
   - **Addresses** line number `N`, last line `$`, `/regex/`, and ranges `N,M` / `/start/,/end/`.
   - **Chaining** multiple commands with `;` *or* repeated `-e` (applied in order); both forms compose into one program.
   - **Regex is ERE** (extended, like `egrep`) by default, with a **GNU BRE-superset**: the BRE backslash-metas `\|` (alternation), `\(…\)` (groups), `\{N,M\}` (intervals), and `\+`/`\?` (quantifiers) are rewritten to their ERE meaning, so agent-idiomatic `s/cat\|dog/X/` and `s/\(a\)\(b\)/\2\1/` work instead of silently matching a literal `|`/`(`. Pass **`-E`/`-r`** for strict ERE, where those escapes match the literal character — the escape hatch for a literal `|`/`+`. The narrow trade-off: in the default dialect a backslashed meta is the operator, never a literal (match the character with a bracket class, `[|]`/`[+]`). A pattern-side backreference (`\1` in the pattern) is still rejected — the linear-time engine has none, in any dialect. (`grep` and `awk` share this superset; `awk` has no `-E` flag, so it always rewrites.)
-  - **In-place edit** `-i` rewrites one or more file operands instead of streaming to stdout (no operands is a loud error). It routes through the latch/trash gate like `tee`/`patch`. The GNU glued backup suffix `-i.bak` is **not** supported (kaish's lexer splits it at the dot); `set -o trash` keeps a recoverable copy instead.
+  - **In-place edit** `-i` rewrites one or more file operands instead of streaming to stdout (no operands is a loud error). It routes through the approvals/trash gate like `tee`/`patch`. The GNU glued backup suffix `-i.bak` is **not** supported (kaish's lexer splits it at the dot); `set -o trash` keeps a recoverable copy instead.
   - **Out of scope** (errors loudly, never half-runs): hold space (`h`/`H`/`g`/`G`/`x`), labels/branching (`b`/`t`/`:`), `w`/`r` file I/O, the `-i.bak` backup suffix, and GNU address extensions (`1~2`, `0,/re/`, `/re/,+N`). Reach for a real `sed` (external command) when you need those.
 
 ### Execution

@@ -47,7 +47,9 @@ fn tempdir() -> tempfile::TempDir {
         .expect("tempdir under CARGO_TARGET_TMPDIR")
 }
 
-/// What a matrix row expects the gate to decide.
+/// What a matrix row expects the gate to decide. The loud-trash-failure row
+/// is its own test rather than a variant here — it asserts on the surviving
+/// content, not just the decision.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Expect {
     /// The operation ran. Exit 0, and the ledger stays empty — §C.5's
@@ -58,9 +60,6 @@ enum Expect {
     Trashed,
     /// The gate held it. Exit 2, one `Requested` entry, target untouched.
     Gated,
-    /// A trash failure. Exit 1, **loud**, and the target survives — never a
-    /// fall-through to an unprotected delete or overwrite.
-    LoudTrashFailure,
 }
 
 /// A kernel and the authority its construction minted.
@@ -139,7 +138,7 @@ impl Session {
 fn session_at(dir: &Path) -> Session {
     let config = KernelConfig::repl()
         .with_cwd(dir.to_path_buf())
-        .with_latch(false)
+        .with_approvals(false)
         .with_trash(false);
     let (kernel, authority) = Kernel::build(config).expect("kernel");
     Session { kernel, authority }
@@ -273,7 +272,7 @@ async fn the_rm_decision_table(
         assert!(session.run("set -o trash").await.ok());
     }
     if enforce {
-        assert!(session.run("set -o latch").await.ok());
+        assert!(session.run("set -o approvals").await.ok());
     }
 
     let recursive = if target == "dir" { "-r " } else { "" };
@@ -312,7 +311,6 @@ async fn the_rm_decision_table(
             let view = result.approval_request().expect("a pending request");
             assert_eq!(view.operation.as_str(), "fs.remove");
         }
-        Expect::LoudTrashFailure => unreachable!("covered by its own test below"),
     }
 }
 
@@ -330,7 +328,7 @@ async fn a_trash_failure_is_loud_and_never_falls_through_to_a_delete(#[case] enf
 
     assert!(session.run("set -o trash").await.ok());
     if enforce {
-        assert!(session.run("set -o latch").await.ok());
+        assert!(session.run("set -o approvals").await.ok());
     }
 
     let result = session.run("rm precious.txt").await;
@@ -406,7 +404,7 @@ async fn the_overwrite_decision_table(
         assert!(session.run("set -o trash").await.ok());
     }
     if enforce {
-        assert!(session.run("set -o latch").await.ok());
+        assert!(session.run("set -o approvals").await.ok());
     }
 
     let result = session.run("cp src.txt dst.txt").await;
@@ -435,7 +433,6 @@ async fn the_overwrite_decision_table(
             let view = result.approval_request().expect("a pending request");
             assert_eq!(view.operation.as_str(), "fs.overwrite");
         }
-        Expect::LoudTrashFailure => unreachable!("covered by its own test above"),
     }
 }
 
@@ -445,7 +442,7 @@ async fn an_append_never_gates() {
     let dir = tempdir();
     std::fs::write(dir.path().join("log.txt"), "old\n").unwrap();
     let session = session_at(dir.path());
-    assert!(session.run("set -o latch").await.ok());
+    assert!(session.run("set -o approvals").await.ok());
 
     let result = session.run("echo new | tee -a log.txt").await;
     assert_eq!(result.code, 0, "an append must not gate: {}", result.err);
@@ -471,7 +468,7 @@ async fn every_gate_site_posts_its_own_operation(#[case] script: &str, #[case] o
     std::fs::write(dir.path().join("src.txt"), "new").unwrap();
     let mock = Arc::new(MockTrash::default());
     let session = session_with_trash(dir.path(), &mock);
-    assert!(session.run("set -o latch").await.ok());
+    assert!(session.run("set -o approvals").await.ok());
 
     let result = session.run(script).await;
     assert_eq!(result.code, 2, "{script} should gate: {}", result.err);
@@ -488,7 +485,7 @@ async fn a_granted_and_redeemed_delete_posts_the_full_chain() {
     let dir = tempdir();
     std::fs::write(dir.path().join("precious.txt"), "data").unwrap();
     let session = session_at(dir.path());
-    assert!(session.run("set -o latch").await.ok());
+    assert!(session.run("set -o approvals").await.ok());
 
     assert_eq!(session.run("rm precious.txt").await.code, 2);
     assert_eq!(session.entry_kinds(), vec!["Requested"]);
@@ -525,7 +522,7 @@ async fn a_failed_attempt_leaves_the_grant_live_for_a_retry() {
     let dir = tempdir();
     std::fs::write(dir.path().join("precious.txt"), "data").unwrap();
     let session = session_at(dir.path());
-    assert!(session.run("set -o latch").await.ok());
+    assert!(session.run("set -o approvals").await.ok());
     assert_eq!(session.run("rm precious.txt").await.code, 2);
     let (id, token) = session.approve_pending().await;
 
@@ -559,7 +556,7 @@ async fn a_key_presented_after_success_reports_the_outcome_and_deletes_once() {
     let dir = tempdir();
     std::fs::write(dir.path().join("precious.txt"), "data").unwrap();
     let session = session_at(dir.path());
-    assert!(session.run("set -o latch").await.ok());
+    assert!(session.run("set -o approvals").await.ok());
     assert_eq!(session.run("rm precious.txt").await.code, 2);
     let (_id, token) = session.approve_pending().await;
 
@@ -596,7 +593,7 @@ async fn a_replay_whose_draft_does_not_match_is_refused_and_posts_no_second_requ
     std::fs::write(dir.path().join("a.txt"), "a").unwrap();
     std::fs::write(dir.path().join("b.txt"), "b").unwrap();
     let session = session_at(dir.path());
-    assert!(session.run("set -o latch").await.ok());
+    assert!(session.run("set -o approvals").await.ok());
 
     assert_eq!(session.run("rm a.txt").await.code, 2);
     let (_id, token) = session.approve_pending().await;
@@ -625,7 +622,7 @@ async fn a_replay_whose_draft_does_not_match_is_refused_and_posts_no_second_requ
 fn pinned_session_at(dir: &Path) -> Session {
     let config = KernelConfig::repl()
         .with_cwd(dir.to_path_buf())
-        .with_latch(true)
+        .with_approvals(true)
         .with_policy_pinned(true)
         .with_trash(false);
     let (kernel, authority) = Kernel::build(config).expect("kernel");
@@ -640,11 +637,11 @@ fn pinned_session_at(dir: &Path) -> Session {
 /// ever becomes an ordinary command, these shapes start reaching the builtin
 /// and the pin's refusal is what has to catch them.
 #[rstest]
-#[case::plain("set +o latch")]
-#[case::in_a_cmdsub("x=$(set +o latch)")]
-#[case::in_a_pipeline_stage("set +o latch | cat")]
-#[case::backgrounded("set +o latch &")]
-#[case::after_a_conjunction("true && set +o latch")]
+#[case::plain("set +o approvals")]
+#[case::in_a_cmdsub("x=$(set +o approvals)")]
+#[case::in_a_pipeline_stage("set +o approvals | cat")]
+#[case::backgrounded("set +o approvals &")]
+#[case::after_a_conjunction("true && set +o approvals")]
 #[tokio::test]
 async fn the_pin_survives_every_scope_a_script_can_reach_for(#[case] script: &str) {
     let dir = tempdir();
@@ -652,7 +649,7 @@ async fn the_pin_survives_every_scope_a_script_can_reach_for(#[case] script: &st
     let session = pinned_session_at(dir.path());
 
     // Either the parser refuses the shape or the pin refuses the change.
-    // Never a success: a successful `set +o latch` here would be the hole.
+    // Never a success: a successful `set +o approvals` here would be the hole.
     match session.kernel.execute(script).await {
         Err(_parse_error) => {}
         Ok(result) => assert_ne!(
@@ -677,7 +674,7 @@ async fn the_pin_refuses_loudly_rather_than_no_opping() {
     let dir = tempdir();
     let session = pinned_session_at(dir.path());
 
-    let refused = session.run("set +o latch").await;
+    let refused = session.run("set +o approvals").await;
     assert_eq!(refused.code, 1, "a pinned policy must refuse, loudly");
     assert!(
         refused.err.contains("pinned by the embedder"),
@@ -690,7 +687,7 @@ async fn the_pin_refuses_loudly_rather_than_no_opping() {
 async fn the_pin_survives_a_kai_script() {
     let dir = tempdir();
     std::fs::write(dir.path().join("precious.txt"), "data").unwrap();
-    std::fs::write(dir.path().join("disarm.kai"), "set +o latch\n").unwrap();
+    std::fs::write(dir.path().join("disarm.kai"), "set +o approvals\n").unwrap();
     let session = pinned_session_at(dir.path());
 
     session.run("source disarm.kai").await;
@@ -712,7 +709,7 @@ async fn the_pin_survives_a_kernel_reset() {
 
     session.kernel.reset().await.expect("reset");
 
-    let refused = session.run("set +o latch").await;
+    let refused = session.run("set +o approvals").await;
     assert_eq!(refused.code, 1, "a reset must not drop the pin: {}", refused.err);
     // `reset()` returns the cwd to `/`, so name the file absolutely.
     let target = dir.path().join("precious.txt");
@@ -735,7 +732,7 @@ async fn a_session_with_no_handle_has_no_reachable_grant_path() {
     std::fs::write(dir.path().join("precious.txt"), "data").unwrap();
     let config = KernelConfig::repl()
         .with_cwd(dir.path().to_path_buf())
-        .with_latch(true)
+        .with_approvals(true)
         .with_trash(false);
     // `Kernel::new` is `build` with the authority dropped — the posture of a
     // session an embedder gave no authority to.

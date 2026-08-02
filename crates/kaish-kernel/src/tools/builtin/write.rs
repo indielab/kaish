@@ -90,8 +90,8 @@ impl Tool for Write {
 
         let resolved = ctx.resolve_path(&path);
 
-        // Gate the truncating overwrite through latch + trash (no-op when both
-        // are off). On latch this returns an exit-2 nonce result; under trash
+        // Gate the truncating overwrite through approvals + trash (no-op when both
+        // are off). Under the enforce policy this returns an exit-2 pending-approval result; under trash
         // the prior content is snapshotted and returned for the CAS below.
         let snapshots = match ctx
             .gate_overwrites(
