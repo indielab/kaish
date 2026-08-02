@@ -16,8 +16,10 @@
 //!   only in the kernel's credential index, keyed by [`RequestId`] (spec §A.2).
 //!   A struct in this module that grew a `token: Token` field and derived
 //!   `Serialize` would fail to compile — that is the enforcement, not a
-//!   convention. See `token_field_would_not_compile` in the tests below for
-//!   the compile-time proof this relies on.
+//!   convention (this crate has no `trybuild` dependency, so there is no
+//!   compile-fail test asserting it directly; the exhaustive field
+//!   destructures in the tests below are the narrower, checkable half of
+//!   the same guarantee, one per wide record).
 //! - **[`ApprovalRequestDraft`] has no `principal`, `capture`, `id`, `context`,
 //!   or `requested_at` field.** A plugin building a request through
 //!   [`ApprovalRequest::builder`] cannot forge any of them — the draft type has
@@ -1479,6 +1481,51 @@ mod tests {
     // `..`), so an added field forces this test to be updated, and the type
     // ascriptions on the security-relevant fields catch a `Token` swap
     // directly.
+
+    #[test]
+    fn approval_request_has_no_credential_field() {
+        let draft = ApprovalRequest::builder("git.push")
+            .risk(RiskClass::Reversible)
+            .build()
+            .unwrap();
+        let req = draft.stamp(
+            RequestId::new(1, 1),
+            Principal::default(),
+            Capture::DirectExecution,
+            RequestContext::default(),
+            SystemTime::UNIX_EPOCH,
+            Duration::from_secs(60),
+            None,
+        );
+        let ApprovalRequest {
+            id,
+            operation,
+            risk,
+            resources,
+            principal,
+            capture,
+            context,
+            job_id,
+            reason,
+            hint,
+            requested_at,
+            ttl,
+            supersedes,
+        } = req;
+        let _: RequestId = id;
+        let _: OperationId = operation;
+        let _: RiskClass = risk;
+        let _: Vec<Resource> = resources;
+        let _: Principal = principal;
+        let _: Capture = capture;
+        let _: RequestContext = context;
+        let _: Option<u64> = job_id;
+        let _: String = reason;
+        let _: String = hint;
+        let _: SystemTime = requested_at;
+        let _: Duration = ttl;
+        let _: Option<RequestId> = supersedes;
+    }
 
     #[test]
     fn approval_request_view_has_no_credential_field() {
