@@ -101,4 +101,4 @@ pub use paths::{home_dir, xdg_cache_home, xdg_config_home, xdg_data_home, xdg_ru
 pub use interpreter::expand_tilde;
 
 // Tool registration (for embedders registering custom tools)
-pub use tools::{Tool, ToolRegistry, ExecContext};
+pub use tools::{LedgerAccess, Tool, ToolRegistry, ExecContext};

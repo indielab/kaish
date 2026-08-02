@@ -49,16 +49,19 @@ cargo test --all                         # Run all tests
 cargo test -p kaish-kernel --test lexer_tests   # Lexer tests only
 cargo test -p kaish-kernel --test parser_tests  # Parser tests only
 cargo clippy --all --all-targets         # Lint everything incl. tests (must be clean)
+RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps   # Rustdoc gate; broken intra-doc links fail CI
 cargo insta test                         # Run snapshot tests
 cargo insta test --check                 # CI mode (fails on pending snapshots)
 cargo insta review                       # Interactive review of pending snapshots
 ```
 
 CI (`.github/workflows/ci.yml`) runs the gates on every PR and push to `main`:
-`cargo test --all --locked`, clippy with `-D warnings`, a committed-`.snap.new`
-tripwire, `cargo test -p kaish-kernel --no-default-features --locked` (see the
-integration-test feature-gating convention below), and the `kaish-wasi`
-wasm32-wasip1 build. When a gate changes, change ci.yml in the same PR. The runners track current
+`cargo test --all --locked`, clippy with `-D warnings`, rustdoc with
+`RUSTDOCFLAGS="-D warnings"` (a broken intra-doc link fails the PR — run the
+doc gate locally too; it has cost two PRs a full CI round trip each), a
+committed-`.snap.new` tripwire, `cargo test -p kaish-kernel
+--no-default-features --locked` (see the integration-test feature-gating
+convention below), and the `kaish-wasi` wasm32-wasip1 build. When a gate changes, change ci.yml in the same PR. The runners track current
 stable Rust, which may be newer than local toolchains — CI clippy can fire
 lints local clippy doesn't have yet; fix the code rather than pinning the
 toolchain.

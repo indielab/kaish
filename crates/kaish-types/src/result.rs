@@ -207,6 +207,19 @@ pub struct ExecResult {
     /// to an unboxed `Option` (Box is transparent to serde).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub latch: Option<Box<LatchRequest>>,
+    /// A pending approval-ledger request — the control-plane signal
+    /// `ApprovalOutcome::proceed()` (`kaish-tool-api`, ledger PR 3) raises
+    /// alongside exit code 2 when a gate site defers. Sits alongside
+    /// [`Self::latch`] rather than replacing it: no gate site posts to the
+    /// ledger yet (that cutover is ledger PR 5, which retires `.latch` per
+    /// the approval-ledger spec's §F.2 rename table), so both fields are
+    /// live during the transition. Read it via [`Self::approval_request`].
+    ///
+    /// Boxed for the same reason as `.latch`: `ExecResult` rides every level
+    /// of `$()`/pipeline recursion, and the view is large enough to be worth
+    /// keeping out of the common (`None`) case's stack footprint.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub approval: Option<Box<crate::approval::ApprovalRequestView>>,
 }
 
 impl ExecResult {
@@ -223,6 +236,7 @@ impl ExecResult {
             content_type: None,
             baggage: BTreeMap::new(),
             latch: None,
+            approval: None,
         }
     }
 
@@ -246,6 +260,7 @@ impl ExecResult {
                 content_type: None,
                 baggage: BTreeMap::new(),
                 latch: None,
+                approval: None,
             },
         }
     }
@@ -283,6 +298,7 @@ impl ExecResult {
             content_type: None,
             baggage: BTreeMap::new(),
             latch: None,
+            approval: None,
         }
     }
 
@@ -306,6 +322,7 @@ impl ExecResult {
             content_type: None,
             baggage: BTreeMap::new(),
             latch: None,
+            approval: None,
         }
     }
 
@@ -322,6 +339,7 @@ impl ExecResult {
             content_type: None,
             baggage: BTreeMap::new(),
             latch: None,
+            approval: None,
         }
     }
 
@@ -342,6 +360,7 @@ impl ExecResult {
             content_type: None,
             baggage: BTreeMap::new(),
             latch: None,
+            approval: None,
         }
     }
 
@@ -361,6 +380,7 @@ impl ExecResult {
             content_type: None,
             baggage: BTreeMap::new(),
             latch: None,
+            approval: None,
         }
     }
 
@@ -382,6 +402,7 @@ impl ExecResult {
             content_type: None,
             baggage: BTreeMap::new(),
             latch: None,
+            approval: None,
         }
     }
 
@@ -547,6 +568,19 @@ impl ExecResult {
     /// `--json` formatting, so this is safe to call before or after it.
     pub fn latch_request(&self) -> Option<LatchRequest> {
         self.latch.as_deref().cloned()
+    }
+
+    /// The pending approval-ledger request, if this result is a deferred
+    /// approval gate.
+    ///
+    /// A gate site that calls `ApprovalOutcome::proceed()` (ledger PR 3) and
+    /// gets `Pending` back returns exit code 2 with the typed view on the
+    /// `.approval` field. Read it here instead of string-matching `.err`.
+    /// Distinct from [`Self::latch_request`]: no gate site posts to the
+    /// ledger yet, so the two fields are never both `Some` on the same
+    /// result today.
+    pub fn approval_request(&self) -> Option<crate::approval::ApprovalRequestView> {
+        self.approval.as_deref().cloned()
     }
 
     /// Set content type hint, returning self for chaining.

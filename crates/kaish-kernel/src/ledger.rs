@@ -15,13 +15,18 @@
 //! sweep, and — from PR 4 — the four-stage [`DecisionChain`] (standing →
 //! `policy` → `decide` → defer) with standing-grant matching (§C.2, §C.4).
 //!
-//! **What is not:** this module is wired to no gate site. `Kernel::build`
-//! constructs a ledger and a chain, but nothing calls the chain yet:
-//! `ToolCtx::request_approval` and the drop-safe `AttemptGuard` (PR 3) and
-//! `Kernel::confirm` with the ten gate sites (PR 5, the cutover) are what
-//! give it callers.
+//! **What is not:** this module is wired to no gate site. Nothing in
+//! `kaish-kernel`'s dispatch path calls into it yet, and building it changed
+//! no observable behavior anywhere else in the crate. `ToolCtx` gained its
+//! `request_approval`/`approvals`/`settle_with` methods and `ExecContext`
+//! its real implementations in PR 3, alongside this module's
+//! [`AttemptGuard`]; `Kernel::build` constructs a ledger and a
+//! [`DecisionChain`] (PR 4) — but no gate site calls either yet.
+//! `Kernel::confirm` and the ten gate sites (PR 5, the cutover) are what
+//! give them callers.
 
 mod approver;
+mod attempt_guard;
 mod config;
 mod core;
 mod error;
@@ -32,6 +37,7 @@ pub use approver::{
     Approver, ChainContext, ChainOutcome, ChainStage, DecisionChain, PatientSource,
     DEFAULT_DECIDE_BUDGET,
 };
+pub use attempt_guard::AttemptGuard;
 pub use config::{LedgerConfig, LedgerSink, LedgerSinkError};
 pub use error::LedgerError;
 pub use handles::{ApproverHandle, AttemptHandle, AttemptView, Approvals, Ledger, RequestChain, Requester};

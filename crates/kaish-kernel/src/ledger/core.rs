@@ -427,6 +427,17 @@ pub(crate) struct LedgerInner {
     config: LedgerConfig,
     state: Mutex<LedgerState>,
     wall: Arc<dyn WallClock>,
+    /// Best-effort settlements queued by a dropped or panicking
+    /// `AttemptGuard` (`kaish-kernel`'s dispatcher, ledger PR 3 — spec §C.1).
+    /// A separate, plain `std::sync::Mutex` from `state`: `Drop` cannot
+    /// `.await` the ledger's own transaction methods, so it pushes here
+    /// instead — synchronous end to end, no lock nesting with `state`
+    /// (each queued item is later settled as its own independent
+    /// lock-acquire-and-release, never while `state`'s guard is already
+    /// held). Drained by [`Self::drain_outbox`], called from the methods
+    /// whose own correctness depends on live-attempt state (`settle`,
+    /// `redeem`, `redeem_with_token`, `abandon_request`) and from `sweep`.
+    outbox: Mutex<Vec<(RequestId, AttemptId, Outcome)>>,
 }
 
 impl LedgerInner {
@@ -444,6 +455,54 @@ impl LedgerInner {
     /// commit time.
     fn now(&self) -> (Instant, SystemTime) {
         (Instant::now(), self.wall.now())
+    }
+
+    /// Queue a best-effort settlement for the next drain (spec §C.1). Called
+    /// from `AttemptGuard::drop`, which cannot `.await` a real transaction —
+    /// a plain, synchronous `Mutex::lock` on a queue distinct from `state`.
+    pub(crate) fn queue_outbox_settle(&self, request: RequestId, attempt: AttemptId, outcome: Outcome) {
+        #[allow(clippy::expect_used)] // mirrors `Self::lock`'s poisoned-mutex stance
+        self.outbox
+            .lock()
+            .expect("approval ledger outbox mutex poisoned")
+            .push((request, attempt, outcome));
+    }
+
+    /// Drain every queued best-effort settlement, each as its own
+    /// independent `settle` transaction (never nested inside a `state` lock
+    /// already held by the caller — spec §C.1's outbox is drained "on the
+    /// next append and on the sweep tick"; here that means the methods whose
+    /// own correctness reads `live_attempt`/attempt state: `settle`,
+    /// `redeem`, `redeem_with_token`, `abandon_request`, and `sweep`).
+    ///
+    /// A terminal entry is never capacity-refusable (review finding B3 —
+    /// its room is banked at reservation time, and `settle` rides that
+    /// banked permit through `commit_terminal`), so `settle` can no longer
+    /// fail this drain with a capacity error to retry against. Its only
+    /// remaining failure modes are `NotFound` — the chain already closed a
+    /// different way and was evicted (review finding S4) before this queued
+    /// item drained, which is a benign race: whatever closed it first
+    /// already recorded the outcome, so there is nothing left to append —
+    /// and `InvariantViolated`, a real ledger bug rather than a race, logged
+    /// rather than retried (retrying a bug would spin forever, never
+    /// resolve).
+    pub(crate) fn drain_outbox(&self) {
+        let items: Vec<_> = {
+            #[allow(clippy::expect_used)]
+            let mut outbox = self.outbox.lock().expect("approval ledger outbox mutex poisoned");
+            std::mem::take(&mut *outbox)
+        };
+        for (request, attempt, outcome) in items {
+            match self.settle(&request, attempt, outcome) {
+                Ok(_) | Err(LedgerError::NotFound(_)) => {}
+                Err(err) => {
+                    tracing::error!(
+                        error = %err,
+                        "approval ledger: outbox drain could not settle a queued attempt"
+                    );
+                }
+            }
+        }
     }
 
     /// Materialize an `Expired` entry the first time it is observed — on any
@@ -1477,8 +1536,12 @@ impl LedgerInner {
     /// Materializes due `Expired` entries and closes `Reserved` attempts
     /// that have sat unreported past `LedgerConfig::attempt_stale_after` as
     /// `Abandoned` (spec §D.4's recovery sweep — see `attempt_stale_after`'s
-    /// doc comment for why PR 2 needs a staleness bound at all).
+    /// doc comment for why PR 2 needs a staleness bound at all). Also drains
+    /// the `AttemptGuard` outbox (spec §C.1, PR 3) — the sweep tick is one
+    /// of the two places that drain is documented to happen, the other
+    /// being the ledger's transaction wrappers in `handles.rs`.
     pub(crate) fn sweep(&self) {
+        self.drain_outbox();
         let ids: Vec<RequestId> = {
             let guard = self.lock();
             guard.chains.keys().cloned().collect()
@@ -1795,6 +1858,7 @@ pub(crate) fn build_inner(
         config,
         state: Mutex::new(state),
         wall,
+        outbox: Mutex::new(Vec::new()),
     }))
 }
 
