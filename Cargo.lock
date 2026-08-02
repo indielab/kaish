@@ -1130,6 +1130,7 @@ dependencies = [
  "clap",
  "kaish-types",
  "serde_json",
+ "tokio",
 ]
 
 [[package]]

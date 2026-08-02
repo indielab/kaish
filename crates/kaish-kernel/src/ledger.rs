@@ -15,17 +15,21 @@
 //! sweep.
 //!
 //! **What is not:** this module is wired to no gate site. Nothing in
-//! `kaish-kernel` calls into it yet, and building one changes no observable
-//! behavior anywhere else in the crate. `ToolCtx::request_approval` and the
-//! drop-safe `AttemptGuard` (PR 3), the `Approver` decision chain and
-//! standing-grant *matching* (PR 4), `Kernel::confirm` and the ten gate
-//! sites (PR 5, the cutover) all build on this module without changing it.
+//! `kaish-kernel`'s dispatch path calls into it yet, and building it changed
+//! no observable behavior anywhere else in the crate. `ToolCtx` gained its
+//! `request_approval`/`approvals`/`settle_with` methods and `ExecContext`
+//! its real implementations in PR 3, alongside this module's
+//! [`AttemptGuard`] — none of it wired to a gate site yet. The `Approver`
+//! decision chain and standing-grant *matching* (PR 4), `Kernel::confirm`
+//! and the ten gate sites (PR 5, the cutover) build on this module next.
 
+mod attempt_guard;
 mod config;
 mod core;
 mod error;
 mod handles;
 
+pub use attempt_guard::AttemptGuard;
 pub use config::{LedgerConfig, LedgerSink, LedgerSinkError};
 pub use error::LedgerError;
 pub use handles::{ApproverHandle, AttemptHandle, AttemptView, Approvals, Ledger, RequestChain, Requester};

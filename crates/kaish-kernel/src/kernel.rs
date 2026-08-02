@@ -2837,6 +2837,7 @@ impl Kernel {
             watchdog: ec.watchdog.clone(),
             #[cfg(all(feature = "localfs", feature = "overlay"))]
             overlay_handle: self.overlay_handle.clone(),
+            ledger_access: ec.ledger_access.clone(),
         })
     }
 

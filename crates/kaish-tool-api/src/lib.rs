@@ -21,10 +21,16 @@
 //!   through `ctx.backend()`.
 //! - [`GlobalFlags`], [`schema_from_clap`], [`validate_against_schema`] — the
 //!   clap-reflection and validation machinery shared by all builtins.
+//! - [`ApprovalOutcome`], [`AttemptHandle`], [`Approvals`] — the
+//!   approval-ledger surface behind [`ToolCtx::request_approval`]
+//!   (`docs/approval-ledger.md`, ledger PR 3). A plugin depending on only
+//!   this crate can gate a privileged operation with no `kaish-kernel`
+//!   dependency and no downcast.
 //!
 //! The pure-data types tools traffic in (`Value`, `ToolArgs`, `ToolSchema`,
 //! `ExecResult`, `OutputData`, …) live one layer down in `kaish-types`.
 
+mod approval;
 mod backend;
 mod clap_schema;
 mod ctx;
@@ -32,6 +38,7 @@ mod global_flags;
 mod issue;
 mod tool;
 
+pub use approval::{ApprovalOutcome, Approvals, AttemptHandle};
 pub use backend::KernelBackend;
 pub use clap_schema::{params_from_clap, schema_from_clap, schema_tree_from_clap};
 pub use ctx::{PatientGuard, ToolCtx};

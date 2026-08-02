@@ -3,12 +3,17 @@
 use std::collections::HashMap;
 use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
+use std::time::Duration;
+
+use async_trait::async_trait;
+use kaish_types::approval::{Capture, Invocation, Principal, RequestContext};
 
 use crate::ast::Value;
 use crate::backend::{KernelBackend, LocalBackend};
 use crate::dispatch::PipelinePosition;
 use crate::ignore_config::IgnoreConfig;
 use crate::interpreter::{ExecResult, Scope};
+use crate::ledger::{Approvals, Requester};
 use crate::nonce::NonceStore;
 use crate::output_limit::OutputLimitConfig;
 use crate::scheduler::{JobManager, PipeReader, PipeWriter, StderrStream};
@@ -188,6 +193,37 @@ pub struct ExecContext {
     /// `None` when no overlay is active (most kernels).
     #[cfg(all(feature = "localfs", feature = "overlay"))]
     pub overlay_handle: Option<Arc<crate::kernel::OverlayHandle>>,
+
+    /// What this context needs to post approval requests against a real
+    /// ledger (`docs/approval-ledger.md`, ledger PR 3). `None` — today's only
+    /// value in production — is what makes `ToolCtx::request_approval`
+    /// return `Unsupported`: no `KernelConfig::with_ledger` exists yet
+    /// (that builder is PR 4), so nothing sets this outside a test.
+    pub ledger_access: Option<LedgerAccess>,
+}
+
+/// Everything [`ExecContext`]'s `ToolCtx::request_approval` needs to post a
+/// request against a real ledger (`docs/approval-ledger.md` §D.1, ledger PR
+/// 3). Grouped into one field rather than four scattered ones so a future
+/// `KernelConfig::with_ledger` (PR 4) has a single seam to populate.
+#[derive(Clone)]
+pub struct LedgerAccess {
+    /// The obligations handle — posts `Requested`/`Redeemed`/`Settled`.
+    pub requester: Requester,
+    /// The read side, for `ToolCtx::approvals`.
+    pub approvals: Approvals,
+    /// Who this context's requests are attributed to.
+    ///
+    /// A fixed value for now — `KernelConfig::with_principal` (PR 4) is what
+    /// will let an embedder set this per session, the same stopgap
+    /// `ApproverHandle`'s PR-2-era placeholder principal already documents.
+    pub principal: Principal,
+    /// How long a posted request stays live with no decision, when this
+    /// context posts one. `ExecContext` has no access to the `LedgerConfig`
+    /// that minted `requester` (only the handle), so this is threaded
+    /// alongside it rather than re-derived — see this PR's decisions list
+    /// for why.
+    pub request_ttl: Duration,
 }
 
 /// What the write-model gate chose for a single truncating overwrite.
@@ -333,6 +369,7 @@ impl ExecContext {
             watchdog: None,
             #[cfg(all(feature = "localfs", feature = "overlay"))]
             overlay_handle: None,
+            ledger_access: None,
         }
     }
 
@@ -373,6 +410,7 @@ impl ExecContext {
             watchdog: None,
             #[cfg(all(feature = "localfs", feature = "overlay"))]
             overlay_handle: None,
+            ledger_access: None,
         }
     }
 
@@ -410,6 +448,7 @@ impl ExecContext {
             watchdog: None,
             #[cfg(all(feature = "localfs", feature = "overlay"))]
             overlay_handle: None,
+            ledger_access: None,
         }
     }
 
@@ -447,6 +486,7 @@ impl ExecContext {
             watchdog: None,
             #[cfg(all(feature = "localfs", feature = "overlay"))]
             overlay_handle: None,
+            ledger_access: None,
         }
     }
 
@@ -487,6 +527,7 @@ impl ExecContext {
             watchdog: None,
             #[cfg(all(feature = "localfs", feature = "overlay"))]
             overlay_handle: None,
+            ledger_access: None,
         }
     }
 
@@ -524,6 +565,7 @@ impl ExecContext {
             watchdog: None,
             #[cfg(all(feature = "localfs", feature = "overlay"))]
             overlay_handle: None,
+            ledger_access: None,
         }
     }
 
@@ -721,6 +763,9 @@ impl ExecContext {
             // Overlay handle is shared: pipeline stages share the same transaction.
             #[cfg(all(feature = "localfs", feature = "overlay"))]
             overlay_handle: self.overlay_handle.clone(),
+            // Ledger access is shared: a pipeline stage gates through the
+            // same ledger as its parent.
+            ledger_access: self.ledger_access.clone(),
         }
     }
 
@@ -1107,6 +1152,7 @@ impl ExecContext {
 /// Trusted in-tree builtins recover the concrete `ExecContext` (job control,
 /// pipes, dispatcher) through
 /// [`ToolCtx::as_any_mut`](kaish_tool_api::ToolCtx::as_any_mut).
+#[async_trait]
 impl kaish_tool_api::ToolCtx for ExecContext {
     fn backend(&self) -> &Arc<dyn KernelBackend> {
         &self.backend
@@ -1138,6 +1184,73 @@ impl kaish_tool_api::ToolCtx for ExecContext {
         match &self.watchdog {
             Some(watchdog) => kaish_tool_api::PatientGuard::held(Box::new(watchdog.hold(budget))),
             None => kaish_tool_api::PatientGuard::inert(),
+        }
+    }
+
+    /// Post an approval request against this context's ledger, if it has one
+    /// (`docs/approval-ledger.md` §D.1, ledger PR 3).
+    ///
+    /// `None` (no `ledger_access`) is today's only production value — there
+    /// is no `KernelConfig::with_ledger` yet (PR 4) — and returns
+    /// `Unsupported`, the fail-closed default. With a ledger wired, this
+    /// always posts and returns `Pending`: PR 3 wires no decision chain (PR
+    /// 4's `Approver`), so every request defers, matching what a
+    /// non-interactive kernel with no approver configured does today (spec
+    /// §C.2, stage 4).
+    async fn request_approval(
+        &mut self,
+        req: kaish_types::approval::ApprovalRequestDraft,
+    ) -> kaish_tool_api::ApprovalOutcome {
+        let Some(access) = self.ledger_access.clone() else {
+            return kaish_tool_api::ApprovalOutcome::Unsupported;
+        };
+        // Replayable iff a dispatch seam stamped the exact invocation;
+        // otherwise this is a direct `tool.execute()` call with no seam
+        // above it (spec's `Capture::DirectExecution` — a unit test).
+        let capture = match self.current_invocation.as_deref() {
+            Some((tool, argv)) => Capture::Exact(Invocation {
+                tool: tool.clone(),
+                argv: argv.clone(),
+            }),
+            None => Capture::DirectExecution,
+        };
+        // Trace-context capture is deferred: threading the live span's W3C
+        // headers into `RequestContext` needs `telemetry.rs` machinery this
+        // wire-to-no-gate-site PR doesn't add (see this PR's decisions
+        // list). The real gate sites (PR 5) should populate this properly.
+        let context = RequestContext::default();
+        match access
+            .requester
+            .post_request(req, access.principal, capture, context, access.request_ttl, None)
+            .await
+        {
+            Ok(request) => kaish_tool_api::ApprovalOutcome::Pending(Box::new(request.into())),
+            Err(err) => kaish_tool_api::ApprovalOutcome::LedgerUnavailable {
+                reason: err.to_string(),
+            },
+        }
+    }
+
+    fn approvals(&self) -> kaish_tool_api::Approvals {
+        match &self.ledger_access {
+            Some(access) => kaish_tool_api::Approvals::from_pending(access.approvals.pending()),
+            None => kaish_tool_api::Approvals::empty(),
+        }
+    }
+
+    async fn settle_with(&mut self, attempt: &kaish_tool_api::AttemptHandle, outcome: kaish_types::approval::Outcome) {
+        let Some(access) = self.ledger_access.clone() else {
+            return;
+        };
+        if let Err(err) = access
+            .requester
+            .settle_by_ids(attempt.request_id(), attempt.attempt_id(), outcome)
+            .await
+        {
+            // Not found / already-terminal are expected races (someone else
+            // — the dispatcher's `AttemptGuard` — settled first); anything
+            // else is worth a trace so it isn't silently lost.
+            tracing::debug!(error = %err, "ToolCtx::settle_with: settle did not apply");
         }
     }
 

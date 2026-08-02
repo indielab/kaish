@@ -167,6 +167,11 @@ impl Requester {
         by: Principal,
         observed: Vec<Observation>,
     ) -> Result<AttemptHandle, LedgerError> {
+        // A stale queued `Unknown` for this chain's live attempt would leave
+        // `live_attempt` looking occupied to this call — drain first so a
+        // dropped guard's settlement lands before the reservation check
+        // reads it (spec §C.1's "drains on its next append").
+        self.0.drain_outbox();
         self.0
             .redeem(id, by, observed)
             .map(|attempt| AttemptHandle {
@@ -189,6 +194,9 @@ impl Requester {
         by: Principal,
         observed: Vec<Observation>,
     ) -> Result<AttemptHandle, LedgerError> {
+        // See `redeem`'s identical drain — the same `live_attempt` staleness
+        // concern applies to the token-presentation path.
+        self.0.drain_outbox();
         self.0
             .redeem_with_token(id, presented, by, observed)
             .map(|attempt| AttemptHandle {
@@ -201,7 +209,38 @@ impl Requester {
     /// (spec §A.1): settling an already-terminal attempt appends nothing
     /// and returns `Ok`. Returns whether a new entry was actually appended.
     pub async fn settle(&self, attempt: &AttemptHandle, outcome: Outcome) -> Result<bool, LedgerError> {
+        self.0.drain_outbox();
         self.0.settle(&attempt.request, attempt.attempt, outcome)
+    }
+
+    /// Settle by explicit ids rather than this crate's opaque
+    /// [`AttemptHandle`] — for `ExecContext::settle_with` (ledger PR 3),
+    /// which receives a `kaish_tool_api::AttemptHandle` (a distinct type;
+    /// see that crate's `approval` module for why) and has only
+    /// `request_id()`/`attempt_id()` to work with, not this handle's
+    /// private fields. Same idempotency and drain contract as
+    /// [`Self::settle`].
+    pub async fn settle_by_ids(
+        &self,
+        request: &RequestId,
+        attempt: AttemptId,
+        outcome: Outcome,
+    ) -> Result<bool, LedgerError> {
+        self.0.drain_outbox();
+        self.0.settle(request, attempt, outcome)
+    }
+
+    /// Queue a best-effort settlement for the next drain, without settling
+    /// synchronously. For `AttemptGuard::drop` (PR 3, `kaish-kernel`'s
+    /// dispatcher), which cannot `.await` `Self::settle` from a destructor —
+    /// see `LedgerInner::queue_outbox_settle`'s doc for the mechanism.
+    ///
+    /// Not part of the supported public surface — a tool has no legitimate
+    /// reason to queue a settlement without also reserving the attempt, and
+    /// this method exists purely for the dispatcher's own guard.
+    #[doc(hidden)]
+    pub fn queue_drop_settle(&self, attempt: &AttemptHandle, outcome: Outcome) {
+        self.0.queue_outbox_settle(attempt.request.clone(), attempt.attempt, outcome);
     }
 
     /// Abandon a request before any attempt was reserved against it (job
@@ -209,6 +248,10 @@ impl Requester {
     /// `LedgerError::AttemptInFlight` if an attempt is currently `Reserved`
     /// — settle or let the sweep close it first.
     pub async fn abandon_request(&self, id: &RequestId, reason: impl Into<String> + Send) -> Result<(), LedgerError> {
+        // An attempt whose guard already dropped (queued but not yet
+        // drained) would wrongly still look `Reserved` to this call's
+        // `AttemptInFlight` check.
+        self.0.drain_outbox();
         self.0.abandon_request(id, reason.into())
     }
 
