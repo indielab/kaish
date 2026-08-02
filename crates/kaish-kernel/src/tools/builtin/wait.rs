@@ -88,7 +88,21 @@ impl Tool for Wait {
                         let status = classify(id, &result, &mut any_failed, &mut latch);
                         output.push_str(&format!("[{}] {}\n", id, status));
                     }
-                    None => return ExecResult::failure(1, format!("wait: job {} not found", id)),
+                    // `wait` returns None for a missing job AND for a stopped
+                    // one (a stopped job can never finish; polling it hung
+                    // forever). Tell them apart for the error text.
+                    None => {
+                        if manager.get(id).await.is_some() {
+                            return ExecResult::failure(
+                                1,
+                                format!(
+                                    "wait: job {} is stopped and cannot finish — resume it with bg or fg, then wait",
+                                    id
+                                ),
+                            );
+                        }
+                        return ExecResult::failure(1, format!("wait: job {} not found", id));
+                    }
                 }
             }
 

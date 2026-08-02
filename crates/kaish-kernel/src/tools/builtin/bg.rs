@@ -250,4 +250,59 @@ mod tests {
             "job must stay Stopped after a failed SIGCONT, not silently become Running"
         );
     }
+
+    /// The reaper's `WUNTRACED` arm: a job resumed by `bg` that is stopped
+    /// AGAIN (SIGSTOP from anywhere) must go back to `Stopped` in the manager.
+    /// Without `WUNTRACED` the stop was invisible — the job showed `Running`
+    /// forever, was unreachable via `last_stopped()`, and `wait_all` polled it
+    /// forever at shutdown.
+    #[tokio::test]
+    async fn test_bg_reaper_marks_a_restopped_job_stopped_again() {
+        let mut child = std::process::Command::new("sleep")
+            .arg("30")
+            .process_group(0)
+            .spawn()
+            .expect("spawn sleep");
+        let pid = child.id();
+
+        let manager = Arc::new(JobManager::new());
+        let job_id = manager.register_stopped("sleep 30".to_string(), pid, pid).await;
+
+        let mut ctx = make_ctx();
+        ctx.set_job_manager(manager.clone());
+        let mut args = ToolArgs::new();
+        args.positional.push(Value::Int(job_id.0 as i64));
+
+        // `bg` SIGCONTs the group and spawns the WUNTRACED reaper.
+        let result = Bg.execute(args, &mut ctx).await;
+        assert!(result.ok(), "bg must resume the live job: {}", result.err);
+
+        // Stop it again from outside — the second-Ctrl-Z shape.
+        nix::sys::signal::kill(
+            nix::unistd::Pid::from_raw(pid as i32),
+            nix::sys::signal::Signal::SIGSTOP,
+        )
+        .expect("SIGSTOP the resumed job");
+
+        // The reaper polls every 200ms; give it a few cycles.
+        let mut status = kaish_types::JobStatus::Running;
+        for _ in 0..20 {
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            if let Some(info) = manager.get(job_id).await {
+                status = info.status;
+                if status == kaish_types::JobStatus::Stopped {
+                    break;
+                }
+            }
+        }
+        assert_eq!(
+            status,
+            kaish_types::JobStatus::Stopped,
+            "the reaper must observe the second stop and hand the job back to Stopped"
+        );
+
+        // Cleanup: the job is stopped; kill and reap it so nothing leaks.
+        child.kill().expect("kill sleep");
+        child.wait().expect("reap sleep");
+    }
 }

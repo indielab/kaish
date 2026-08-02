@@ -368,3 +368,36 @@ async fn kill_continues_past_a_bad_target_and_still_reports_failure() {
         gone.text_out()
     );
 }
+
+/// The mixed run, pinned end-to-end: targets before AND after a failing middle
+/// one are both signalled, and the aggregate exit code reports the failure.
+/// (`%99` first and `%99` last are each covered above; this closes the
+/// remaining shape.)
+#[tokio::test]
+async fn kill_mixed_run_signals_good_targets_around_a_bad_one_and_exits_nonzero() {
+    let kernel = setup().await;
+    let r = kernel
+        .execute("sleep 30 & sleep 30 & kill %1 %99 %2")
+        .await
+        .expect("execute");
+    assert!(
+        !r.ok(),
+        "one failed target must make the whole kill exit non-zero: out={} err={}",
+        r.text_out(),
+        r.err
+    );
+    assert!(
+        r.err.contains("not found"),
+        "the error must name the missing job: {}",
+        r.err
+    );
+
+    for spec in ["%1", "%2"] {
+        let gone = kernel.execute(&format!("kill {spec}")).await.expect("execute");
+        assert!(
+            !gone.ok(),
+            "job {spec} must have been signalled despite %99 failing mid-run, got: {}",
+            gone.text_out()
+        );
+    }
+}

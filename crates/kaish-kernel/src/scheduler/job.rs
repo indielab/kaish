@@ -624,6 +624,10 @@ impl JobManager {
 
     /// Wait for a specific job to complete.
     ///
+    /// Returns `None` when the job does not exist **or is stopped** — a stopped
+    /// job can never finish, so waiting on one would hang forever. Callers that
+    /// need to tell the two apart check [`JobManager::get`] after a `None`.
+    ///
     /// The job's pending awaitable (its task handle or result channel) is taken
     /// out of the map under the lock, then the lock is **released before**
     /// awaiting completion. Holding the `jobs` mutex across the await would
@@ -647,6 +651,16 @@ impl JobManager {
             {
                 let mut jobs = self.jobs.lock().await;
                 let job = jobs.get_mut(&id)?;
+                // A stopped job can never finish: `is_done()` returns `false`
+                // for as long as it is stopped, so polling would spin forever —
+                // the same hang `wait_all`'s stopped-skip closes, reachable
+                // here directly (`wait %N` on a Ctrl-Z'd job) and by a job
+                // stopping *after* `wait_all` took its snapshot (the bg reaper
+                // observes a SIGSTOP and flips the flag mid-wait). Bail loud;
+                // the caller resumes with `bg`/`fg` and waits again.
+                if job.stopped {
+                    return None;
+                }
                 if job.is_done() {
                     let result = job
                         .result
@@ -677,6 +691,10 @@ impl JobManager {
     /// 10ms poll loop forever, and since [`crate::Kernel::shutdown`] calls this, a single
     /// Ctrl-Z hung shutdown with no timeout and no escape. Skip them: `wait_all`
     /// means "wait for everything that will finish", not "wait for everything".
+    ///
+    /// The filter below is a snapshot; a job that stops *after* it (the bg
+    /// reaper observing a SIGSTOP) is caught by [`JobManager::wait`]'s own
+    /// stopped guard, which returns `None` instead of re-creating the hang.
     ///
     /// A caller that wants a stopped job to finish must resume it first (`bg`/`fg`).
     pub async fn wait_all(&self) -> Vec<(JobId, ExecResult)> {
@@ -1554,6 +1572,86 @@ mod tests {
         assert!(
             ids.contains(&finisher),
             "wait_all must still collect jobs that can finish"
+        );
+    }
+
+    /// `wait` on an already-stopped job returns `None` immediately instead of
+    /// polling a job that can never become done.
+    #[tokio::test]
+    async fn wait_returns_none_on_a_stopped_job() {
+        let manager = JobManager::new();
+        let id = manager
+            .register_stopped("sleep 5".to_string(), 4242, 4242)
+            .await;
+
+        let res = tokio::time::timeout(Duration::from_secs(2), manager.wait(id))
+            .await
+            .expect("wait on a stopped job must return, not hang");
+        assert!(res.is_none(), "a stopped job has no result to wait for");
+    }
+
+    /// The `wait_all` stopped-skip is a snapshot: a job that stops *after* the
+    /// filter (the bg reaper observing a SIGSTOP) used to leave the inner
+    /// `wait` polling `is_done()` forever — the same shutdown hang, reached
+    /// through a sub-200ms window instead of always. The stopped guard inside
+    /// `wait`'s loop closes it.
+    #[tokio::test]
+    async fn wait_bails_when_the_job_stops_mid_wait() {
+        let manager = Arc::new(JobManager::new());
+        manager.set_persist_output_files(false);
+
+        // A job that never finishes on its own: the sender side is kept alive
+        // so the future stays parked until the test ends.
+        let (_tx, rx) = oneshot::channel::<()>();
+        let id = manager
+            .spawn("blocker".to_string(), async move {
+                let _ = rx.await;
+                ExecResult::success("done")
+            })
+            .await;
+
+        let m = manager.clone();
+        let waiter = tokio::spawn(async move { m.wait(id).await });
+
+        // Let the waiter enter its poll loop, then stop the job under it.
+        tokio::time::sleep(Duration::from_millis(30)).await;
+        manager.stop_job(id, 4242, 4242).await;
+
+        let res = tokio::time::timeout(Duration::from_secs(2), waiter)
+            .await
+            .expect("wait must return once the job stops, not poll forever")
+            .expect("waiter task must not panic");
+        assert!(res.is_none(), "a job that stopped mid-wait has no result");
+    }
+
+    /// Same race through `wait_all`: the job passes the not-stopped snapshot,
+    /// then stops while the inner `wait` polls it.
+    #[tokio::test]
+    async fn wait_all_returns_when_a_job_stops_after_the_snapshot() {
+        let manager = Arc::new(JobManager::new());
+        manager.set_persist_output_files(false);
+
+        let (_tx, rx) = oneshot::channel::<()>();
+        let id = manager
+            .spawn("blocker".to_string(), async move {
+                let _ = rx.await;
+                ExecResult::success("done")
+            })
+            .await;
+
+        let m = manager.clone();
+        let all = tokio::spawn(async move { m.wait_all().await });
+
+        tokio::time::sleep(Duration::from_millis(30)).await;
+        manager.stop_job(id, 4242, 4242).await;
+
+        let results = tokio::time::timeout(Duration::from_secs(2), all)
+            .await
+            .expect("wait_all must return once the job stops, not poll forever")
+            .expect("wait_all task must not panic");
+        assert!(
+            !results.iter().any(|(rid, _)| *rid == id),
+            "a job that stopped mid-wait_all yields no result"
         );
     }
 }
