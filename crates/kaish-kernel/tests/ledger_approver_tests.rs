@@ -63,28 +63,31 @@ async fn post(requester: &Requester, op: &str, resources: Vec<Resource>) -> Appr
         .unwrap()
 }
 
-/// Issue a standing grant covering `operations` and `resources`.
+/// Issue a standing grant covering `operations` and `resources`. `None`
+/// keeps the old helper semantics (unlimited) so tests that grant
+/// repeatedly stay honest about it; `Some(n)` is an explicit bound.
 async fn standing(
     authority: &ApproverHandle,
     operations: &[&str],
     resources: &[(&str, &str)],
     max_uses: Option<u32>,
 ) -> StandingId {
-    authority
-        .grant_standing(StandingGrant::new(
-            operations.iter().map(|o| OperationPattern::new(*o)).collect(),
-            resources
-                .iter()
-                .map(|(kind, pattern)| ResourcePattern::new(*kind, *pattern))
-                .collect(),
-            None,
-            max_uses,
-            None,
-            operator(),
-            "test rule",
-        ))
-        .await
-        .unwrap()
+    let grant = StandingGrant::new(
+        operations.iter().map(|o| OperationPattern::new(*o)).collect(),
+        resources
+            .iter()
+            .map(|(kind, pattern)| ResourcePattern::new(*kind, *pattern))
+            .collect(),
+        None,
+        None,
+        operator(),
+        "test rule",
+    );
+    let grant = match max_uses {
+        Some(n) => grant.with_max_uses(n),
+        None => grant.unlimited_uses(),
+    };
+    authority.grant_standing(grant).await.unwrap()
 }
 
 /// What a gate site does with a chain outcome — the exit-code mapping
@@ -406,7 +409,6 @@ async fn an_auto_approval_never_outlives_the_rule_that_produced_it() {
         .grant_standing(StandingGrant::new(
             vec![OperationPattern::new("fs.write")],
             vec![ResourcePattern::new("path", "*")],
-            None,
             None,
             Some(rule_expiry),
             operator(),

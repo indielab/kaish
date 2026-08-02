@@ -89,13 +89,14 @@ mod tests {
     }
 
     fn rule(operations: &[&str], resources: &[(&str, &str)]) -> StandingGrant {
+        // max_uses is irrelevant to pure matching (consumption is core.rs's
+        // job), so the one-shot default is fine here.
         StandingGrant::new(
             operations.iter().map(|o| OperationPattern::new(*o)).collect(),
             resources
                 .iter()
                 .map(|(kind, pattern)| ResourcePattern::new(*kind, *pattern))
                 .collect(),
-            None,
             None,
             None,
             Principal::new("operator", PrincipalKind::Human),

@@ -672,11 +672,11 @@ async fn grant_standing_and_revoke_standing_are_pure_record_operations() {
         vec![kaish_types::approval::OperationPattern::new("git.commit")],
         Vec::new(),
         None,
-        Some(3),
         None,
         agent("human-1"),
         "trusted agent workflow",
-    );
+    )
+    .with_max_uses(3);
     let id = approver.grant_standing(g).await.unwrap();
     assert_eq!(approvals.standing().len(), 1);
     assert!(matches!(approvals.log(0).last(), Some(LedgerEntry::StandingIssued { .. })));
