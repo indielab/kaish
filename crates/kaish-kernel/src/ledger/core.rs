@@ -151,6 +151,12 @@ struct LedgerState {
     live_count_total: usize,
     live_count_by_principal: HashMap<String, usize>,
     standing: HashMap<StandingId, StandingGrant>,
+    /// Successful uses charged against each standing grant's `max_uses`
+    /// (spec §C.4). Kept beside the rule rather than decremented into it so
+    /// `Approvals::standing()` keeps reporting the rule as issued; the same
+    /// count is reconstructible from the log as the number of
+    /// `Granted{grounds: Standing{id}}` entries naming the rule.
+    standing_uses: HashMap<StandingId, u32>,
     ring: VecDeque<RingSlot>,
     /// Ring slots promised to a not-yet-landed terminal entry (review
     /// finding B3) — counted against `retained_entries` alongside
@@ -1182,14 +1188,28 @@ impl LedgerInner {
         );
         let mut guard = self.lock();
         let (mono, wall) = self.now();
-        self.materialize_expiry(&mut guard, id, mono, wall)?;
+        // `materialize_expiry` hands back the entries it committed so this
+        // caller can trace them after dropping the lock. Discarding them
+        // loses the `Expired` event for a request that expired on the way
+        // in — every ledger append gets a tracing event (spec §G), and an
+        // error return is no exception. `deny` already threads them; this
+        // does too.
+        let mut all_committed = self.materialize_expiry(&mut guard, id, mono, wall)?;
+        macro_rules! bail {
+            ($err:expr) => {{
+                let err = $err;
+                drop(guard);
+                emit_events(&all_committed);
+                return Err(err);
+            }};
+        }
         let Some(chain) = guard.chains.get(id) else {
-            return Err(LedgerError::NotFound(id.clone()));
+            bail!(LedgerError::NotFound(id.clone()));
         };
         match chain.state {
             RequestState::Requested => {}
-            RequestState::Granted => return Err(LedgerError::AlreadyDecided(id.clone())),
-            other => return Err(self.terminal_error(id, other, chain.void_reason.clone())),
+            RequestState::Granted => bail!(LedgerError::AlreadyDecided(id.clone())),
+            other => bail!(self.terminal_error(id, other, chain.void_reason.clone())),
         }
         // An approver may narrow (add or tighten) the request's declared
         // transition claims and may never widen them — every
@@ -1200,13 +1220,16 @@ impl LedgerInner {
         // request's transitions verbatim; this only rejects a caller that
         // dropped or altered one.
         if let Some((resource, expected)) = find_widened_condition(&chain.request, &terms) {
-            return Err(LedgerError::ConditionsWidened {
+            bail!(LedgerError::ConditionsWidened {
                 request: id.clone(),
                 resource,
                 expected,
             });
         }
-        let reserved = guard.reserve_capacity(1, self.config.retained_entries)?;
+        let reserved = match guard.reserve_capacity(1, self.config.retained_entries) {
+            Ok(reserved) => reserved,
+            Err(err) => bail!(err),
+        };
 
         let not_after = terms.not_after;
         let grant = Grant::from_terms(id.clone(), decided_by, grounds, terms, token.token_prefix(), wall);
@@ -1221,7 +1244,7 @@ impl LedgerInner {
             },
             Some(id.clone()),
         )];
-        let committed = guard.commit(entries, reserved);
+        all_committed.extend(guard.commit(entries, reserved));
         if let Some(chain) = guard.chains.get_mut(id) {
             chain.grant = Some(grant.clone());
             chain.state = RequestState::Granted;
@@ -1229,7 +1252,7 @@ impl LedgerInner {
             chain.token = Some(token);
         }
         drop(guard);
-        emit_events(&committed);
+        emit_events(&all_committed);
         Ok(grant)
     }
 
@@ -1309,6 +1332,148 @@ impl LedgerInner {
         Ok(id)
     }
 
+    /// Stage 1 of the decision chain (spec §C.2): match `id`'s request
+    /// against every live standing grant, and — for the winner — charge one
+    /// use and post `Granted{grounds: Standing}` in the **same** lock
+    /// acquisition as the match. That atomicity is the whole point: a
+    /// match-then-grant split across two acquisitions would let N concurrent
+    /// requests all observe `uses < max_uses` and overrun the limit.
+    ///
+    /// Returns `Ok(None)` when no rule covers the request — the caller falls
+    /// through to stage 2. Matching is `standing::matches`, which is pure
+    /// glob work with no I/O and no `.await`, the only reason this stage may
+    /// run under the lock at all (spec §B.1).
+    ///
+    /// The grant expires at `grant_ttl` from now, clamped down to the
+    /// winning rule's own `expires_at` — an auto-approval never outlives the
+    /// rule that produced it.
+    pub(crate) fn grant_from_standing(
+        &self,
+        id: &RequestId,
+        grant_ttl: Duration,
+    ) -> Result<Option<Grant>, LedgerError> {
+        // Drawn before the lock for the same reason `grant` draws it there:
+        // `getrandom::fill` can block on entropy starvation and the ledger
+        // lock must never gate on I/O (spec §B.1). A request that turns out
+        // to match no rule has drawn entropy for nothing, which is cheap.
+        let token = Token::new(
+            generate_credential().map_err(|e| LedgerError::CredentialUnavailable(e.to_string()))?,
+        );
+        // Clocks sampled after the lock, so the `at` on the entry this
+        // commits is a time inside the critical section rather than one
+        // read before an arbitrary wait for it.
+        let mut guard = self.lock();
+        let (mono, wall) = self.now();
+        let mut all_committed = self.materialize_expiry(&mut guard, id, mono, wall)?;
+        macro_rules! bail {
+            ($err:expr) => {{
+                let err = $err;
+                drop(guard);
+                emit_events(&all_committed);
+                return Err(err);
+            }};
+        }
+        macro_rules! no_match {
+            () => {{
+                drop(guard);
+                emit_events(&all_committed);
+                return Ok(None);
+            }};
+        }
+        if guard.standing.is_empty() {
+            no_match!();
+        }
+        let Some(chain) = guard.chains.get(id) else {
+            bail!(LedgerError::NotFound(id.clone()));
+        };
+        match chain.state {
+            RequestState::Requested => {}
+            RequestState::Granted => bail!(LedgerError::AlreadyDecided(id.clone())),
+            other => bail!(self.terminal_error(id, other, chain.void_reason.clone())),
+        }
+        let request = chain.request.clone();
+
+        // Precedence when several rules cover one request: the lowest
+        // `StandingId` — issue order — wins, and only the winner is charged.
+        // Deterministic beats "most specific", which would need a
+        // specificity metric no one has defined (spec §I.2).
+        let mut candidates: Vec<StandingId> = guard.standing.keys().copied().collect();
+        candidates.sort_unstable();
+        let winner = candidates.into_iter().find(|standing_id| {
+            let Some(rule) = guard.standing.get(standing_id) else {
+                return false;
+            };
+            let exhausted = rule.max_uses.is_some_and(|max| {
+                guard.standing_uses.get(standing_id).copied().unwrap_or(0) >= max
+            });
+            // Exhaustion appends nothing special — the rule simply stops
+            // matching and the request falls through (spec §C.4).
+            !exhausted && super::standing::matches(rule, &request, wall)
+        });
+        let Some(winner) = winner else {
+            no_match!();
+        };
+        let Some(rule) = guard.standing.get(&winner) else {
+            no_match!();
+        };
+        let decided_by = rule.issued_by.clone();
+        let not_after = match rule.expires_at {
+            Some(rule_expiry) => (wall + grant_ttl).min(rule_expiry),
+            None => wall + grant_ttl,
+        };
+
+        // Commit-or-nothing: the use is charged only once capacity for the
+        // `Granted` entry is confirmed, so a full ring can never leave a
+        // consumed `max_uses` with no grant to show for it.
+        let reserved = match guard.reserve_capacity(1, self.config.retained_entries) {
+            Ok(reserved) => reserved,
+            Err(err) => bail!(err),
+        };
+        *guard.standing_uses.entry(winner).or_insert(0) += 1;
+
+        // "Transitions are not matched, they are conditioned" (spec §C.4):
+        // the rule says nothing about oids, so the request's own declared
+        // transitions become the grant's conditions and the redemption-time
+        // check still fires.
+        let terms = GrantTerms::once_for(&request, not_after);
+        let grant = Grant::from_terms(
+            id.clone(),
+            decided_by,
+            Grounds::Standing { grant: winner },
+            terms,
+            token.token_prefix(),
+            wall,
+        );
+        let remaining = not_after.duration_since(wall).unwrap_or(Duration::ZERO);
+
+        let seq = guard.alloc_seq();
+        let entries = vec![(
+            LedgerEntry::Granted {
+                seq,
+                at: wall,
+                grant: grant.clone(),
+            },
+            Some(id.clone()),
+        )];
+        all_committed.extend(guard.commit(entries, reserved));
+        if let Some(chain) = guard.chains.get_mut(id) {
+            chain.grant = Some(grant.clone());
+            chain.state = RequestState::Granted;
+            chain.grant_deadline = Some(mono + remaining);
+            chain.token = Some(token);
+        }
+        drop(guard);
+        emit_events(&all_committed);
+        Ok(Some(grant))
+    }
+
+    /// How many uses have been charged against a standing grant. Read-side
+    /// only — the authoritative count is the one
+    /// [`Self::grant_from_standing`] increments under the lock.
+    pub(crate) fn standing_uses(&self, id: StandingId) -> u32 {
+        self.lock().standing_uses.get(&id).copied().unwrap_or(0)
+    }
+
     pub(crate) fn revoke_standing(&self, id: StandingId, by: Principal, reason: String) -> Result<(), LedgerError> {
         let mut guard = self.lock();
         let (_, wall) = self.now();
@@ -1317,6 +1482,9 @@ impl LedgerInner {
         }
         let reserved = guard.reserve_capacity(1, self.config.retained_entries)?;
         guard.standing.remove(&id);
+        // Ids are monotonic, so no future rule can reuse this one's count;
+        // dropping it keeps the map bounded by the live rule set.
+        guard.standing_uses.remove(&id);
         let seq = guard.alloc_seq();
         let entries = vec![(
             LedgerEntry::StandingRevoked {
@@ -1677,6 +1845,7 @@ pub(crate) fn build_inner(
         live_count_total: 0,
         live_count_by_principal: HashMap::new(),
         standing: HashMap::new(),
+        standing_uses: HashMap::new(),
         ring: VecDeque::new(),
         reserved_ring_slots: 0,
         sink_tx,

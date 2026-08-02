@@ -312,6 +312,49 @@ pub struct KernelConfig {
     /// in the same call as the writes, or the transaction is discarded on drop.
     /// Frontends (REPL, MCP) expose `--overlay` as an explicit opt-in flag.
     pub overlay: bool,
+
+    /// The approval side: who this session is, what decides its gated
+    /// operations, and whether it may approve anything
+    /// (`docs/approval-ledger.md` §D.2). Defaults to no approver and no
+    /// authority, which is exactly today's behavior — every gate defers.
+    pub approval: ApprovalConfig,
+}
+
+/// A kernel's approval-side configuration (spec §D.2), grouped so the
+/// surface stays one field on [`KernelConfig`] as later PRs add
+/// `policy_pinned`, `deny_self_approval`, and the state resolvers.
+///
+/// Set through [`KernelConfig::with_approver`],
+/// [`KernelConfig::with_principal`], and
+/// [`KernelConfig::with_approver_handle`].
+#[derive(Clone, Default)]
+pub struct ApprovalConfig {
+    /// The decision hook stages 2 and 3 of the chain call. `None` — the
+    /// default — skips both stages, so every request no standing grant
+    /// covers defers to exit 2.
+    pub approver: Option<Arc<dyn crate::ledger::Approver>>,
+    /// Who this session is. Recorded as the decider on grants made through
+    /// the authority this kernel mints, and stamped on the requests it
+    /// posts. `None` takes the ledger's own placeholder identity.
+    pub principal: Option<kaish_types::approval::Principal>,
+    /// The authority this session holds. **Absent means the session may not
+    /// approve anything** — that is the enforcement mechanism itself (spec
+    /// §E.2, tier 1). Supplying one also adopts its ledger, so two kernels
+    /// built from one handle share a single log.
+    pub approver_handle: Option<crate::ledger::ApproverHandle>,
+}
+
+/// Names what is configured without printing an opaque `dyn Approver`
+/// address — `KernelConfig` keeps its `#[derive(Debug)]` this way rather
+/// than taxing every embedder's hook with a `Debug` bound.
+impl std::fmt::Debug for ApprovalConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ApprovalConfig")
+            .field("approver", &self.approver.is_some())
+            .field("principal", &self.principal)
+            .field("approver_handle", &self.approver_handle)
+            .finish()
+    }
 }
 
 /// Get the default sandbox root ($HOME).
@@ -344,6 +387,7 @@ impl Default for KernelConfig {
                 kill_grace: Duration::from_secs(2),
                 vfs_budget_bytes: None,
                 overlay: false,
+                approval: ApprovalConfig::default(),
             }
         }
         #[cfg(not(feature = "localfs"))]
@@ -365,6 +409,7 @@ impl Default for KernelConfig {
                 kill_grace: Duration::from_secs(2),
                 vfs_budget_bytes: None,
                 overlay: false,
+                approval: ApprovalConfig::default(),
             }
         }
     }
@@ -392,6 +437,7 @@ impl KernelConfig {
             kill_grace: Duration::from_secs(2),
             vfs_budget_bytes: None,
             overlay: false,
+            approval: ApprovalConfig::default(),
         }
     }
 
@@ -422,6 +468,7 @@ impl KernelConfig {
             kill_grace: Duration::from_secs(2),
             vfs_budget_bytes: None,
             overlay: false,
+            approval: ApprovalConfig::default(),
         }
     }
 
@@ -460,6 +507,7 @@ impl KernelConfig {
             kill_grace: Duration::from_secs(2),
             vfs_budget_bytes: None,
             overlay: false,
+            approval: ApprovalConfig::default(),
         }
     }
 
@@ -495,6 +543,7 @@ impl KernelConfig {
             kill_grace: Duration::from_secs(2),
             vfs_budget_bytes: Some(64 * 1024 * 1024),
             overlay: false,
+            approval: ApprovalConfig::default(),
         }
     }
 
@@ -523,6 +572,7 @@ impl KernelConfig {
             kill_grace: Duration::from_secs(2),
             vfs_budget_bytes: Some(64 * 1024 * 1024),
             overlay: false,
+            approval: ApprovalConfig::default(),
         }
     }
 
@@ -548,6 +598,7 @@ impl KernelConfig {
             kill_grace: Duration::from_secs(2),
             vfs_budget_bytes: None,
             overlay: false,
+            approval: ApprovalConfig::default(),
         }
     }
 
@@ -685,6 +736,44 @@ impl KernelConfig {
         self.overlay = overlay;
         self
     }
+
+    /// Install the decision hook stages 2 and 3 of the approval chain call
+    /// (`docs/approval-ledger.md` §C.2).
+    ///
+    /// With no approver — the default — a gated operation is decided by
+    /// standing grants alone, and anything they do not cover defers to exit
+    /// 2. Installing one whose methods both `Defer` changes nothing: the
+    /// trait's defaults are today's behavior.
+    pub fn with_approver(mut self, approver: Arc<dyn crate::ledger::Approver>) -> Self {
+        self.approval.approver = Some(approver);
+        self
+    }
+
+    /// Name who this session is (spec §A.3, §E.2).
+    ///
+    /// The kernel trusts this assignment — it is the embedder's job to know
+    /// which session belongs to which actor, and the whole session-boundary
+    /// enforcement tier is only as strong as that assignment. It is recorded
+    /// as the decider on grants made through the authority this kernel
+    /// mints.
+    pub fn with_principal(mut self, principal: kaish_types::approval::Principal) -> Self {
+        self.approval.principal = Some(principal);
+        self
+    }
+
+    /// Give this session approval authority, and bind it to that handle's
+    /// ledger (spec §D.2).
+    ///
+    /// **Withholding this is the enforcement.** A session built without a
+    /// handle has no method that grants — not a redacted one, not a checked
+    /// one, none — which is what keeps an agent from approving its own
+    /// operations (§E.2, tier 1). Pass a handle only to a session that
+    /// should be able to approve: a REPL the human watches, an embedder's
+    /// UI session, a clearance session.
+    pub fn with_approver_handle(mut self, handle: crate::ledger::ApproverHandle) -> Self {
+        self.approval.approver_handle = Some(handle);
+        self
+    }
 }
 
 /// Handle to an active overlay session, kept on the kernel and shared to
@@ -801,6 +890,37 @@ pub struct Kernel {
     /// the recursion chain is single-threaded (top-level `execute` is
     /// serialized by `execute_lock`; concurrency happens on forks).
     recursion_depth: AtomicUsize,
+    /// This kernel's approval side (spec §D.2). Shared by every fork, so a
+    /// background job's requests land in the same log the foreground reads.
+    approvals: KernelApprovals,
+}
+
+/// One kernel's approval side: the ledger handles it holds, the chain that
+/// decides its gated operations, and its identity (spec §D.2).
+///
+/// Grouped rather than spread across six `Kernel` fields because every one
+/// of them is cloned together on `fork` and handed out together by
+/// [`Kernel::build`].
+#[derive(Clone)]
+struct KernelApprovals {
+    /// Posts obligations. Cannot grant — there is no method on it that
+    /// produces a `Grant`.
+    requester: crate::ledger::Requester,
+    /// The read side. Safe to hand anywhere.
+    approvals: crate::ledger::Approvals,
+    /// The four-stage chain. Holds the ledger's authority internally so it
+    /// can post the decision it reaches; nothing reachable from script code
+    /// can get that authority back out of it.
+    chain: Arc<crate::ledger::DecisionChain>,
+    /// Who this session is.
+    principal: kaish_types::approval::Principal,
+    /// The one authority this ledger minted, returned by [`Kernel::build`]
+    /// to the embedder. Held privately: an embedder decides which sessions
+    /// get a clone, and a session does not help itself to one.
+    authority: crate::ledger::ApproverHandle,
+    /// The authority *this session* was given, if any. `None` means this
+    /// session may not approve anything (spec §E.2, tier 1).
+    session_authority: Option<crate::ledger::ApproverHandle>,
 }
 
 /// RAII balance for [`Kernel::recursion_depth`]: increments on construction
@@ -826,6 +946,34 @@ struct VfsSetupResult {
 }
 
 impl Kernel {
+    /// Create a new kernel and the one approval authority its construction
+    /// mints (`docs/approval-ledger.md` §D.2).
+    ///
+    /// The authority is in the signature because that is what enforces the
+    /// separation: the only way to obtain an
+    /// [`ApproverHandle`](crate::ledger::ApproverHandle) is to build
+    /// a kernel, and the embedder then decides which sessions get a clone
+    /// (through [`KernelConfig::with_approver_handle`]). A session built
+    /// without one has no method that grants.
+    ///
+    /// When the config already carries a handle, this returns that same
+    /// handle and the kernel joins its ledger rather than minting a fresh
+    /// one — that is how several kernels in a process share one log.
+    ///
+    /// [`Kernel::new`] is this with the authority dropped, which is what
+    /// every caller that does not participate in approvals wants.
+    ///
+    /// # Errors
+    ///
+    /// Everything [`Kernel::new`] fails on, plus a ledger that cannot mint
+    /// its id epoch because the OS supplied no entropy. There is no fallback
+    /// — see `nonce.rs`'s identical stance.
+    pub fn build(config: KernelConfig) -> Result<(Self, crate::ledger::ApproverHandle)> {
+        let kernel = Self::new(config)?;
+        let authority = kernel.approvals.authority.clone();
+        Ok((kernel, authority))
+    }
+
     /// Create a new kernel with the given configuration.
     pub fn new(config: KernelConfig) -> Result<Self> {
         let mut setup = Self::setup_vfs(&config)?;
@@ -1149,7 +1297,9 @@ impl Kernel {
         let no_host_side_channel =
             no_host_filesystem || matches!(config.vfs_mode, VfsMountMode::NoLocal);
 
-        let KernelConfig { name, cwd, skip_validation, interactive, ignore_config, mut output_limit, allow_external_commands, latch_enabled, trash_enabled, nonce_store, initial_vars, request_timeout, kill_grace, .. } = config;
+        let KernelConfig { name, cwd, skip_validation, interactive, ignore_config, mut output_limit, allow_external_commands, latch_enabled, trash_enabled, nonce_store, initial_vars, request_timeout, kill_grace, approval, .. } = config;
+
+        let approvals = Self::build_approvals(approval)?;
 
         if no_host_side_channel {
             output_limit.set_spill_mode(crate::output_limit::SpillMode::Memory);
@@ -1227,6 +1377,7 @@ impl Kernel {
             self_weak: std::sync::OnceLock::new(),
             execute_lock: tokio::sync::Mutex::new(()),
             recursion_depth: AtomicUsize::new(0),
+            approvals,
             bg_job_id: None,
             // Overlay handle is set by Kernel::new after assemble returns;
             // assemble itself doesn't know the handle (it's constructed in setup_vfs).
@@ -1234,6 +1385,80 @@ impl Kernel {
             #[cfg(all(feature = "localfs", feature = "overlay"))]
             overlay_handle: None,
         })
+    }
+
+    /// Assemble the approval side from its config (spec §D.2).
+    ///
+    /// A configured `approver_handle` is adopted whole — the kernel joins
+    /// that handle's ledger instead of minting one, so kernels built from
+    /// one handle share a single log. Otherwise a fresh ledger is minted
+    /// here, and its authority is what [`Kernel::build`] hands back.
+    ///
+    /// Either way the authority is re-attributed to the configured
+    /// principal, so grants made through it name a real actor rather than
+    /// the ledger's placeholder.
+    fn build_approvals(config: ApprovalConfig) -> Result<KernelApprovals> {
+        let ApprovalConfig {
+            approver,
+            principal,
+            approver_handle,
+        } = config;
+
+        let (requester, approvals, authority) = match &approver_handle {
+            Some(handle) => handle.join(),
+            None => crate::ledger::Ledger::build(crate::ledger::LedgerConfig::default(), None)
+                .context("approval ledger could not mint its id epoch — the OS supplied no entropy")?,
+        };
+        let authority = match &principal {
+            Some(principal) => authority.with_principal(principal.clone()),
+            None => authority,
+        };
+        let session_authority = approver_handle.map(|_| authority.clone());
+        let chain = Arc::new(crate::ledger::DecisionChain::new(
+            authority.clone(),
+            approvals.clone(),
+            approver,
+        ));
+
+        Ok(KernelApprovals {
+            requester,
+            approvals,
+            chain,
+            principal: principal.unwrap_or_default(),
+            authority,
+            session_authority,
+        })
+    }
+
+    /// The read side of this kernel's approval ledger (spec §D.2). Grants
+    /// nothing — pending requests, states, standing rules, and the log tail.
+    pub fn approvals(&self) -> crate::ledger::Approvals {
+        self.approvals.approvals.clone()
+    }
+
+    /// The obligation side: what posts `Requested`, `Redeemed`, and
+    /// `Settled`. Cannot grant.
+    pub fn requester(&self) -> &crate::ledger::Requester {
+        &self.approvals.requester
+    }
+
+    /// The four-stage decision chain this kernel's gate sites run
+    /// (spec §C.2). The seam `ToolCtx::request_approval` (PR 3) and the
+    /// rewritten gate sites (PR 5) call.
+    pub fn decision_chain(&self) -> &Arc<crate::ledger::DecisionChain> {
+        &self.approvals.chain
+    }
+
+    /// Who this session is (spec §A.3). Stamped on the requests it posts.
+    pub fn principal(&self) -> &kaish_types::approval::Principal {
+        &self.approvals.principal
+    }
+
+    /// The approval authority **this session** holds, if any. `None` means
+    /// the session may not approve anything — the check the `approvals`
+    /// builtin makes (spec §D.3, PR 7).
+    pub fn session_authority(&self) -> Option<&crate::ledger::ApproverHandle> {
+        self.approvals.session_authority.as_ref()
     }
 
     /// Get the kernel name.
@@ -1361,6 +1586,10 @@ impl Kernel {
             // parent — background jobs and scatter workers count against the same
             // cap as foreground writes.
             vfs_budget: self.vfs_budget.clone(),
+            // One ledger for the whole session: a background job's requests
+            // must land in the log the foreground reads, and its chain must
+            // be the same chain.
+            approvals: self.approvals.clone(),
             request_timeout: self.request_timeout,
             kill_grace: self.kill_grace,
             stderr_receiver: tokio::sync::Mutex::new(stderr_receiver),

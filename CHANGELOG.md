@@ -36,8 +36,8 @@ breaking entries are marked **BREAKING**.
   depending on only `kaish-tool-api` can gate an operation with no
   `kaish-kernel` dependency and no `as_any_mut` downcast. `ExecContext` gained
   real implementations behind a new optional `ledger_access` field (`None`
-  everywhere in production — there is no `KernelConfig::with_ledger` yet, PR
-  4), and the dispatcher's drop-safe `AttemptGuard`, whose `Drop` queues a
+  everywhere in production until the PR 5 cutover threads the kernel's
+  ledger through to gate sites), and the dispatcher's drop-safe `AttemptGuard`, whose `Drop` queues a
   best-effort `Outcome::Unknown` settlement onto a synchronous outbox the
   ledger drains on `settle`/`redeem`/`redeem_with_token`/`abandon_request` and
   on its sweep tick — a cancelled or panicking tool never leaves an attempt
@@ -45,6 +45,25 @@ breaking entries are marked **BREAKING**.
   field (alongside the existing `latch`, untouched) carrying the pending
   view's control-plane payload. Wired to no gate site — additive, no
   observable behavior change anywhere else in kaish.
+- **The approval decision chain and the authority capability** (ledger PR 4,
+  `docs/approval-ledger.md`) — `kaish_kernel::ledger::DecisionChain` runs four stages
+  in order (standing grants → `Approver::policy` → `Approver::decide` → defer), first
+  non-`Defer` wins. Both `Approver` decision methods default to `Defer`, so an empty
+  impl changes nothing and a kernel with no approver defers to exit 2 exactly as today.
+- **`Kernel::build` returns `(Kernel, ApproverHandle)`** — the only way to obtain
+  approval authority — with `KernelConfig::with_approver`/`with_principal`/
+  `with_approver_handle`; a session built without a handle has no method that grants.
+  `Kernel::new` is unchanged for callers that do not participate in approvals.
+- **Standing grants now match live requests** — all-or-nothing across a request's
+  resources (a rule covering three of four defers), `kind` matched exactly with only
+  `id` globbed through `kaish-glob`, and the request's declared transitions copied
+  into the grant's conditions so the redemption-time check still fires.
+- **`max_uses` is charged in the same critical section that appends the grant**, so
+  the limit holds exactly under concurrency and a full ring never consumes a use.
+- **`Approver::decide` runs under a patient hold** bounded by `Approver::decide_budget`
+  (default 300s), so a human's think time does not trip the script timeout — and a
+  cancelled execution never leaves a live grant, even when the cancellation lands
+  after the decision.
 - **`JobId`/`JobStatus`/`JobInfo` (kaish-types) now derive `Serialize`/`Deserialize`**
   (GH #241) — the last type family in kaish-types without serde.
 - `schemars::JsonSchema` on those types sits behind the `schema` feature, matching
