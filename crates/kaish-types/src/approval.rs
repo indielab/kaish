@@ -959,7 +959,14 @@ pub struct StandingGrant {
     /// Restrict to one requesting principal; `None` means any requester in
     /// this session.
     pub principal: Option<Principal>,
-    /// Maximum number of successful uses, if bounded.
+    /// Maximum number of matching requests this rule may auto-approve.
+    /// Defaults to 1 — a standing rule is one-shot unless explicitly
+    /// widened ([`Self::with_max_uses`] / [`Self::unlimited_uses`]).
+    /// `None` is explicit unlimited; an omitted field on the wire is the
+    /// one-shot default, never unlimited. **On the wire, `"max_uses":
+    /// null` reads as explicit unlimited** — a producer that means "use
+    /// the default" must omit the field, not send null.
+    #[serde(default = "default_max_uses")]
     pub max_uses: Option<u32>,
     /// When this rule stops matching, if it expires.
     #[serde(
@@ -974,19 +981,25 @@ pub struct StandingGrant {
     pub reason: String,
 }
 
+/// The wire and constructor default for [`StandingGrant::max_uses`]:
+/// one-shot. Wider is always an explicit act.
+fn default_max_uses() -> Option<u32> {
+    Some(1)
+}
+
 impl StandingGrant {
-    /// Build a not-yet-issued standing grant. `id` is a placeholder —
-    /// `ApproverHandle::grant_standing` overwrites it with a
+    /// Build a not-yet-issued standing grant, one-shot by default
+    /// (`max_uses = Some(1)`) — widen explicitly with
+    /// [`Self::with_max_uses`] or [`Self::unlimited_uses`]. `id` is a
+    /// placeholder — `ApproverHandle::grant_standing` overwrites it with a
     /// ledger-allocated [`StandingId`] when the rule is issued (spec §C.4);
     /// there is no separate draft type here for the same reason
     /// [`ApprovalRequestDraft`] exists for [`ApprovalRequest`]. The only
     /// external constructor for this `#[non_exhaustive]` type.
-    #[allow(clippy::too_many_arguments)]
     pub fn new(
         operations: Vec<OperationPattern>,
         resources: Vec<ResourcePattern>,
         principal: Option<Principal>,
-        max_uses: Option<u32>,
         expires_at: Option<SystemTime>,
         issued_by: Principal,
         reason: impl Into<String>,
@@ -996,11 +1009,24 @@ impl StandingGrant {
             operations,
             resources,
             principal,
-            max_uses,
+            max_uses: default_max_uses(),
             expires_at,
             issued_by,
             reason: reason.into(),
         }
+    }
+
+    /// Widen the rule to auto-approve up to `n` matching requests.
+    pub fn with_max_uses(mut self, n: u32) -> Self {
+        self.max_uses = Some(n);
+        self
+    }
+
+    /// Remove the use bound entirely. Unlimited is an explicit act, never
+    /// a default — say so in `reason`.
+    pub fn unlimited_uses(mut self) -> Self {
+        self.max_uses = None;
+        self
     }
 }
 
@@ -1817,6 +1843,45 @@ mod tests {
             issued_by: Principal::new("amy", PrincipalKind::Human),
             reason: "trust agent branches".to_string(),
         }
+    }
+
+    #[test]
+    fn standing_grant_missing_max_uses_on_the_wire_is_one_shot_not_unlimited() {
+        let mut value = serde_json::to_value(sample_standing_grant()).unwrap();
+        value.as_object_mut().unwrap().remove("max_uses");
+        let parsed: StandingGrant = serde_json::from_value(value).unwrap();
+        assert_eq!(parsed.max_uses, Some(1));
+    }
+
+    #[test]
+    fn standing_grant_explicit_null_max_uses_is_unlimited_not_the_default() {
+        // The null-versus-omitted split is deliberate and this test pins it:
+        // null is the wire spelling of an explicit unlimited, omission is
+        // the one-shot default. A producer meaning "default" must omit.
+        let mut value = serde_json::to_value(sample_standing_grant()).unwrap();
+        value
+            .as_object_mut()
+            .unwrap()
+            .insert("max_uses".to_string(), serde_json::Value::Null);
+        let parsed: StandingGrant = serde_json::from_value(value).unwrap();
+        assert_eq!(parsed.max_uses, None);
+    }
+
+    #[test]
+    fn standing_grant_is_one_shot_by_default_and_widening_is_explicit() {
+        let base = || {
+            StandingGrant::new(
+                vec![OperationPattern::new("git.commit")],
+                Vec::new(),
+                None,
+                None,
+                Principal::new("amy", PrincipalKind::Human),
+                "one-shot unless widened",
+            )
+        };
+        assert_eq!(base().max_uses, Some(1));
+        assert_eq!(base().with_max_uses(5).max_uses, Some(5));
+        assert_eq!(base().unlimited_uses().max_uses, None);
     }
 
     fn all_entries() -> Vec<LedgerEntry> {

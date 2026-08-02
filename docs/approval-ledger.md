@@ -909,7 +909,7 @@ pub struct StandingGrant {
     pub operations: Vec<OperationPattern>,     // "git.commit", "fs.*"
     pub resources: Vec<ResourcePattern>,       // { kind: "git.ref", pattern: "refs/heads/agent/*" }
     pub principal: Option<Principal>,          // None = any requester in this session
-    pub max_uses: Option<u32>,
+    pub max_uses: Option<u32>,                 // defaults to Some(1); None = explicit unlimited
     pub expires_at: Option<SystemTime>,
     pub issued_by: Principal,
     pub reason: String,
@@ -928,10 +928,17 @@ Matching rules, chosen for loudness:
   what the oids are; it copies the request's declared transitions into the resulting
   grant's `conditions`, so the redemption-time check still fires. "Auto-approve commits to
   `agent/*`" still fails loud if the ref moved.
-- `max_uses` is consumed inside the same critical section as the attempt reservation
-  (§B.1). Exhaustion appends nothing special: the rule stops matching and the request
-  Defers to the next stage. The `StandingIssued` entry plus the count of `Granted{grounds:
-  Standing{id}}` entries reconstructs the usage history.
+- **`max_uses` defaults to 1** — a standing rule auto-approves one matching request
+  unless explicitly widened (`with_max_uses`) or explicitly made unlimited
+  (`unlimited_uses`); an omitted field on the wire is the one-shot default, never
+  unlimited. Automation that fires repeatedly is an act the record can point to, not a
+  default it fell into.
+- `max_uses` is consumed inside the same critical section that appends the `Granted`
+  entry (§B.1; charged at decision time — the PR 4 review settled the §C.4-versus-§B.1
+  wording in favor of the concurrency test's phrasing). Exhaustion appends nothing
+  special: the rule stops matching and the request Defers to the next stage. The
+  `StandingIssued` entry plus the count of `Granted{grounds: Standing{id}}` entries
+  reconstructs the usage history.
 
 Revocation (`ApproverHandle::revoke_standing`) appends `StandingRevoked` and takes effect
 immediately for requests not yet granted. Already-issued grants are unaffected — revoking a
