@@ -75,6 +75,13 @@ breaking entries are marked **BREAKING**.
   only checker that sees them.
 
 ### Fixed
+- **`kill` signals every target, not just the first.** `kill %1 %2` used to signal
+  `%1`, drop `%2` silently, and exit 0.
+- A failing target no longer stops the rest, and the exit code is 1 if any target
+  failed — bash semantics.
+- **A Ctrl-Z'd job no longer hangs `Kernel::shutdown` forever.** A stopped job can
+  never become done, so `wait_all` now skips it instead of polling it at 10ms with
+  no timeout.
 - **`wait`'s published flag description no longer claims it accepts a PID.** There
   is no PID path; a bare `2` means job 2.
 - **`cargo doc` builds the workspace with zero warnings**, and CI now denies them —

@@ -76,7 +76,8 @@ struct KillArgs {
     #[command(flatten)]
     global: GlobalFlags,
 
-    /// Target PID(s) or job specifier(s) (e.g. `%1`).
+    /// One or more targets: job specifiers (`%1`) or PIDs. Every target is
+    /// signalled; the exit code is 1 if any of them failed.
     targets: Vec<String>,
 }
 
@@ -253,62 +254,108 @@ impl Tool for Kill {
         // single source of truth for what "no signal given" means.
         let signal_name = explicit_signal.or(shorthand_signal).unwrap_or(parsed.signal);
 
-        let target_str = match targets.first() {
-            Some(Value::String(s)) => s.clone(),
-            Some(Value::Int(i)) => i.to_string(),
-            Some(_) => return ExecResult::failure(1, "kill: invalid target"),
-            None => {
-                return ExecResult::failure(
-                    1,
-                    "kill: usage: kill [--signal SIG | -SIG | -N] target".to_string(),
-                )
-            }
-        };
-
-        // Job reference `%N` — kaish-level job control, available in every build.
-        if let Some(job_num) = target_str.strip_prefix('%') {
-            let job_id = match job_num.parse::<u64>() {
-                Ok(i) => JobId(i),
-                Err(_) => {
-                    return ExecResult::failure(1, format!("kill: invalid job reference: {target_str}"))
-                }
-            };
-            let manager = match &ctx.job_manager {
-                Some(m) => m.clone(),
-                None => return ExecResult::failure(1, "kill: no job manager"),
-            };
-            // A latched job's cached result is the only handle to its pending
-            // confirmation — killing it would silently destroy the gate
-            // (GH #96). Refuse unless the caller explicitly discards.
-            //
-            // TOCTOU note: a Running job can race into Latched between this
-            // check and kill_job's cancel+remove. That's acceptable — the
-            // guard protects an already-visible confirmation request from
-            // accidental destruction; a job killed while still running is the
-            // caller's stated intent, whatever it was about to become.
-            if manager.is_latched(job_id).await {
-                if !discard {
-                    return ExecResult::failure(
-                        1,
-                        format!(
-                            "kill: job {job_id} is latched awaiting confirmation — \
-                             fulfill it (see /v/jobs/{job_id}/latch) or abandon it \
-                             with: kill --discard %{job_id}"
-                        ),
-                    );
-                }
-                manager.cancel(job_id).await;
-                manager.remove(job_id).await;
-                return ExecResult::success(format!(
-                    "kill: discarded pending latch for job {job_id}"
-                ));
-            }
-            return kill_job(&manager, job_id, &signal_name).await;
+        if targets.is_empty() {
+            return ExecResult::failure(
+                1,
+                "kill: usage: kill [--signal SIG | -SIG | -N] target...".to_string(),
+            );
         }
 
-        // Bare PID — signalling an OS process needs the subprocess capability.
-        kill_pid(&target_str, &signal_name)
+        // Signal every target, like bash: one target's failure does not stop the
+        // rest, and the exit code is 0 only if all of them succeeded. Reading
+        // just `targets.first()` used to drop the remainder silently, so
+        // `kill %1 %2` reported success having signalled only `%1`.
+        let mut out = String::new();
+        let mut any_failed = false;
+
+        for target in &targets {
+            let target_str = match target {
+                Value::String(s) => s.clone(),
+                Value::Int(i) => i.to_string(),
+                other => {
+                    any_failed = true;
+                    out.push_str(&format!("kill: invalid target: {other:?}\n"));
+                    continue;
+                }
+            };
+
+            let result = kill_one(ctx, &target_str, &signal_name, discard).await;
+            if result.code != 0 {
+                any_failed = true;
+            }
+            let text = result.text_out();
+            let text = text.trim_end();
+            if !text.is_empty() {
+                out.push_str(text);
+                out.push('\n');
+            }
+            if !result.err.is_empty() {
+                out.push_str(result.err.trim_end());
+                out.push('\n');
+            }
+        }
+
+        let out = out.trim_end().to_string();
+        if any_failed {
+            ExecResult::failure(1, out)
+        } else {
+            ExecResult::success(out)
+        }
     }
+}
+
+/// Signal one target: a `%N` job reference or a bare PID.
+///
+/// Split out of `execute()` so the multi-target loop can run every target and
+/// aggregate the outcome. Each early return here ends one target, not the
+/// command — that distinction is the whole fix.
+async fn kill_one(
+    ctx: &ExecContext,
+    target_str: &str,
+    signal_name: &str,
+    discard: bool,
+) -> ExecResult {
+    // Job reference `%N` — kaish-level job control, available in every build.
+    if let Some(job_num) = target_str.strip_prefix('%') {
+        let job_id = match job_num.parse::<u64>() {
+            Ok(i) => JobId(i),
+            Err(_) => {
+                return ExecResult::failure(1, format!("kill: invalid job reference: {target_str}"))
+            }
+        };
+        let manager = match &ctx.job_manager {
+            Some(m) => m.clone(),
+            None => return ExecResult::failure(1, "kill: no job manager"),
+        };
+        // A latched job's cached result is the only handle to its pending
+        // confirmation — killing it would silently destroy the gate
+        // (GH #96). Refuse unless the caller explicitly discards.
+        //
+        // TOCTOU note: a Running job can race into Latched between this
+        // check and kill_job's cancel+remove. That's acceptable — the
+        // guard protects an already-visible confirmation request from
+        // accidental destruction; a job killed while still running is the
+        // caller's stated intent, whatever it was about to become.
+        if manager.is_latched(job_id).await {
+            if !discard {
+                return ExecResult::failure(
+                    1,
+                    format!(
+                        "kill: job {job_id} is latched awaiting confirmation — \
+                         fulfill it (see /v/jobs/{job_id}/latch) or abandon it \
+                         with: kill --discard %{job_id}"
+                    ),
+                );
+            }
+            manager.cancel(job_id).await;
+            manager.remove(job_id).await;
+            return ExecResult::success(format!("kill: discarded pending latch for job {job_id}"));
+        }
+        return kill_job(&manager, job_id, signal_name).await;
+    }
+
+    // Bare PID — signalling an OS process needs the subprocess capability.
+    kill_pid(target_str, signal_name)
 }
 
 /// Classify a signal as terminating (unwinds the job) vs. non-terminating,
