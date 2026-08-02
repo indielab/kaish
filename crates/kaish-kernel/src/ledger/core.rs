@@ -228,6 +228,17 @@ impl LedgerInner {
     /// other transaction (see `handles.rs`'s read-side callers for where the
     /// exception to this is — the synchronous `Approvals` read methods,
     /// which cannot return `Result` and so treat this call as best-effort).
+    ///
+    /// Unlike every public transaction method, this one calls
+    /// `emit_events` *before* its caller drops the lock (the caller already
+    /// holds `guard` when it calls in, and handing entries back out just to
+    /// re-emit them after would touch every one of `materialize_expiry`'s
+    /// several call sites for a synchronous `tracing::` call). `tracing`
+    /// macros do not `.await`, so this does not violate §B.1's "never call
+    /// an async hook while holding the lock" — but a subscriber that blocks
+    /// (e.g. writes to a slow file) would hold up every other transaction
+    /// on this ledger for the span of that call. Acceptable for now; worth
+    /// revisiting if a real subscriber ever makes that latency visible.
     fn materialize_expiry(&self, guard: &mut LedgerState, id: &RequestId, mono: Instant, wall: SystemTime) -> Result<(), LedgerError> {
         let Some(chain) = guard.chains.get(id) else {
             return Ok(());
@@ -420,13 +431,21 @@ impl LedgerInner {
         // match at all — every presentation against it is "bad" by
         // definition, and still counts, matching the transition table's
         // "redeem before any decision" row).
-        let Some(chain) = guard.chains.get_mut(id) else {
+        //
+        // Compute the *would-be* count without mutating anything yet — a
+        // capacity failure below must leave `reject_count` untouched
+        // (commit-or-nothing, spec §B.1), or a later successful rejection
+        // would record an `attempts` value one higher than the number of
+        // `TokenRejected` entries actually on the log.
+        let Some(chain) = guard.chains.get(id) else {
             return Err(LedgerError::NotAuthorized(id.clone()));
         };
-        chain.reject_count += 1;
-        let n = chain.reject_count;
+        let n = chain.reject_count + 1;
         let voids_now = n >= self.config.max_token_attempts;
         guard.reserve_capacity(if voids_now { 2 } else { 1 }, self.config.retained_entries)?;
+        if let Some(chain) = guard.chains.get_mut(id) {
+            chain.reject_count = n;
+        }
 
         let seq1 = guard.alloc_seq();
         let mut entries = vec![(
@@ -628,6 +647,16 @@ impl LedgerInner {
                 "request {request_id} already has a successful (or Unknown) settlement — a grant authorizes exactly one"
             )));
         }
+        // The chain may already have closed a different way (voided by a
+        // 5th bad credential, expired past `not_after`, abandoned) while
+        // this attempt was still `Reserved` — that path does not check
+        // `live_attempt`, by design (spec §B.2: those are derived facts
+        // about the world, not about any one attempt). A chain closes
+        // exactly once; `mark_closed` must not run a second time here, or
+        // the live counters it maintains undercount (spec §D.4's
+        // `live_capacity` gate would then admit more than its configured
+        // number of genuinely live requests).
+        let was_already_closed = chain.is_closed();
 
         guard.reserve_capacity(1, self.config.retained_entries)?;
         let seq = guard.alloc_seq();
@@ -652,7 +681,7 @@ impl LedgerInner {
                 chain.closed_by_settlement = true;
             }
         }
-        if closes {
+        if closes && !was_already_closed {
             guard.mark_closed(request_id);
         }
         drop(guard);
@@ -695,6 +724,30 @@ impl LedgerInner {
         Ok(())
     }
 
+    /// Renew an `Expired` request into a fresh `Requested` one (spec §B.5).
+    ///
+    /// Deliberately **not** one critical section, unlike every other method
+    /// in this file — it acquires the lock up to three times (materialize,
+    /// read, then `post_request`'s own). This is safe only because the
+    /// state it reads back (`Expired`) is terminal for every path except
+    /// this one: nothing else in PR 2 can mutate an already-`Expired`
+    /// chain out from under the second acquisition. It stays flagged here
+    /// rather than fixed because the real fix — reading the old request and
+    /// posting the new one under one held guard — needs `post_request`'s
+    /// internals threaded through a shared-guard variant, which is not
+    /// worth doing until `renew` gains its full behavior (re-observing the
+    /// transitions before posting; see the note below).
+    ///
+    /// **Does not yet re-observe transitions before posting** (the rest of
+    /// spec §B.5: "If the world already moved, renewal fails loud rather
+    /// than posting a request whose claims are already false"). The
+    /// original resources — which may carry `StateClaim::Exact` transition
+    /// claims — are cloned verbatim. Re-observation needs a `StateResolver`
+    /// call per resource, which is PR 6's `StateResolver` trait; PR 2 has
+    /// no I/O seam to call one through. A `renew`d request's conditions are
+    /// still re-checked at its own redemption time (the ordinary
+    /// `Refused`/`Voided` path), so a stale claim is caught there — just one
+    /// step later than the spec's stated ideal.
     pub(crate) fn renew(&self, id: &RequestId) -> Result<RequestId, LedgerError> {
         let (mono, wall) = self.now();
         {
@@ -754,6 +807,16 @@ impl LedgerInner {
         decided_by: Principal,
         grounds: Grounds,
     ) -> Result<Grant, LedgerError> {
+        // Drawn before the lock is taken: `getrandom::fill` is synchronous
+        // but can block on entropy starvation, and the ledger lock must
+        // never gate on I/O — even non-async I/O — the way it never gates
+        // on `Approver::decide` (spec §B.1, §C.2). A grant that turns out
+        // to be invalid (already decided, terminal) has drawn entropy for
+        // nothing; that is a cheap, inconsequential cost next to the
+        // alternative of blocking every other transaction on this ledger.
+        let token = Token::new(
+            generate_credential().map_err(|e| LedgerError::CredentialUnavailable(e.to_string()))?,
+        );
         let (mono, wall) = self.now();
         let mut guard = self.lock();
         self.materialize_expiry(&mut guard, id, mono, wall)?;
@@ -767,9 +830,6 @@ impl LedgerInner {
         }
         guard.reserve_capacity(1, self.config.retained_entries)?;
 
-        let token = Token::new(
-            generate_credential().map_err(|e| LedgerError::CredentialUnavailable(e.to_string()))?,
-        );
         let not_after = terms.not_after;
         let grant = Grant::from_terms(id.clone(), decided_by, grounds, terms, token.token_prefix(), wall);
         let remaining = not_after.duration_since(wall).unwrap_or(Duration::ZERO);
@@ -1201,6 +1261,43 @@ mod tests {
         ApprovalRequest::builder(op).risk(RiskClass::Reversible).build().unwrap()
     }
 
+    /// Regression test for a review finding: a bad-credential presentation
+    /// must reserve ring/sink capacity for its `TokenRejected` entry
+    /// *before* touching `reject_count`, or a capacity failure leaves the
+    /// counter advanced with no corresponding entry — the next successful
+    /// rejection would then report an `attempts` value one higher than the
+    /// number of `TokenRejected` entries actually on the log, and the fifth
+    /// void could fire after only four recorded rejections.
+    #[test]
+    fn bad_key_under_ring_pressure_does_not_advance_reject_count_without_recording_it() {
+        let config = LedgerConfig {
+            retained_entries: 1,
+            ..Default::default()
+        };
+        #[allow(clippy::unwrap_used)]
+        let inner = build_inner(config, None, Arc::new(SystemWallClock)).unwrap();
+        let principal = agent("agent-1");
+        // Occupies the ring's one slot with a still-live (Requested, no
+        // decision yet) chain — nothing is evictable, so any further
+        // append attempt must refuse loud rather than partially commit.
+        #[allow(clippy::unwrap_used)]
+        let req = inner
+            .post_request(draft("fs.remove"), principal.clone(), Capture::DirectExecution, RequestContext::default(), Duration::from_secs(60), None)
+            .unwrap();
+
+        let err = inner
+            .redeem_with_token(&req.id, "wrong", principal, Vec::new())
+            .unwrap_err();
+        assert!(matches!(err, LedgerError::RingAtCapacity), "got {err:?}");
+
+        #[allow(clippy::unwrap_used)]
+        let reject_count = {
+            let guard = inner.lock();
+            guard.chains.get(&req.id).unwrap().reject_count
+        };
+        assert_eq!(reject_count, 0, "a capacity failure must not silently advance the rejection counter");
+    }
+
     #[test]
     fn wall_clock_jumps_neither_extend_nor_void_a_grant() {
         let clock = Arc::new(FakeWallClock {
@@ -1329,5 +1426,68 @@ mod tests {
         // attempt against a grant nobody can vouch for.
         let err = inner.redeem(&req.id, principal, Vec::new()).unwrap_err();
         assert!(matches!(err, LedgerError::AlreadySettled { .. }));
+    }
+
+    /// Regression test for a review finding: `settle()` must not run
+    /// `mark_closed` a second time when the chain already closed a
+    /// different way (voided, expired, abandoned) while its attempt was
+    /// still `Reserved`. A double-decrement of `live_count_total` would let
+    /// the ledger admit more live requests than `live_capacity` — proven
+    /// here through the public capacity gate itself rather than by reaching
+    /// into `live_count_total` directly, so the test still means something
+    /// if the counter's representation ever changes.
+    #[test]
+    fn settle_after_a_different_close_does_not_admit_extra_live_requests_past_capacity() {
+        let config = LedgerConfig {
+            live_capacity: 1,
+            ..Default::default()
+        };
+        #[allow(clippy::unwrap_used)]
+        let inner = build_inner(config, None, Arc::new(SystemWallClock)).unwrap();
+        let principal = agent("agent-1");
+
+        // Chain A occupies the ledger's one live slot.
+        #[allow(clippy::unwrap_used)]
+        let req_a = inner
+            .post_request(draft("fs.remove"), principal.clone(), Capture::DirectExecution, RequestContext::default(), Duration::from_secs(60), None)
+            .unwrap();
+        let not_after = SystemTime::now() + Duration::from_secs(300);
+        #[allow(clippy::unwrap_used)]
+        inner
+            .grant(&req_a.id, GrantTerms::once_for(&req_a, not_after), principal.clone(), Grounds::Embedder)
+            .unwrap();
+        #[allow(clippy::unwrap_used)]
+        let attempt_a = inner.redeem(&req_a.id, principal.clone(), Vec::new()).unwrap();
+
+        // Void chain A via 5 bad keys while its attempt is still `Reserved`
+        // — this closes the chain (freeing its live slot) without settling
+        // the attempt.
+        for _ in 0..5 {
+            let _ = inner.redeem_with_token(&req_a.id, "wrong", principal.clone(), Vec::new());
+        }
+        assert_eq!(inner.state(&req_a.id), Some(RequestState::Voided));
+
+        // The freed slot admits chain B, which stays live (undecided).
+        #[allow(clippy::unwrap_used)]
+        let _req_b = inner
+            .post_request(draft("fs.remove"), principal.clone(), Capture::DirectExecution, RequestContext::default(), Duration::from_secs(60), None)
+            .unwrap();
+
+        // The now-orphaned attempt against already-voided chain A finally
+        // settles. Before the fix, this called `mark_closed` for chain A a
+        // second time, decrementing `live_count_total` again even though
+        // chain B — not chain A — is what is actually occupying the slot.
+        let _ = inner.settle(&req_a.id, attempt_a, Outcome::Exit(0));
+
+        // If the double-decrement happened, the ledger now believes it has
+        // 0 live requests even though chain B genuinely is one, and this
+        // wrongly succeeds past the configured capacity of 1.
+        let err = inner
+            .post_request(draft("fs.remove"), principal, Capture::DirectExecution, RequestContext::default(), Duration::from_secs(60), None)
+            .unwrap_err();
+        assert!(
+            matches!(err, LedgerError::LiveCapacity { limit: 1 }),
+            "chain B is still live — the capacity gate must still refuse a third request, got {err:?}"
+        );
     }
 }

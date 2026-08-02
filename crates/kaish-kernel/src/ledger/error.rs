@@ -41,10 +41,14 @@ pub enum LedgerError {
     },
     /// No standing grant exists with this id.
     StandingNotFound(StandingId),
-    /// A redemption arrived after the grant already had a successful (or
-    /// `Unknown`) settlement. The kernel reports the settled outcome instead
-    /// of re-executing (spec §B.4) — `outcome` is `None` only when the
-    /// settling entry could not be found (should not happen in practice).
+    /// A redemption arrived after the grant already closed — either a
+    /// successful (or `Unknown`) settlement, or the recovery sweep closing
+    /// an unreported `Reserved` attempt as `Abandoned` (spec §B.2 treats
+    /// that the same as `Unknown`: effects unknown, no retry against this
+    /// grant). The kernel reports the outcome instead of re-executing (spec
+    /// §B.4); `outcome` is `None` when the chain closed via the sweep
+    /// rather than an actual `Settled` entry — there is no outcome to
+    /// report, only the fact that nobody ever will.
     AlreadySettled {
         /// The request whose grant already closed.
         id: RequestId,
@@ -130,7 +134,7 @@ impl fmt::Display for LedgerError {
                 ),
                 None => write!(
                     f,
-                    "request {id} already settled successfully — not re-executing; present a new request to retry"
+                    "request {id} closed with no reported outcome (its reservation was abandoned by the recovery sweep) — not re-executing; present a new request to retry"
                 ),
             },
             Self::Refused { id, detail } => {
