@@ -1129,14 +1129,28 @@ impl LedgerInner {
         );
         let mut guard = self.lock();
         let (mono, wall) = self.now();
-        self.materialize_expiry(&mut guard, id, mono, wall)?;
+        // `materialize_expiry` hands back the entries it committed so this
+        // caller can trace them after dropping the lock. Discarding them
+        // loses the `Expired` event for a request that expired on the way
+        // in — every ledger append gets a tracing event (spec §G), and an
+        // error return is no exception. `deny` already threads them; this
+        // does too.
+        let mut all_committed = self.materialize_expiry(&mut guard, id, mono, wall)?;
+        macro_rules! bail {
+            ($err:expr) => {{
+                let err = $err;
+                drop(guard);
+                emit_events(&all_committed);
+                return Err(err);
+            }};
+        }
         let Some(chain) = guard.chains.get(id) else {
-            return Err(LedgerError::NotFound(id.clone()));
+            bail!(LedgerError::NotFound(id.clone()));
         };
         match chain.state {
             RequestState::Requested => {}
-            RequestState::Granted => return Err(LedgerError::AlreadyDecided(id.clone())),
-            other => return Err(self.terminal_error(id, other, chain.void_reason.clone())),
+            RequestState::Granted => bail!(LedgerError::AlreadyDecided(id.clone())),
+            other => bail!(self.terminal_error(id, other, chain.void_reason.clone())),
         }
         // An approver may narrow (add or tighten) the request's declared
         // transition claims and may never widen them — every
@@ -1147,13 +1161,16 @@ impl LedgerInner {
         // request's transitions verbatim; this only rejects a caller that
         // dropped or altered one.
         if let Some((resource, expected)) = find_widened_condition(&chain.request, &terms) {
-            return Err(LedgerError::ConditionsWidened {
+            bail!(LedgerError::ConditionsWidened {
                 request: id.clone(),
                 resource,
                 expected,
             });
         }
-        let reserved = guard.reserve_capacity(1, self.config.retained_entries)?;
+        let reserved = match guard.reserve_capacity(1, self.config.retained_entries) {
+            Ok(reserved) => reserved,
+            Err(err) => bail!(err),
+        };
 
         let not_after = terms.not_after;
         let grant = Grant::from_terms(id.clone(), decided_by, grounds, terms, token.token_prefix(), wall);
@@ -1168,7 +1185,7 @@ impl LedgerInner {
             },
             Some(id.clone()),
         )];
-        let committed = guard.commit(entries, reserved);
+        all_committed.extend(guard.commit(entries, reserved));
         if let Some(chain) = guard.chains.get_mut(id) {
             chain.grant = Some(grant.clone());
             chain.state = RequestState::Granted;
@@ -1176,7 +1193,7 @@ impl LedgerInner {
             chain.token = Some(token);
         }
         drop(guard);
-        emit_events(&committed);
+        emit_events(&all_committed);
         Ok(grant)
     }
 

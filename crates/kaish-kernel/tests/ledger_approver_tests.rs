@@ -850,6 +850,126 @@ async fn an_already_cancelled_execution_is_never_granted() {
     );
 }
 
+/// An approver that fires the cancellation token from inside the narrowest
+/// window there is: `principal()`, which the chain calls *after* its
+/// post-decide cancellation check and *before* the grant reaches the
+/// ledger. Nothing a timing-based test can hit reliably — this makes the
+/// race deterministic.
+struct CancelsWhileGranting {
+    cancel: tokio_util::sync::CancellationToken,
+    decision: Decision,
+    from_policy: bool,
+}
+
+#[async_trait]
+impl Approver for CancelsWhileGranting {
+    fn policy(&self, _req: &ApprovalRequestView, _ledger: &Approvals) -> Decision {
+        if self.from_policy {
+            self.decision.clone()
+        } else {
+            Decision::Defer
+        }
+    }
+
+    async fn decide(&self, _req: &ApprovalRequestView) -> Decision {
+        if self.from_policy {
+            Decision::Defer
+        } else {
+            self.decision.clone()
+        }
+    }
+
+    fn principal(&self) -> Principal {
+        // The chain has already decided to grant and has not yet posted.
+        self.cancel.cancel();
+        Principal::new("racing-approver", PrincipalKind::Automation)
+    }
+}
+
+fn grant_terms_for(operation: &str) -> Decision {
+    Decision::Grant(GrantTerms::once_for(
+        &ApprovalRequest::builder(operation)
+            .risk(RiskClass::Irreversible)
+            .build()
+            .unwrap()
+            .stamp(
+                kaish_types::approval::RequestId::new(0, 0),
+                agent("agent-1"),
+                Capture::DirectExecution,
+                RequestContext::default(),
+                SystemTime::now(),
+                Duration::from_secs(600),
+                None,
+            ),
+        far_future(),
+    ))
+}
+
+/// A cancellation that lands *after* the chain's own check and *before* the
+/// grant commits must still not leave a live grant. The window cannot be
+/// closed — the ledger knows nothing of cancellation tokens — so the
+/// guarantee is stated as an outcome: the grant is undone, the request ends
+/// `Abandoned`, and the caller is told `Cancelled`.
+#[tokio::test]
+async fn a_cancellation_that_beats_the_commit_leaves_no_live_grant() {
+    for from_policy in [true, false] {
+        let cancel = tokio_util::sync::CancellationToken::new();
+        let approver = Arc::new(CancelsWhileGranting {
+            cancel: cancel.clone(),
+            decision: grant_terms_for("fs.remove"),
+            from_policy,
+        });
+        let (requester, approvals, _authority, chain) = chain_over(Some(approver));
+        let request = post(&requester, "fs.remove", vec![]).await;
+
+        let outcome = chain
+            .decide(&request, &ChainContext::new(&NoPatient, cancel))
+            .await
+            .unwrap();
+
+        assert_eq!(
+            outcome,
+            ChainOutcome::Cancelled,
+            "from_policy={from_policy}: a cancelled execution is never told it may proceed"
+        );
+        assert_eq!(
+            approvals.state(&request.id),
+            Some(RequestState::Abandoned),
+            "from_policy={from_policy}: the grant that beat the cancellation must be undone"
+        );
+        // The record keeps both halves: the decision, and its undoing.
+        let log = approvals.log(0);
+        assert!(log.iter().any(|e| matches!(e, LedgerEntry::Granted { .. })));
+        assert!(log.iter().any(|e| matches!(e, LedgerEntry::Abandoned { .. })));
+        // And the credential is gone — an abandoned chain is closed.
+        assert_eq!(gate_result(&outcome, &request).code, 130);
+    }
+}
+
+/// A cancellation racing a *denial* leaves the denial standing: it
+/// authorizes nothing, and erasing it would lose a real decision.
+#[tokio::test]
+async fn a_cancellation_racing_a_denial_keeps_the_denial() {
+    let cancel = tokio_util::sync::CancellationToken::new();
+    let approver = Arc::new(CancelsWhileGranting {
+        cancel: cancel.clone(),
+        decision: Decision::Deny {
+            reason: "denied on the way out".into(),
+        },
+        from_policy: true,
+    });
+    let (requester, approvals, _authority, chain) = chain_over(Some(approver));
+    let request = post(&requester, "fs.remove", vec![]).await;
+
+    let outcome = chain
+        .decide(&request, &ChainContext::new(&NoPatient, cancel))
+        .await
+        .unwrap();
+
+    assert!(matches!(outcome, ChainOutcome::Denied { .. }), "got {outcome:?}");
+    assert_eq!(approvals.state(&request.id), Some(RequestState::Denied));
+}
+
 /// A `PatientSource` with no watchdog behind it — the shape a non-kernel
 /// caller has.
 struct NoPatient;

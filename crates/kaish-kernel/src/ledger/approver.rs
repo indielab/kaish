@@ -34,7 +34,7 @@ use kaish_types::approval::{
 use tokio_util::sync::CancellationToken;
 
 use super::error::LedgerError;
-use super::handles::{ApproverHandle, Approvals};
+use super::handles::{ApproverHandle, Approvals, Requester};
 
 /// How long [`Approver::decide`] may hold the patient budget before the
 /// watchdog fires anyway — 300 seconds, the number §C.3 gives the terminal
@@ -218,6 +218,10 @@ impl PatientSource for crate::ExecContext {
 pub struct DecisionChain {
     authority: ApproverHandle,
     approvals: Approvals,
+    /// Derived from `authority`, and used for exactly one thing: abandoning
+    /// a request whose execution was cancelled out from under a decision
+    /// (see [`DecisionChain::undo_if_cancelled`]). Grants nothing.
+    requester: Requester,
     approver: Option<Arc<dyn Approver>>,
     grant_ttl: Duration,
 }
@@ -237,9 +241,11 @@ impl DecisionChain {
     /// `approver` is `None` for a kernel with no decision hook — stages 2
     /// and 3 are then skipped outright.
     pub fn new(authority: ApproverHandle, approvals: Approvals, approver: Option<Arc<dyn Approver>>) -> Self {
+        let (requester, _, _) = authority.join();
         Self {
             authority,
             approvals,
+            requester,
             approver,
             grant_ttl: DEFAULT_GRANT_TTL,
         }
@@ -289,10 +295,16 @@ impl DecisionChain {
             .grant_from_standing(&request.id, self.grant_ttl)
             .await?
         {
-            return Ok(ChainOutcome::Granted {
-                grant,
-                stage: ChainStage::Standing,
-            });
+            return self
+                .undo_if_cancelled(
+                    request,
+                    ChainOutcome::Granted {
+                        grant,
+                        stage: ChainStage::Standing,
+                    },
+                    ctx,
+                )
+                .await;
         }
 
         let Some(approver) = self.approver.as_ref() else {
@@ -307,7 +319,7 @@ impl DecisionChain {
             Decision::Defer => {}
             decision => {
                 return self
-                    .post(request, decision, approver.as_ref(), ChainStage::Policy)
+                    .post(request, decision, approver.as_ref(), ChainStage::Policy, ctx)
                     .await
             }
         }
@@ -334,7 +346,7 @@ impl DecisionChain {
             Decision::Defer => {}
             decision => {
                 return self
-                    .post(request, decision, approver.as_ref(), ChainStage::Decide)
+                    .post(request, decision, approver.as_ref(), ChainStage::Decide, ctx)
                     .await
             }
         }
@@ -351,6 +363,7 @@ impl DecisionChain {
         decision: Decision,
         approver: &dyn Approver,
         stage: ChainStage,
+        ctx: &ChainContext<'_>,
     ) -> Result<ChainOutcome, LedgerError> {
         let principal = approver.principal();
         match decision {
@@ -376,7 +389,8 @@ impl DecisionChain {
                     .with_principal(principal)
                     .grant_with_grounds(&request.id, terms, grounds)
                     .await?;
-                Ok(ChainOutcome::Granted { grant, stage })
+                self.undo_if_cancelled(request, ChainOutcome::Granted { grant, stage }, ctx)
+                    .await
             }
             Decision::Deny { reason } => {
                 self.authority
@@ -384,6 +398,8 @@ impl DecisionChain {
                     .with_principal(principal)
                     .deny(&request.id, &reason)
                     .await?;
+                // A denial needs no undo: it authorizes nothing, and
+                // erasing it would lose the record of a real decision.
                 Ok(ChainOutcome::Denied { reason, stage })
             }
             Decision::Defer => Ok(ChainOutcome::Deferred),
@@ -391,5 +407,45 @@ impl DecisionChain {
             // without a case here must not silently mean "yes".
             _ => Ok(ChainOutcome::Deferred),
         }
+    }
+
+    /// Close the window between "we decided to grant" and "the grant is on
+    /// the log": if cancellation fired anywhere in it, abandon the request,
+    /// which kills the grant and drops its credential.
+    ///
+    /// The window cannot be removed. A grant commits inside the ledger's
+    /// critical section, and the ledger deliberately knows nothing about
+    /// cancellation tokens — teaching it would run one feature's plumbing
+    /// through another's boundary for a check that would still race the
+    /// instant before the lock. So the guarantee is stated as an outcome
+    /// rather than as timing: **a cancelled execution never leaves a live
+    /// grant behind.** A grant that beat the cancellation is undone by
+    /// `Abandoned`, which is the same transition a discarded job takes
+    /// (spec §B.2), and the record shows both the decision and its undoing
+    /// rather than hiding either.
+    ///
+    /// A failure to undo is **loud**: it returns the ledger's error rather
+    /// than the grant, because reporting `Granted` for an execution that is
+    /// unwinding is the one answer that could authorize something nobody
+    /// will perform.
+    async fn undo_if_cancelled(
+        &self,
+        request: &ApprovalRequest,
+        outcome: ChainOutcome,
+        ctx: &ChainContext<'_>,
+    ) -> Result<ChainOutcome, LedgerError> {
+        if !ctx.cancel.is_cancelled() {
+            return Ok(outcome);
+        }
+        let ChainOutcome::Granted { .. } = &outcome else {
+            return Ok(outcome);
+        };
+        self.requester
+            .abandon_request(
+                &request.id,
+                "the execution was cancelled before its grant could be used",
+            )
+            .await?;
+        Ok(ChainOutcome::Cancelled)
     }
 }
