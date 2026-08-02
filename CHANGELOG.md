@@ -75,6 +75,8 @@ breaking entries are marked **BREAKING**.
   only checker that sees them.
 
 ### Fixed
+- **`grep -c` over multiple files prints a `name:count` line per file** (GNU
+  parity), zero counts included — it used to print one aggregate total.
 - **`wait`'s published flag description no longer claims it accepts a PID.** There
   is no PID path; a bare `2` means job 2.
 - **`cargo doc` builds the workspace with zero warnings**, and CI now denies them —

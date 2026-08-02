@@ -50,6 +50,42 @@ async fn grep_c_multifile_exits_1_only_if_no_file_matches() {
     assert_eq!(code, 0, "a match in any file must exit 0");
 }
 
+#[tokio::test]
+async fn grep_c_multifile_prints_per_file_counts() {
+    // GNU parity: `grep -c` over multiple files prints one `name:count` line
+    // per file, zero counts included — not a single aggregate total.
+    let tmp = tempfile::tempdir().unwrap();
+    std::fs::write(tmp.path().join("a.txt"), "alpha\nalpha\n").unwrap();
+    std::fs::write(tmp.path().join("b.txt"), "beta\n").unwrap();
+    let kernel = kernel_at(tmp.path());
+
+    let (out, code) = run(&kernel, "grep -c alpha a.txt b.txt").await;
+    assert_eq!(out, "a.txt:2\nb.txt:0");
+    assert_eq!(code, 0);
+
+    // All-zero counts still print per file, with exit 1.
+    let (out, code) = run(&kernel, "grep -c zzz a.txt b.txt").await;
+    assert_eq!(out, "a.txt:0\nb.txt:0");
+    assert_eq!(code, 1);
+}
+
+#[tokio::test]
+async fn grep_c_recursive_prints_per_file_counts() {
+    let tmp = tempfile::tempdir().unwrap();
+    std::fs::create_dir(tmp.path().join("d")).unwrap();
+    std::fs::write(tmp.path().join("d/a.txt"), "alpha\n").unwrap();
+    std::fs::write(tmp.path().join("d/b.txt"), "alpha\nalpha\nbeta\n").unwrap();
+    let kernel = kernel_at(tmp.path());
+
+    // Display follows grep's existing single-walk-root convention: the root
+    // (`d/`) is stripped from names, matching the match-line display.
+    let (out, code) = run(&kernel, "grep -rc alpha d").await;
+    assert_eq!(code, 0);
+    let mut lines: Vec<&str> = out.lines().collect();
+    lines.sort_unstable();
+    assert_eq!(lines, vec!["a.txt:1", "b.txt:2"]);
+}
+
 // ───────────────────── $(cmd) trailing-whitespace trim ─────────────────────
 
 #[tokio::test]
