@@ -27,6 +27,10 @@ breaking entries are marked **BREAKING**.
   TTY-stopped-only and is usually `None` for an embedder-created job.
 - Timestamps come from `kaish_types::clock::system_now()`, not `SystemTime::now()`,
   so they stay valid on `wasm32-unknown-unknown`.
+- `started_at`/`finished_at` serialize as RFC 3339 UTC strings with millisecond
+  precision (`"2026-08-02T14:29:00.123Z"`) on every surface (`jobs --json`,
+  embedder serde) — not Rust's internal `secs_since_epoch` object. Parsing
+  accepts 0–9 fractional digits, `Z` only.
 - **`JobManager::try_result(JobId) -> Option<ExecResult>`** (GH #243) — a
   non-blocking read of a finished job's result; the only prior path was the
   blocking `JobManager::wait`.

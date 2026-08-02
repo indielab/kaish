@@ -13,6 +13,7 @@ pub mod job;
 pub mod kernel;
 pub mod output;
 pub mod result;
+pub mod rfc3339;
 pub mod tool;
 pub mod value;
 
