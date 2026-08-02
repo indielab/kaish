@@ -532,7 +532,7 @@ stateDiagram-v2
 
 ### B.3 Replay vs. resume, and the generalized precondition check
 
-Keep the latch's replay model — it is proven, it is exactly what makes `Kernel::confirm` a one-liner, and every gated operation already has to be idempotent-on-replay by construction. Do **not** build suspend-and-resume; a tool that gets halfway through and then asks is a tool that has already done half of something unauthorized.
+Keep the latch's replay model — not because it is battle-proven (it works in tests and has seen only light real use; adoption is what this design is for — Amy, 2026-08-01), but because it is the right shape: it keeps `Kernel::confirm` a one-liner, and every gated operation already has to be idempotent-on-replay by construction. Do **not** build suspend-and-resume; a tool that gets halfway through and then asks is a tool that has already done half of something unauthorized.
 
 What generalizes is `cas_overwrite`. Today (`crates/kaish-kernel/src/tools/context.rs:269-292`) the pattern is: snapshot bytes at gate time, re-read at write time, loud `InvalidOperation` on mismatch, and — critically — a re-read *failure* propagates rather than defaulting to empty. That is precisely right. Lift it:
 
@@ -1002,7 +1002,7 @@ The `/v/approvals` mount (read-only; writes `Unsupported`; tokens always redacte
 1. **Ring capacity and the fail-loud-when-full rule.** 1024 live requests is a lot for an interactive session and possibly not enough for a long-running agent that gates thousands of auto-approved `fs.*` ops. Auto-granted chains settle immediately, so they evict cleanly — but if that intuition is wrong the default is too small. Should auto-granted-and-settled chains have a separate, smaller retention than gated ones?
 2. **Should the `fs.*` auto-grant post at all when latch is off?** The "implementation side always calls" framing has been honored. The alternative — post only when a policy defers — is cheaper and loses the "what did this agent actually delete" record. The design chooses the record. Confirm.
 3. **`approval.request` spanning the wait.** A span open for minutes is unusual and some backends dislike it. The alternative is two spans (request, decision) linked by span links. The design chooses duration-is-the-signal; co-architect lean is mild agreement, but flag it if your collector will hate it.
-4. **Should `Irreversible` refuse `--confirm` entirely?** Token delivery now follows approval authority (§D.3), which closes the agent-self-redemption hole. The residual: even a human-held token is a bearer credential; should `RiskClass::Irreversible` require the out-of-band `Kernel::grant`/`approvals grant` path and reject `--confirm`, making irreversible approvals principal-bound rather than token-bound? Cost: breaks the "re-run the hint" muscle memory for exactly the operations where that muscle memory is most dangerous — which may be the argument *for* it.
+4. **Should `Irreversible` refuse `--confirm` entirely?** **Resolved 2026-08-01 (Amy): no — the key path has no special cases (§H.1).** A second, principal-bound-only redemption path for `Irreversible` would fork the redemption contract exactly where predictability matters most. The bearer risk is handled where it belongs: `Irreversible` grants default to single-use (§E.3 item 3), and retrieving the key requires authority — an operator who hands a key to an irreversible operation is making that choice deliberately, and the ledger records it.
 
 ---
 ## H. Separation of duties — who may approve, and where the boundary is real
@@ -1033,6 +1033,33 @@ transcript — a key printed to stdout, echoed by a prompt, or readable in a
 file is a key the model holds, whatever the surrounding prose says. So every
 enforcement question reduces to *which connection can post the grant*, never
 *who knows the magic string*.
+
+**What is the key for, then?** In every channel-authenticated flow below,
+approval is a record update by name — the ledger append *is* the
+authorization, and the key never moves. The key does exactly one job: **it
+redeems a specific request without the redeemer being channel-authenticated
+as an approver** (§A.2 says the same from the data-model side). Two uses:
+
+- **The human contract.** `rm x` → exit 2 → `rm x --confirm=<key>`. The
+  kernel cannot authenticate who types into a pty; presenting the key is
+  proof of having seen the approval surface. This is the contract §D.3
+  keeps.
+- **Deliberate delegation.** The authority side judges the request and hands
+  the key to the requester, which re-runs and unlocks itself — exactly one
+  redemption, no standing power, and the key dies at settlement (§A.2).
+  Under §D.3 delivery, a key reaching a gated session is always a deliberate
+  act by an authority holder, never ambient.
+
+**The key path has no special cases** *(Amy, 2026-08-01: "I think we should
+be consistent. If a session has authority, it can get the key and use it.")*
+Redemption is always "present the key"; `--confirm` takes keys, never names.
+Authority's privilege is *retrieval* — an authority-holding session gets the
+key (exit-2 delivery per §D.3, or `Kernel::approvals().get(id)` on the
+embedder side) and uses or hands over the same key everyone else would.
+That said, prefer the record update in channel-authenticated embedders: a
+handed-over key is a bearer credential sitting in the requester's
+transcript, so delegate it only when you *want* the requester to perform
+the unlock itself.
 
 ### H.2 The enforcement ladder
 
@@ -1104,19 +1131,26 @@ the two models sit on different channels: the subagent's session can name
 its request and nothing more; the approval tool exists only on the client
 model's side of the MCP boundary.
 
-The approval tool has two shapes, and an embedder picks per call:
+After judging, the client model has two ways to complete the operation.
+`Kernel::grant(id)` is the enabling record update under both — it
+authorizes, but something still has to redeem:
 
-- **Grant** (`Kernel::grant(id)`): authorization is posted; the *subagent*
-  re-runs the operation and redeems it. Keeps the subagent in the loop —
-  right when the client model wants the subagent to notice, adapt, retry.
 - **Confirm** (`Kernel::confirm(&req)`): the kernel replays the exact
   captured invocation itself and the operation completes without the
-  subagent lifting a finger. Smoother, but only `Exact`-captured
+  subagent lifting a finger. Smoothest, but only `Exact`-captured
   invocations are replayable (review synthesis, revision 5).
+- **Key handoff — the subagent unlocks itself.** The client model's
+  authority lets it retrieve the key; it hands the key back in the tool
+  result, and the subagent re-runs with `--confirm=<key>` — the same key
+  path as everywhere else (§H.1), no special case. This keeps the subagent
+  in the loop: it notices the gate, receives the judgment, performs its own
+  unlock, and sees the result — right when the client model wants it to
+  adapt rather than be silently unblocked.
 
-The key never crosses the MCP boundary in either direction — the client
-model approves by name, and no "send the token to the approver" path should
-ever be added for this case.
+Either way the client model approves by *name*; the key travels only when
+the client model deliberately delegates the redemption. There is no "send
+the key to the approver" path and none should be added — the approver
+*retrieves* it (§H.1).
 
 ### H.5 Walkthrough: kaijutsu — the human approves via the UI
 
