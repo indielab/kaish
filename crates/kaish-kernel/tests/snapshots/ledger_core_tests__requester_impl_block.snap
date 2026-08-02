@@ -1,0 +1,86 @@
+---
+source: crates/kaish-kernel/tests/ledger_core_tests.rs
+expression: block
+---
+impl Requester {
+    /// Post a request. `draft` carries only what a producer supplies
+    /// (`ApprovalRequest::builder`, spec §D.1); every other field is
+    /// stamped here — the caller cannot forge a principal or an invocation.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn post_request(
+        &self,
+        draft: ApprovalRequestDraft,
+        principal: Principal,
+        capture: Capture,
+        context: RequestContext,
+        ttl: Duration,
+        job_id: Option<u64>,
+    ) -> Result<ApprovalRequest, LedgerError> {
+        self.0.post_request(draft, principal, capture, context, ttl, job_id)
+    }
+
+    /// Reserve an attempt by name, using an internal redemption context
+    /// (the replay path — spec §B.4) rather than a presented credential.
+    /// `observed` is what a `StateResolver` (PR 6) saw for each of the
+    /// grant's conditions, evaluated *outside* the ledger lock and carried
+    /// in (spec §B.1); pass an empty `Vec` for an unconditioned grant.
+    pub async fn redeem(
+        &self,
+        id: &RequestId,
+        by: Principal,
+        observed: Vec<Observation>,
+    ) -> Result<AttemptHandle, LedgerError> {
+        self.0
+            .redeem(id, by, observed)
+            .map(|attempt| AttemptHandle {
+                request: id.clone(),
+                attempt,
+            })
+    }
+
+    /// Reserve an attempt by presenting a bearer credential (the
+    /// `--confirm=<token>` path — spec §E.1). `id` is the request the
+    /// presentation claims to be for (in the full system, resolved by the
+    /// gate site's draft matcher, PR 5 — see this PR's flagged ambiguity in
+    /// the PR body for why PR 2 takes it as a direct argument). A wrong
+    /// `presented` value counts against `id`'s rejection total and, on the
+    /// fifth, voids it (spec §F.3).
+    pub async fn redeem_with_token(
+        &self,
+        id: &RequestId,
+        presented: &str,
+        by: Principal,
+        observed: Vec<Observation>,
+    ) -> Result<AttemptHandle, LedgerError> {
+        self.0
+            .redeem_with_token(id, presented, by, observed)
+            .map(|attempt| AttemptHandle {
+                request: id.clone(),
+                attempt,
+            })
+    }
+
+    /// Report an attempt's terminal outcome. Idempotent by `AttemptId`
+    /// (spec §A.1): settling an already-terminal attempt appends nothing
+    /// and returns `Ok`. Returns whether a new entry was actually appended.
+    pub async fn settle(&self, attempt: &AttemptHandle, outcome: Outcome) -> Result<bool, LedgerError> {
+        self.0.settle(&attempt.request, attempt.attempt, outcome)
+    }
+
+    /// Abandon a request before any attempt was reserved against it (job
+    /// discarded, session shutdown — spec §B.2). Fails with
+    /// `LedgerError::AttemptInFlight` if an attempt is currently `Reserved`
+    /// — settle or let the sweep close it first.
+    pub async fn abandon_request(&self, id: &RequestId, reason: impl Into<String> + Send) -> Result<(), LedgerError> {
+        self.0.abandon_request(id, reason.into())
+    }
+
+    /// Renew an `Expired` request: post a new `Requested` carrying the
+    /// original's operation, resources, capture, principal, and trace
+    /// context, linked via `supersedes` (spec §B.5). Renewal is a requester
+    /// action — the principal that owns the request may renew it without
+    /// holding any authority.
+    pub async fn renew(&self, id: &RequestId) -> Result<RequestId, LedgerError> {
+        self.0.renew(id)
+    }
+}
