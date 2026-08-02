@@ -4,6 +4,7 @@
 //! It exists so that consumers (kaijutsu, external tools) can work with kaish's
 //! type system without pulling kaish-kernel's ~60 transitive deps.
 
+pub mod approval;
 pub mod backend;
 pub mod bytes;
 pub mod clock;
