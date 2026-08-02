@@ -98,6 +98,17 @@ pub enum LedgerError {
     /// ledger has stopped accepting new obligations until an operator
     /// restarts it (spec §D.4 — a sink error fails the request closed).
     SinkUnavailable(String),
+    /// An approver returned terms that authorize more than the request
+    /// declared — a condition the request stated is missing or weakened in
+    /// the grant. An approver may narrow and may never widen (spec §A.4), so
+    /// the decision is refused and nothing is posted. An embedder bug, not a
+    /// kernel one.
+    GrantWidensRequest {
+        /// The request whose grant was refused.
+        id: RequestId,
+        /// Which condition was dropped or weakened.
+        detail: String,
+    },
     /// A kernel bug: an unmatched `Redeemed`/terminal pair, a `seq` gap, a
     /// second successful settlement against one grant, or a grant whose
     /// conditions widened its request. Never means "proceed" (spec §A.1).
@@ -162,6 +173,10 @@ impl fmt::Display for LedgerError {
             Self::SinkUnavailable(reason) => {
                 write!(f, "approval ledger audit sink unavailable: {reason}")
             }
+            Self::GrantWidensRequest { id, detail } => write!(
+                f,
+                "the grant for request {id} authorizes more than the request declared: {detail} — an approver may narrow a request's conditions and may never widen them"
+            ),
             Self::InvariantViolated(detail) => {
                 write!(f, "approval ledger invariant violated: {detail}")
             }

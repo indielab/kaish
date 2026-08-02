@@ -47,11 +47,22 @@ pub struct Approvals(Option<Arc<LedgerInner>>);
 /// // one from parts nor pattern the fields back out of one it already
 /// // holds, e.g. from a real `Ledger::build` call.
 /// fn peel(handle: ApproverHandle) {
-///     let ApproverHandle(_inner, _authority) = handle;
+///     let ApproverHandle(_inner, _authority, _principal) = handle;
 /// }
 /// ```
 #[derive(Clone)]
-pub struct ApproverHandle(Arc<LedgerInner>, AuthorityId);
+pub struct ApproverHandle(Arc<LedgerInner>, AuthorityId, Principal);
+
+/// Names the authority and the principal it decides as. Carries no ledger
+/// state and no credential — there is nothing here a log line could leak.
+impl std::fmt::Debug for ApproverHandle {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ApproverHandle")
+            .field("authority", &self.1 .0)
+            .field("principal", &self.2)
+            .finish()
+    }
+}
 
 /// A lightweight tag distinguishing which minted authority a clone of
 /// [`ApproverHandle`] descends from. PR 2 mints exactly one per
@@ -134,7 +145,7 @@ impl Ledger {
         Ok((
             Requester(Arc::clone(&inner)),
             Approvals(Some(Arc::clone(&inner))),
-            ApproverHandle(inner, AuthorityId(1)),
+            ApproverHandle(inner, AuthorityId(1), default_authority_principal(1)),
         ))
     }
 }
@@ -266,8 +277,21 @@ impl ApproverHandle {
     /// already has a decision, or `LedgerError::Terminal` if it is no
     /// longer `Requested` for any other reason (expired, voided, ...).
     pub async fn grant(&self, id: &RequestId, terms: GrantTerms) -> Result<(), LedgerError> {
+        self.grant_with_grounds(id, terms, Grounds::Embedder).await.map(|_| ())
+    }
+
+    /// Decide yes, recording *why* — the grounds the decision chain
+    /// attaches when a `policy` or `decide` hook produced the decision
+    /// (spec §A.4). [`Self::grant`] is this with `Grounds::Embedder`, which
+    /// is what a direct embedder grant is.
+    pub async fn grant_with_grounds(
+        &self,
+        id: &RequestId,
+        terms: GrantTerms,
+        grounds: Grounds,
+    ) -> Result<Grant, LedgerError> {
         let decided_by = self.principal();
-        self.0.grant(id, terms, decided_by, Grounds::Embedder).map(|_| ())
+        self.0.grant(id, terms, decided_by, grounds)
     }
 
     /// Decide no.
@@ -303,15 +327,67 @@ impl ApproverHandle {
         self.0.token_for(id, by)
     }
 
-    /// The principal recorded as deciding/retrieving through this handle.
-    /// PR 2 has no embedder-supplied identity to draw from yet (that is
-    /// `KernelConfig::with_principal`, PR 4) — every grant/denial/retrieval
-    /// through a PR-2-era `ApproverHandle` is attributed to a fixed
-    /// `Embedder`-kind principal until then.
-    fn principal(&self) -> Principal {
-        Principal::new(
-            format!("approver-handle-{}", self.1 .0),
-            kaish_types::approval::PrincipalKind::Automation,
-        )
+    /// Stage 1 of the decision chain (spec §C.2): if a live standing grant
+    /// covers this request, charge one use against it and post
+    /// `Granted{grounds: Standing}` — match and consumption in the same
+    /// critical section, so `max_uses` holds exactly under concurrency
+    /// (spec §C.4, §B.1). `Ok(None)` means no rule covered the request and
+    /// the caller falls through to stage 2.
+    ///
+    /// `grant_ttl` bounds the resulting grant, clamped down to the winning
+    /// rule's own `expires_at`. The deciding principal on the grant is the
+    /// rule's `issued_by` — whoever wrote the rule made this call, not
+    /// whoever happens to hold this handle.
+    ///
+    /// Lives on the authority handle because it posts a `Granted` entry;
+    /// [`DecisionChain`](super::DecisionChain) is the only caller.
+    pub async fn grant_from_standing(
+        &self,
+        id: &RequestId,
+        grant_ttl: Duration,
+    ) -> Result<Option<Grant>, LedgerError> {
+        self.0.grant_from_standing(id, grant_ttl)
     }
+
+    /// How many uses have been charged against a standing grant so far
+    /// (spec §C.4). The same number the log reconstructs by counting
+    /// `Granted{grounds: Standing{id}}` entries; this is the cheap read.
+    pub fn standing_uses(&self, id: &StandingId) -> u32 {
+        self.0.standing_uses(*id)
+    }
+
+    /// Re-attribute this handle to `principal`. The returned handle shares
+    /// the same ledger and the same minted authority — it grants exactly
+    /// what this one grants — and records `principal` as the decider on
+    /// every grant, denial, and credential retrieval made through it.
+    ///
+    /// This is the embedder's principal-assignment seam (spec §E.2, tier 2):
+    /// the kernel enforces the requester/approver split and trusts the
+    /// embedder to say who is who. `KernelConfig::with_principal` is what
+    /// calls it in-tree.
+    pub fn with_principal(mut self, principal: Principal) -> Self {
+        self.2 = principal;
+        self
+    }
+
+    /// The principal recorded as deciding/retrieving through this handle.
+    /// Seeded to a distinct per-authority placeholder at mint time and
+    /// replaced by [`Self::with_principal`] — which is what
+    /// `KernelConfig::with_principal` does — so an embedder that never
+    /// assigns identity still produces a name an auditor can distinguish
+    /// from a real one.
+    fn principal(&self) -> Principal {
+        self.2.clone()
+    }
+}
+
+/// The identity a freshly minted authority decides as until an embedder
+/// assigns one. Deliberately not `Principal::default()` (an empty id), which
+/// would collide with every other unnamed actor in the per-principal live
+/// index.
+fn default_authority_principal(authority: u64) -> Principal {
+    Principal::new(
+        format!("approver-handle-{authority}"),
+        kaish_types::approval::PrincipalKind::Automation,
+    )
 }
