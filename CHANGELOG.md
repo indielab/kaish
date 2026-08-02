@@ -16,6 +16,17 @@ breaking entries are marked **BREAKING**.
   `OperationId` identity types, `ApprovalRequest` + builder, `Grant`/`GrantTerms`/
   `Grounds`, `StandingGrant`, `Decision`/`Outcome`, and the internally-tagged
   `LedgerEntry` log. Additive; no gate site uses it yet.
+- **`kaish_kernel::ledger`** (ledger PR 2, `docs/approval-ledger.md`) — the approval
+  ledger's state machine: `Ledger::build` mints a `Requester` (posts
+  `Requested`/`Redeemed`/`Settled`), an `Approvals` read view, and one
+  `ApproverHandle` (posts `Granted`/`Denied`/standing grants, retrieves the
+  credential). One grant authorizes exactly one successful settlement; a failed
+  attempt does not consume it. The credential index, the fifth-rejected-credential
+  void, partitioned retention (a ring that refuses to evict a still-live chain),
+  sink backpressure, and the recovery sweep are all here. Additive and
+  self-contained — wired to no gate site, so no existing kaish surface changes
+  behavior. `ToolCtx::request_approval` and the gate-site cutover follow in later
+  PRs.
 - **`JobId`/`JobStatus`/`JobInfo` (kaish-types) now derive `Serialize`/`Deserialize`**
   (GH #241) — the last type family in kaish-types without serde.
 - `schemars::JsonSchema` on those types sits behind the `schema` feature, matching
