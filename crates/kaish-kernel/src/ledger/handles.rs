@@ -356,6 +356,21 @@ impl ApproverHandle {
         self.0.standing_uses(*id)
     }
 
+    /// Derive this ledger's three handles from an authority already held —
+    /// how a second kernel joins an existing ledger rather than minting one
+    /// (`KernelConfig::with_approver_handle`).
+    ///
+    /// Grants no new capability: the returned [`Requester`] and
+    /// [`Approvals`] are both strictly weaker than the handle they come
+    /// from, and the returned authority is this same one.
+    pub fn join(&self) -> (Requester, Approvals, ApproverHandle) {
+        (
+            Requester(Arc::clone(&self.0)),
+            Approvals(Some(Arc::clone(&self.0))),
+            self.clone(),
+        )
+    }
+
     /// Re-attribute this handle to `principal`. The returned handle shares
     /// the same ledger and the same minted authority — it grants exactly
     /// what this one grants — and records `principal` as the decider on
