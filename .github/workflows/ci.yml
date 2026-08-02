@@ -42,6 +42,15 @@ jobs:
       - name: Clippy (deny warnings)
         run: cargo clippy --all --all-targets --locked -- -D warnings
 
+      # Nothing watched rustdoc until 2026-08-01, by which point 19 warnings had
+      # accumulated — three of them unclosed HTML tags that mangled the rendered
+      # page. Folded into this job rather than a fourth one: it reuses the warm
+      # cargo cache and adds no runner.
+      - name: Rustdoc (deny warnings)
+        run: cargo doc --workspace --no-deps --locked
+        env:
+          RUSTDOCFLAGS: -D warnings
+
       # insta writes `.snap.new` files for pending snapshots during local runs; they
       # must be reviewed (`cargo insta review`) and never committed. Under CI insta
       # already fails tests on mismatch without writing files, so any `.snap.new`

@@ -40,7 +40,7 @@ pub enum EntryType {
 /// All fields are always serialized (no skip_serializing_if) for predictable shape
 /// across JSON, postcard, and bincode formats.
 ///
-/// `text` is Option<String> because None and Some("") are semantically distinct:
+/// `text` is `Option<String>` because None and Some("") are semantically distinct:
 /// - None: this is a named entry (file listing, table row), not a text node
 /// - Some(""): this IS a text node whose content is empty (e.g. `echo ""`)
 ///
@@ -180,7 +180,7 @@ impl OutputNode {
 /// This is the top-level structure for command output.
 /// It contains optional column headers and a list of root nodes.
 ///
-/// `headers` is Option<Vec<String>> because None means "not tabular" while
+/// `headers` is `Option<Vec<String>>` because None means "not tabular" while
 /// Some(vec![]) means "tabular with no column headers." The rendering dispatch
 /// in to_json() and the REPL formatter branch on this distinction.
 ///

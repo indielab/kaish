@@ -549,7 +549,7 @@ impl JobManager {
     /// Toggle whether completed jobs persist their output to a host temp file.
     ///
     /// Disable this for a hermetic / read-only kernel: the host write in
-    /// [`Job::write_output_file`] uses `std::fs` directly and so bypasses the
+    /// `Job::write_output_file` uses `std::fs` directly and so bypasses the
     /// VFS (and any read-only mount). Live output stays available in-memory via
     /// the VFS streams (`/v/jobs/{id}/stdout`), so nothing is lost in-process.
     ///

@@ -726,7 +726,7 @@ impl Scope {
     /// Traversal borrows into the root's JSON tree and clones only the selected
     /// leaf (a slice builds a new list); the whole-root clone is never taken, so
     /// repeated `${u[$k]}` in a loop stays O(depth), not O(root size). The
-    /// per-hop classification lives in [`resolve_step`], shared with the future
+    /// per-hop classification lives in `resolve_step`, shared with the future
     /// lvalue-write walk so read and write can never diverge.
     ///
     /// Errors distinguish an undefined root (soft) from a loud path error (see

@@ -2,7 +2,7 @@
 //!
 //! Usage:
 //!   kaish                      # Interactive REPL
-//!   kaish -c <command>         # Execute command and exit
+//!   kaish -c `<command>`       # Execute command and exit
 //!   kaish script.kai           # Run a script
 
 use std::env;

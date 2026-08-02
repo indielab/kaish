@@ -38,8 +38,8 @@ breaking entries are marked **BREAKING**.
   `--signal NAME`/`-s NAME`.
 - The shorthand covers a fixed set of 9 names (`TERM KILL INT HUP STOP CONT QUIT
   USR1 USR2`) plus any numeric signal (`-9`, `-15`, `-<N>`).
-- An unsupported signal name is a loud usage error naming what IS supported, never
-  a silent fallback.
+- An unsupported signal name exits 2 and names the nine that work — `kill` never
+  falls back to a default signal.
 - **Writing style guide** (`docs/style.md`) plus a `Terms` glossary in `README.md`
   and `CLAUDE.md` — weights, not gates, groomed at the point of touch.
 - Inspired by the structure of ASD-STE100 Simplified Technical English, not STE —
@@ -59,8 +59,8 @@ breaking entries are marked **BREAKING**.
   runs for every ignore rule against every walked path.
 - All three cuts are allocator churn, not peak memory, and were justified by the
   new GH #48 heap profile; behavior is otherwise unchanged.
-- **`jobs --json` now emits the serialized `JobInfo`** plus a bolted-on `path`
-  field, rather than a hand-built mirror.
+- **`jobs --json` now emits the serialized `JobInfo`** plus a `path` field, so the
+  wire shape follows the type instead of a hand-maintained copy.
 - `status` in that output is lowercase (`"failed"`, not `"Failed"`), in line with
   `/v/jobs/N/status`'s existing `done:0`/`failed:42` vocabulary — the two disagreed
   before.
@@ -75,6 +75,10 @@ breaking entries are marked **BREAKING**.
   only checker that sees them.
 
 ### Fixed
+- **`wait`'s published flag description no longer claims it accepts a PID.** There
+  is no PID path; a bare `2` means job 2.
+- **`cargo doc` builds the workspace with zero warnings**, and CI now denies them —
+  three unclosed HTML tags had been mangling the rendered docs.
 - **A background job that spills now reports `failed:3`, not `done:0`** (GH #212) —
   it used to keep the child's original exit code.
 - **A scatter worker that spills now exits 3, so `gather` reports 123** (GH #212) —

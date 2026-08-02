@@ -1105,7 +1105,8 @@ impl ExecContext {
 /// [`ToolCtx`](kaish_tool_api::ToolCtx) contract that out-of-tree tools see.
 ///
 /// Trusted in-tree builtins recover the concrete `ExecContext` (job control,
-/// pipes, dispatcher) through [`ToolCtx::as_any_mut`].
+/// pipes, dispatcher) through
+/// [`ToolCtx::as_any_mut`](kaish_tool_api::ToolCtx::as_any_mut).
 impl kaish_tool_api::ToolCtx for ExecContext {
     fn backend(&self) -> &Arc<dyn KernelBackend> {
         &self.backend
