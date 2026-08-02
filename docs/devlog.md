@@ -15,6 +15,57 @@ before it ships.
 
 ---
 
+## The review cascade: every layer of stale prose hid a bug (2026-08-01 → 2026-08-02)
+
+It started as a writing exercise. Amy asked for a Simplified-Technical-English-style
+prose reset — a small, predictable subset of English to match kaish's small,
+predictable subset of `sh`. That landed as `docs/style.md` (#260), dialed in by eval
+before it shipped: Sonnet and Opus each rewrote `help/limits.md` under the draft
+guide and both got *longer* (Opus +17%), which killed the guide's 25-word sentence
+budget; deepseek and or-glm critiqued it against the real corpus and caught six guide
+bugs, including a spine sentence asserting the exact ShellCheck overclaim that #239
+was retiring the same day.
+
+Then the exercise kept returning correctness bugs. Every layer of stale or padded
+prose we opened had a factual error inside it: three code comments that were false
+rather than merely stale, a help file promising full output it no longer delivers,
+two builtins publishing a PID path that does not exist, an unsupportable threat model
+in a security comment, and a breaking change buried mid-bullet where nobody scanning
+for `**BREAKING:**` would find it.
+
+So we swept. kaibo over everything merged since v0.13.0 — deepseek as the workhorse,
+or-gpt on the concurrency and security surfaces — and the sweeps produced #268: `kill
+%1 %2` signalled job 1, dropped job 2 silently, and exited 0; a single Ctrl-Z hung
+`Kernel::shutdown` forever (a stopped job can never become done, and `wait_all`
+polled it at 10ms with no timeout); the bg reaper waited without `WUNTRACED`, so a
+re-stopped job showed Running forever; and `apply_spill_contract` clobbered
+`original_code` when applied twice.
+
+The cascade is the part worth remembering. #268's own review confirmed all four
+fixes and found the residual: the `wait_all` stopped-skip is a snapshot, so a job
+stopping *after* the filter — the new WUNTRACED reaper observing a SIGSTOP is
+exactly such a path — re-created the hang through a sub-200ms window. That became
+#270, which moved the guard inside `JobManager::wait`'s poll loop where it also
+fixed a day-one hang nobody had ever hit deliberately: `wait %N` on a Ctrl-Z'd job
+now fails loud with the resume instruction instead of polling forever. Meanwhile
+the gemini-pro batch from the same sweep produced #269: `grep -c` over multiple
+files printed one aggregate total while the comment directly above the code claimed
+GNU per-file behavior. The comment recorded the intent; the code was the bug — the
+same comment-versus-code disagreement as everything else in the sweep.
+
+Each review's findings became the next PR, and each PR got its own review before
+merging; the cascade terminated when a review came back with only noted-for-later
+items (a `kill` test against a stopped middle target, an all-stopped `wait_all`).
+The one big deliberately-open item from the sweep: `fg` and the bg reaper can both
+`waitpid` the same pid, and the loser's `ECHILD` maps to `Exited(0)` — success
+reported for a process that stopped. That wants a single wait-owner per OS job, and
+it is on the books, not in this batch.
+
+Nineteen PRs landed across the two days (#239–#270 range), including the style
+guide's adoption by reference in kaish-extras (extras#6) and kaibo (kaibo#117), and
+the approval-ledger design doc's migration into kaish as the living canonical copy
+(#266) — that story gets its own entry when the redraft lands.
+
 ## We optimized for a year against a profile we never ran (2026-07-30)
 
 GH #48's own "Approach" section says: *profile a representative workload first,
