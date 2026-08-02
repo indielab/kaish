@@ -258,15 +258,16 @@ an `awk` that never surprises.
   feature and they don't exist at all.
 - `--overlay` makes a call copy-on-write: writes stay in memory unless the
   script runs `kaish-vfs commit`.
-- `set -o latch` (or `KAISH_LATCH=1`) gates destructive commands behind
-  nonce confirmation — the command returns exit 2 and a re-run hint instead
-  of acting.
+- `set -o approvals` (or `KAISH_APPROVALS=1`) gates destructive commands behind
+  an approval — the command returns exit 2 and a typed request naming the
+  operation and the paths, instead of acting.
 - `set -o trash` (or `KAISH_TRASH=1`) diverts deletes to the freedesktop.org
-  Trash instead of removing them.
+  Trash instead of removing them. Trash wins over approvals: a delete the trash
+  can catch needs no approval, because the trash IS the recovery net.
 
-Latch and trash semantics are covered in [docs/LANGUAGE.md](docs/LANGUAGE.md);
-the embedder-facing contract (`LatchRequest`, nonce stores, `Kernel::confirm`)
-in [docs/EMBEDDING.md](docs/EMBEDDING.md).
+Approvals and trash semantics are covered in [docs/LANGUAGE.md](docs/LANGUAGE.md);
+the embedder-facing contract (`ExecResult.approval`, `ApproverHandle`,
+`Kernel::confirm`) in [docs/EMBEDDING.md](docs/EMBEDDING.md).
 
 ## Terms
 
