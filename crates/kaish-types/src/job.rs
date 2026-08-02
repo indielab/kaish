@@ -95,11 +95,20 @@ pub struct JobInfo {
     pub exit_code: Option<i64>,
     /// Wall-clock time the job started running (spawn/registration time).
     /// Acquired via [`crate::clock::system_now`], not `SystemTime::now()`
-    /// directly, so this stays valid on `wasm32-unknown-unknown`.
+    /// directly, so this stays valid on `wasm32-unknown-unknown`. On the wire
+    /// this is an RFC 3339 UTC string with millisecond precision
+    /// (`"2026-08-02T14:29:00.123Z"`) — see [`crate::rfc3339`].
+    #[serde(with = "crate::rfc3339::system_time")]
+    #[cfg_attr(feature = "schema", schemars(schema_with = "crate::rfc3339::schema"))]
     pub started_at: SystemTime,
     /// Wall-clock time the job finished, if it has. `None` while
-    /// `Running`/`Stopped`.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    /// `Running`/`Stopped`. Same RFC 3339 wire format as [`Self::started_at`].
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "crate::rfc3339::opt_system_time"
+    )]
+    #[cfg_attr(feature = "schema", schemars(schema_with = "crate::rfc3339::opt_schema"))]
     pub finished_at: Option<SystemTime>,
     /// OS process groups spawned by this job's external children (so
     /// `kill -<sig> %N` can signal them, and an embedder can see what's
@@ -318,6 +327,84 @@ mod tests {
         // Required fields always present.
         assert!(obj.contains_key("started_at"), "{json}");
         assert!(obj.contains_key("status"), "{json}");
+    }
+
+    // ── serde: timestamps are RFC 3339 UTC strings (wire format pinned) ──
+
+    #[test]
+    fn job_info_timestamps_serialize_as_rfc3339_utc_strings() {
+        // 1_700_000_000s past the epoch is 2023-11-14T22:13:20Z. Exactly three
+        // fractional digits, truncated never rounded, `Z` only — fixed width
+        // keeps string order equal to time order.
+        let started = std::time::UNIX_EPOCH + std::time::Duration::new(1_700_000_000, 123_456_789);
+        let finished = std::time::UNIX_EPOCH + std::time::Duration::from_secs(1_700_000_005);
+        let info = JobInfo::new(JobId(6), "sleep 5", JobStatus::Done)
+            .with_started_at(started)
+            .with_finished_at(Some(finished));
+        let json = serde_json::to_value(&info).unwrap();
+        assert_eq!(json["started_at"], "2023-11-14T22:13:20.123Z", "{json}");
+        assert_eq!(json["finished_at"], "2023-11-14T22:13:25.000Z", "{json}");
+    }
+
+    #[test]
+    fn job_info_timestamps_parse_second_through_nanosecond_precision() {
+        let base = serde_json::json!({
+            "id": 7, "command": "x", "status": "done",
+            "started_at": "2023-11-14T22:13:20Z",
+        });
+        let back: JobInfo = serde_json::from_value(base).unwrap();
+        assert_eq!(
+            back.started_at,
+            std::time::UNIX_EPOCH + std::time::Duration::from_secs(1_700_000_000)
+        );
+
+        let nanos = serde_json::json!({
+            "id": 7, "command": "x", "status": "done",
+            "started_at": "2023-11-14T22:13:20.123456789Z",
+        });
+        let back: JobInfo = serde_json::from_value(nanos).unwrap();
+        assert_eq!(
+            back.started_at,
+            std::time::UNIX_EPOCH + std::time::Duration::new(1_700_000_000, 123_456_789)
+        );
+    }
+
+    #[test]
+    fn job_info_timestamps_reject_junk_loud() {
+        // One spelling on the wire: `Z` only (kaish never emits an offset, so
+        // it does not accept one), `T` separator, real calendar dates, nothing
+        // before the epoch.
+        for bad in [
+            "2023-11-14 22:13:20Z",      // space separator
+            "2023-11-14T22:13:20",       // missing zone
+            "2023-11-14T22:13:20+00:00", // offset instead of Z
+            "1969-12-31T23:59:59Z",      // before the epoch
+            "2023-13-01T00:00:00Z",      // month 13
+            "2023-02-29T00:00:00Z",      // not a leap year
+            "2023-11-14T24:00:00Z",      // hour 24
+            "not-a-time",
+        ] {
+            let v = serde_json::json!({
+                "id": 8, "command": "x", "status": "done", "started_at": bad,
+            });
+            let r: Result<JobInfo, _> = serde_json::from_value(v);
+            assert!(r.is_err(), "{bad:?} must be rejected");
+            let msg = r.unwrap_err().to_string();
+            assert!(
+                msg.contains("RFC 3339"),
+                "error for {bad:?} must name the expected format: {msg}"
+            );
+        }
+    }
+
+    #[test]
+    fn job_info_leap_day_round_trips() {
+        let leap = std::time::UNIX_EPOCH + std::time::Duration::from_secs(1_709_164_800);
+        let info = JobInfo::new(JobId(9), "x", JobStatus::Done).with_started_at(leap);
+        let json = serde_json::to_value(&info).unwrap();
+        assert_eq!(json["started_at"], "2024-02-29T00:00:00.000Z", "{json}");
+        let back: JobInfo = serde_json::from_value(json).unwrap();
+        assert_eq!(back.started_at, leap);
     }
 
     #[test]
