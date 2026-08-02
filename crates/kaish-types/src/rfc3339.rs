@@ -63,14 +63,17 @@ pub fn parse(s: &str) -> Result<SystemTime, String> {
 
     let num = |range: std::ops::Range<usize>, what: &str| -> Result<u64, String> {
         let text = &s[range];
-        if !text.bytes().all(|c| c.is_ascii_digit()) {
+        // The emptiness check is load-bearing, not just a nicer error: an
+        // empty string passes the all-digits check vacuously and then panics
+        // `str::parse` under the expect below.
+        if text.is_empty() || !text.bytes().all(|c| c.is_ascii_digit()) {
             return Err(std::format!(
                 "invalid RFC 3339 timestamp {s:?}: non-digit {what}; expected YYYY-MM-DDTHH:MM:SS[.fff]Z (UTC `Z` only)"
             ));
         }
-        // Digits-only with length <= 9 cannot overflow u64.
+        // Non-empty digits-only with length <= 9 cannot fail or overflow u64.
         #[allow(clippy::expect_used)]
-        Ok(text.parse::<u64>().expect("digit-checked"))
+        Ok(text.parse::<u64>().expect("non-empty digit-checked"))
     };
 
     let year = num(0..4, "year")?;
