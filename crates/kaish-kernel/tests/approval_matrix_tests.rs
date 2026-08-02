@@ -96,6 +96,41 @@ impl Session {
             .collect()
     }
 
+    /// Grant `id` for the next five minutes, on the terms the request itself
+    /// declared. `GrantTerms::once_for` needs the stamped request; the
+    /// tokenless view carries every field it reads.
+    async fn grant(&self, id: &RequestId) {
+        let view = self
+            .kernel
+            .approvals()
+            .get(id)
+            .expect("the request's chain")
+            .request;
+        let request = ApprovalRequest::builder(view.operation.as_str())
+            .risk(view.risk)
+            .build()
+            .unwrap()
+            .stamp(
+                view.id.clone(),
+                view.principal.clone(),
+                view.capture.clone(),
+                view.context.clone(),
+                view.requested_at,
+                view.ttl,
+                view.job_id,
+            );
+        self.authority
+            .grant(
+                id,
+                GrantTerms::once_for(
+                    &request,
+                    std::time::SystemTime::now() + std::time::Duration::from_secs(300),
+                ),
+            )
+            .await
+            .expect("the grant must post");
+    }
+
     /// Grant the single pending request and retrieve its bearer key.
     async fn approve_pending(&self) -> (RequestId, String) {
         let approvals = self.kernel.approvals();
@@ -758,4 +793,217 @@ async fn a_session_with_no_handle_has_no_reachable_grant_path() {
         "the request is posted and waiting on an authority the session lacks"
     );
     assert!(dir.path().join("precious.txt").exists());
+}
+
+// ============================================================================
+// Control-plane reach: every statement aggregator carries the request
+// ============================================================================
+//
+// Four inner aggregators (`execute_user_tool`, `source`, `execute_block_capturing`,
+// and the PATH-resolved `.kai` runner) rebuild an `ExecResult` from parts rather
+// than returning the last statement's own. Each used to keep only
+// out/err/code/data, so a body ending in a gated operation reduced to a bare
+// exit 2 with no request — indistinguishable from an ordinary failure, and
+// unfulfillable, because the caller never learns the request's id.
+//
+// The latch had this same gap. It is fixed here because a dropped control-plane
+// signal IS the silent bypass the ledger exists to end.
+
+#[tokio::test]
+async fn a_gate_inside_a_function_reaches_the_caller() {
+    let dir = tempdir();
+    std::fs::write(dir.path().join("precious.txt"), "data").unwrap();
+    let session = session_at(dir.path());
+    assert!(session.run("set -o approvals").await.ok());
+
+    let defined = session.run("cleanup() { rm precious.txt; }").await;
+    assert!(defined.ok(), "{}", defined.err);
+
+    let gated = session.run("cleanup").await;
+    assert_eq!(gated.code, 2, "the function must surface the gate: {}", gated.err);
+    let view = gated
+        .approval_request()
+        .expect("a function body's gate must reach its caller");
+    assert_eq!(view.operation.as_str(), "fs.remove");
+    assert!(dir.path().join("precious.txt").exists());
+}
+
+#[tokio::test]
+async fn a_gate_inside_a_sourced_script_reaches_the_caller() {
+    let dir = tempdir();
+    std::fs::write(dir.path().join("precious.txt"), "data").unwrap();
+    std::fs::write(dir.path().join("cleanup.kai"), "rm precious.txt\n").unwrap();
+    let session = session_at(dir.path());
+    assert!(session.run("set -o approvals").await.ok());
+
+    let gated = session.run("source cleanup.kai").await;
+    assert_eq!(gated.code, 2, "source must surface the gate: {}", gated.err);
+    assert!(
+        gated.approval_request().is_some(),
+        "a sourced script's gate must reach its caller"
+    );
+    assert!(dir.path().join("precious.txt").exists());
+}
+
+#[tokio::test]
+async fn a_gate_inside_a_path_resolved_kai_script_reaches_the_caller() {
+    let dir = tempdir();
+    std::fs::write(dir.path().join("precious.txt"), "data").unwrap();
+    std::fs::write(dir.path().join("cleanup.kai"), "rm precious.txt\n").unwrap();
+    let session = session_at(dir.path());
+    assert!(session.run("set -o approvals").await.ok());
+    assert!(session
+        .run(&format!("export PATH={}", dir.path().display()))
+        .await
+        .ok());
+
+    let gated = session.run("cleanup").await;
+    assert_eq!(gated.code, 2, "a .kai script must surface the gate: {}", gated.err);
+    assert!(
+        gated.approval_request().is_some(),
+        "a PATH-resolved .kai script's gate must reach its caller"
+    );
+    assert!(dir.path().join("precious.txt").exists());
+}
+
+// ============================================================================
+// The pin survives every scope reset a script can reach
+// ============================================================================
+
+#[tokio::test]
+async fn a_path_resolved_kai_script_runs_under_the_callers_policy() {
+    // A `.kai` script gets an isolated scope. The approval policy is not
+    // session state a script may shed — a blank scope would run the delete
+    // **ungated** under a pinned-on policy, which is the hole the pin exists
+    // to close.
+    let dir = tempdir();
+    std::fs::write(dir.path().join("precious.txt"), "data").unwrap();
+    std::fs::write(dir.path().join("danger.kai"), "rm precious.txt\n").unwrap();
+    let session = pinned_session_at(dir.path());
+    assert!(session
+        .run(&format!("export PATH={}", dir.path().display()))
+        .await
+        .ok());
+
+    let result = session.run("danger").await;
+    assert_eq!(
+        result.code, 2,
+        "a .kai script must inherit the caller's policy, not a blank scope: {}",
+        result.err
+    );
+    assert!(
+        dir.path().join("precious.txt").exists(),
+        "the file must survive — an isolated scope must not disarm the gate"
+    );
+}
+
+#[tokio::test]
+async fn kaish_clear_does_not_disarm_a_pinned_policy() {
+    // `kaish-clear` clears variables and cwd. A policy is neither — and a
+    // blank scope defaults the gate off and unpinned, which would make
+    // clearing the session a script-reachable way around the pin.
+    let dir = tempdir();
+    std::fs::write(dir.path().join("precious.txt"), "data").unwrap();
+    let session = pinned_session_at(dir.path());
+
+    let cleared = session.run("kaish-clear").await;
+    assert!(cleared.ok(), "{}", cleared.err);
+
+    // `kaish-clear` resets the cwd to `/`, so name the file absolutely.
+    let target = dir.path().join("precious.txt");
+    let gated = session.run(&format!("rm {}", target.display())).await;
+    assert_eq!(
+        gated.code, 2,
+        "kaish-clear must not disarm a pinned policy: {}",
+        gated.err
+    );
+    assert!(target.exists());
+
+    let refused = session.run("set +o approvals").await;
+    assert_eq!(refused.code, 1, "the pin itself must survive the clear");
+}
+
+// ============================================================================
+// `Kernel::confirm` never strands its reservation
+// ============================================================================
+
+#[tokio::test]
+async fn a_replay_that_fails_before_its_gate_does_not_strand_the_attempt() {
+    // `confirm` reserves the attempt *before* dispatching, so a replay that
+    // returns before it ever reaches `request_gate` — `rm` on a path that
+    // vanished between the grant and the replay fails at its `lstat` — would
+    // leave the attempt `Reserved` forever. Every later redemption would then
+    // fail `AttemptInFlight`: a grant the operator can no longer use.
+    let dir = tempdir();
+    std::fs::write(dir.path().join("precious.txt"), "data").unwrap();
+    let session = session_at(dir.path());
+    assert!(session.run("set -o approvals").await.ok());
+    assert_eq!(session.run("rm precious.txt").await.code, 2);
+
+    let id = session.kernel.approvals().pending()[0].id.clone();
+    session.grant(&id).await;
+
+    // Delete the target out from under the replay.
+    std::fs::remove_file(dir.path().join("precious.txt")).unwrap();
+    let failed = session
+        .kernel
+        .confirm(&session.authority, &id)
+        .await
+        .expect("confirm executes");
+    assert_ne!(failed.code, 0, "the replay should fail: {}", failed.err);
+
+    // Put it back and confirm again. A non-zero settlement does not consume
+    // the grant, so this must succeed rather than reporting an in-flight
+    // attempt.
+    std::fs::write(dir.path().join("precious.txt"), "data").unwrap();
+    let retried = session
+        .kernel
+        .confirm(&session.authority, &id)
+        .await
+        .expect("confirm executes");
+    assert_eq!(
+        retried.code, 0,
+        "a failed replay must leave the grant usable, not stranded: {}",
+        retried.err
+    );
+    assert!(!dir.path().join("precious.txt").exists());
+}
+
+#[tokio::test]
+async fn two_concurrent_confirms_each_replay_their_own_request() {
+    // The reservation and the replay correlation are single slots on shared
+    // kernel state. Interleaved confirms would let one replay adopt the
+    // other's authorization, and leave the other posting a fresh request.
+    let dir = tempdir();
+    std::fs::write(dir.path().join("a.txt"), "a").unwrap();
+    std::fs::write(dir.path().join("b.txt"), "b").unwrap();
+    let session = session_at(dir.path());
+    assert!(session.run("set -o approvals").await.ok());
+
+    assert_eq!(session.run("rm a.txt").await.code, 2);
+    assert_eq!(session.run("rm b.txt").await.code, 2);
+    let pending = session.kernel.approvals().pending();
+    assert_eq!(pending.len(), 2);
+    for view in &pending {
+        session.grant(&view.id).await;
+    }
+    let (first, second) = (pending[0].id.clone(), pending[1].id.clone());
+
+    let (r1, r2) = tokio::join!(
+        session.kernel.confirm(&session.authority, &first),
+        session.kernel.confirm(&session.authority, &second),
+    );
+    let r1 = r1.expect("confirm executes");
+    let r2 = r2.expect("confirm executes");
+    assert_eq!(r1.code, 0, "first confirm: {}", r1.err);
+    assert_eq!(r2.code, 0, "second confirm: {}", r2.err);
+    assert!(!dir.path().join("a.txt").exists(), "a.txt should be deleted");
+    assert!(!dir.path().join("b.txt").exists(), "b.txt should be deleted");
+
+    // Neither replay may have posted a fresh request.
+    assert!(
+        session.kernel.approvals().pending().is_empty(),
+        "a replay must never post a second request: {:?}",
+        session.kernel.approvals().pending()
+    );
 }

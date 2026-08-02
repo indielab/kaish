@@ -1863,6 +1863,21 @@ impl Kernel {
     #[tracing::instrument(level = "info", skip(self, argv), fields(cmd = name, argc = argv.len()))]
     pub async fn execute_argv(&self, name: &str, argv: &[Value]) -> Result<ExecResult> {
         let _guard = self.acquire_execute_lock().await;
+        self.execute_argv_locked(name, argv).await
+    }
+
+    /// [`Self::execute_argv`]'s body, with the execute lock assumed **held**.
+    ///
+    /// Split out for [`Self::confirm`], which has to hold that lock across
+    /// more than the dispatch: it reserves a ledger attempt and stamps a
+    /// replay correlation onto the shared `exec_ctx` *before* dispatching, and
+    /// both of those are single slots. Re-acquiring the lock inside would
+    /// leave a window in which a second concurrent `confirm` overwrites the
+    /// correlation — the first replay would then adopt the second's
+    /// authorization, and the second would post a fresh request. The lock is
+    /// not reentrant, so the reservation, the correlation, the dispatch, and
+    /// the clear are one critical section by construction.
+    async fn execute_argv_locked(&self, name: &str, argv: &[Value]) -> Result<ExecResult> {
         // Fresh cancel surface for this call: `execute_pipeline` reads
         // `self.cancel_token`, so a stale cancelled token from a prior call must be
         // replaced first. The returned clone is the token the watchdog cancels on
@@ -1962,6 +1977,13 @@ impl Kernel {
             }
         };
 
+        // Everything from here to the clear is one critical section. The
+        // reservation and the replay correlation are single slots on shared
+        // kernel state, so two concurrent confirms that interleave would let
+        // one replay adopt the other's authorization (see
+        // `execute_argv_locked`).
+        let _guard = self.acquire_execute_lock().await;
+
         // Reserve the attempt before dispatching (spec §B.4): a bare replay
         // would re-enter the gate site, build a fresh draft, and post a
         // *second* request — the approval would authorize a request nobody
@@ -1973,12 +1995,7 @@ impl Kernel {
             .await
         {
             Ok(attempt) => attempt,
-            Err(err) => {
-                let code = matches!(err, crate::ledger::LedgerError::AlreadySettled { .. })
-                    .then_some(1)
-                    .unwrap_or(1);
-                return Ok(ExecResult::failure(code, format!("confirm: {err}")));
-            }
+            Err(err) => return Ok(ExecResult::failure(1, format!("confirm: {err}"))),
         };
 
         {
@@ -1986,7 +2003,7 @@ impl Kernel {
             ctx.set_redemption(request_id.clone(), attempt.attempt_id());
         }
         let argv: Vec<Value> = invocation.argv.iter().map(|a| Value::String(a.clone())).collect();
-        let result = self.execute_argv(&invocation.tool, &argv).await;
+        let result = self.execute_argv_locked(&invocation.tool, &argv).await;
         {
             // Clear it whatever happened: a stale correlation would let the
             // *next* command adopt an authorization that was not for it.
@@ -1994,6 +2011,29 @@ impl Kernel {
             ctx.clear_redemption();
         }
         let result = result?;
+
+        // Settle the reservation with what the replay actually did. Usually
+        // redundant — the gate site adopted the attempt and the dispatch seam
+        // already settled it, and settlement is idempotent by `AttemptId`, so
+        // this appends nothing. It is load-bearing for the replay that never
+        // reaches its gate at all: `rm` on a path that vanished between the
+        // grant and the replay fails at its `lstat` and returns before
+        // `request_gate`, which would otherwise leave the attempt `Reserved`
+        // forever and make every later redemption fail `AttemptInFlight` —
+        // a grant an operator could no longer use. A non-zero settlement does
+        // not consume the grant (spec §A.1), so the retry stays available.
+        if let Err(err) = self
+            .approvals
+            .requester
+            .settle_by_ids(
+                request_id,
+                attempt.attempt_id(),
+                kaish_types::approval::Outcome::Exit(result.code),
+            )
+            .await
+        {
+            tracing::debug!(error = %err, "confirm: settling the replayed attempt did not apply");
+        }
 
         if result.ok()
             && let Some(id) = chain.request.job_id
@@ -4528,6 +4568,14 @@ impl Kernel {
         let mut accumulated_err = String::new();
         let mut last_code = 0i64;
         let mut last_data: Option<Value> = None;
+        // The last statement's pending approval, carried the same way `.data`
+        // is. A body that ends in a gated operation must hand its caller the
+        // request, not just exit 2 — otherwise a gated `rm` inside a function,
+        // a sourced script, a `$(…)`, or a `.kai` script is indistinguishable
+        // from an ordinary failure, and inside `$(…)` the outer statement even
+        // reads as success. The latch had this same gap; a dropped
+        // control-plane signal IS the silent bypass, so it gets fixed here.
+        let mut last_approval: Option<Box<kaish_types::approval::ApprovalRequestView>> = None;
 
         fn push_out(buf: &mut Vec<u8>, r: &ExecResult) {
             match r.out_bytes() {
@@ -4558,6 +4606,7 @@ impl Kernel {
                             accumulated_err.push_str(&r.err);
                             last_code = r.code;
                             last_data = r.data;
+                            last_approval = r.approval;
                         }
                         ControlFlow::Return { value } => {
                             push_out(&mut accumulated_out, &value);
@@ -4575,6 +4624,7 @@ impl Kernel {
                             accumulated_err.push_str(&r.err);
                             last_code = r.code;
                             last_data = r.data;
+                            last_approval = r.approval;
                         }
                     }
                 }
@@ -4600,6 +4650,7 @@ impl Kernel {
         let mut result = ExecResult::success_text_or_bytes(accumulated_out).with_code(code);
         result.err = accumulated_err;
         result.data = last_data;
+        result.approval = last_approval;
         Ok(result)
     }
 
@@ -4641,6 +4692,14 @@ impl Kernel {
         let mut accumulated_err = String::new();
         let mut last_code = 0i64;
         let mut last_data: Option<Value> = None;
+        // The last statement's pending approval, carried the same way `.data`
+        // is. A body that ends in a gated operation must hand its caller the
+        // request, not just exit 2 — otherwise a gated `rm` inside a function,
+        // a sourced script, a `$(…)`, or a `.kai` script is indistinguishable
+        // from an ordinary failure, and inside `$(…)` the outer statement even
+        // reads as success. The latch had this same gap; a dropped
+        // control-plane signal IS the silent bypass, so it gets fixed here.
+        let mut last_approval: Option<Box<kaish_types::approval::ApprovalRequestView>> = None;
 
         // Append a statement's stdout as raw bytes (binary) or its UTF-8 bytes.
         fn push_out(buf: &mut Vec<u8>, r: &ExecResult) {
@@ -4671,6 +4730,7 @@ impl Kernel {
                     accumulated_err.push_str(&r.err);
                     last_code = r.code;
                     last_data = r.data;
+                    last_approval = r.approval;
                 }
                 ControlFlow::Return { value } => {
                     push_out(&mut accumulated_out, &value);
@@ -4689,6 +4749,7 @@ impl Kernel {
         let mut result = ExecResult::success_text_or_bytes(accumulated_out).with_code(last_code);
         result.err = accumulated_err;
         result.data = last_data;
+        result.approval = last_approval;
         Ok(result)
     }
 
@@ -4770,6 +4831,14 @@ impl Kernel {
         let mut accumulated_err = String::new();
         let mut last_code = 0i64;
         let mut last_data: Option<Value> = None;
+        // The last statement's pending approval, carried the same way `.data`
+        // is. A body that ends in a gated operation must hand its caller the
+        // request, not just exit 2 — otherwise a gated `rm` inside a function,
+        // a sourced script, a `$(…)`, or a `.kai` script is indistinguishable
+        // from an ordinary failure, and inside `$(…)` the outer statement even
+        // reads as success. The latch had this same gap; a dropped
+        // control-plane signal IS the silent bypass, so it gets fixed here.
+        let mut last_approval: Option<Box<kaish_types::approval::ApprovalRequestView>> = None;
 
         for stmt in program.statements {
             if matches!(stmt, crate::ast::Stmt::Empty) {
@@ -4791,6 +4860,7 @@ impl Kernel {
                             accumulated_err.push_str(&r.err);
                             last_code = r.code;
                             last_data = r.data.clone();
+                            last_approval = r.approval.clone();
                             self.update_last_result(&r).await;
                         }
                         ControlFlow::Break { .. } | ControlFlow::Continue { .. } => {
@@ -4813,6 +4883,7 @@ impl Kernel {
                                 ExecResult::success_text_or_bytes(accumulated_out).with_code(code);
                             result.err = accumulated_err;
                             result.data = last_data;
+                            result.approval = last_approval;
                             return Ok(result);
                         }
                     }
@@ -4826,6 +4897,7 @@ impl Kernel {
         let mut result = ExecResult::success_text_or_bytes(accumulated_out).with_code(last_code);
         result.err = accumulated_err;
         result.data = last_data;
+        result.approval = last_approval;
         Ok(result)
     }
 
@@ -4906,8 +4978,20 @@ impl Kernel {
             // Build tool_args from args (async for command substitution support)
             let tool_args = self.build_args_async(args, None).await?;
 
-            // Create isolated scope (like user tools)
+            // Create isolated scope (like user tools). The approval policy
+            // and its pin are NOT session state a script may shed: a `.kai`
+            // script starting from a blank scope would run **ungated** under a
+            // pinned-on policy, which is precisely the hole the pin exists to
+            // close. Carry both, and the trash rail with them.
             let mut isolated_scope = Scope::new();
+            {
+                let scope = self.scope.read().await;
+                isolated_scope.set_pid(scope.pid());
+                isolated_scope.set_approvals_enabled(scope.approvals_enabled());
+                isolated_scope.set_policy_pinned(scope.policy_pinned());
+                isolated_scope.set_trash_enabled(scope.trash_enabled());
+                isolated_scope.set_trash_max_size(scope.trash_max_size());
+            }
 
             // Set up positional parameters ($0 = script name, $1, $2, ... = args)
             let positional_args: Vec<String> = tool_args.positional
@@ -4936,6 +5020,14 @@ impl Kernel {
             let mut accumulated_err = String::new();
             let mut last_code = 0i64;
             let mut last_data: Option<Value> = None;
+            // The last statement's pending approval, carried the same way `.data`
+            // is. A body that ends in a gated operation must hand its caller the
+            // request, not just exit 2 — otherwise a gated `rm` inside a function,
+            // a sourced script, a `$(…)`, or a `.kai` script is indistinguishable
+            // from an ordinary failure, and inside `$(…)` the outer statement even
+            // reads as success. The latch had this same gap; a dropped
+            // control-plane signal IS the silent bypass, so it gets fixed here.
+            let mut last_approval: Option<Box<kaish_types::approval::ApprovalRequestView>> = None;
             let mut exec_error: Option<anyhow::Error> = None;
             let mut exit_code: Option<i64> = None;
 
@@ -4959,6 +5051,7 @@ impl Kernel {
                                 accumulated_err.push_str(&r.err);
                                 last_code = r.code;
                                 last_data = r.data;
+                                last_approval = r.approval;
                             }
                             ControlFlow::Return { value } => {
                                 push_out(&mut accumulated_out, &value);
@@ -4976,6 +5069,7 @@ impl Kernel {
                                 accumulated_err.push_str(&r.err);
                                 last_code = r.code;
                                 last_data = r.data;
+                                last_approval = r.approval;
                             }
                         }
                     }
@@ -5000,6 +5094,7 @@ impl Kernel {
             let mut result = ExecResult::success_text_or_bytes(accumulated_out).with_code(code);
             result.err = accumulated_err;
             result.data = last_data;
+            result.approval = last_approval;
             return Ok(Some(result));
         }
 

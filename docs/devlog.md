@@ -15,6 +15,90 @@ before it ships.
 
 ---
 
+## The cutover: the latch becomes the ledger, and the word goes with it (2026-08-02)
+
+PR 5 of the nine — the one the plan called "aggressive-clean: no compatibility
+step, one cutover". Delete `NonceStore`, rewrite ten gate sites on
+`request_approval`, apply the §F.2 rename table, land `Kernel::confirm` on the
+ledger, and carry the two pieces of §F.3 hardening that belong with a cutover
+rather than with the thing being deleted.
+
+**The census earned its keep before a line was written.** A fresh map of every
+site — ten gate sites, thirty-nine `.latch` control-plane hops, the eleven-hop
+confirm path, both `set` parse paths, ~110 tests — turned up the single biggest
+under-scoped item in the plan: `ExecResult.approval`, added by PR 3, had **one
+writer and one reader**. `.latch` had thirty-nine hops. So this was never a
+rename over an existing mesh; the `.approval` control plane had to be built from
+nothing, and every one of §F.2's "stable — does not move" guarantees (survives
+`clear_stdout`, survives the `ToolResult` roundtrip, overrides a later pipeline
+stage, rides scatter rows, survives `--json`) was *false* for `.approval` on the
+morning of the cutover. Budgeting for that up front is the difference between a
+day and a week.
+
+The census also caught three stale line citations in §F.3 and an "8 hex" claim
+about a nonce that has been 32 hex since #259. Small things, fixed in the PR
+that made them visible — but the kind of small thing a changelog quotes verbatim
+if nobody looks.
+
+**Where I deviated from the spec, and why.** §F.1 said `gate_overwrites` keeps
+its signature. It gained a `KernelOperation` parameter instead, because §A.6
+wants adding a gate site without registering its operation to be a *compile*
+error, and the alternative — sniffing the command name inside the helper —
+picks a plausible wrong default in silence. Those two sections wanted opposite
+things; the one that fails loud won.
+
+**The draft matcher is what makes a bearer key safe to be wrong about.** A
+presented `--confirm=<token>` does not name its request. Under the latch that
+was fine, because the nonce *was* the identity. Under the ledger a wrong key has
+to count against *some* request or the rejected-attempt limit has nowhere to
+attach — that is exactly what #259 deferred for want of an attempt-identity
+model. So the draft names the request: same operation, same resource set,
+newest match wins. It deliberately matches *closed* chains too, which is what
+lets a key presented after a successful run report what already happened
+instead of quietly posting a fresh request and deleting the file a second time.
+
+**Two tests had to invert, and that inversion is the whole point.** The latch's
+nonce was reusable inside its TTL, so `rm.rs`'s `test_rm_latch_nonce_reuse_idempotent`
+and its integration-test twin asserted that re-presenting a key was a harmless
+no-op. It was not harmless: it ran the delete again. Both now assert the
+opposite — the settled outcome is reported and the file is deleted exactly once
+— and the test that proves it restores the file between the two presentations,
+because an assertion that the file is gone would pass either way.
+
+**One test I deleted rather than weakened.** `confirm_without_captured_invocation_errors`
+hand-built a `LatchRequest` with an empty tool and argv. The type is gone, and
+every request a kernel-routed command can raise goes through the dispatch seam
+and captures `Capture::Exact` — there is no honest way to reach the non-`Exact`
+refusal from that file. Faking one would have tested the fake.
+
+**What implementation found that the plan could not have.** §F.3 worried that
+`$(set +o latch)`, `set +o latch | cat`, and `set +o latch &` could route around
+a policy pin through the parser's flags-versus-positional quirk. They cannot:
+`set` is a *grammar keyword*, so all three are parse errors before any policy
+check runs. That is a stronger guarantee than the refusal — and a fragile one,
+because it belongs to the grammar rather than to the pin. The cases stay in the
+matrix accepting either outcome, so the day `set` becomes an ordinary command,
+the pin is what catches them and the test says so.
+
+**The word went too.** Mid-flight, Amy resolved §I.4: the latch is retired
+completely rather than leaving two spellings of a word the rest of the design
+drops. `set -o latch` → `set -o approvals`, `JobStatus::Latched` → `Gated`
+(wire `"gated"`), `KAISH_LATCH` → `KAISH_APPROVALS`. `Kernel::confirm` and
+`--confirm=<token>` stay, because "confirm" was never latch vocabulary — it
+names what the operator is doing, and that has not changed. Arriving mid-PR, it
+cost a mechanical sweep and a full rewrite of the help fragments' Latch section
+into an Approvals section; arriving after the PR it would have cost a second
+breaking release.
+
+**A small thing I got wrong twice in the same afternoon.** Two tests asserted
+the tokenless boundary by grepping the serialized view for the substring
+`"token"`. Both fired — on the hint's literal `<token>` placeholder, which is
+display text. §A.2 promises that no *field* is a credential, not that no field
+*mentions* one. Walking the object's keys is the assertion that matches the
+promise; the substring check was testing a coincidence.
+
+---
+
 ## The ledger lands in lanes, and the second family earns its seat (2026-08-02)
 
 Four PRs of the approval ledger's nine-PR plan landed in one day — types (#274),
