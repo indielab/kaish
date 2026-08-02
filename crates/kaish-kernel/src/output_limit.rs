@@ -287,7 +287,14 @@ pub async fn apply_spill_contract(result: &mut ExecResult, config: &OutputLimitC
         let _ = spill_if_needed(result, config).await;
     }
     if result.did_spill {
-        result.original_code = Some(result.code);
+        // Idempotent: only capture `original_code` the first time. A result can
+        // arrive already remapped — backend conversions preserve both fields
+        // (`kaish-types/src/backend.rs`), so a pre-remapped result is supported
+        // input, not impossible state. Overwriting unconditionally replaced a
+        // real `Some(7)` with `Some(3)` and lost the actual exit code.
+        if result.original_code.is_none() {
+            result.original_code = Some(result.code);
+        }
         result.code = 3;
     }
 }
@@ -826,6 +833,31 @@ mod tests {
 
         assert_eq!(result.code, 3, "did_spill set anywhere must remap to exit 3");
         assert_eq!(result.original_code, Some(0));
+    }
+
+    #[tokio::test]
+    async fn apply_spill_contract_is_idempotent_and_keeps_the_first_original_code() {
+        // A result can reach this seam already remapped — backend conversions
+        // preserve `did_spill`/`original_code` (kaish-types/src/backend.rs), so
+        // an embedder's pre-remapped result is supported input. Applying the
+        // contract twice used to overwrite `Some(7)` with `Some(3)`, destroying
+        // the real exit code the caller needed to explain the failure.
+        let config = OutputLimitConfig::none();
+        let mut result = ExecResult::success("spilled").with_code(7);
+        result.did_spill = true;
+
+        apply_spill_contract(&mut result, &config).await;
+        assert_eq!(result.code, 3);
+        assert_eq!(result.original_code, Some(7), "first pass captures the real code");
+
+        // Second pass: still 3, and the ORIGINAL 7 survives.
+        apply_spill_contract(&mut result, &config).await;
+        assert_eq!(result.code, 3, "still remapped");
+        assert_eq!(
+            result.original_code,
+            Some(7),
+            "a second pass must not overwrite the captured original with 3"
+        );
     }
 
     #[test]

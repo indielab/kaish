@@ -252,11 +252,18 @@ async fn dash_h_also_points_at_help_kill() {
 }
 
 /// Found via kaibo review: a literal `--` end-of-options marker must
-/// actually end option parsing, not be a no-op. `kill -- -9 %1` must try to
-/// signal a PID literally named `-9` (which fails loudly — no such
-/// capability/process — but crucially does NOT deliver KILL to job 1),
-/// never quietly resolve `-9` as the numeric shorthand once `--` has been
-/// seen.
+/// actually end option parsing, not be a no-op. `kill -- -9 %1` must treat
+/// `-9` as a target literally named `-9` (which fails loudly — no such
+/// capability/process), never quietly resolve it as the numeric shorthand
+/// once `--` has been seen.
+///
+/// Note the operand count: after `--` there are **two** targets, `-9` and
+/// `%1`, and kill signals every target. This test used to also assert "job 1
+/// must be untouched", which was true only because kill read `targets.first()`
+/// and silently dropped the rest — the test was pinning a consequence of that
+/// bug. With bash-parity multi-target, `%1` is signalled as its own operand
+/// (with the default TERM, not the `-9` that `--` disarmed), and the run exits
+/// non-zero because `-9` failed.
 #[tokio::test]
 async fn double_dash_ends_option_parsing() {
     let kernel = setup().await;
@@ -267,20 +274,24 @@ async fn double_dash_ends_option_parsing() {
         "the literal PID target -9 is named in the error: {}",
         r.err
     );
-    // Job 1 must still be running — the shorthand was NOT applied to it.
-    let jobs = kernel.execute("jobs").await.expect("execute");
+    // `%1` was a target in its own right, so it is gone — and the failing `-9`
+    // did not stop kill from getting to it.
+    let gone = kernel.execute("kill %1").await.expect("execute");
     assert!(
-        jobs.text_out().contains("Running"),
-        "job 1 must be untouched by the post-- token: {}",
-        jobs.text_out()
+        !gone.ok(),
+        "job 1 is a target too and must have been signalled: {}",
+        gone.text_out()
     );
-    let _ = kernel.execute("kill %1").await;
 }
 
 /// A literal `--` also ends option parsing for control tokens like
 /// `--discard`, not just the signal shorthand — `kill -- --discard %1`
 /// must try to signal a target literally named `--discard`, not discard
 /// job 1's latch.
+///
+/// Same operand-count note as the test above: `--discard` and `%1` are two
+/// targets, so job 1 is signalled on its own account. The old "job 1 must be
+/// untouched" assertion was pinning the drop-after-first bug.
 #[tokio::test]
 async fn double_dash_ends_option_parsing_for_discard_too() {
     let kernel = setup().await;
@@ -291,11 +302,69 @@ async fn double_dash_ends_option_parsing_for_discard_too() {
         "the literal target --discard is named in the error: {}",
         r.err
     );
-    let jobs = kernel.execute("jobs").await.expect("execute");
+    // The point that still matters: `--discard` was NOT honoured as a flag, so
+    // job 1's latch (had it any) was never discarded — it was just signalled.
+    let gone = kernel.execute("kill %1").await.expect("execute");
     assert!(
-        jobs.text_out().contains("Running"),
-        "job 1 must be untouched: {}",
-        jobs.text_out()
+        !gone.ok(),
+        "job 1 is a target too and must have been signalled: {}",
+        gone.text_out()
     );
-    let _ = kernel.execute("kill %1").await;
+}
+
+// ─── Multi-target (bash parity) ────────────────────────────────────────────
+//
+// `kill` collected every positional target but only ever read
+// `targets.first()`, so `kill %1 %2` signalled job 1, dropped job 2 without a
+// word, and exited 0. A destructive command reporting success for work it did
+// not do is the failure class this project treats as unacceptable — and the
+// published arg doc said "Target PID(s) or job specifier(s)", plural, so the
+// schema promised what the code did not deliver.
+
+/// Every target gets signalled, not just the first.
+#[tokio::test]
+async fn kill_signals_every_target_not_just_the_first() {
+    let kernel = setup().await;
+    let r = kernel
+        .execute("sleep 30 & sleep 30 & kill %1 %2")
+        .await
+        .expect("execute");
+    assert_eq!(
+        r.code, 0,
+        "kill %1 %2 should terminate both jobs: out={} err={}",
+        r.text_out(),
+        r.err
+    );
+
+    for spec in ["%1", "%2"] {
+        let gone = kernel.execute(&format!("kill {spec}")).await.expect("execute");
+        assert!(
+            !gone.ok(),
+            "job {spec} must already be gone after `kill %1 %2`, got: {}",
+            gone.text_out()
+        );
+    }
+}
+
+/// A bad target does not abort the run: the later good target is still
+/// signalled, and the exit code still reports the failure. This is the half
+/// that a naive "return on first error" rewrite would get wrong — `%99` comes
+/// first deliberately.
+#[tokio::test]
+async fn kill_continues_past_a_bad_target_and_still_reports_failure() {
+    let kernel = setup().await;
+    let r = kernel.execute("sleep 30 & kill %99 %1").await.expect("execute");
+    assert!(
+        !r.ok(),
+        "a bad target must make kill exit non-zero: out={} err={}",
+        r.text_out(),
+        r.err
+    );
+
+    let gone = kernel.execute("kill %1").await.expect("execute");
+    assert!(
+        !gone.ok(),
+        "job 1 must have been signalled even though %99 failed first, got: {}",
+        gone.text_out()
+    );
 }
