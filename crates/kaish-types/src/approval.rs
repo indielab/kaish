@@ -963,7 +963,9 @@ pub struct StandingGrant {
     /// Defaults to 1 — a standing rule is one-shot unless explicitly
     /// widened ([`Self::with_max_uses`] / [`Self::unlimited_uses`]).
     /// `None` is explicit unlimited; an omitted field on the wire is the
-    /// one-shot default, never unlimited.
+    /// one-shot default, never unlimited. **On the wire, `"max_uses":
+    /// null` reads as explicit unlimited** — a producer that means "use
+    /// the default" must omit the field, not send null.
     #[serde(default = "default_max_uses")]
     pub max_uses: Option<u32>,
     /// When this rule stops matching, if it expires.
@@ -1819,6 +1821,20 @@ mod tests {
         value.as_object_mut().unwrap().remove("max_uses");
         let parsed: StandingGrant = serde_json::from_value(value).unwrap();
         assert_eq!(parsed.max_uses, Some(1));
+    }
+
+    #[test]
+    fn standing_grant_explicit_null_max_uses_is_unlimited_not_the_default() {
+        // The null-versus-omitted split is deliberate and this test pins it:
+        // null is the wire spelling of an explicit unlimited, omission is
+        // the one-shot default. A producer meaning "default" must omit.
+        let mut value = serde_json::to_value(sample_standing_grant()).unwrap();
+        value
+            .as_object_mut()
+            .unwrap()
+            .insert("max_uses".to_string(), serde_json::Value::Null);
+        let parsed: StandingGrant = serde_json::from_value(value).unwrap();
+        assert_eq!(parsed.max_uses, None);
     }
 
     #[test]
