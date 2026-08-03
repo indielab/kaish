@@ -29,10 +29,16 @@ async fn spilled_worker_flips_gather_to_failure() {
     // NoLocal (isolated) kernel forces in-memory spill mode automatically —
     // no disk writes in this test (CLAUDE.md).
     let kernel = Kernel::new(KernelConfig::isolated()).expect("failed to create kernel");
-    kernel.execute("set -o output-limit=4").await.expect("set limit");
+    // 10, not 4: since GH #250, `pre_scatter` (here `seq 1 3`, 6 bytes: "1\n2\n3\n")
+    // is itself spill-checked before scatter runs — a 4-byte limit would trip
+    // THAT guard first and short-circuit before any worker ever launches,
+    // which is a different test (see `pre_scatter_spill_short_circuits_before_scatter_runs`
+    // above). 10 lets the 6-byte pre_scatter output through clean while still
+    // being well under every worker's own output.
+    kernel.execute("set -o output-limit=10").await.expect("set limit");
 
     // Every worker's output ("item-N-padding") is well over the shared
-    // 4-byte limit, so every worker spills AND (because the same tiny limit
+    // 10-byte limit, so every worker spills AND (because the same tiny limit
     // also applies to the pipeline's own post-run check) the aggregate
     // JSONL spills too — the outer spill's loud exit-3 wins either way
     // (pre-existing behavior: ANY spill anywhere maps the final code to 3).
@@ -64,6 +70,41 @@ async fn spilled_worker_flips_gather_to_failure() {
          reported success (0) — got original_code={:?}, err={:?}",
         r.original_code,
         r.err
+    );
+}
+
+// GH #250: `pre_scatter` (any pipeline stage before `scatter`) runs via
+// `run_sequential`, which never applies the output-limit spill check or the
+// `did_spill` -> exit-3 remap (`output_limit::apply_spill_contract`) that
+// #212/#249 gave the parallel workers, the top-level pipeline, and
+// background jobs. Before the fix, a `pre_scatter` command whose output
+// overflowed the enabled limit kept `code == 0` (`result.ok()` stayed
+// `true`), so the `!result.ok()` guard right after `run_sequential` never
+// fired and `scatter` fanned out over a truncated/capped preview of the
+// input instead of refusing to run at all.
+#[tokio::test]
+async fn pre_scatter_spill_short_circuits_before_scatter_runs() {
+    let kernel = Kernel::new(KernelConfig::isolated()).expect("failed to create kernel");
+    kernel.execute("set -o output-limit=4").await.expect("set limit");
+
+    let r = kernel
+        .execute(
+            r#"echo "way-over-the-four-byte-limit" | scatter --as N | echo "should-never-run-$N" | gather"#,
+        )
+        .await
+        .expect("kernel execute");
+
+    assert_eq!(
+        r.code, 3,
+        "a spilled pre_scatter result must remap to exit 3 and short-circuit the whole \
+         pipeline, matching the contract the worker/background/pipeline surfaces already have: {:?}",
+        r.err
+    );
+    assert!(r.did_spill, "the pre_scatter spill must be visible on the final result: {r:?}");
+    assert!(
+        !r.text_out().contains("should-never-run"),
+        "scatter must never fan out over a pre_scatter result that already spilled: {:?}",
+        r.text_out()
     );
 }
 

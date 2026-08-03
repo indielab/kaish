@@ -227,6 +227,10 @@ breaking entries are marked **BREAKING**.
   a spilled worker used to count as a success.
 - **`scatter`/`gather` option errors honor `--json`** (GH #222) — the error envelope
   was bypassing the kernel's output-format handling.
+- **A `pre_scatter` pipeline stage that spills now short-circuits `scatter`
+  instead of fanning out over the truncated preview** (GH #250) — the same
+  `apply_spill_contract` remap the parallel workers and background jobs
+  already got.
 - **A spill after a 10 MiB capture-ring overflow now says `tail only at <path>`, not
   `full output`** (GH #212) — the ring drops the earliest bytes, so the file holds
   only the tail.
