@@ -236,6 +236,17 @@ breaking entries are marked **BREAKING**.
   only checker that sees them.
 
 ### Fixed
+- **An approval-gated overwrite that races a concurrent write now fails loud
+  instead of clobbering it** — the gate carried a compare-and-swap expectation only
+  for trash-snapshotted targets, so an approved target with the trash off (or one
+  too big for it) reached the write with no compare at all.
+- The approval path compares content digests rather than bytes, so an oversize
+  target costs one 256 KiB window instead of its whole size.
+- **A replay claiming a different prior state than the one approved is refused** —
+  the draft matcher compared resources by kind and id and dropped the state claim,
+  so a grant that went stale between the ledger's check and the gate site's arrival
+  still authorized. The credential router still ignores the claim, so a wrong key is
+  still counted against the request it named.
 - **`/v/jobs/N/status` reports `stopped` for a Ctrl-Z-stopped job** (#252) — it
   read `running` forever: `status()` had the stopped check but the status-string
   twin backing the VFS node did not, and a stopped job has no result channel to
