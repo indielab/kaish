@@ -246,6 +246,13 @@ breaking entries are marked **BREAKING**.
   a spilled worker used to count as a success.
 - **`scatter`/`gather` option errors honor `--json`** (GH #222) — the error envelope
   was bypassing the kernel's output-format handling.
+- **A `pre_scatter` pipeline stage that spills now short-circuits `scatter`
+  instead of fanning out over the truncated preview** (GH #250) — the same
+  `apply_spill_contract` remap the parallel workers and background jobs
+  already got.
+- **The test-only dispatch twin now reports exit 126 for a directory or a
+  non-executable file named with a `/`** (GH #229), matching production —
+  it used to fall through to spawn and leak the raw OS error under exit 127.
 - **A spill after a 10 MiB capture-ring overflow now says `tail only at <path>`, not
   `full output`** (GH #212) — the ring drops the earliest bytes, so the file holds
   only the tail.

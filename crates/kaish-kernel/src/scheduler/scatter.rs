@@ -172,7 +172,24 @@ impl ScatterGatherRunner {
             };
             (text, data)
         } else {
-            let result = runner.run_sequential(pre_scatter, ctx, &*self.sequential_dispatcher).await;
+            let mut result = runner.run_sequential(pre_scatter, ctx, &*self.sequential_dispatcher).await;
+            // GH #250: `run_sequential` never applies the output-limit spill
+            // check or the `did_spill` -> exit-3 remap
+            // (`output_limit::apply_spill_contract`) — that seam only
+            // reached the parallel workers, background jobs, and the
+            // top-level pipeline result (#249). Without it, a pre_scatter
+            // command whose output overflowed the enabled limit or the
+            // ~10MB capture ring (#191) kept `code == 0` (`result.ok()`
+            // stayed `true`), so the `!result.ok()` check below never fired
+            // and scatter fanned out over a truncated/capped preview of the
+            // input instead of refusing to run at all. Applying the
+            // contract here reuses that same check as the enforcement
+            // point: a spilled pre_scatter result now remaps to code 3, the
+            // guard below returns early, and scatter never sees the
+            // truncated data — the same hard-stop `post_gather` already
+            // gets for free via the top-level seam once this result
+            // reaches it.
+            crate::output_limit::apply_spill_contract(&mut result, &ctx.output_limit).await;
             if !result.ok() {
                 return result;
             }
