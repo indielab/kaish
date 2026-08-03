@@ -23,7 +23,7 @@ impl std::fmt::Display for JobId {
 /// Status of a background job.
 ///
 /// Wire spelling (via `Serialize`/`Deserialize`) is lowercase — `"running"`,
-/// `"stopped"`, `"done"`, `"gated"`, `"failed"` — matching the existing
+/// `"stopped"`, `"done"`, `"gated"`, `"killed"`, `"failed"` — matching the existing
 /// `/v/jobs/N/status` text vocabulary (`Job::status_string`), not the
 /// capitalized `Display` impl (which stays capitalized for human-facing
 /// text: the `jobs` table, `[N]+ Done ...` notifications). This is now the
@@ -50,6 +50,13 @@ pub enum JobStatus {
     /// (`docs/approval-ledger.md` §F.2) — the ledger renames the mechanism,
     /// not this status.
     Gated,
+    /// Job was terminated by `kill %N` (or an embedder's cancel) and has
+    /// unwound. Terminal, like `Failed`, but distinguishes "someone killed
+    /// it" from "it errored on its own" — before this variant existed the
+    /// killed job was deleted outright, so "I killed job 1" and "job 1 never
+    /// existed" were indistinguishable (GH #244). The job's cached result and
+    /// output stay readable until the job is reaped.
+    Killed,
     /// Job failed with an error.
     Failed,
 }
@@ -61,6 +68,7 @@ impl std::fmt::Display for JobStatus {
             JobStatus::Stopped => write!(f, "Stopped"),
             JobStatus::Done => write!(f, "Done"),
             JobStatus::Gated => write!(f, "Gated"),
+            JobStatus::Killed => write!(f, "Killed"),
             JobStatus::Failed => write!(f, "Failed"),
         }
     }
@@ -262,6 +270,7 @@ mod tests {
         assert_eq!(serde_json::to_string(&JobStatus::Stopped).unwrap(), "\"stopped\"");
         assert_eq!(serde_json::to_string(&JobStatus::Done).unwrap(), "\"done\"");
         assert_eq!(serde_json::to_string(&JobStatus::Gated).unwrap(), "\"gated\"");
+        assert_eq!(serde_json::to_string(&JobStatus::Killed).unwrap(), "\"killed\"");
         assert_eq!(serde_json::to_string(&JobStatus::Failed).unwrap(), "\"failed\"");
     }
 
@@ -272,6 +281,7 @@ mod tests {
             JobStatus::Stopped,
             JobStatus::Done,
             JobStatus::Gated,
+            JobStatus::Killed,
             JobStatus::Failed,
         ] {
             let json = serde_json::to_string(&status).unwrap();

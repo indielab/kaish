@@ -26,6 +26,20 @@ async fn setup() -> Arc<Kernel> {
     Kernel::new(KernelConfig::isolated()).expect("failed to create kernel").into_arc()
 }
 
+/// Prove a job was killed earlier: a second `kill %N` on it is an idempotent
+/// no-op naming the terminal status (GH #244). The old proof — `kill %N`
+/// failing with "not found" — pinned delete-on-kill, which #244 retired: a
+/// killed job stays tracked with its result until reaped.
+async fn assert_already_killed(kernel: &Kernel, spec: &str) {
+    let again = kernel.execute(&format!("kill {spec}")).await.expect("execute");
+    assert_eq!(again.code, 0, "re-kill of a killed job is a clean no-op: {}", again.err);
+    assert!(
+        again.text_out().contains("already finished (killed:"),
+        "job {spec} must be tracked as killed, got: {}",
+        again.text_out()
+    );
+}
+
 /// `kill -9 %1` must terminate job 1 — not silently try to signal a PID named
 /// "-9" while dropping `%1` on the floor. A follow-up `kill %1` reporting the
 /// job gone is the only way to distinguish "job 1 was really killed" from the
@@ -36,9 +50,7 @@ async fn dash9_numeric_shorthand_kills_the_job_not_a_pid_named_dash9() {
     let r = kernel.execute("sleep 30 & kill -9 %1").await.expect("execute");
     assert_eq!(r.code, 0, "kill -9 %1 should terminate job 1: out={} err={}", r.text_out(), r.err);
 
-    let gone = kernel.execute("kill %1").await.expect("execute");
-    assert!(!gone.ok(), "job 1 must already be gone");
-    assert!(gone.err.contains("not found"), "got: {}", gone.err);
+    assert_already_killed(&kernel, "%1").await;
 }
 
 /// `-15` (SIGTERM) is the other numeric shorthand explicitly called out —
@@ -274,14 +286,9 @@ async fn double_dash_ends_option_parsing() {
         "the literal PID target -9 is named in the error: {}",
         r.err
     );
-    // `%1` was a target in its own right, so it is gone — and the failing `-9`
-    // did not stop kill from getting to it.
-    let gone = kernel.execute("kill %1").await.expect("execute");
-    assert!(
-        !gone.ok(),
-        "job 1 is a target too and must have been signalled: {}",
-        gone.text_out()
-    );
+    // `%1` was a target in its own right — the failing `-9` did not stop
+    // kill from getting to it (with the default TERM, since `--` disarmed -9).
+    assert_already_killed(&kernel, "%1").await;
 }
 
 /// A literal `--` also ends option parsing for control tokens like
@@ -303,13 +310,8 @@ async fn double_dash_ends_option_parsing_for_discard_too() {
         r.err
     );
     // The point that still matters: `--discard` was NOT honoured as a flag, so
-    // job 1's latch (had it any) was never discarded — it was just signalled.
-    let gone = kernel.execute("kill %1").await.expect("execute");
-    assert!(
-        !gone.ok(),
-        "job 1 is a target too and must have been signalled: {}",
-        gone.text_out()
-    );
+    // job 1's gate (had it any) was never discarded — it was just signalled.
+    assert_already_killed(&kernel, "%1").await;
 }
 
 // ─── Multi-target (bash parity) ────────────────────────────────────────────
@@ -337,12 +339,7 @@ async fn kill_signals_every_target_not_just_the_first() {
     );
 
     for spec in ["%1", "%2"] {
-        let gone = kernel.execute(&format!("kill {spec}")).await.expect("execute");
-        assert!(
-            !gone.ok(),
-            "job {spec} must already be gone after `kill %1 %2`, got: {}",
-            gone.text_out()
-        );
+        assert_already_killed(&kernel, spec).await;
     }
 }
 
@@ -361,12 +358,7 @@ async fn kill_continues_past_a_bad_target_and_still_reports_failure() {
         r.err
     );
 
-    let gone = kernel.execute("kill %1").await.expect("execute");
-    assert!(
-        !gone.ok(),
-        "job 1 must have been signalled even though %99 failed first, got: {}",
-        gone.text_out()
-    );
+    assert_already_killed(&kernel, "%1").await;
 }
 
 /// The mixed run, pinned end-to-end: targets before AND after a failing middle
@@ -393,11 +385,6 @@ async fn kill_mixed_run_signals_good_targets_around_a_bad_one_and_exits_nonzero(
     );
 
     for spec in ["%1", "%2"] {
-        let gone = kernel.execute(&format!("kill {spec}")).await.expect("execute");
-        assert!(
-            !gone.ok(),
-            "job {spec} must have been signalled despite %99 failing mid-run, got: {}",
-            gone.text_out()
-        );
+        assert_already_killed(&kernel, spec).await;
     }
 }
