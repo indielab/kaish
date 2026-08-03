@@ -387,7 +387,8 @@ with the renewed request, so `JobInfo.approval`, `/v/jobs/{id}/approval`, and
 `wait` all name the live id rather than the dead one.
 
 **Reading the ledger.** `Kernel::approvals()` is the read side (it grants
-nothing): `pending()`, `ids()`, `get(&id)`, `standing()`, and `log(since)`.
+nothing): `pending()`, `ids()`, `get(&id)`, `standing()`, `subscriptions()`,
+`any_subscriptions()`, and `log(since)`.
 The same read model is projected at **`/v/approvals`** — `pending`,
 `standing`, and `log` at the root, and `{id}/{request,state,attempts,grant}`
 per request — and surfaced by the `approvals` builtin (`list`, `show`,
@@ -410,6 +411,49 @@ a *later* call — or from a different kernel — share the ledger with
 kernel. `KernelConfig::with_ledger(config)` tunes retention and the
 rejected-credential limit, and `with_ledger_sink(sink)` posts every entry to an
 audit sink as it commits.
+
+**Recording without gating: `fs.*` subscriptions.** `set -o approvals` is one
+posture — enforce, over the whole `fs.*` namespace. A subscription generalizes
+it: `ApproverHandle::subscribe(Subscription::new(operations, resources, mode,
+reason))` registers a glob over (operation, resource) in one of two modes.
+
+| Mode | What matching operations do |
+|---|---|
+| `SubscriptionMode::Observe` | Post `Requested` + an immediate `Granted{Observe}` and **run**. Never defers, never blocks, never returns exit 2. This is "record everything" with no permission semantics. |
+| `SubscriptionMode::Enforce` | Go through the full decision chain, exactly as `set -o approvals` does — but scoped to the glob instead of the whole namespace. |
+
+Operations glob (`fs.*` covers the namespace); resource **kinds match exactly
+and only the `id` globs**, so `ResourcePattern::new("path", "/workspace/**")`
+never matches a `git.ref`. An empty pattern list matches nothing rather than
+everything. `subscribe` returns a `SubscriptionId`; `unsubscribe(&id, reason)`
+revokes it, and both append their own ledger entry (`Subscribed`,
+`Unsubscribed`) — an audit scope that changed with no record of the change
+makes the record it produced unreadable. Revocation takes effect for
+operations not yet posted; a request already granted under the subscription is
+unaffected.
+
+Three rules worth knowing before writing a glob:
+
+- **Unsubscribed and ungated means unposted.** An `fs.*` operation nothing
+  covers posts **nothing at all** — no `Requested`, no allocation. The gate
+  sites take one relaxed atomic load (`Approvals::any_subscriptions()`) before
+  building anything, so a 10,000-path delete on a session with no subscription
+  costs one branch. `ApprovalRequest::constructed_count()` is the counter that
+  proves it: read it either side of a command and the difference is **0**.
+- **`enforce` beats `observe`** when both cover a path. Enforce is strictly
+  stronger and its record is a superset, so the other precedence could
+  downgrade a gate to a note.
+- **Matching is per resource, and against the resolved path.** `rm
+  /workspace/a /tmp/b` under an observe subscription on `/workspace/**`
+  records `/workspace/a` and stays silent about `/tmp/b`. The glob is matched
+  against the path the kernel resolved — so a relative path cannot step
+  outside the scope — while the record names the path the command wrote,
+  which is what an auditor is trying to recognize.
+
+`trash.empty` gates regardless of any subscription: it discards the recovery
+net every other `fs.*` operation relies on. `Approvals::subscriptions()` lists
+the live registry; there is no shell surface for `subscribe` — a session that
+could subscribe itself could also unsubscribe itself.
 
 **Pinning the policy.** `KernelConfig::with_policy_pinned(true)` makes
 `set +o approvals` fail with **exit 1** and a message naming the pin, rather

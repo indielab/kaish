@@ -153,6 +153,30 @@ breaking entries are marked **BREAKING**.
   included — the enumeration `/v/approvals` and `approvals list --all` read.
 - **`RequestId::seq()`** returns the id's allocation sequence; sorting the id text
   puts `req_..._10` ahead of `req_..._9`.
+- **`fs.*` observability subscriptions** (ledger PR 8, `docs/approval-ledger.md`
+  §C.5) — `ApproverHandle::subscribe(Subscription)` / `unsubscribe(&id, reason)`
+  register a glob over (operation, resource) in `observe` (record and run) or
+  `enforce` (decide) mode, generalizing the whole-namespace `set -o approvals`
+  policy into a scoped one. Additive: nothing is subscribed by default and no
+  posture changes.
+- An `observe` subscription posts `Requested` + `Granted{Observe}` and **never
+  defers, blocks, or returns exit 2** — it carries no permission semantics.
+- **Unsubscribed and ungated stays unposted** — a gate site takes one relaxed
+  atomic load before building anything, so a 10,000-path delete on an unsubscribed
+  session posts zero entries and allocates zero requests.
+- **`ApprovalRequest::constructed_count()`** counts requests built process-wide, so
+  the free-when-unsubscribed rule is asserted as a number rather than described.
+- `enforce` beats `observe` when both cover a path — the stronger posture wins, so
+  a subscription can never downgrade a gate to a note.
+- Subscriptions match per resource against the **resolved** path and record the
+  **display** path — a relative path cannot step outside the scope, and the record
+  still names what the command wrote.
+- **`LedgerEntry::Subscribed` / `Unsubscribed`** — registering and revoking a
+  subscription are themselves ledger entries; an audit scope that changed with no
+  record of the change makes the record it produced unreadable.
+- **`Approvals::subscriptions()` / `any_subscriptions()`**, `Grounds::Observe`,
+  `ChainStage::Subscription`, and `LedgerError::SubscriptionNotFound` — revoking an
+  id that was never issued fails loud instead of reporting success.
 
 ### Changed
 - **`wait` on several gated jobs names the total** (ledger PR 7) —
