@@ -47,6 +47,7 @@ pub use resolver::{
     ConditionReport, PathResolver, ResolverError, StateResolver, StateResolverConflict,
     StateResolvers, PATH_DIGEST_ALG, PATH_KIND,
 };
+pub(crate) use core::condition_conflict;
 pub(crate) use resolver::{conditions_to_observe, digest_path};
 pub use handles::{ApproverHandle, AttemptHandle, AttemptView, Approvals, Ledger, RequestChain, Requester};
 

@@ -1672,6 +1672,17 @@ impl LedgerInner {
             .collect()
     }
 
+    pub(crate) fn ids(&self) -> Vec<RequestId> {
+        // Same full sweep `pending` runs: a request whose deadline passed
+        // must be listed as `Expired`, not `Requested`, the moment anything
+        // enumerates it (spec §B.5 — expiry materializes on observation).
+        self.sweep();
+        let guard = self.lock();
+        let mut ids: Vec<RequestId> = guard.chains.keys().cloned().collect();
+        ids.sort_by(|a, b| a.as_str().cmp(b.as_str()));
+        ids
+    }
+
     pub(crate) fn state(&self, id: &RequestId) -> Option<RequestState> {
         self.best_effort_materialize(id);
         let guard = self.lock();
@@ -1768,6 +1779,22 @@ fn find_widened_condition(request: &ApprovalRequest, terms: &GrantTerms) -> Opti
 ///   too. A precondition nobody could check has not been met — this is the
 ///   one place a silent pass would be a data-loss bug rather than an
 ///   inconvenience.
+/// Why `report` refuses `conditions`, if it does — the same decision
+/// [`evaluate_conditions`] makes at redemption, exposed for the one caller
+/// that has to make it *before* anything is posted: renewal (spec §B.5, "if
+/// the world already moved, renewal fails loud rather than posting a request
+/// whose claims are already false").
+///
+/// Shares the redemption path's implementation deliberately. A renewal that
+/// judged staleness by its own rules would let a request through that its own
+/// redemption then refuses, which is the drift this indirection exists to
+/// prevent.
+pub(crate) fn condition_conflict(conditions: &[Condition], report: ConditionReport) -> Option<String> {
+    evaluate_conditions(conditions, report)
+        .1
+        .map(|(_, _, reason)| reason)
+}
+
 fn evaluate_conditions(
     conditions: &[Condition],
     report: ConditionReport,

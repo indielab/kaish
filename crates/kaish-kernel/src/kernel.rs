@@ -111,7 +111,7 @@ use crate::tools::{resolve_in_path, virtual_cwd_error};
 use crate::validator::{Severity, Validator};
 #[cfg(feature = "localfs")]
 use crate::vfs::LocalFs;
-use crate::vfs::{BuiltinFs, DevFs, JobFs, MemoryFs, VfsRouter};
+use crate::vfs::{ApprovalsFs, BuiltinFs, DevFs, JobFs, MemoryFs, VfsRouter};
 use kaish_vfs::ByteBudget;
 #[cfg(all(feature = "localfs", feature = "overlay"))]
 use kaish_vfs::OverlayFs;
@@ -1431,6 +1431,12 @@ impl Kernel {
 
         // Mount BuiltinFs so `ls /v/bin` lists builtins
         vfs.mount("/v/bin", BuiltinFs::new(tools.clone()));
+
+        // Mount ApprovalsFs so `cat /v/approvals/pending` reads the ledger.
+        // Here rather than beside `/v/jobs` because the ledger does not exist
+        // until `build_approvals` above has run — and it must be the same
+        // ledger the gate sites post to, not a second one.
+        vfs.mount("/v/approvals", ApprovalsFs::new(approvals.approvals.clone()));
 
         let vfs = Arc::new(vfs);
 
