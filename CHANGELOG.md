@@ -113,7 +113,11 @@ breaking entries are marked **BREAKING**.
   what it did (`kill: job 1 exited (killed:130)`) instead of empty output; new
   `--no-wait` returns at dispatch.
 - `JobManager` keeps at most 100 finished jobs (#244) — oldest evicted at
-  registration, gated jobs never; `set_finished_retention` tunes it.
+  registration and at completion observation (`list`/`wait`), gated jobs
+  never; `set_finished_retention` tunes it.
+- `kill %N` treats a stale recorded process group (ESRCH) as "keep going",
+  not a failure (#244) — a pipeline job records one group per external child
+  and a finished child's group used to abort the whole kill.
 - `kill %N` on a stopped (Ctrl-Z) job now also delivers `CONT` (#244) — a
   suspended process cannot act on a pending signal; the entry is untracked as
   before, since a stopped job has no result to keep.

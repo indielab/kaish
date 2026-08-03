@@ -74,10 +74,10 @@ struct KillArgs {
     discard: bool,
 
     /// Return as soon as the termination is dispatched instead of waiting
-    /// for the job to exit. By default kill waits (bounded by the kernel's
-    /// kill grace plus 3 seconds) so exit 0 means the job is dead; with
-    /// --no-wait exit 0 only means the signal went out, and the job stays
-    /// visible in jobs until it unwinds.
+    /// for the job to exit. By default kill waits, bounded by the kernel's
+    /// kill grace plus 3 seconds per target, so exit 0 means the job is
+    /// dead; with --no-wait exit 0 only means the signal went out, and the
+    /// job stays visible in jobs until it unwinds.
     #[arg(long)]
     no_wait: bool,
 
@@ -416,16 +416,16 @@ async fn terminate_and_confirm(
     delivery: &str,
     delivered: bool,
 ) -> ExecResult {
-    // Flag before tripping the token: the job can unwind the instant the
-    // token trips, and a flag set after the fact races the status read.
-    manager.mark_killed(job_id).await;
-    let cancelled = manager.cancel(job_id).await;
-    if !cancelled && !delivered {
+    // Flag + cancel are one atomic manager call: the flag turns the terminal
+    // status into Killed, so it must never be set when there is no lever to
+    // kill with (no token, nothing delivered) — a later organic failure
+    // would read as a kill that never happened.
+    if !manager.mark_killed_and_cancel(job_id, delivered).await {
         return ExecResult::failure(
             1,
             format!(
-                "kill: job {job_id} has no cancellation token and no process group — \
-                 nothing to deliver {delivery} to"
+                "kill: job {job_id} has no cancellation token and no live process \
+                 group — nothing to deliver {delivery} to"
             ),
         );
     }
@@ -565,14 +565,23 @@ async fn kill_job(
     // Real process group(s) recorded for the job — deliver the signal directly.
     let pgids = manager.job_pgids(job_id).await;
     if !pgids.is_empty() {
-        let mut last_err = None;
+        // A recorded group whose processes have all exited (`ESRCH`) is
+        // stale, not a failure: a pipeline job records one group per external
+        // child and finished children are never unrecorded, so `true |
+        // sleep 30 &` has a dead group next to the live one (review finding —
+        // the old aggregate-error return aborted the kill after successfully
+        // signalling the live group, and skipped the lifecycle entirely).
+        let mut delivered_any = false;
+        let mut hard_err = None;
         for pg in &pgids {
             let pgid = nix::unistd::Pid::from_raw(*pg as i32);
-            if let Err(e) = nix::sys::signal::killpg(pgid, signal) {
-                last_err = Some(e);
+            match nix::sys::signal::killpg(pgid, signal) {
+                Ok(()) => delivered_any = true,
+                Err(nix::errno::Errno::ESRCH) => {}
+                Err(e) => hard_err = Some(e),
             }
         }
-        if let Some(e) = last_err {
+        if let Some(e) = hard_err {
             return ExecResult::failure(1, format!("kill: {e}"));
         }
         let groups = pgids
@@ -582,30 +591,53 @@ async fn kill_job(
             .join(", ");
         // A stopped (Ctrl-Z) job cannot act on a termination while it is
         // suspended — the signal sits pending forever — so, like bash, kill
-        // follows it with SIGCONT. There is no result to persist either (a
-        // stopped foreground job has no result channel; its entry would read
-        // "stopped" forever), so this is the one kill that still untracks
-        // the job (GH #244 scoped stopped/TTY jobs out of the persist rule).
+        // follows it with SIGCONT on every group. There is no result to
+        // persist either (a stopped foreground job has no result channel;
+        // its entry would read "stopped" forever), so this is the one kill
+        // that still untracks the job (GH #244 scoped stopped/TTY jobs out
+        // of the persist rule).
         if terminating && stopped {
-            let cont = nix::unistd::Pid::from_raw(pgids[0] as i32);
-            // Error intentionally ignored: the group may already have died
-            // on the first signal, and CONT is only the wake-up nudge.
-            let _ = nix::sys::signal::killpg(cont, Signal::SIGCONT);
+            for pg in &pgids {
+                let pgid = nix::unistd::Pid::from_raw(*pg as i32);
+                // Error intentionally ignored: the group may already have
+                // died on the first signal, and CONT is only the wake-up
+                // nudge.
+                let _ = nix::sys::signal::killpg(pgid, Signal::SIGCONT);
+            }
             manager.remove(job_id).await;
-            return ExecResult::success(format!(
-                "kill: job {job_id} (stopped): delivered {signal} and CONT to \
-                 process group(s) {groups}; job untracked"
-            ));
+            return ExecResult::success(if delivered_any {
+                format!(
+                    "kill: job {job_id} (stopped): delivered {signal} and CONT to \
+                     process group(s) {groups}; job untracked"
+                )
+            } else {
+                format!(
+                    "kill: job {job_id} (stopped): process group(s) {groups} already \
+                     gone; job untracked"
+                )
+            });
         }
         // A terminating signal also unwinds the wrapping task; the job entry
-        // stays, with its result and output, until reaped (GH #244).
+        // stays, with its result and output, until reaped (GH #244). With
+        // every group stale, the cancellation token is the remaining lever —
+        // terminate_and_confirm fails loud if there is neither.
         if terminating {
             let delivery = format!("{signal} to process group(s) {groups}");
-            return terminate_and_confirm(manager, job_id, no_wait, &delivery, true).await;
+            return terminate_and_confirm(manager, job_id, no_wait, &delivery, delivered_any)
+                .await;
         }
-        return ExecResult::success(format!(
-            "kill: job {job_id}: delivered {signal} to process group(s) {groups}"
-        ));
+        if delivered_any {
+            return ExecResult::success(format!(
+                "kill: job {job_id}: delivered {signal} to process group(s) {groups}"
+            ));
+        }
+        return ExecResult::failure(
+            1,
+            format!(
+                "kill: job {job_id}: recorded process group(s) {groups} have already \
+                 exited — nothing to deliver {signal} to"
+            ),
+        );
     }
 
     // No process group — a pure in-process job (e.g. `sleep &`, a kaish builtin)

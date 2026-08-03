@@ -561,6 +561,34 @@ async fn kill_no_wait_dispatches_without_confirming() {
     assert_eq!(status, "killed:130");
 }
 
+/// GH #244 review finding: a stale recorded process group (its processes
+/// already exited — `true | sleep 30 &` records one group per external
+/// child, and finished children are never unrecorded) must not abort the
+/// kill. ESRCH is "stale, keep going", and with every group stale the
+/// cancellation token still terminates the job.
+#[cfg(all(unix, feature = "subprocess"))]
+#[tokio::test]
+async fn kill_survives_a_stale_process_group() {
+    let kernel = setup().await;
+    let r = kernel.execute("sleep 30 &").await.expect("execute");
+    assert_eq!(r.code, 0, "spawn: {}", r.err);
+    // Record a process group that cannot exist (beyond pid_max) — killpg
+    // returns ESRCH for it, the stale-group shape.
+    kernel.jobs().add_pgid(kaish_kernel::scheduler::JobId(1), 999_999_999).await;
+    let killed = kernel.execute("kill %1").await.expect("execute");
+    assert_eq!(
+        killed.code, 0,
+        "a stale group must not abort the kill: out={} err={}",
+        killed.text_out(),
+        killed.err
+    );
+    assert!(
+        killed.text_out().contains("exited (killed:130"),
+        "the token still terminates and confirms, got: {}",
+        killed.text_out()
+    );
+}
+
 /// GH #252: `/v/jobs/N/status` reports `stopped` for a Ctrl-Z-stopped job.
 /// `Job::status()` had the stopped check; the string twin backing the VFS
 /// node didn't, and a stopped job has no result channel, so `try_poll` can

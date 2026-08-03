@@ -322,7 +322,16 @@ impl Job {
 
         let mut content = String::new();
         content.push_str(&format!("# Job {}: {}\n", self.id, self.command));
-        content.push_str(&format!("# Status: {}\n\n", if result.ok() { "Done" } else { "Failed" }));
+        // Same terminal-status words as `status()` — a killed job's persisted
+        // log must not claim it "Failed" on its own (GH #244 review finding).
+        let status = if result.ok() {
+            "Done"
+        } else if self.killed {
+            "Killed"
+        } else {
+            "Failed"
+        };
+        content.push_str(&format!("# Status: {status}\n\n"));
 
         if is_bytes {
             let n = result.out_bytes().map(|b| b.len()).unwrap_or(0);
@@ -741,6 +750,12 @@ impl JobManager {
                     {
                         job.output_file = Some(path);
                     }
+                    // A completion was just observed — enforce retention here
+                    // too, not only at registration (an embedder that stops
+                    // registering must still stay bounded). The result is
+                    // already cloned, so evicting this very job (cap 0) is
+                    // safe.
+                    self.enforce_retention_locked(&mut jobs);
                     return Some(result);
                 }
             }
@@ -786,15 +801,22 @@ impl JobManager {
     }
 
     /// List all jobs with their status.
+    ///
+    /// Listing polls every job, so this is also a completion-observation
+    /// point: retention is enforced here (after the snapshot is taken — the
+    /// returned list is complete even for entries evicted by it).
     pub async fn list(&self) -> Vec<JobInfo> {
         let mut jobs = self.jobs.lock().await;
-        jobs.values_mut()
+        let infos: Vec<JobInfo> = jobs
+            .values_mut()
             .map(|job| {
                 let status = job.status();
                 let approval = job.approval();
                 job.to_info(status, approval)
             })
-            .collect()
+            .collect();
+        self.enforce_retention_locked(&mut jobs);
+        infos
     }
 
     /// Get the number of running jobs.
@@ -851,10 +873,13 @@ impl JobManager {
     }
 
     /// Evict the oldest finished jobs beyond the retention cap
-    /// ([`Self::set_finished_retention`]). Called with the jobs lock held, at
-    /// registration time — the only moment the tracked-job count grows, so
-    /// enforcing here bounds a never-reaping embedder without a background
-    /// sweeper (GH #244). "Finished" follows `reap_finished`'s reap-safety
+    /// ([`Self::set_finished_retention`]). Called with the jobs lock held at
+    /// registration time (the moment the tracked-job count grows) **and** at
+    /// the completion-observation points (`list`, `wait`'s finalize) — so an
+    /// embedder that stops registering but keeps observing stays bounded
+    /// without a background sweeper (GH #244). A session that registers jobs
+    /// and then never calls anything at all holds what it registered; there
+    /// is no sweeper task by design. "Finished" follows `reap_finished`'s reap-safety
     /// rule: gated jobs are never evicted (their cached result holds the only
     /// pending approval request) and stopped jobs are not finished. Eviction
     /// is oldest `finished_at` first, so the survivors are the newest N.
@@ -1024,16 +1049,36 @@ impl JobManager {
         }
     }
 
-    /// Flag that a terminating kill was dispatched at this job, so its
-    /// terminal status reads `Killed` rather than `Failed` once it unwinds
-    /// (GH #244). Set *before* tripping the cancellation token — the job can
-    /// finish the instant the token trips, and a flag set after the fact
-    /// would race the status read.
-    pub async fn mark_killed(&self, id: JobId) {
-        let mut jobs = self.jobs.lock().await;
-        if let Some(job) = jobs.get_mut(&id) {
+    /// Flag a terminating kill and trip the job's cancellation token, as one
+    /// operation under the jobs lock. Returns `false` — and leaves the job
+    /// **unflagged** — when there is no lever to kill with: no cancellation
+    /// token recorded and no OS signal already delivered (`delivered`). The
+    /// flag turns the job's terminal status into `Killed`, so setting it
+    /// without a working delivery would misclassify a later *organic* failure
+    /// as a kill (found in review: `JobManager::spawn`/`register` jobs have
+    /// no token unless the kernel records one).
+    ///
+    /// The flag is set *before* the token trips (the job can unwind the
+    /// instant it does; a flag set after races the status read), and the
+    /// token is cancelled after the lock drops — `CancellationToken::cancel`
+    /// is synchronous, but waking waiters under the jobs lock buys nothing.
+    pub async fn mark_killed_and_cancel(&self, id: JobId, delivered: bool) -> bool {
+        let token = {
+            let mut jobs = self.jobs.lock().await;
+            let Some(job) = jobs.get_mut(&id) else {
+                return false;
+            };
+            let token = job.cancel.clone();
+            if token.is_none() && !delivered {
+                return false;
+            }
             job.killed = true;
+            token
+        };
+        if let Some(token) = token {
+            token.cancel();
         }
+        true
     }
 
     /// Cancel a job by its token. Returns `true` if a token was recorded and
@@ -1776,9 +1821,9 @@ mod tests {
     }
 
     /// GH #244: a killed job's terminal status is `Killed`/`killed:{code}`,
-    /// not `Failed` — the flag is set by `mark_killed` before the cancel
-    /// trips, and only colors a non-ok exit (a job that finished ok anyway
-    /// still reads `Done`).
+    /// not `Failed` — the flag is set by `mark_killed_and_cancel` before the
+    /// cancel trips, and only colors a non-ok exit (a job that finished ok
+    /// anyway still reads `Done`).
     #[tokio::test]
     async fn mark_killed_colors_the_terminal_status() {
         let manager = JobManager::new();
@@ -1790,7 +1835,9 @@ mod tests {
                 ExecResult::failure(130, "cancelled")
             })
             .await;
-        manager.mark_killed(id).await;
+        // delivered=true stands in for a real killpg delivery — spawn()'d
+        // jobs record no cancellation token.
+        assert!(manager.mark_killed_and_cancel(id, true).await);
         drop(tx); // unblock the future — it returns the 130 result
         let result = manager.wait(id).await.expect("job finishes");
         assert_eq!(result.code, 130);
@@ -1804,13 +1851,99 @@ mod tests {
         let id2 = manager
             .spawn("survivor".to_string(), async { ExecResult::success("done") })
             .await;
-        manager.mark_killed(id2).await;
+        assert!(manager.mark_killed_and_cancel(id2, true).await);
         let result = manager.wait(id2).await.expect("job finishes");
         assert!(result.ok());
         assert_eq!(
             manager.get(id2).await.map(|info| info.status),
             Some(JobStatus::Done),
             "a job that finished ok before the kill landed reports Done"
+        );
+    }
+
+    /// Review finding (GH #244): with no cancellation token and nothing
+    /// delivered, `mark_killed_and_cancel` must refuse AND leave the flag
+    /// unset — otherwise a later organic failure reads as a kill that never
+    /// happened.
+    #[tokio::test]
+    async fn no_lever_kill_does_not_color_a_later_organic_failure() {
+        let manager = JobManager::new();
+        manager.set_persist_output_files(false);
+        let (tx, rx) = oneshot::channel::<()>();
+        let id = manager
+            .spawn("doomed anyway".to_string(), async move {
+                let _ = rx.await;
+                ExecResult::failure(7, "organic failure")
+            })
+            .await;
+        assert!(
+            !manager.mark_killed_and_cancel(id, false).await,
+            "no token + nothing delivered must refuse"
+        );
+        drop(tx);
+        let result = manager.wait(id).await.expect("job finishes");
+        assert_eq!(result.code, 7);
+        assert_eq!(
+            manager.get(id).await.map(|info| info.status),
+            Some(JobStatus::Failed),
+            "the failed kill attempt must not have colored the status"
+        );
+        assert_eq!(manager.get_status_string(id).await.as_deref(), Some("failed:7"));
+    }
+
+    /// Review finding (GH #244): retention must also hold when jobs finish
+    /// AFTER registration stopped — `list()` observes completions and
+    /// enforces. (The registration-time test above releases each job before
+    /// the next spawn, which masked this.)
+    #[tokio::test]
+    async fn retention_enforced_when_completion_is_observed_by_list() {
+        let manager = JobManager::new();
+        manager.set_persist_output_files(false);
+        manager.set_finished_retention(2);
+
+        let mut releases = Vec::new();
+        let mut ids = Vec::new();
+        for n in 0..5 {
+            let (tx, rx) = oneshot::channel::<()>();
+            releases.push(tx);
+            ids.push(
+                manager
+                    .spawn(format!("held {n}"), async move {
+                        let _ = rx.await;
+                        ExecResult::success("")
+                    })
+                    .await,
+            );
+        }
+        // All five registered while RUNNING — registration-time enforcement
+        // had nothing to evict. Now they all finish with no registration
+        // following. (Not waited one-by-one: wait() itself now evicts at
+        // each observed completion, so a sequential wait on the oldest ids
+        // finds them already gone — which is the feature, not the fixture.)
+        for tx in releases {
+            drop(tx);
+        }
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        loop {
+            let infos = manager.list().await;
+            if infos.iter().all(|info| info.status != JobStatus::Running) {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "jobs did not finish in time"
+            );
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        let mut tracked = 0;
+        for id in &ids {
+            if manager.exists(*id).await {
+                tracked += 1;
+            }
+        }
+        assert!(
+            tracked <= 2,
+            "finished jobs beyond the cap must be evicted once observed, still tracked: {tracked}"
         );
     }
 

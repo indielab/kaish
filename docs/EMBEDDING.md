@@ -878,9 +878,12 @@ the job stays tracked with its result and output until reaped, so a killed
 job is still distinguishable from one that never existed, and `wait %N` still
 returns its result (GH #244). `kill %N` waits for the job to actually unwind
 (bounded by `kill_grace` + 3s) before exiting 0; `kill --no-wait %N` returns
-at dispatch. The `JobManager` keeps at most 100 finished jobs (oldest evicted
-first; gated jobs never evicted) — tune with
-`JobManager::set_finished_retention`.
+at dispatch. The `JobManager` keeps at most 100 finished jobs — enforced at
+registration and whenever completion is observed (`list`, `wait`); oldest
+evicted first, gated jobs never evicted — tune with
+`JobManager::set_finished_retention`. A session that registers jobs and then
+never calls anything holds what it registered; there is no background
+sweeper.
 
 `JobId`/`JobStatus`/`JobInfo` (`kaish-types`) implement `Serialize`/
 `Deserialize` (plus `schemars::JsonSchema` behind the `schema` feature), so an
