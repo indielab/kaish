@@ -1153,32 +1153,64 @@ impl ExecContext {
     /// swallowed: an operator who subscribed asked for a complete record, and
     /// an operation that ran outside a record the operator believes is
     /// complete is exactly the silent gap the subscription exists to close.
+    ///
+    /// A **deferral** here exits 1, never 2. The gate site classified these
+    /// paths as observed and the chain then declined to auto-grant them,
+    /// which means the filter's registry snapshot and the registry disagree —
+    /// either the subscription was revoked while the command ran, or a
+    /// mismatch between [`SubscriptionFilter::posture`] and stage 1b let a
+    /// record turn into a gate. Reporting it as exit 2 would advertise a
+    /// grantable request for an operation with no permission semantics, and
+    /// hide the disagreement behind a plausible-looking prompt.
     pub(crate) async fn record_observed(
         &mut self,
         operation: KernelOperation,
         command: &str,
         paths: Vec<String>,
     ) -> Result<(), ExecResult> {
+        use kaish_tool_api::ApprovalOutcome;
+
         if paths.is_empty() {
             return Ok(());
         }
-        let resources = paths
+        let resources: Vec<Resource> = paths
             .into_iter()
             .map(|path| Resource::plain(PATH_KIND, path))
             .collect();
-        self.request_gate(
-            operation,
-            resources,
-            "an observe subscription covers these paths",
+        let mut builder = ApprovalRequest::builder(operation.as_str())
+            .risk(operation.risk())
+            .reason("an observe subscription covers these paths")
             // No re-run to advertise: the operation is running now. The hint
             // is display-only, and inventing a command here would put a
             // re-run in the record that nobody is meant to type.
-            String::new(),
-            None,
-        )
-        .await
-        .map(|_| ())
-        .map_err(|result| prefix_error(command, result))
+            .hint("");
+        for resource in resources {
+            builder = builder.resource(resource);
+        }
+        let draft = match builder.build() {
+            Ok(draft) => draft,
+            Err(e) => {
+                return Err(ExecResult::failure(
+                    1,
+                    format!("{command}: could not build the observe record: {e}"),
+                ))
+            }
+        };
+        match self.gate(draft, None).await {
+            ApprovalOutcome::Authorized(_) => Ok(()),
+            ApprovalOutcome::Pending(view) => Err(ExecResult::failure(
+                1,
+                format!(
+                    "{command}: request {} was posted as an observe record and was not granted — \
+                     the subscription that covered these paths is no longer in the registry",
+                    view.id
+                ),
+            )),
+            other => other
+                .proceed()
+                .map(|_| ())
+                .map_err(|result| prefix_error(command, result)),
+        }
     }
 
     /// Request approval for one kernel operation — the single call every
@@ -1689,7 +1721,14 @@ impl ExecContext {
             } else {
                 0
             };
-            let posture = subscriptions.posture(&operation_id, PATH_KIND, display);
+            // Matched on the **resolved** path, recorded under the display
+            // path. A subscription is a scope, and a scope a relative path
+            // could step outside of would not be one — `cd /workspace && tee
+            // secret` must land inside `/workspace/**`. The record still
+            // shows what the operator's command named, because that is what
+            // an auditor reading the log is trying to recognize.
+            let posture =
+                subscriptions.posture(&operation_id, PATH_KIND, &resolved.to_string_lossy());
             let action = decide_mutation_action(
                 trash_enabled,
                 posture.enforces(),

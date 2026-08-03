@@ -201,7 +201,13 @@ impl Tool for Rm {
             let file_size = entry.as_ref().map(|s| s.size);
             let is_dir = entry.as_ref().is_some_and(|s| s.is_dir());
             let is_symlink = entry.as_ref().is_some_and(|s| s.is_symlink());
-            let posture = subscriptions.posture(&operation_id, crate::ledger::PATH_KIND, &path);
+            // Matched on the **resolved** path, recorded under the display
+            // path — see `gate_overwrites` for why the two differ.
+            let posture = subscriptions.posture(
+                &operation_id,
+                crate::ledger::PATH_KIND,
+                &resolved.to_string_lossy(),
+            );
             let action = decide_rm_action(
                 trash_enabled,
                 posture.enforces(),
