@@ -185,11 +185,29 @@ impl BackendDispatcher {
                     None => return Some(virtual_cwd_error(name, &ctx.cwd)),
                 }
             };
-            if resolved.exists() {
-                resolved.to_string_lossy().into_owned()
-            } else {
+            // Kept in sync with kernel.rs::try_execute_external (issue
+            // #229): `exists()` alone isn't enough — a directory or a
+            // non-executable file both "exist" but must fail with the
+            // clean, documented exit-126 class instead of falling through
+            // to `Command::spawn()` and leaking whatever raw OS error comes
+            // back (e.g. "Permission denied (os error 13)" under exit 127).
+            if !resolved.exists() {
                 return Some(ExecResult::failure(127, format!("{}: No such file or directory", name)));
             }
+            if !resolved.is_file() {
+                return Some(ExecResult::failure(126, format!("{}: Is a directory", name)));
+            }
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                let mode = std::fs::metadata(&resolved)
+                    .map(|m| m.permissions().mode())
+                    .unwrap_or(0);
+                if mode & 0o111 == 0 {
+                    return Some(ExecResult::failure(126, format!("{}: Permission denied", name)));
+                }
+            }
+            resolved.to_string_lossy().into_owned()
         } else {
             // PATH from scope only — never OS env (keeps this test-only spawn
             // site in sync with kernel.rs::try_execute_external).
@@ -910,6 +928,73 @@ mod external_process_tests {
              later killpg reaches it and any of its own children), matching \
              production (kernel.rs::try_execute_external); got pid={pid} \
              pgid={pgid}"
+        );
+    }
+
+    /// GH #229: `try_external`'s path-with-slash branch checked only
+    /// `resolved.exists()` before spawning, diverging from production
+    /// (`kernel.rs::try_execute_external`), which additionally checks
+    /// `is_file()` (exit 126 "Is a directory") and the Unix executable bit
+    /// (exit 126 "Permission denied"). Spawning a directory through this
+    /// test-only dispatcher used to fall through to `Command::spawn()`,
+    /// which fails with a raw OS error (mapped to exit 127 here, "{name}:
+    /// {e}") instead of the clean, documented exit-126 class production
+    /// gives every `kernel.execute()` test.
+    #[tokio::test]
+    async fn path_with_slash_to_a_directory_is_126_not_a_leaked_os_error() {
+        let (dispatcher, mut ctx, dir) = real_cwd_dispatcher();
+        std::fs::create_dir(dir.path().join("adir")).expect("mkdir");
+
+        let cmd = Command { name: "./adir".to_string(), args: vec![], redirects: vec![] };
+        let result = dispatcher.dispatch(&cmd, &mut ctx).await.expect("dispatch");
+
+        assert_eq!(
+            result.code, 126,
+            "spawning a directory must report the clean 'Is a directory' class \
+             (matching kernel.rs::try_execute_external), not leak whatever raw \
+             OS spawn error Command::spawn() happens to produce: {:?}",
+            result
+        );
+        assert!(
+            result.err.contains("Is a directory"),
+            "err should name the reason: {}",
+            result.err
+        );
+    }
+
+    /// GH #229 companion: a resolved-but-non-executable regular file must
+    /// report exit 126 "Permission denied", matching production's Unix mode
+    /// check. Pre-fix, this dispatcher had no mode check at all and fell
+    /// through to `Command::spawn()`, leaking whatever raw OS error resulted
+    /// instead of the clean exit-126 class. The mode check reads the file's
+    /// own permission bits directly (not an effective-permission check via
+    /// the OS), so this is deterministic even when the test runs as root.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn path_with_slash_to_a_non_executable_file_is_126_not_a_leaked_os_error() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let (dispatcher, mut ctx, dir) = real_cwd_dispatcher();
+        let file_path = dir.path().join("not_executable");
+        std::fs::write(&file_path, b"#!/bin/sh\necho hi\n").expect("write file");
+        let mut perms = std::fs::metadata(&file_path).expect("metadata").permissions();
+        perms.set_mode(0o644); // no exec bits, regardless of effective uid
+        std::fs::set_permissions(&file_path, perms).expect("chmod");
+
+        let cmd = Command { name: "./not_executable".to_string(), args: vec![], redirects: vec![] };
+        let result = dispatcher.dispatch(&cmd, &mut ctx).await.expect("dispatch");
+
+        assert_eq!(
+            result.code, 126,
+            "a non-executable file must report the clean 'Permission denied' \
+             class (matching kernel.rs::try_execute_external), not leak a raw \
+             OS spawn error: {:?}",
+            result
+        );
+        assert!(
+            result.err.contains("Permission denied"),
+            "err should name the reason: {}",
+            result.err
         );
     }
 }
