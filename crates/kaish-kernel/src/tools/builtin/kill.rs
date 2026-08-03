@@ -73,6 +73,14 @@ struct KillArgs {
     #[arg(long, conflicts_with = "signal")]
     discard: bool,
 
+    /// Return as soon as the termination is dispatched instead of waiting
+    /// for the job to exit. By default kill waits (bounded by the kernel's
+    /// kill grace plus 3 seconds) so exit 0 means the job is dead; with
+    /// --no-wait exit 0 only means the signal went out, and the job stays
+    /// visible in jobs until it unwinds.
+    #[arg(long)]
+    no_wait: bool,
+
     #[command(flatten)]
     global: GlobalFlags,
 
@@ -148,6 +156,7 @@ impl Tool for Kill {
         // Kept separate so mixing the two forms can be flagged as ambiguous
         // instead of silently preferring one.
         let mut discard = false;
+        let mut no_wait = false;
         let mut explicit_signal: Option<String> = None;
         let mut shorthand_signal: Option<String> = None;
         let mut targets: Vec<Value> = Vec::new();
@@ -182,6 +191,7 @@ impl Tool for Kill {
                     // to do here but recognize and skip it, not error.
                     "--json" => {}
                     "--discard" => discard = true,
+                    "--no-wait" => no_wait = true,
                     "-s" | "--signal" => {
                         i += 1;
                         let Some(next) = args.positional.get(i) else {
@@ -241,6 +251,14 @@ impl Tool for Kill {
                     .to_string(),
             );
         }
+        if discard && no_wait {
+            return ExecResult::failure(
+                2,
+                "kill: --discard cannot be combined with --no-wait — discarding a gate \
+                 is immediate; there is nothing to wait for"
+                    .to_string(),
+            );
+        }
         if explicit_signal.is_some() && shorthand_signal.is_some() {
             return ExecResult::failure(
                 2,
@@ -279,7 +297,7 @@ impl Tool for Kill {
                 }
             };
 
-            let result = kill_one(ctx, &target_str, &signal_name, discard).await;
+            let result = kill_one(ctx, &target_str, &signal_name, discard, no_wait).await;
             if result.code != 0 {
                 any_failed = true;
             }
@@ -314,6 +332,7 @@ async fn kill_one(
     target_str: &str,
     signal_name: &str,
     discard: bool,
+    no_wait: bool,
 ) -> ExecResult {
     // Job reference `%N` — kaish-level job control, available in every build.
     if let Some(job_num) = target_str.strip_prefix('%') {
@@ -353,11 +372,96 @@ async fn kill_one(
                 "kill: discarded the pending approval request for job {job_id}"
             ));
         }
-        return kill_job(&manager, job_id, signal_name).await;
+        // A job that already finished keeps its entry (and result) until
+        // reaped — a second kill is a clean no-op that says so, keeping the
+        // MCP surface idempotent: before GH #244, "I killed job 1" and
+        // "job 1 never existed" both answered `job 1 not found`.
+        if let Some(status) = already_finished(&manager, job_id).await {
+            return ExecResult::success(format!(
+                "kill: job {job_id} already finished ({status})"
+            ));
+        }
+        return kill_job(&manager, job_id, signal_name, no_wait).await;
     }
 
     // Bare PID — signalling an OS process needs the subprocess capability.
     kill_pid(target_str, signal_name)
+}
+
+/// The job's status string if it has already unwound (its result is cached),
+/// `None` while it is still running/stopped or does not exist.
+async fn already_finished(manager: &JobManager, job_id: JobId) -> Option<String> {
+    if manager.try_result(job_id).await.is_some() {
+        manager.get_status_string(job_id).await
+    } else {
+        None
+    }
+}
+
+/// Terminate a running job and confirm the death: flag it killed (so its
+/// terminal status reads `killed:{code}`, not `failed:{code}`), trip the
+/// cancellation cascade, and — unless `--no-wait` — wait for the job to
+/// actually unwind, so exit 0 means "dead", never "signal dispatched"
+/// (GH #244). The job entry, its result, and its output all stay tracked
+/// until reaped (`jobs --cleanup`, the REPL prompt, or retention).
+///
+/// `delivered` says whether a real OS signal already went out via `killpg` —
+/// in that case a missing cancellation token is not an error (the wrapper
+/// task unwinds when its children die); with no delivery and no token there
+/// is nothing to kill with, and that fails loud.
+async fn terminate_and_confirm(
+    manager: &JobManager,
+    job_id: JobId,
+    no_wait: bool,
+    delivery: &str,
+    delivered: bool,
+) -> ExecResult {
+    // Flag before tripping the token: the job can unwind the instant the
+    // token trips, and a flag set after the fact races the status read.
+    manager.mark_killed(job_id).await;
+    let cancelled = manager.cancel(job_id).await;
+    if !cancelled && !delivered {
+        return ExecResult::failure(
+            1,
+            format!(
+                "kill: job {job_id} has no cancellation token and no process group — \
+                 nothing to deliver {delivery} to"
+            ),
+        );
+    }
+    if no_wait {
+        return ExecResult::success(format!(
+            "kill: job {job_id}: {delivery} dispatched; not awaited (--no-wait) — the \
+             job stays in jobs until it unwinds"
+        ));
+    }
+    // Bound the wait by the cascade's own SIGTERM→SIGKILL grace plus margin:
+    // past that, something is genuinely stuck and kill says so with exit 1
+    // rather than parking forever or guessing.
+    let bound = manager.kill_grace() + std::time::Duration::from_secs(3);
+    match tokio::time::timeout(bound, manager.wait(job_id)).await {
+        Ok(Some(_)) => {
+            let status = manager
+                .get_status_string(job_id)
+                .await
+                .unwrap_or_else(|| "killed".to_string());
+            ExecResult::success(format!("kill: job {job_id} exited ({status})"))
+        }
+        Ok(None) => ExecResult::failure(
+            1,
+            format!(
+                "kill: job {job_id}: {delivery} dispatched, but the job is stopped or no \
+                 longer tracked — resume it (bg %{job_id}) or check jobs"
+            ),
+        ),
+        Err(_) => ExecResult::failure(
+            1,
+            format!(
+                "kill: job {job_id}: {delivery} dispatched, but the job has not exited \
+                 after {bound:?} — check jobs; wait %{job_id} returns its result when it dies"
+            ),
+        ),
+    }
 }
 
 /// Classify a signal as terminating (unwinds the job) vs. non-terminating,
@@ -393,15 +497,18 @@ fn signal_is_terminating(name: &str) -> Option<bool> {
 /// Terminate a kaish job by its cancellation token. No OS-signal support, so
 /// only terminating signals are honoured; anything else is refused loudly.
 #[cfg(not(all(unix, feature = "subprocess")))]
-async fn kill_job(manager: &JobManager, job_id: JobId, signal_name: &str) -> ExecResult {
+async fn kill_job(
+    manager: &JobManager,
+    job_id: JobId,
+    signal_name: &str,
+    no_wait: bool,
+) -> ExecResult {
     match signal_is_terminating(signal_name) {
         Some(true) => {
-            if manager.cancel(job_id).await {
-                manager.remove(job_id).await;
-                ExecResult::success("")
-            } else {
-                ExecResult::failure(1, format!("kill: job {job_id} not found"))
+            if !manager.exists(job_id).await {
+                return ExecResult::failure(1, format!("kill: job {job_id} not found"));
             }
+            terminate_and_confirm(manager, job_id, no_wait, "termination", false).await
         }
         Some(false) => ExecResult::failure(
             1,
@@ -431,7 +538,12 @@ fn kill_pid(target: &str, _signal_name: &str) -> ExecResult {
 /// signal — STOP/CONT/USR1/… — is delivered faithfully); falls back to the
 /// cancellation token for pure in-process jobs (which can only be terminated).
 #[cfg(all(unix, feature = "subprocess"))]
-async fn kill_job(manager: &JobManager, job_id: JobId, signal_name: &str) -> ExecResult {
+async fn kill_job(
+    manager: &JobManager,
+    job_id: JobId,
+    signal_name: &str,
+    no_wait: bool,
+) -> ExecResult {
     use nix::sys::signal::Signal;
 
     let signal = match parse_signal(signal_name) {
@@ -441,6 +553,13 @@ async fn kill_job(manager: &JobManager, job_id: JobId, signal_name: &str) -> Exe
     let terminating = matches!(
         signal,
         Signal::SIGTERM | Signal::SIGKILL | Signal::SIGINT | Signal::SIGHUP | Signal::SIGQUIT
+    );
+    if !manager.exists(job_id).await {
+        return ExecResult::failure(1, format!("kill: job {job_id} not found"));
+    }
+    let stopped = matches!(
+        manager.get(job_id).await.map(|info| info.status),
+        Some(crate::scheduler::JobStatus::Stopped)
     );
 
     // Real process group(s) recorded for the job — deliver the signal directly.
@@ -453,27 +572,47 @@ async fn kill_job(manager: &JobManager, job_id: JobId, signal_name: &str) -> Exe
                 last_err = Some(e);
             }
         }
-        // A terminating signal also unwinds the wrapping task and drops the job.
-        if terminating {
-            manager.cancel(job_id).await;
-            manager.remove(job_id).await;
+        if let Some(e) = last_err {
+            return ExecResult::failure(1, format!("kill: {e}"));
         }
-        return match last_err {
-            Some(e) => ExecResult::failure(1, format!("kill: {e}")),
-            None => ExecResult::success(""),
-        };
+        let groups = pgids
+            .iter()
+            .map(u32::to_string)
+            .collect::<Vec<_>>()
+            .join(", ");
+        // A stopped (Ctrl-Z) job cannot act on a termination while it is
+        // suspended — the signal sits pending forever — so, like bash, kill
+        // follows it with SIGCONT. There is no result to persist either (a
+        // stopped foreground job has no result channel; its entry would read
+        // "stopped" forever), so this is the one kill that still untracks
+        // the job (GH #244 scoped stopped/TTY jobs out of the persist rule).
+        if terminating && stopped {
+            let cont = nix::unistd::Pid::from_raw(pgids[0] as i32);
+            // Error intentionally ignored: the group may already have died
+            // on the first signal, and CONT is only the wake-up nudge.
+            let _ = nix::sys::signal::killpg(cont, Signal::SIGCONT);
+            manager.remove(job_id).await;
+            return ExecResult::success(format!(
+                "kill: job {job_id} (stopped): delivered {signal} and CONT to \
+                 process group(s) {groups}; job untracked"
+            ));
+        }
+        // A terminating signal also unwinds the wrapping task; the job entry
+        // stays, with its result and output, until reaped (GH #244).
+        if terminating {
+            let delivery = format!("{signal} to process group(s) {groups}");
+            return terminate_and_confirm(manager, job_id, no_wait, &delivery, true).await;
+        }
+        return ExecResult::success(format!(
+            "kill: job {job_id}: delivered {signal} to process group(s) {groups}"
+        ));
     }
 
     // No process group — a pure in-process job (e.g. `sleep &`, a kaish builtin)
     // or an external whose PGID hasn't registered yet. The cancellation token is
     // the only lever; it can stop the job but not deliver an arbitrary signal.
     if terminating {
-        if manager.cancel(job_id).await {
-            manager.remove(job_id).await;
-            ExecResult::success("")
-        } else {
-            ExecResult::failure(1, format!("kill: job {job_id} not found"))
-        }
+        terminate_and_confirm(manager, job_id, no_wait, "termination", false).await
     } else {
         ExecResult::failure(
             1,

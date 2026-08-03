@@ -7,7 +7,7 @@
 //! └── {job_id}/
 //!     ├── stdout   ← live output stream (ring buffer snapshot)
 //!     ├── stderr   ← live error stream
-//!     ├── status   ← "running" | "done:0" | "failed:1"
+//!     ├── status   ← "running" | "stopped" | "done:0" | "gated" | "killed:N" | "failed:N"
 //!     └── command  ← the original command string
 //! ```
 //!
@@ -28,7 +28,7 @@ use crate::scheduler::{JobId, JobManager};
 /// - List root to see all job IDs as directories
 /// - Read `{id}/stdout` for live stdout output
 /// - Read `{id}/stderr` for live stderr output
-/// - Read `{id}/status` for job status ("running", "done:0", "failed:N")
+/// - Read `{id}/status` for job status ("running", "stopped", "done:0", "gated", "killed:N", "failed:N")
 /// - Read `{id}/command` for the original command string
 pub struct JobFs {
     jobs: Arc<JobManager>,

@@ -844,7 +844,7 @@ job state:
 ├── 1/
 │   ├── stdout    # Captured stdout (bounded)
 │   ├── stderr    # Captured stderr (bounded)
-│   ├── status    # "running", "done:0", "gated", or "failed:N"
+│   ├── status    # "running", "stopped", "done:0", "gated", "killed:N", or "failed:N"
 │   ├── command   # Original command string
 │   └── approval  # Pending approval request (JSON) if gated, else empty
 ├── 2/
@@ -871,14 +871,22 @@ every one of those surfaces reports the same correlation. An embedder fulfills
 the backgrounded gate with `Kernel::confirm(&handle, &id)` — the
 same API as a foreground gate.
 
-The status strings are exactly `running`, `done:0`, and `failed:{code}` —
-match on those, not on `completed`.
+The status strings are exactly `running`, `stopped`, `done:0`, `gated`,
+`killed:{code}`, and `failed:{code}` — match on those, not on `completed`.
+`killed:{code}` marks a job terminated by `kill %N` (or an embedder cancel):
+the job stays tracked with its result and output until reaped, so a killed
+job is still distinguishable from one that never existed, and `wait %N` still
+returns its result (GH #244). `kill %N` waits for the job to actually unwind
+(bounded by `kill_grace` + 3s) before exiting 0; `kill --no-wait %N` returns
+at dispatch. The `JobManager` keeps at most 100 finished jobs (oldest evicted
+first; gated jobs never evicted) — tune with
+`JobManager::set_finished_retention`.
 
 `JobId`/`JobStatus`/`JobInfo` (`kaish-types`) implement `Serialize`/
 `Deserialize` (plus `schemars::JsonSchema` behind the `schema` feature), so an
 embedder can serialize `JobManager::list()`/`get()` output directly rather
 than hand-rolling a mirror struct. `JobStatus`'s wire spelling under
-serde is lowercase (`"running"`/`"stopped"`/`"done"`/`"gated"`/`"failed"`),
+serde is lowercase (`"running"`/`"stopped"`/`"done"`/`"gated"`/`"killed"`/`"failed"`),
 matching the `/v/jobs/N/status` text vocabulary above — not the capitalized
 `Display` impl used for human-facing text (the `jobs` table). `JobInfo` also
 carries `exit_code: Option<i64>` (set once the job finishes), `started_at` /

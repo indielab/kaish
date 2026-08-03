@@ -157,7 +157,8 @@ const CASES: &[Case] = &[
     Case { name: "kaish-version", setup: &[], cmd: "kaish-version --json", expect: Expect::String },
     Case { name: "kaish-vfs", setup: &[], cmd: "kaish-vfs status --json", expect: Expect::Array },
     Case { name: "keys", setup: &["u=$(fromjson '{\"a\":1,\"b\":2}')"], cmd: "keys $u --json", expect: Expect::Array },
-    Case { name: "kill", setup: &["sleep 5 &"], cmd: "kill %1 --json", expect: Expect::Empty },
+    // GH #244: kill confirms the death and says so — no longer an empty success.
+    Case { name: "kill", setup: &["sleep 5 &"], cmd: "kill %1 --json", expect: Expect::String },
     Case { name: "ln", setup: &[], cmd: "ln -s tmp/data.json link2.json --json", expect: Expect::Empty },
     Case { name: "ls", setup: &[], cmd: "ls src --json", expect: Expect::Array },
     Case { name: "mkdir", setup: &[], cmd: "mkdir newdir --json", expect: Expect::Empty },

@@ -36,7 +36,7 @@ async fn wait_for_job(kernel: &Kernel, job_id: u64, timeout: Duration) -> String
         let text = result.text_out();
         let status = text.trim();
 
-        if status.starts_with("done:") || status.starts_with("failed:") {
+        if status.starts_with("done:") || status.starts_with("failed:") || status.starts_with("killed:") {
             return status.to_string();
         }
 
@@ -470,38 +470,115 @@ async fn wait_propagates_background_job_failure() {
     );
 }
 
-/// `kill %N` removes the job from the table, so a subsequent `wait %N` reports
-/// it gone (exit 1, "not found") rather than hanging or succeeding silently.
+/// GH #244: `kill %N` no longer deletes the job — it stays tracked with its
+/// cached result, so a subsequent `wait %N` returns that result (the
+/// cancellation exit, 130) instead of "not found". Before this, "I killed
+/// job 1" and "job 1 never existed" were indistinguishable.
 /// Pure kaish job control — works in hermetic builds (no `subprocess`).
 #[tokio::test]
-async fn wait_after_kill_reports_job_gone() {
+async fn wait_after_kill_returns_the_cached_result() {
     let kernel = setup().await;
     let killed = kernel.execute("sleep 30 & kill %1").await.expect("execute");
     assert_eq!(killed.code, 0, "kill %1 should succeed: {}", killed.err);
 
     let waited = kernel.execute("wait %1").await.expect("execute");
-    assert!(!waited.ok(), "wait on a killed job must fail");
     assert!(
-        waited.err.contains("not found"),
-        "expected job-not-found, got: {}",
+        !waited.err.contains("not found"),
+        "a killed job must stay addressable, got: {}",
         waited.err
+    );
+    assert_eq!(waited.code, 1, "the killed job did not finish its work");
+    assert!(
+        waited.text_out().contains("[1] Killed"),
+        "wait names the kill, not a generic failure: {}",
+        waited.text_out()
     );
 }
 
-/// Phase 1: `kill %N` stops a pure-builtin background job (no OS process
-/// group) via its cancellation token, and removes it from the table. This is
-/// kernel-level job control: it works in **every** build, hermetic included.
+/// Phase 1 + GH #244: `kill %N` stops a pure-builtin background job (no OS
+/// process group) via its cancellation token, confirms the death (exit 0 means
+/// dead, and the output says so), and keeps the job tracked with terminal
+/// status `Killed`. A second kill is an idempotent no-op that names the
+/// status. This is kernel-level job control: it works in **every** build,
+/// hermetic included.
 #[tokio::test]
 async fn kill_terminates_builtin_background_job() {
     let kernel = setup().await;
-    // Background a long builtin sleep, then kill it. The kill must succeed and
-    // drop the job — a follow-up kill reports it gone.
     let r = kernel.execute("sleep 30 & kill %1").await.expect("execute");
     assert_eq!(r.code, 0, "kill %1 of a builtin job should succeed: {}", r.err);
+    let out = r.text_out();
+    assert!(
+        out.contains("exited") && out.contains("killed:130"),
+        "kill must confirm the death and name the status, got: {out}"
+    );
 
+    // The job survives the kill: `jobs` shows it as Killed until reaped.
+    let jobs = kernel.execute("jobs").await.expect("execute");
+    assert!(
+        jobs.text_out().contains("Killed"),
+        "killed job must stay listed with Killed status, got: {}",
+        jobs.text_out()
+    );
+
+    // Second kill: clean idempotent no-op, distinguishable from "never existed".
     let again = kernel.execute("kill %1").await.expect("execute");
-    assert!(!again.ok(), "job should be gone after kill");
-    assert!(again.err.contains("not found"), "got: {}", again.err);
+    assert_eq!(again.code, 0, "second kill is a no-op, got: {}", again.err);
+    assert!(
+        again.text_out().contains("already finished (killed:130)"),
+        "second kill names the terminal status, got: {}",
+        again.text_out()
+    );
+}
+
+/// GH #244: `/v/jobs/N/status` reports `killed:{code}` for a killed job —
+/// the status file vocabulary distinguishes a kill from an organic failure.
+#[tokio::test]
+async fn v_jobs_status_reports_killed() {
+    let kernel = setup().await;
+    let r = kernel.execute("sleep 30 & kill %1").await.expect("execute");
+    assert_eq!(r.code, 0, "kill should succeed: {}", r.err);
+    let status = kernel.execute("cat /v/jobs/1/status").await.expect("execute");
+    assert_eq!(status.text_out().trim(), "killed:130", "err: {}", status.err);
+}
+
+/// GH #244: `kill --no-wait %N` returns as soon as the termination is
+/// dispatched; the job unwinds asynchronously and lands on `Killed`.
+#[tokio::test]
+async fn kill_no_wait_dispatches_without_confirming() {
+    let kernel = setup().await;
+    let r = kernel
+        .execute("sleep 30 & kill --no-wait %1")
+        .await
+        .expect("execute");
+    assert_eq!(r.code, 0, "kill --no-wait should succeed: {}", r.err);
+    assert!(
+        r.text_out().contains("not awaited"),
+        "--no-wait must say the death was not confirmed, got: {}",
+        r.text_out()
+    );
+    // The job still dies — poll until the status lands on killed.
+    let status = wait_for_job(&kernel, 1, Duration::from_secs(5)).await;
+    assert_eq!(status, "killed:130");
+}
+
+/// GH #252: `/v/jobs/N/status` reports `stopped` for a Ctrl-Z-stopped job.
+/// `Job::status()` had the stopped check; the string twin backing the VFS
+/// node didn't, and a stopped job has no result channel, so `try_poll` can
+/// never resolve it — it read `running` forever.
+#[tokio::test]
+async fn v_jobs_status_reports_stopped() {
+    let kernel = setup().await;
+    // A stopped job comes from Ctrl-Z on a TTY, which a test has no access
+    // to — register one through the same manager entry point the reaper uses.
+    let id = kernel
+        .jobs()
+        .register_stopped("sleep 30".to_string(), 4242, 4242)
+        .await;
+    let status = kernel
+        .execute(&format!("cat /v/jobs/{id}/status"))
+        .await
+        .expect("execute");
+    assert_eq!(status.text_out().trim(), "stopped", "err: {}", status.err);
 }
 
 /// A non-terminating signal to a pure-builtin job is refused loudly (there is

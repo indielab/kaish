@@ -1146,6 +1146,8 @@ Cascade rules:
 
 When `kill %N` targets external processes it signals their **process group**, so shell wrappers like `bash -c '...'` do not protect their grandchildren. SIGTERM-trapping processes are escalated to SIGKILL after `kill_grace`.
 
+`kill %N` confirms the death: it waits (bounded by `kill_grace` + 3 seconds) for the job to actually unwind, so exit 0 means the job is dead, and the output names the terminal status (`kill: job 1 exited (killed:130)`). `kill --no-wait %N` returns as soon as the signal is dispatched. The killed job **stays in `jobs`** with status `Killed` and its result/output intact until reaped (`jobs --cleanup`, or automatically at the next REPL prompt) — so `wait %N` after a kill returns the job's result, and a second `kill %N` is a clean no-op naming the status rather than `not found`. A stopped (Ctrl-Z) job is the exception: it has no result to keep, so a terminating kill delivers the signal plus `CONT` (a suspended process cannot act on a pending signal) and untracks it.
+
 ## Virtual Filesystem
 
 VFS mounts provide unified resource access:

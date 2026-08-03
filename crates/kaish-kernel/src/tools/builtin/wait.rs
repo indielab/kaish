@@ -89,7 +89,11 @@ impl Tool for Wait {
 
                 match manager.wait(id).await {
                     Some(result) => {
-                        let status = classify(&result, &mut any_failed, &mut held);
+                        let killed = matches!(
+                            manager.get(id).await.map(|info| info.status),
+                            Some(crate::scheduler::JobStatus::Killed)
+                        );
+                        let status = classify(&result, killed, &mut any_failed, &mut held);
                         output.push_str(&format!("[{}] {}\n", id, status));
                     }
                     // `wait` returns None for a missing job AND for a stopped
@@ -124,7 +128,11 @@ impl Tool for Wait {
             let mut held: Option<ApprovalRequestView> = None;
 
             for (id, result) in results {
-                let status = classify(&result, &mut any_failed, &mut held);
+                let killed = matches!(
+                    manager.get(id).await.map(|info| info.status),
+                    Some(crate::scheduler::JobStatus::Killed)
+                );
+                let status = classify(&result, killed, &mut any_failed, &mut held);
                 output.push_str(&format!("[{}] {}\n", id, status));
             }
 
@@ -147,6 +155,7 @@ impl Tool for Wait {
 /// cannot drift.
 fn classify(
     result: &ExecResult,
+    killed: bool,
     any_failed: &mut bool,
     held: &mut Option<ApprovalRequestView>,
 ) -> &'static str {
@@ -160,7 +169,13 @@ fn classify(
         "Gated"
     } else {
         *any_failed = true;
-        "Failed"
+        // A kill is not an organic failure — say so (GH #244). The exit code
+        // still aggregates as a failure: the waited-on work did not finish.
+        if killed {
+            "Killed"
+        } else {
+            "Failed"
+        }
     }
 }
 
