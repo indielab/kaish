@@ -17,6 +17,7 @@ use std::path::Path;
 use crate::ast::Value;
 use crate::backend::PatchOp;
 use crate::interpreter::{ExecResult, OutputData};
+use crate::ledger::KernelOperation;
 use crate::tools::builtin::get_path_string;
 use crate::tools::{schema_from_clap, ExecContext, ToolCtx, GlobalFlags, Tool, ToolArgs, ToolSchema};
 
@@ -43,7 +44,7 @@ struct PatchArgs {
     #[arg(long = "file")]
     file: Option<String>,
 
-    /// Confirmation nonce for a latch-gated overwrite.
+    /// Approval token for a gated overwrite (`--confirm=<token>`).
     #[arg(long = "confirm")]
     confirm: Option<String>,
 
@@ -148,7 +149,7 @@ impl Tool for Patch {
 
         let groups = group_by_file(&hunks);
 
-        // Gate truncating overwrites through latch + trash (no-op when both are
+        // Gate truncating overwrites through approvals + trash (no-op when both are
         // off; skipped for --dry-run, which never writes). patch always rewrites
         // an existing file, so every target is a non-append overwrite; one nonce
         // scopes the whole set of files the diff touches. The snapshot copies
@@ -166,9 +167,13 @@ impl Tool for Patch {
                 })
                 .collect();
             if let Err(blocked) = ctx
-                .gate_overwrites("patch", &targets, parsed.confirm.as_deref(), |nonce, joined| {
-                    format!("patch --confirm=\"{nonce}\" {joined}")
-                })
+                .gate_overwrites(
+                    KernelOperation::FsOverwrite,
+                    "patch",
+                    &targets,
+                    parsed.confirm.as_deref(),
+                    |joined| format!("patch --confirm=<token> {joined}"),
+                )
                 .await
             {
                 return blocked;

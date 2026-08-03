@@ -70,7 +70,7 @@ document uses; it does not use synonyms for them.
 **`latch` and `nonce` retire with the mechanism.** A latch is now a request in the
 `Requested` state; a nonce is now a name plus a key. Two spellings of the retired word
 survive, because the §F.2 rename table is the whole break and does not reach them: the
-shell option `set -o latch`, and `JobStatus::Latched`, whose wire spelling `"latched"` is
+shell option (now `set -o approvals`), and `JobStatus::Gated` (wire spelling `"gated"`), which is
 pinned. §I asks whether they should change. PR 9 updates the Terms tables in `CLAUDE.md`
 and `README.md` to match this one.
 
@@ -970,7 +970,7 @@ ledger must not tax it by default.
   evictable (§B.2). It needs no new state-machine surface — the `Grounds` variant, the subscription registry, and the fast-path filter are
   the whole feature.
 - **`enforce`** — matching operations go through the real decision chain (§C.2). This is
-  what `set -o latch` becomes: an enforce subscription over `fs.*`. The cutover (§H, PR 5)
+  what `set -o approvals` becomes: an enforce subscription over `fs.*`. The cutover (§H, PR 5)
   ships exactly that one degenerate case — whole namespace, no glob, no `observe` — because
   it is what replaces the flag. Glob scoping, `observe`, and the registry generalize it
   afterwards.
@@ -1501,11 +1501,11 @@ reader who knows the latch can find the concept they are looking for.
 | Latch concept | Ledger concept |
 |---|---|
 | `NonceStore` | `Ledger` (record) + kernel-internal credential index (§A.2) |
-| nonce (8 hex, identity + secret + record) | `RequestId` (name, public) + `Token` (key, 128-bit CSPRNG, kernel-held) |
+| nonce (32 lowercase hex since kaish #259, identity + secret + record) | `RequestId` (name, public) + `Token` (key, 128-bit CSPRNG, kernel-held) |
 | `NonceScope { command, paths }` | `ApprovalRequest { operation, resources }` |
 | subset-of-paths validation | resource-set match + per-resource conditions |
-| `set -o latch` | an enforce policy over the whole `fs.*` namespace, which §C.5 later generalizes to a subscription |
-| `set +o latch` | removing that policy — refused under a pin (§F.3) |
+| `set -o latch` | `set -o approvals` — an enforce policy over the whole `fs.*` namespace, which §C.5 later generalizes to a subscription |
+| `set +o latch` | `set +o approvals` — removing that policy, refused under a pin (§F.3) |
 | `kaish-trash empty`'s unconditional gate | an always-enforced operation, independent of any subscription |
 | `latch_result` | `ctx.request_approval` (kernel-internal helper on top) |
 | `gate_overwrites` | unchanged signature; reimplemented on `request_approval`, with `cas_overwrite`'s snapshot digest becoming a `Condition` |
@@ -1527,7 +1527,9 @@ those is a field above.
 - The control-plane discipline: never folded into `.data`, survives `clear_stdout`,
   survives the `ExecResult`↔`ToolResult` roundtrip, survives `--json`, overrides a later
   pipeline stage's success, rides `scatter`/`gather` rows.
-- `JobStatus::Latched` (the name and the meaning — a held job, distinct from `Failed`).
+- The *meaning* of the held-job status — a job waiting on an unsatisfied gate, distinct
+  from `Failed`. Its **name** changes (see the table below); what does not change is that
+  a held job is never reaped, never reported as `Failed`, and never silently discarded.
 
 **Breaking — one `**BREAKING:**` changelog bullet each:**
 
@@ -1542,6 +1544,8 @@ those is a field above.
 | re-presenting a nonce after success re-ran the operation | a key presented after a successful settlement reports the settled outcome and does not re-execute (§B.4) |
 | `/v/jobs/{id}/latch` | `/v/jobs/{id}/approval` |
 | `JobInfo.latch: Option<LatchRequest>` | `JobInfo.approval: Option<ApprovalRequestView>` |
+| `set -o latch` / `set +o latch` | `set -o approvals` / `set +o approvals` (and `KAISH_LATCH` → `KAISH_APPROVALS`, `KernelConfig::with_latch` → `with_approvals`) |
+| `JobStatus::Latched`, wire `"latched"` | `JobStatus::Gated`, wire `"gated"` |
 
 Keeping `LatchRequest` as a compatibility projection was considered and rejected twice, on
 independent grounds: `LatchRequest` is `#[serde(deny_unknown_fields)]` (`result.rs:72-74`)
@@ -1572,13 +1576,21 @@ rather than a valid key mysteriously not working.
 
 **3. Pinning the policy.** `set +o latch` from script code is the hole that makes the whole
 thing advisory. `Scope.policy_pinned`, seeded from `KernelConfig::with_policy_pinned`, never
-settable from script, copied into forks and pipeline stages exactly where `latch_enabled`
-already is (`kernel.rs:5850-5857`). Disabling an enforce subscription under a pin returns
-**exit 1** with `"approval policy: pinned by the embedder; cannot be disabled from script"`
-— loud, not a silent no-op, because a silent no-op teaches an agent that its `set +o latch`
-worked. The pin covers the `-o`-split fallback path in `set.rs` so the
-flags-versus-positional parse quirk cannot route around it, and it generalizes to any
-script-reachable policy mutation the ledger adds. This was originally planned as a
+settable from script, copied into forks and pipeline stages exactly where the option's own
+flag already is (`kernel.rs:5554-5561`, and `Kernel::reset`). Changing the policy under a
+pin returns **exit 1** with `"approval policy: pinned by the embedder; cannot be disabled
+from script"` — loud, not a silent no-op, because a silent no-op teaches an agent that its
+`set +o approvals` worked. The pin fixes the policy in **both** directions: an embedder that
+pinned the gate off is equally entitled to that decision. It covers the `-o`-split fallback
+path in `set.rs` so the flags-versus-positional parse quirk cannot route around it, and it
+generalizes to any script-reachable policy mutation the ledger adds.
+
+*Found at implementation time:* `set` is a grammar keyword in kaish, so `$(set +o
+approvals)`, `set +o approvals | cat`, and `set +o approvals &` are **parse errors** — three
+of the four shapes this item worried about never reach the builtin at all. That is a
+stronger guarantee than the refusal, but it belongs to the grammar rather than to the pin,
+so the pin still has to hold on its own: if `set` ever becomes an ordinary command those
+shapes start reaching the builtin, and the refusal is what catches them. This was originally planned as a
 standalone PR against `NonceStore`; it moved into the cutover because hardening a structure
 that is about to be deleted is wasted motion (§H).
 
@@ -1598,11 +1610,12 @@ multi-use form, which a reusable key never was.
 **5. Adjacent, not in this design's path.** These are real and tracked in the PR that
 touches them, not blockers here:
 
-- `KAISH_LATCH` / `KAISH_TRASH` are read from `std::env` inside kernel presets
-  (`kernel.rs:339, 455, 490, 518`). The right fix is for the *frontend* to read env and pass
+- `KAISH_APPROVALS` / `KAISH_TRASH` are read from `std::env` inside four kernel presets
+  (`kernel.rs:382, 502, 538, 567`). The right fix is for the *frontend* to read env and pass
   `KernelConfig`; the kernel presets should not touch `std::env`. The direction is safe
-  today (env can only turn the gate on), but the hermeticity claim in `EMBEDDING.md:337-345`
-  is inexact and should be fixed or footnoted when the cutover rewrites those presets.
+  today (env can only turn a rail on), and the cutover footnoted the hermeticity claim in
+  `EMBEDDING.md`'s "Initial Variables and Hermetic Subprocess Env" section rather than
+  leaving it silently inexact. Moving the reads out to the frontend is still open.
 - `--confirm` has no schema-level marker, so a policy engine cannot discover gateable
   operations from `tools --json`. Under the ledger the discoverable thing is the *operation
   taxonomy*, not the flag — add `ToolSchema.operations: Vec<OperationId>` so `tools --json`
@@ -1782,8 +1795,9 @@ One PR, no compatibility step. Delete `NonceStore` and `NonceScope` and every la
 Reimplement `latch_result`, `gate_overwrites`, `rm`'s `decide_rm_action`, and `kaish-trash
 empty` on `request_approval` — ten gate sites, rewritten in ledger vocabulary. Apply the
 §F.2 rename table across `ExecResult`, `JobInfo`, the `--json` envelope, and the VFS path.
-`set -o latch` becomes the whole-namespace `fs.*` enforce policy (no glob, no `observe` —
-those are PR 8); `set +o latch` removes it and is refused under a pin. Land
+`set -o latch` becomes `set -o approvals`, the whole-namespace `fs.*` enforce policy (no
+glob, no `observe` — those are PR 8); `set +o approvals` removes it and is refused under a
+pin. `JobStatus::Latched` becomes `JobStatus::Gated` (wire `"gated"`). Land
 `Kernel::confirm(&handle, &id)` here — this is the first PR with something to replay — along
 with `RedemptionContext` correlation and the `Capture` status, so replay stops substituting
 an empty argv. Carry the §F.3 hardening that belongs with the cutover: the policy pin, and
@@ -1906,11 +1920,14 @@ permanent home.
    Privacy and retention of captured argv and resource names, which can carry secrets into
    a sink. Tenant isolation if a ledger is ever shared across principals that should not
    read each other's records.
-4. **The two surviving spellings of the retired word.** `set -o latch` (the shell option)
-   and `JobStatus::Latched` (wire spelling `"latched"`, pinned) keep a word the rest of the
-   design drops (§0, Vocabulary). Neither is in the §F.2 rename table, so neither changes
-   in the cutover; renaming either is its own breaking change with its own migration, and
-   nobody has decided to.
+4. ~~**The two surviving spellings of the retired word.**~~ **Resolved 2026-08-02 (Amy):
+   the latch is completely retired — the ledger gets its own grammar in code, docs, and
+   help text.** `set -o latch` becomes `set -o approvals` (with `KAISH_LATCH` →
+   `KAISH_APPROVALS` and `KernelConfig::with_latch` → `with_approvals`), and
+   `JobStatus::Latched` becomes `JobStatus::Gated` with the wire spelling `"gated"`. Both
+   rows are in the §F.2 rename table and both land in the cutover (PR 5). What does **not**
+   change: exit code **2**, the `--confirm=<token>` flag spelling, and `Kernel::confirm` —
+   "confirm" is not latch vocabulary. `trash` is untouched.
 
 **Resolved during the redraft, recorded in the body rather than here**, so they are not
 re-litigated from the reviews: whether an ungated `fs.*` operation posts at all — no, the

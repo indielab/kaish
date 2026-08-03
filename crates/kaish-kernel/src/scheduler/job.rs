@@ -207,10 +207,10 @@ impl Job {
         self.try_poll();
         match &self.result {
             Some(r) if r.ok() => JobStatus::Done,
-            // A gated destructive op (exit 2 with a stored latch) is *held*,
-            // not failed — surface it distinctly so `Kernel::confirm` can
-            // still fulfill it (GH #96).
-            Some(r) if r.latch_request().is_some() => JobStatus::Latched,
+            // A gated destructive op (exit 2 with a stored approval
+            // request) is *held*, not failed — surface it distinctly so
+            // `Kernel::confirm` can still fulfill it (GH #96).
+            Some(r) if r.approval_request().is_some() => JobStatus::Gated,
             Some(_) => JobStatus::Failed,
             None => JobStatus::Running,
         }
@@ -221,34 +221,31 @@ impl Job {
     /// Returns:
     /// - `"running"` if the job is still running
     /// - `"done:0"` if the job completed successfully
-    /// - `"latched"` if the job is blocked on an unfulfilled confirmation latch
+    /// - `"gated"` if the job is held on an unsatisfied approval gate
     /// - `"failed:{code}"` if the job failed with an exit code
     pub fn status_string(&mut self) -> String {
         self.try_poll();
         match &self.result {
             Some(r) if r.ok() => "done:0".to_string(),
-            Some(r) if r.latch_request().is_some() => "latched".to_string(),
+            Some(r) if r.approval_request().is_some() => "gated".to_string(),
             Some(r) => format!("failed:{}", r.code),
             None => "running".to_string(),
         }
     }
 
-    /// The job's pending confirmation-latch request, if it is gated
-    /// (`JobStatus::Latched`). `None` otherwise. Backs `JobInfo.latch` and the
-    /// `/v/jobs/{id}/latch` node so a backgrounded gate is fulfillable (#96).
+    /// The job's pending approval request, if it is held
+    /// (`JobStatus::Gated`). `None` otherwise. Backs `JobInfo.approval` and
+    /// the `/v/jobs/{id}/approval` node so a backgrounded gate is fulfillable
+    /// (#96).
     ///
-    /// Stamps `job_id` with this job's own id (GH #124 part 4) — the ONE
-    /// chokepoint every latch-reading path (`list`/`get`/`get_latch`/
-    /// `is_latched`/`cleanup`) goes through, so `Kernel::confirm` can later
-    /// retire the originating job after a successful replay without every
-    /// caller having to thread the id through separately.
-    pub fn latch(&mut self) -> Option<kaish_types::result::LatchRequest> {
+    /// Reads `job_id` straight off the record rather than stamping it here:
+    /// the request was posted by a fork that already knew which job it ran
+    /// for, so correlation is stamped **once**, at post time. The latch had
+    /// two stamping sites (this chokepoint and `wait`'s own `classify`) and
+    /// they could drift; the ledger has one.
+    pub fn approval(&mut self) -> Option<kaish_types::approval::ApprovalRequestView> {
         self.try_poll();
-        let id = self.id;
-        self.result.as_ref().and_then(|r| r.latch_request()).map(|mut lr| {
-            lr.job_id = Some(id.0);
-            lr
-        })
+        self.result.as_ref().and_then(|r| r.approval_request())
     }
 
     /// Get the stdout stream (if attached).
@@ -429,18 +426,22 @@ impl Job {
         v
     }
 
-    /// Build the full `JobInfo` snapshot for this job. `status`/`latch` are
+    /// Build the full `JobInfo` snapshot for this job. `status`/`approval` are
     /// taken as parameters rather than recomputed here because both require
     /// `&mut self` (they poll) — callers (`list`/`get`/`reap_finished`)
     /// already did that poll to decide reap-safety before calling this. The
     /// single chokepoint that populates every `JobInfo` field (GH #243), so
     /// the three call sites can't drift on which fields they remember to set.
-    fn to_info(&self, status: JobStatus, latch: Option<kaish_types::result::LatchRequest>) -> JobInfo {
+    fn to_info(
+        &self,
+        status: JobStatus,
+        approval: Option<kaish_types::approval::ApprovalRequestView>,
+    ) -> JobInfo {
         let exit_code = self.result.as_ref().map(|r| r.code);
         JobInfo::new(self.id, self.command.clone(), status)
             .with_output_file(self.output_file.clone())
             .with_pid(self.pid)
-            .with_latch(latch)
+            .with_approval(approval)
             .with_exit_code(exit_code)
             .with_started_at(self.started_at)
             .with_finished_at(self.finished_at)
@@ -723,8 +724,8 @@ impl JobManager {
         jobs.values_mut()
             .map(|job| {
                 let status = job.status();
-                let latch = job.latch();
-                job.to_info(status, latch)
+                let approval = job.approval();
+                job.to_info(status, approval)
             })
             .collect()
     }
@@ -744,10 +745,10 @@ impl JobManager {
     /// Remove completed jobs from tracking and clean up their temp files,
     /// returning info for each job removed.
     ///
-    /// A latched job is "done" but its cached result holds the only
-    /// `LatchRequest` for the gated operation — reaping it would silently
-    /// destroy the pending confirmation (GH #96). It stays until confirmed
-    /// or explicitly discarded (`kill --discard %N`).
+    /// A held job is "done" but its cached result holds the only pending
+    /// approval request for the gated operation — reaping it would silently
+    /// destroy the reference an embedder needs to fulfill it (GH #96). It
+    /// stays until confirmed or explicitly discarded (`kill --discard %N`).
     ///
     /// Shared by `jobs --cleanup` (which only needs a count) and the REPL's
     /// pre-prompt notification (GH #131, which needs the id/command/status of
@@ -757,7 +758,7 @@ impl JobManager {
         let mut jobs = self.jobs.lock().await;
         let done_ids: Vec<JobId> = jobs
             .iter_mut()
-            .filter_map(|(id, job)| (job.is_done() && job.latch().is_none()).then_some(*id))
+            .filter_map(|(id, job)| (job.is_done() && job.approval().is_none()).then_some(*id))
             .collect();
 
         let mut removed = Vec::with_capacity(done_ids.len());
@@ -766,8 +767,8 @@ impl JobManager {
                 continue;
             };
             let status = job.status();
-            let latch = job.latch();
-            let info = job.to_info(status, latch);
+            let approval = job.approval();
+            let info = job.to_info(status, approval);
             job.cleanup_files();
             removed.push(info);
         }
@@ -776,7 +777,7 @@ impl JobManager {
 
     /// Remove completed jobs from tracking and clean up their temp files.
     ///
-    /// See [`reap_finished`](Self::reap_finished) for the latch-safety rule;
+    /// See [`reap_finished`](Self::reap_finished) for the gate-safety rule;
     /// this is the count-only form `jobs --cleanup` reports.
     pub async fn cleanup(&self) {
         self.reap_finished().await;
@@ -788,12 +789,14 @@ impl JobManager {
         jobs.contains_key(&id)
     }
 
-    /// Whether the job's cached result is a pending confirmation gate
-    /// (`JobStatus::Latched`). Consumers that would drop the job (`kill`,
-    /// cleanup paths) check this so a latch is never destroyed silently.
-    pub async fn is_latched(&self, id: JobId) -> bool {
+    /// Whether the job's cached result is a pending approval gate
+    /// (`JobStatus::Gated`). Consumers that would drop the job (`kill`,
+    /// cleanup paths) check this so a held request is never destroyed
+    /// silently. Keeps the `gated` spelling the status itself keeps
+    /// (`docs/approval-ledger.md` §F.2).
+    pub async fn is_gated(&self, id: JobId) -> bool {
         let mut jobs = self.jobs.lock().await;
-        jobs.get_mut(&id).is_some_and(|job| job.latch().is_some())
+        jobs.get_mut(&id).is_some_and(|job| job.approval().is_some())
     }
 
     /// Get info for a specific job.
@@ -801,8 +804,8 @@ impl JobManager {
         let mut jobs = self.jobs.lock().await;
         jobs.get_mut(&id).map(|job| {
             let status = job.status();
-            let latch = job.latch();
-            job.to_info(status, latch)
+            let approval = job.approval();
+            job.to_info(status, approval)
         })
     }
 
@@ -818,13 +821,13 @@ impl JobManager {
         jobs.get_mut(&id).map(|job| job.status_string())
     }
 
-    /// Get a gated job's pending confirmation-latch request (for
-    /// `/v/jobs/{id}/latch` and any embedder reaching a backgrounded gate).
-    /// `Some(None)` vs `None` distinguishes "job exists, not latched" from
-    /// "no such job"; jobfs flattens both to an empty node body. GH #96.
-    pub async fn get_latch(&self, id: JobId) -> Option<kaish_types::result::LatchRequest> {
+    /// Get a held job's pending approval request (for
+    /// `/v/jobs/{id}/approval` and any embedder reaching a backgrounded
+    /// gate). `Some(None)` vs `None` distinguishes "job exists, not held"
+    /// from "no such job"; jobfs flattens both to an empty node body. GH #96.
+    pub async fn get_approval(&self, id: JobId) -> Option<kaish_types::approval::ApprovalRequestView> {
         let mut jobs = self.jobs.lock().await;
-        jobs.get_mut(&id).and_then(|job| job.latch())
+        jobs.get_mut(&id).and_then(|job| job.approval())
     }
 
     /// Read stdout stream content for a job.
@@ -971,10 +974,10 @@ impl JobManager {
 
     /// Remove a job from tracking.
     ///
-    /// NOTE: this bypasses the latch guard — a caller that might hit a
-    /// latched job must check [`is_latched`](Self::is_latched) first (see
-    /// the `kill` builtin), or the job's pending confirmation is destroyed
-    /// with it. `cleanup()` is the latch-safe bulk path.
+    /// NOTE: this bypasses the gate guard — a caller that might hit a held
+    /// job must check [`is_gated`](Self::is_gated) first (see the `kill`
+    /// builtin), or the job's pending approval request is destroyed with it.
+    /// `cleanup()` is the gate-safe bulk path.
     pub async fn remove(&self, id: JobId) {
         let mut jobs = self.jobs.lock().await;
         if let Some(mut job) = jobs.remove(&id) {
@@ -1081,36 +1084,34 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn latch_stamps_job_id_back_reference() {
-        // GH #124 part 4: Job::latch() is the ONE chokepoint every latch-reading
-        // path (list/get/get_latch/is_latched/cleanup) goes through, so it must
-        // stamp the job's own id onto the surfaced LatchRequest -- otherwise
-        // Kernel::confirm has no way to know which job to retire after a
-        // successful replay.
+    async fn a_held_jobs_request_carries_its_job_id_from_the_record() {
+        // GH #124 part 4, under the ledger: correlation is stamped ONCE, at
+        // post time, by the fork that already knows which job it runs for.
+        // `Job::approval()` reads it straight off the record — it does not
+        // re-stamp — so `wait` and `jobs` cannot disagree about which job a
+        // held request belongs to.
         let manager = JobManager::new();
 
-        let id = manager.spawn("gated".to_string(), async {
-            let mut result = ExecResult::failure(2, "confirmation required");
-            result.latch = Some(Box::new(kaish_types::result::LatchRequest {
-                nonce: "4b1e0d9a7c3f28e6b5a0c1d4e7f2938a".to_string(),
-                command: "rm".to_string(),
-                paths: vec!["x".to_string()],
-                hint: "rm --confirm=4b1e0d9a7c3f28e6b5a0c1d4e7f2938a x".to_string(),
-                tool: "rm".to_string(),
-                argv: vec!["x".to_string()],
-                ttl: 60,
-                job_id: None, // unset at construction -- Job::latch() must fill it in
-            }));
-            result
-        }).await;
+        let id = manager
+            .spawn("gated".to_string(), async {
+                let mut result = ExecResult::failure(2, "approval required");
+                let mut view = crate::ledger::sample_view(
+                    crate::ledger::KernelOperation::FsRemove,
+                    &["x"],
+                );
+                view.job_id = Some(1);
+                result.approval = Some(Box::new(view));
+                result
+            })
+            .await;
 
         tokio::time::sleep(Duration::from_millis(10)).await;
 
-        let latch = manager.get_latch(id).await.expect("job must be latched");
+        let approval = manager.get_approval(id).await.expect("the job must be held");
         assert_eq!(
-            latch.job_id,
+            approval.job_id,
             Some(id.0),
-            "Job::latch() must stamp this job's own id onto the surfaced request"
+            "the surfaced request must carry the job it was posted for"
         );
     }
 
@@ -1326,46 +1327,38 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_reap_finished_never_reaps_latched_jobs() {
-        // GH #131 / GH #96: a Latched job is "done" in the sense that its
-        // future resolved, but it's awaiting confirmation of a pending
-        // destructive-operation gate — reaping it would silently destroy the
-        // only copy of the LatchRequest. Must never be auto-reaped or
-        // reported as a finished job.
-        use kaish_types::result::LatchRequest;
-
+    async fn test_reap_finished_never_reaps_gated_jobs() {
+        // GH #131 / GH #96: a Gated job is "done" in the sense that its
+        // future resolved, but it's held on a pending destructive-operation
+        // gate — reaping it would silently destroy the only reference to the
+        // approval request. Must never be auto-reaped or reported as a
+        // finished job.
         let manager = JobManager::new();
         manager.set_persist_output_files(false);
         let (tx, rx) = oneshot::channel();
         let id = manager.register("rm precious.txt".to_string(), rx).await;
 
-        let mut gated = ExecResult::failure(2, "rm: confirmation required (latch enabled)");
-        gated.latch = Some(Box::new(LatchRequest {
-            nonce: "4b1e0d9a7c3f28e6b5a0c1d4e7f2938a".to_string(),
-            command: "rm".to_string(),
-            paths: vec!["precious.txt".to_string()],
-            hint: "rm --confirm=\"4b1e0d9a7c3f28e6b5a0c1d4e7f2938a\" precious.txt".to_string(),
-            tool: "rm".to_string(),
-            argv: vec!["precious.txt".to_string()],
-            ttl: 60,
-            job_id: None,
-        }));
+        let mut gated = ExecResult::failure(2, "rm: approval required");
+        gated.approval = Some(Box::new(crate::ledger::sample_view(
+            crate::ledger::KernelOperation::FsRemove,
+            &["precious.txt"],
+        )));
         tx.send(gated).expect("send gated result");
         tokio::time::sleep(Duration::from_millis(10)).await;
 
-        // Confirm it's actually seen as Latched before reaping.
+        // Confirm it's actually seen as Gated before reaping.
         let info = manager.get(id).await.expect("job exists");
-        assert_eq!(info.status, JobStatus::Latched);
+        assert_eq!(info.status, JobStatus::Gated);
 
         let removed = manager.reap_finished().await;
         assert!(
             removed.is_empty(),
-            "a latched job must never be auto-reaped: {removed:?}"
+            "a held job must never be auto-reaped: {removed:?}"
         );
         assert_eq!(
             manager.list().await.len(),
             1,
-            "the latched job must still be tracked so its gate can be fulfilled"
+            "the gated job must still be tracked so its gate can be fulfilled"
         );
     }
 

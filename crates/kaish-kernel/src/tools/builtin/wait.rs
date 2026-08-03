@@ -3,8 +3,10 @@
 use async_trait::async_trait;
 use clap::{CommandFactory, Parser};
 
+use kaish_types::approval::ApprovalRequestView;
+
 use crate::ast::Value;
-use crate::interpreter::{ExecResult, LatchRequest, OutputData};
+use crate::interpreter::{ExecResult, OutputData};
 use crate::scheduler::JobId;
 use crate::tools::{schema_from_clap, ExecContext, ToolCtx, GlobalFlags, Tool, ToolArgs, ToolSchema};
 
@@ -68,7 +70,7 @@ impl Tool for Wait {
         if !args.positional.is_empty() {
             let mut output = String::new();
             let mut any_failed = false;
-            let mut latch: Option<LatchRequest> = None;
+            let mut held: Option<ApprovalRequestView> = None;
 
             for spec in &args.positional {
                 let id = match spec {
@@ -87,7 +89,7 @@ impl Tool for Wait {
 
                 match manager.wait(id).await {
                     Some(result) => {
-                        let status = classify(id, &result, &mut any_failed, &mut latch);
+                        let status = classify(&result, &mut any_failed, &mut held);
                         output.push_str(&format!("[{}] {}\n", id, status));
                     }
                     // `wait` returns None for a missing job AND for a stopped
@@ -108,7 +110,7 @@ impl Tool for Wait {
                 }
             }
 
-            finish(output, any_failed, latch)
+            finish(output, any_failed, held)
         } else {
             // Wait for all jobs
             let results = manager.wait_all().await;
@@ -119,57 +121,57 @@ impl Tool for Wait {
 
             let mut output = String::new();
             let mut any_failed = false;
-            let mut latch: Option<LatchRequest> = None;
+            let mut held: Option<ApprovalRequestView> = None;
 
             for (id, result) in results {
-                let status = classify(id, &result, &mut any_failed, &mut latch);
+                let status = classify(&result, &mut any_failed, &mut held);
                 output.push_str(&format!("[{}] {}\n", id, status));
             }
 
-            finish(output, any_failed, latch)
+            finish(output, any_failed, held)
         }
     }
 }
 
 /// Classify one waited job's result into a display word, threading the
-/// aggregate `any_failed` flag and the first-seen backgrounded latch. A gated
-/// job (`set -o latch`, exit 2 with a stored request) is `Latched`, *not*
-/// `Failed` — the op is held, and the request must reach the caller so a
-/// backgrounded gate is fulfillable (GH #96).
+/// aggregate `any_failed` flag and the first-seen held request. A gated job
+/// (the `fs.*` enforce policy, exit 2 with a stored request) is `Gated`,
+/// *not* `Failed` — the op is held, and the request must reach the caller so
+/// a backgrounded gate is fulfillable (GH #96).
 ///
-/// `wait` reads the job's raw cached `ExecResult` straight from
-/// `JobManager::wait`/`wait_all`, bypassing `Job::latch()` (the chokepoint
-/// that stamps `job_id` for `jobs`/`/v/jobs/{id}/latch`) — so this stamps it
-/// here too (GH #124 part 4), or a latch surfaced via `wait` would carry no
-/// back-reference for `Kernel::confirm` to retire the job with.
+/// No `job_id` stamping here. The latch had two stamping sites — this one and
+/// `Job::approval()`'s predecessor — because a gate site could not know which
+/// job it ran for. A ledger request carries `job_id` from the moment it is
+/// posted (the fork that runs a background job stamps it), so `wait` reads
+/// the same correlation `jobs` and `/v/jobs/{id}/approval` read, and the two
+/// cannot drift.
 fn classify(
-    id: JobId,
     result: &ExecResult,
     any_failed: &mut bool,
-    latch: &mut Option<LatchRequest>,
+    held: &mut Option<ApprovalRequestView>,
 ) -> &'static str {
     if result.ok() {
         "Done"
-    } else if let Some(mut lr) = result.latch_request() {
-        lr.job_id = Some(id.0);
-        // First latch wins if several jobs are gated — `.latch` holds one, and
-        // an embedder waiting on multiple gated jobs is an unusual pattern.
-        latch.get_or_insert(lr);
-        "Latched"
+    } else if let Some(view) = result.approval_request() {
+        // The first held request wins if several jobs are gated —
+        // `.approval` holds one, and an embedder waiting on multiple gated
+        // jobs is an unusual pattern.
+        held.get_or_insert(view);
+        "Gated"
     } else {
         *any_failed = true;
         "Failed"
     }
 }
 
-/// Assemble `wait`'s result: a surfaced backgrounded latch wins (exit 2 with
-/// the request on the control-plane `.latch` field, mirroring a foreground
+/// Assemble `wait`'s result: a surfaced backgrounded gate wins (exit 2 with
+/// the request on the control-plane `.approval` field, mirroring a foreground
 /// gate); otherwise any failure is exit 1; otherwise success.
-fn finish(output: String, any_failed: bool, latch: Option<LatchRequest>) -> ExecResult {
-    if let Some(lr) = latch {
+fn finish(output: String, any_failed: bool, held: Option<ApprovalRequestView>) -> ExecResult {
+    if let Some(view) = held {
         let mut result = ExecResult::from_output(2, output.clone(), "");
         result.set_output(Some(OutputData::text(output)));
-        result.latch = Some(Box::new(lr));
+        result.approval = Some(Box::new(view));
         result
     } else if any_failed {
         let mut result = ExecResult::from_output(1, output.clone(), "");

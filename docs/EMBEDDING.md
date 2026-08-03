@@ -54,16 +54,16 @@ code is something agents can branch on:
 |--------|---------|----------|
 | 0 | Success | — |
 | 1 | Failure | Read `err` |
-| 2 | Confirmation required (`set -o latch`) | Re-run with `--confirm="<nonce>"` — embedders read the typed `ExecResult.latch` (or call `Kernel::confirm`); the `To confirm, run:` line shows it for humans |
+| 2 | Approval required (`set -o approvals`) | Grant the request, then re-run with `--confirm="<token>"` — embedders read the typed `ExecResult.approval` (or call `Kernel::confirm`); the request's `hint` shows the re-run for humans |
 | 3 | Output truncated by the output limit | `original_code` holds the real exit code. With disk spill the message names the spill file — `cat` it, or narrow the query; memory-spill kernels (`with_backend`, `SpillMode::Memory`) truncate in place with no file |
 | 124 | Timeout (`timeout_ms`, default 30 s) | — |
 | 130 | Cancelled | — |
 
 Embedders typically run a fresh kernel per request (variables, functions,
 aliases, `set -o` options, and `cwd` reset each time) while trash and
-confirmation nonces (60 s TTL) persist across calls — share the store with
-`KernelConfig::with_nonce_store()` (see
-[Destructive-op rails](#destructive-op-rails-inspecting-and-fulfilling-the-latch)).
+approval requests (60 s undecided TTL) persist across calls — share one ledger
+with `KernelConfig::with_approver_handle()` (see
+[Destructive-op rails](#destructive-op-rails-inspecting-and-fulfilling-an-approval-gate)).
 
 ## Stack size — size your execution threads
 
@@ -203,96 +203,130 @@ let config = KernelConfig::isolated();
 let config = KernelConfig::agent();
 ```
 
-Other builders: `.with_latch(bool)` / `.with_trash(bool)` (destructive-op
+Other builders: `.with_approvals(bool)` / `.with_trash(bool)` (destructive-op
 rails — see below), `.with_vfs_budget(bytes)` / `.without_vfs_budget()` (cap
 in-memory VFS growth), `.with_skip_validation(bool)`, `.with_initial_vars(map)`
 (below).
 
-#### Destructive-op rails: inspecting and fulfilling the latch
+#### Destructive-op rails: inspecting and fulfilling an approval gate
 
-With `.with_latch(true)`, a destructive op (`rm`'s delete, and the truncating
+With `.with_approvals(true)`, a destructive op (`rm`'s delete, and the truncating
 overwrite behind `tee` / `patch` / `sed -i` / `write` / `cp` / `mv` / `dd of=`)
 does not run on first call — it returns an `ExecResult` with **exit code 2** and a
-confirmation request. Copying or moving *into* a directory, and recursive
+pending approval request. Copying or moving *into* a directory, and recursive
 `cp -r`/`mv` of a tree, gate only the named destination, not per-child overwrites.
-The output contract:
+`kaish-trash empty` gates **always**, whatever the option says. The output
+contract:
 
 - **`ExecResult.err`** (which a frontend routes to stderr) carries the
-  human-readable prompt;
+  human-readable message;
 - **stdout** is empty (nothing happened, so there is no success output);
-- **`ExecResult.latch`** carries the request as a first-class typed field —
-  `Option<Box<LatchRequest>>`, control-plane and distinct from the data-plane
-  `.data`.
+- **`ExecResult.approval`** carries the request as a first-class typed field —
+  `Option<Box<ApprovalRequestView>>`, control-plane and distinct from the
+  data-plane `.data`.
 
-`LatchRequest` is the whole inspect+fulfill contract:
+The view is the whole inspect contract, and it is **tokenless by
+construction** — there is no credential field to redact, so it is safe to log,
+serialize, and hand to a reviewing model:
 
 ```rust
-pub struct LatchRequest {
-    pub nonce: String,        // pass back as --confirm=<nonce>
-    pub command: String,      // display label, e.g. "rm", "kaish-trash empty"
-    pub paths: Vec<String>,   // resolved paths the op would touch (for policy)
-    pub hint: String,         // human re-run string (display only)
-    pub tool: String,         // dispatch name — argv0 for a precise replay
-    pub argv: Vec<String>,    // the EXACT captured argv (minus the nonce)
-    pub ttl: u64,             // seconds until the nonce expires
+pub struct ApprovalRequestView {
+    pub id: RequestId,            // the request's public name
+    pub operation: OperationId,   // "fs.remove", "fs.overwrite", "fs.rename", "trash.empty"
+    pub risk: RiskClass,
+    pub resources: Vec<Resource>, // what it would touch (kind + id, e.g. path)
+    pub principal: Principal,     // who is asking
+    pub capture: Capture,         // Exact(tool, argv) when replayable
+    pub job_id: Option<u64>,      // set when a backgrounded job raised it
+    pub reason: String,           // why the gate fired
+    pub hint: String,             // human re-run string (display only)
+    pub ttl: Duration,            // how long it stays live undecided
+    // … see kaish_types::approval for the full record
 }
 ```
 
-**Inspect** with the typed accessor (works before or after `--json` — `.latch`
-survives formatting):
+**Authority is a capability, not a flag.** `Kernel::build(config)` returns
+`(Kernel, ApproverHandle)` — building the kernel is the only way to obtain one,
+and you decide which sessions get a clone. `Kernel::new` is `build` with the
+handle dropped, which is the right posture for a session that must not approve
+its own work.
+
+**Inspect** with the typed accessor (works before or after `--json` —
+`.approval` survives formatting):
 
 ```rust
-if let Some(req) = result.latch_request() {
-    // apply preapproval policy / model review over (req.command, req.paths),
-    // or inspect the exact req.argv that a confirm will replay …
+if let Some(req) = result.approval_request() {
+    // apply preapproval policy / model review over (req.operation, req.resources),
+    // or inspect req.capture — the exact argv a confirm would replay …
 }
 ```
 
-**Fulfill** with `Kernel::confirm` — the highest-fidelity path. It replays the
-*exact captured argv* (`req.tool` + `req.argv`) with `--confirm=<nonce>`
-prepended, via the argv door — no re-parsing, so paths with spaces or glob
-characters round-trip precisely:
+**Fulfill** by granting through the handle, then replaying with
+`Kernel::confirm`. The replay reserves the attempt *first* and dispatches the
+captured invocation with that correlation, so the gate it re-enters matches its
+fresh draft against the granted request instead of posting a second one:
 
 ```rust
+let (kernel, authority) = Kernel::build(config)?;
 let gated = kernel.execute("rm 'my notes.txt'").await?;
-if let Some(req) = gated.latch_request() {
-    if approve(&req) {                       // your policy
-        let done = kernel.confirm(&req).await?;   // replays exactly, deletes
+if let Some(req) = gated.approval_request() {
+    if approve(&req) {                                    // your policy
+        authority.grant(&req.id, terms).await?;
+        let done = kernel.confirm(&authority, &req.id).await?;  // replays exactly
     }
 }
 ```
 
 Prefer `confirm` over hand-building the re-run. The `hint` field is a
-*human-display* string and does **not** robustly quote paths (`rm --confirm="N"
-my notes.txt` re-parses as two paths); `confirm` sidesteps that entirely. If you
-must build it yourself, use the argv door: `execute_argv(req.tool, [..req.argv,
-"--confirm=<nonce>"])`.
+*human-display* string and does **not** robustly quote paths (`rm
+--confirm="T" my notes.txt` re-parses as two paths); `confirm` replays the
+captured argv through the argv door and sidesteps that entirely. A session
+without a handle can still fulfill a gate by presenting a key it was given:
+re-run with `--confirm=<token>`, retrieved by an authority via
+`ApproverHandle::token_for`.
 
-The kernel owns the *mechanism* (issuing/validating the path- and command-scoped
-nonce, capturing the argv at the dispatch seam); the embedder owns the
-*judgment*. The latch is **never** folded into `.data` — a stdout redirect
-(`rm big > log`) clears the data-plane `.data` but can't touch the control-plane
-`.latch`, so the gate can't be silently bypassed.
+**A grant authorizes exactly one successful run.** A key presented after a
+successful settlement reports the recorded outcome instead of running the
+operation a second time. A *failed* attempt does not consume the grant, so a
+transient failure retries inside the grant's lifetime. Repetition that is
+genuinely wanted has a first-class form: a standing grant with a use count.
+
+The kernel owns the *mechanism* (posting the request, capturing the argv at the
+dispatch seam, minting and checking the credential); the embedder owns the
+*judgment*. The request is **never** folded into `.data` — a stdout redirect
+(`rm big > log`) clears the data-plane `.data` but can't touch the
+control-plane `.approval`, so the gate can't be silently bypassed.
 
 > **Note:** the argv is captured at the kernel's dispatch seam, so it's present
 > for every kaish builtin and any tool you register in the kernel's registry
 > (the `Kernel::with_backend` tools closure). A tool served *only* by a custom
-> `KernelBackend::call_tool` that raises its own latch leaves `tool`/`argv`
-> empty; `confirm` then fails loud (exit 2) — fulfill those via the `hint` or a
-> manually reconstructed argv.
+> `KernelBackend::call_tool` that raises its own gate records a non-`Exact`
+> `Capture`; `confirm` then fails loud (exit 2) naming the variant it found,
+> rather than replaying an empty argv. Those requests are still grantable and
+> still redeemable by presenting the key with `--confirm=<token>`.
 
 If you executed with `--json` (`OutputFormat::Json`), the gate is a non-zero exit
 with a diagnostic, so the result is wrapped in the standard JSON error envelope
-and the request is surfaced under its own `latch` key:
-`{ "error": "...", "code": 2, "latch": { "nonce": ..., "tool": ..., "argv":
-[...], "paths": [...], "hint": ..., "ttl": 60 } }`. The typed `latch_request()`
+and the request is surfaced under its own `approval` key:
+`{ "error": "...", "code": 2, "approval": { "id": ..., "operation": ...,
+"resources": [...], "hint": ..., ... } }`. The typed `approval_request()`
 accessor works the same either way, so it's the recommended path.
 
-Nonces are scoped to `(command, paths)`, expire after 60s, and are not consumed
-on use (idempotent retries). To confirm a nonce issued in one `execute()` call
-from a *later* call, share the store with
-`KernelConfig::with_nonce_store()` — the default `NonceStore` is fresh per
-kernel. See [LANGUAGE.md](LANGUAGE.md) for the full latch/trash semantics.
+A request nobody decides expires after 60s, and the expiry is recorded rather
+than silently forgotten. To decide a request raised in one `execute()` call from
+a *later* call — or from a different kernel — share the ledger with
+`KernelConfig::with_approver_handle()`; the default is a fresh ledger per
+kernel. `KernelConfig::with_ledger(config)` tunes retention and the
+rejected-credential limit, and `with_ledger_sink(sink)` posts every entry to an
+audit sink as it commits.
+
+**Pinning the policy.** `KernelConfig::with_policy_pinned(true)` makes
+`set +o approvals` fail with **exit 1** and a message naming the pin, rather
+than silently doing nothing — a silent no-op would teach an agent that its
+`set +o approvals` worked. The pin is copied into every fork and pipeline
+stage, and survives `Kernel::reset`.
+
+See [LANGUAGE.md](LANGUAGE.md) for the full approvals/trash semantics.
 
 ### Custom Backend (`Kernel::with_backend`)
 
@@ -395,7 +429,17 @@ kernel — by design, since neither owns a host mount to spill to.
 
 The kernel is **hermetic by default** — it never reads `std::env::vars()`,
 and external commands launched from inside the kernel see only the
-variables kaish has marked as exported. Frontends that want shell-like UX
+variables kaish has marked as exported.
+
+> **One exception, and it only ever turns a rail *on*.** Four `KernelConfig`
+> presets read `KAISH_APPROVALS` and `KAISH_TRASH` from the process
+> environment at construction (`repl()` and the agent presets — the ones a
+> frontend uses). Nothing else in the kernel touches `std::env`, and the
+> direction is safe: env can enable the approval gate or the trash, never
+> disable one an embedder asked for. The right long-term shape is for the
+> *frontend* to read env and pass `KernelConfig`; until then, an embedder that
+> needs a guaranteed-hermetic construction builds its own `KernelConfig`
+> rather than starting from a preset. Frontends that want shell-like UX
 (the bundled REPL, or an embedder that mirrors the host shell) opt in to
 OS-env passthrough by populating `initial_vars`:
 
@@ -553,9 +597,9 @@ Semantics:
   not a subset that drops expressiveness, it's a different door that converges with
   the string door at the shared dispatch chain.
 - **Same tail as the string door.** Command resolution (aliases, user tools,
-  `.kai` scripts, externals, backend tools), `--json`, and the confirmation latch
-  all apply, so a latched `rm` still returns exit 2 with a request on
-  `ExecResult.latch` (see [Destructive-op rails](#destructive-op-rails-reading-the-latch-nonce)).
+  `.kai` scripts, externals, backend tools), `--json`, and the approval gate
+  all apply, so a gated `rm` still returns exit 2 with a request on
+  `ExecResult.approval` (see [Destructive-op rails](#destructive-op-rails-inspecting-and-fulfilling-an-approval-gate)).
   The kernel's pre-execution *syntax* validator does not run — argv carries no
   shell syntax — but a tool's own `validate()`/clap parse still does.
 - **Typed-passthrough caveat.** Because builtins re-parse their own `to_argv()`
@@ -800,9 +844,9 @@ job state:
 ├── 1/
 │   ├── stdout    # Captured stdout (bounded)
 │   ├── stderr    # Captured stderr (bounded)
-│   ├── status    # "running", "done:0", "latched", or "failed:N"
+│   ├── status    # "running", "done:0", "gated", or "failed:N"
 │   ├── command   # Original command string
-│   └── latch     # Confirmation-latch request (JSON) if gated, else empty
+│   └── approval  # Pending approval request (JSON) if gated, else empty
 ├── 2/
 │   └── ...
 ```
@@ -818,11 +862,13 @@ cat /v/jobs/1/stdout    # Job's stdout
 cat /v/jobs/1/status    # "done:0" on success, "failed:N" otherwise
 ```
 
-A destructive op backgrounded under `set -o latch` (`rm x &`) gates in the
-background rather than running: `status` is `latched`, `JobInfo.latch` (from
-`JobManager::list`/`get`) and `/v/jobs/{id}/latch` (JSON) carry the pending
-`LatchRequest`, and `wait` surfaces it on the result's `.latch` field (exit 2).
-An embedder fulfills the backgrounded gate with `Kernel::confirm(&latch)` — the
+A destructive op backgrounded under `set -o approvals` (`rm x &`) gates in the
+background rather than running: `status` is `gated`, `JobInfo.approval` (from
+`JobManager::list`/`get`) and `/v/jobs/{id}/approval` (JSON) carry the pending
+request, and `wait` surfaces it on the result's `.approval` field (exit 2). The
+request carries the `job_id` it was posted for, stamped once at post time, so
+every one of those surfaces reports the same correlation. An embedder fulfills
+the backgrounded gate with `Kernel::confirm(&handle, &id)` — the
 same API as a foreground gate.
 
 The status strings are exactly `running`, `done:0`, and `failed:{code}` —
@@ -832,7 +878,7 @@ match on those, not on `completed`.
 `Deserialize` (plus `schemars::JsonSchema` behind the `schema` feature), so an
 embedder can serialize `JobManager::list()`/`get()` output directly rather
 than hand-rolling a mirror struct. `JobStatus`'s wire spelling under
-serde is lowercase (`"running"`/`"stopped"`/`"done"`/`"latched"`/`"failed"`),
+serde is lowercase (`"running"`/`"stopped"`/`"done"`/`"gated"`/`"failed"`),
 matching the `/v/jobs/N/status` text vocabulary above — not the capitalized
 `Display` impl used for human-facing text (the `jobs` table). `JobInfo` also
 carries `exit_code: Option<i64>` (set once the job finishes), `started_at` /

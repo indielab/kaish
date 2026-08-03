@@ -8,6 +8,7 @@ use clap::{CommandFactory, Parser};
 use crate::ast::Value;
 use crate::interpreter::{ExecResult, OutputData, OutputNode};
 use crate::trash::TrashBackend;
+use crate::ledger::KernelOperation;
 use crate::tools::{schema_from_clap, ExecContext, ToolCtx, GlobalFlags, Tool, ToolArgs, ToolSchema};
 
 /// KaishTrash tool: manage the system trash.
@@ -17,7 +18,7 @@ pub struct KaishTrash;
 #[derive(Parser, Debug)]
 #[command(name = "kaish-trash", about = "Manage the freedesktop.org Trash")]
 struct KaishTrashArgs {
-    /// Confirmation nonce for empty (--confirm=NONCE).
+    /// Approval token for `empty` (`--confirm=<token>`).
     #[arg(id = "confirm", long = "confirm")]
     _confirm: Option<String>,
 
@@ -148,26 +149,32 @@ async fn cmd_empty(args: &ToolArgs, ctx: &mut ExecContext) -> ExecResult {
         _ => None,
     });
 
-    // Empty always requires nonce confirmation (inherently destructive)
-    if let Some(nonce) = &confirm {
-        match ctx.verify_nonce(nonce, "kaish-trash empty", &[]) {
-            Ok(()) => {
-                let trash = match get_backend(ctx, "empty") {
-                    Ok(t) => t,
-                    Err(e) => return e,
-                };
-                match trash.purge_all().await {
-                    Ok(0) => ExecResult::with_output(OutputData::text("trash is already empty")),
-                    Ok(_) => ExecResult::with_output(OutputData::text("trash emptied")),
-                    Err(e) => ExecResult::failure(1, format!("kaish-trash empty: {}", e)),
-                }
-            }
-            Err(e) => ExecResult::failure(1, format!("kaish-trash empty: {}", e)),
-        }
-    } else {
-        ctx.latch_result("kaish-trash empty", &[], "emptying trash is destructive", |nonce| {
-            format!("kaish-trash empty --confirm=\"{}\"", nonce)
-        })
+    // `trash.empty` gates every time, independent of any subscription or
+    // policy (spec §F.1): it discards the recovery net that makes every other
+    // fs.* operation survivable, so it is not something a session can turn
+    // off. This is also why the dispatch seam captures the invocation
+    // unconditionally — see `kernel.rs`'s capture site.
+    if let Err(result) = ctx
+        .request_gate(
+            KernelOperation::TrashEmpty,
+            &[],
+            "emptying the trash is irreversible",
+            "kaish-trash empty --confirm=<token>".to_string(),
+            confirm.as_deref(),
+        )
+        .await
+    {
+        return crate::tools::prefix_error("kaish-trash empty", result);
+    }
+
+    let trash = match get_backend(ctx, "empty") {
+        Ok(t) => t,
+        Err(e) => return e,
+    };
+    match trash.purge_all().await {
+        Ok(0) => ExecResult::with_output(OutputData::text("trash is already empty")),
+        Ok(_) => ExecResult::with_output(OutputData::text("trash emptied")),
+        Err(e) => ExecResult::failure(1, format!("kaish-trash empty: {}", e)),
     }
 }
 
@@ -198,12 +205,12 @@ async fn cmd_config(args: &ToolArgs, ctx: &mut ExecContext) -> ExecResult {
     // Show current config
     let enabled = ctx.scope.trash_enabled();
     let max_size = ctx.scope.trash_max_size();
-    let latch = ctx.scope.latch_enabled();
+    let enforce = ctx.scope.approvals_enabled();
 
     let nodes = vec![
         OutputNode::new("enabled").with_cells(vec![enabled.to_string()]),
         OutputNode::new("max_size").with_cells(vec![format_size(max_size)]),
-        OutputNode::new("latch").with_cells(vec![latch.to_string()]),
+        OutputNode::new("approvals").with_cells(vec![enforce.to_string()]),
     ];
 
     ExecResult::with_output(OutputData::table(
@@ -282,32 +289,71 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_empty_without_nonce_returns_code_2() {
+    async fn empty_gates_regardless_of_any_policy() {
+        // `trash.empty` is always enforced (spec §F.1): it discards the
+        // recovery net that makes every other fs.* operation survivable, so
+        // it gates with the enforce policy off, which is the default here.
         let mut ctx = make_ctx();
+        ctx.wire_test_ledger();
+        assert!(!ctx.scope.approvals_enabled(), "precondition: the policy is off");
 
         let mut args = ToolArgs::new();
         args.positional.push(Value::String("empty".into()));
 
         let result = KaishTrash.execute(args, &mut ctx).await;
         assert_eq!(result.code, 2);
-        assert!(result.err.contains("confirmation required"));
-        assert!(result.err.contains("--confirm="));
+        let view = result.approval_request().expect("a pending request");
+        assert_eq!(view.operation.as_str(), "trash.empty");
+        assert!(view.resources.is_empty(), "empty names no path resource");
+        assert!(view.hint.contains("--confirm="), "{}", view.hint);
     }
 
     #[ignore] // calls real OS trash — flaky in CI
     #[tokio::test]
-    async fn test_empty_with_valid_nonce_on_empty_trash() {
+    async fn empty_with_a_granted_key_on_an_empty_trash() {
+        use kaish_types::approval::{ApprovalRequest, GrantTerms};
         let mut ctx = make_ctx();
+        let authority = ctx.wire_test_ledger();
         ctx.trash_backend = Some(Arc::new(crate::trash_system::SystemTrash));
-
-        let nonce = ctx.nonce_store.issue("kaish-trash empty", &[]).expect("entropy");
 
         let mut args = ToolArgs::new();
         args.positional.push(Value::String("empty".into()));
-        args.named.insert("confirm".to_string(), Value::String(nonce));
+        assert_eq!(KaishTrash.execute(args, &mut ctx).await.code, 2);
+
+        let approvals = ctx.ledger_access.as_ref().expect("a wired ledger").approvals.clone();
+        let id = approvals.pending()[0].id.clone();
+        let chain = approvals.get(&id).expect("the chain");
+        let request = ApprovalRequest::builder(chain.request.operation.as_str())
+            .risk(chain.request.risk)
+            .build()
+            .expect("a well-formed draft")
+            .stamp(
+                id.clone(),
+                chain.request.principal.clone(),
+                chain.request.capture.clone(),
+                chain.request.context.clone(),
+                chain.request.requested_at,
+                chain.request.ttl,
+                None,
+            );
+        authority
+            .grant(
+                &id,
+                GrantTerms::once_for(
+                    &request,
+                    std::time::SystemTime::now() + std::time::Duration::from_secs(300),
+                ),
+            )
+            .await
+            .expect("the grant must post");
+        let token = authority.token_for(&id).expect("a credential").reveal().to_string();
+
+        let mut args = ToolArgs::new();
+        args.positional.push(Value::String("empty".into()));
+        args.named.insert("confirm".to_string(), Value::String(token));
 
         let result = KaishTrash.execute(args, &mut ctx).await;
-        assert!(result.ok());
+        assert!(result.ok(), "{}", result.err);
         assert!(result.text_out().contains("already empty"));
     }
 

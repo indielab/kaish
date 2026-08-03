@@ -8,7 +8,7 @@ use crate::scheduler::JobInfo;
 use crate::tools::{schema_from_clap, ExecContext, ToolCtx, GlobalFlags, Tool, ToolArgs, ToolSchema};
 
 /// Build `jobs --json` rows: the full serialized `JobInfo` (GH #241 — id,
-/// status, command, exit_code, started_at/finished_at, pgids, latch, ... —
+/// status, command, exit_code, started_at/finished_at, pgids, approval, ... —
 /// whatever `JobInfo`'s own `Serialize` impl emits) plus one bolt-on `path`
 /// field.
 ///
@@ -17,7 +17,7 @@ use crate::tools::{schema_from_clap, ExecContext, ToolCtx, GlobalFlags, Tool, To
 /// not an intrinsic property of the job itself, so the builtin adds it here
 /// rather than the type baking in a `jobs`-specific presentation detail.
 /// Before GH #241 this function hand-built every field with `serde_json::json!`
-/// (including re-deriving `status` from `Display` and re-serializing `latch`)
+/// (including re-deriving `status` from `Display` and re-serializing `approval`)
 /// because `JobInfo` couldn't serialize itself — now that it can, the only
 /// thing left to bolt on is `path`.
 fn job_rows_json(jobs: &[JobInfo]) -> Vec<serde_json::Value> {
@@ -96,12 +96,12 @@ impl Tool for Jobs {
             manager.cleanup().await;
             let remaining = manager.list().await;
             let removed = before - remaining.len();
-            let latched = remaining.iter().filter(|j| j.latch.is_some()).count();
+            let held = remaining.iter().filter(|j| j.approval.is_some()).count();
             let mut msg = format!("Cleaned up {} completed job(s)\n", removed);
-            if latched > 0 {
+            if held > 0 {
                 msg.push_str(&format!(
-                    "Kept {latched} latched job(s) awaiting confirmation — \
-                     confirm via the nonce or abandon with kill --discard %N\n"
+                    "Kept {held} gated job(s) awaiting approval — \
+                     grant the request or abandon with kill --discard %N\n"
                 ));
             }
             return ExecResult::with_output(OutputData::text(msg));
@@ -129,7 +129,7 @@ impl Tool for Jobs {
             "PATH".to_string(),
         ];
 
-        // rich_json rows carry `latch` for a `Latched` row (GH #124 part 2) —
+        // rich_json rows carry `approval` for a `Gated` row (GH #124 part 2) —
         // computed from `&jobs` before the text loop below consumes it by value.
         let rows = job_rows_json(&jobs);
         let output = OutputData::table(headers, nodes)
@@ -160,22 +160,15 @@ mod tests {
     }
 
     #[test]
-    fn job_rows_json_carries_latch_only_on_latched_rows() {
-        use crate::interpreter::LatchRequest;
+    fn job_rows_json_carries_the_approval_only_on_held_rows() {
         use crate::scheduler::{JobId, JobStatus};
 
-        let latch = LatchRequest {
-            nonce: "4b1e0d9a7c3f28e6b5a0c1d4e7f2938a".to_string(),
-            command: "rm".to_string(),
-            paths: vec!["precious.txt".to_string()],
-            hint: "rm --confirm=\"4b1e0d9a7c3f28e6b5a0c1d4e7f2938a\" precious.txt".to_string(),
-            tool: "rm".to_string(),
-            argv: vec!["precious.txt".to_string()],
-            ttl: 60,
-            job_id: Some(1),
-        };
+        let mut view =
+            crate::ledger::sample_view(crate::ledger::KernelOperation::FsRemove, &["precious.txt"]);
+        view.job_id = Some(1);
         let jobs = vec![
-            JobInfo::new(JobId(1), "rm precious.txt", JobStatus::Latched).with_latch(Some(latch)),
+            JobInfo::new(JobId(1), "rm precious.txt", JobStatus::Gated)
+                .with_approval(Some(view.clone())),
             JobInfo::new(JobId(2), "sleep 5", JobStatus::Running),
         ];
 
@@ -184,22 +177,22 @@ mod tests {
         assert_eq!(rows[0]["id"], 1);
         // GH #241: the JSON spelling of JobStatus is lowercase, matching the
         // existing `/v/jobs/N/status` vocabulary — NOT the capitalized
-        // `Display` impl this row used to derive from (`"Latched"`).
-        assert_eq!(rows[0]["status"], "latched");
+        // `Display` impl this row used to derive from (`"Gated"`).
+        assert_eq!(rows[0]["status"], "gated");
         assert_eq!(rows[0]["path"], "/v/jobs/1/");
         assert_eq!(
-            rows[0]["latch"]["nonce"], "4b1e0d9a7c3f28e6b5a0c1d4e7f2938a",
-            "a latched row must carry the nonce: {}",
+            rows[0]["approval"]["id"], view.id.as_str(),
+            "a held row must carry the approval request: {}",
             rows[0]
         );
         assert_eq!(
-            rows[0]["latch"]["job_id"], 1,
-            "the row's latch must carry the job_id back-reference (GH #124 part 4): {}",
+            rows[0]["approval"]["job_id"], 1,
+            "the row's request must carry the job_id back-reference (GH #124 part 4): {}",
             rows[0]
         );
         assert!(
-            rows[1].get("latch").is_none(),
-            "a non-latched row must NOT carry a latch key: {}",
+            rows[1].get("approval").is_none(),
+            "a row that is not held must NOT carry an approval key: {}",
             rows[1]
         );
     }

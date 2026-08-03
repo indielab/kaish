@@ -408,8 +408,17 @@ pub struct Scope {
     errexit_suppressed: usize,
     /// AST display mode (kaish-ast -on/-off): show AST instead of executing.
     show_ast: bool,
-    /// Latch mode (set -o latch): gate dangerous operations behind nonce confirmation.
-    latch_enabled: bool,
+    /// The `fs.*` enforce policy (`set -o approvals`): every filesystem
+    /// mutation with no recoverable prior copy goes through the approval
+    /// ledger's decision chain (`docs/approval-ledger.md` §C.5). The whole
+    /// namespace, no glob and no `observe` — those generalize it later.
+    approvals_enabled: bool,
+    /// Whether the embedder pinned this session's approval policy
+    /// (`KernelConfig::with_policy_pinned`, spec §F.3 item 3). Never
+    /// settable from script: `set -o approvals` / `set +o approvals` are refused
+    /// with exit 1 under a pin, because a silent no-op teaches an agent that
+    /// its `set +o approvals` worked.
+    policy_pinned: bool,
     /// Trash mode (set -o trash): move deleted files to freedesktop.org Trash.
     trash_enabled: bool,
     /// Maximum file size (bytes) for trash. Files larger than this bypass trash.
@@ -440,7 +449,8 @@ impl Scope {
             error_exit: false,
             errexit_suppressed: 0,
             show_ast: false,
-            latch_enabled: false,
+            approvals_enabled: false,
+            policy_pinned: false,
             trash_enabled: false,
             trash_max_size: 10 * 1024 * 1024, // 10 MB
             glob_enabled: true,
@@ -614,14 +624,30 @@ impl Scope {
         self.show_ast = enabled;
     }
 
-    /// Check if latch mode is enabled (set -o latch).
-    pub fn latch_enabled(&self) -> bool {
-        self.latch_enabled
+    /// Whether the `fs.*` enforce policy is on (`set -o approvals`).
+    pub fn approvals_enabled(&self) -> bool {
+        self.approvals_enabled
     }
 
-    /// Set latch mode (set -o latch / set +o latch).
-    pub fn set_latch_enabled(&mut self, enabled: bool) {
-        self.latch_enabled = enabled;
+    /// Turn the `fs.*` enforce policy on or off (`set -o approvals` /
+    /// `set +o approvals`). The pin is checked by the caller (`set`), not here —
+    /// `KernelConfig` seeds this directly at construction, which is the
+    /// embedder's own act and is never refused.
+    pub fn set_approvals_enabled(&mut self, enabled: bool) {
+        self.approvals_enabled = enabled;
+    }
+
+    /// Whether the embedder pinned this session's approval policy (spec
+    /// §F.3 item 3). Copied into every fork and pipeline stage exactly where
+    /// [`Self::approvals_enabled`] is, so `$(set +o approvals)` cannot route around it.
+    pub fn policy_pinned(&self) -> bool {
+        self.policy_pinned
+    }
+
+    /// Pin the approval policy. Only `KernelConfig::with_policy_pinned`
+    /// calls this; there is no script-reachable path to it.
+    pub fn set_policy_pinned(&mut self, pinned: bool) {
+        self.policy_pinned = pinned;
     }
 
     /// Check if trash mode is enabled (set -o trash).

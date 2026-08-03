@@ -8,7 +8,7 @@
 //!    oracle for free.
 //!  - **The semantic contract that only the argv door can express**: tokens are
 //!    literal (no glob/`$VAR`/split), typed `Value`s ride through as positionals,
-//!    and the shared tail (`--json`, the confirmation latch, error codes) is
+//!    and the shared tail (`--json`, the approval gate, error codes) is
 //!    reachable.
 //!
 //! The classifier itself is unit-/property-tested in-crate
@@ -32,13 +32,19 @@ fn tempdir() -> tempfile::TempDir {
         .expect("tempdir under CARGO_TARGET_TMPDIR")
 }
 
-/// Real-FS kernel rooted at `dir`, latch/trash off by default (tests opt in).
+/// Real-FS kernel rooted at `dir`, approvals/trash off by default (tests opt in).
 fn kernel_at(dir: &Path) -> Kernel {
+    kernel_and_authority_at(dir).0
+}
+
+/// As [`kernel_at`], keeping the authority `Kernel::build` mints — what a test
+/// needs to grant a request it raised.
+fn kernel_and_authority_at(dir: &Path) -> (Kernel, kaish_kernel::ledger::ApproverHandle) {
     let config = KernelConfig::repl()
         .with_cwd(dir.to_path_buf())
-        .with_latch(false)
+        .with_approvals(false)
         .with_trash(false);
-    Kernel::new(config).expect("kernel")
+    Kernel::build(config).expect("kernel")
 }
 
 /// `Value::String` shorthand.
@@ -155,7 +161,7 @@ async fn typed_values_ride_through_as_positionals() {
 }
 
 // ============================================================================
-// Shared tail is reachable: --json, error codes, the confirmation latch
+// Shared tail is reachable: --json, error codes, the approval gate
 // ============================================================================
 
 #[tokio::test]
@@ -183,7 +189,7 @@ async fn request_timeout_interrupts_a_hung_command() {
     // for safety parity with the string door (a hung command can't run forever).
     let config = KernelConfig::repl()
         .with_cwd(tempdir().path().to_path_buf())
-        .with_latch(false)
+        .with_approvals(false)
         .with_trash(false)
         .with_request_timeout(Duration::from_millis(200));
     let kernel = Kernel::new(config).expect("kernel");
@@ -209,42 +215,72 @@ async fn unknown_command_is_127() {
 }
 
 #[tokio::test]
-async fn latch_round_trips_through_argv_door() {
+async fn an_approval_round_trips_through_the_argv_door() {
+    use kaish_types::approval::{ApprovalRequest, GrantTerms};
+
     let dir = tempdir();
     std::fs::write(dir.path().join("precious.txt"), "data").unwrap();
-    let kernel = kernel_at(dir.path());
+    let (kernel, authority) = kernel_and_authority_at(dir.path());
 
-    // Enable the latch *via argv too* (`set -o latch`).
-    let enabled = kernel.execute_argv("set", &[s("-o"), s("latch")]).await.unwrap();
-    assert_eq!(enabled.code, 0, "set -o latch failed: {}", enabled.err);
+    // Turn the `fs.*` enforce policy on *via argv too* (`set -o approvals`).
+    let enabled = kernel.execute_argv("set", &[s("-o"), s("approvals")]).await.unwrap();
+    assert_eq!(enabled.code, 0, "set -o approvals failed: {}", enabled.err);
 
-    // First rm is gated: exit 2, file untouched, nonce in structured `.data`.
+    // First rm is gated: exit 2, file untouched, the request on `.approval`.
     let gated = kernel.execute_argv("rm", &[s("precious.txt")]).await.unwrap();
-    assert_eq!(gated.code, 2, "expected latch exit 2, err: {}", gated.err);
+    assert_eq!(gated.code, 2, "expected an approval gate, err: {}", gated.err);
     assert!(
         dir.path().join("precious.txt").exists(),
-        "file must survive the latch gate"
+        "the file must survive the gate"
     );
 
-    // Read the latch through the typed accessor — this exercises the real
-    // kernel→rm→latch_result production path and closes the producer/consumer
-    // loop, so a drift between the payload keys and `LatchRequest` fails here.
+    // Read the request through the typed accessor — this exercises the real
+    // kernel→rm→request_gate production path and closes the producer/consumer
+    // loop, so a drift between what rm posts and what the view carries fails
+    // here.
     let req = gated
-        .latch_request()
-        .expect("a gated rm result decodes to a LatchRequest");
-    assert_eq!(req.command, "rm");
-    assert_eq!(req.paths, vec!["precious.txt".to_string()]);
-    assert_eq!(req.ttl, 60);
-    let nonce = req.nonce;
+        .approval_request()
+        .expect("a gated rm result carries an ApprovalRequestView");
+    assert_eq!(req.operation.as_str(), "fs.remove");
+    assert_eq!(
+        req.resources.iter().map(|r| r.id.as_str()).collect::<Vec<_>>(),
+        vec!["precious.txt"]
+    );
 
-    // Confirm through the argv door: `rm --confirm=<nonce> precious.txt`.
+    // Grant it out of band, the way an embedder does.
+    let request = ApprovalRequest::builder(req.operation.as_str())
+        .risk(req.risk)
+        .build()
+        .unwrap()
+        .stamp(
+            req.id.clone(),
+            req.principal.clone(),
+            req.capture.clone(),
+            req.context.clone(),
+            req.requested_at,
+            req.ttl,
+            req.job_id,
+        );
+    authority
+        .grant(
+            &req.id,
+            GrantTerms::once_for(
+                &request,
+                std::time::SystemTime::now() + std::time::Duration::from_secs(300),
+            ),
+        )
+        .await
+        .unwrap();
+    let token = authority.token_for(&req.id).unwrap().reveal().to_string();
+
+    // Confirm through the argv door: `rm --confirm=<token> precious.txt`.
     let confirmed = kernel
-        .execute_argv("rm", &[s(&format!("--confirm={nonce}")), s("precious.txt")])
+        .execute_argv("rm", &[s(&format!("--confirm={token}")), s("precious.txt")])
         .await
         .unwrap();
     assert_eq!(confirmed.code, 0, "confirm failed: {}", confirmed.err);
     assert!(
         !dir.path().join("precious.txt").exists(),
-        "file should be deleted after argv confirmation"
+        "the file should be deleted after argv confirmation"
     );
 }

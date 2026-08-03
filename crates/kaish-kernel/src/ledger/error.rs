@@ -73,7 +73,7 @@ pub enum LedgerError {
         state: RequestState,
     },
     /// The OS could not supply entropy for a new credential. No fallback —
-    /// see `nonce.rs`'s identical stance on `generate_nonce`.
+    /// a guessable credential is worse than a loud failure.
     CredentialUnavailable(String),
     /// The live index is at its configured capacity — no request-level quota
     /// distinction.
@@ -111,6 +111,15 @@ pub enum LedgerError {
         resource: ResourceRef,
         /// What the request declared and the grant failed to preserve.
         expected: StateClaim,
+    },
+    /// A replay's fresh draft does not describe the operation and resources
+    /// that were approved (spec §B.4). The replay did not turn into the
+    /// operation that was granted, so it is refused rather than authorized.
+    DraftMismatch {
+        /// The request the replay claimed to fulfill.
+        request: RequestId,
+        /// How the draft differs from what was approved.
+        detail: String,
     },
     /// A kernel bug: an unmatched `Redeemed`/terminal pair, a `seq` gap, or
     /// a second successful settlement against one grant. Never means
@@ -180,6 +189,10 @@ impl fmt::Display for LedgerError {
                 f,
                 "grant for request {request} widens the request's declared transition on {}:{} (expected {expected:?} preserved) — an approver may narrow, never widen",
                 resource.kind, resource.id
+            ),
+            Self::DraftMismatch { request, detail } => write!(
+                f,
+                "the replayed invocation does not match request {request}: {detail} — nothing was performed"
             ),
             Self::InvariantViolated(detail) => {
                 write!(f, "approval ledger invariant violated: {detail}")

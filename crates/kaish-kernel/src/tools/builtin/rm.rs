@@ -1,7 +1,9 @@
 //! rm — Remove files and directories.
 //!
-//! Supports confirmation latch (`set -o latch`) and trash-on-delete
-//! (`set -o trash`) for safe autonomous operation.
+//! Gated by the approval ledger's `fs.*` enforce policy (`set -o approvals`) and
+//! by trash-on-delete (`set -o trash`) for safe autonomous operation. Trash
+//! wins over the gate — the trash IS the recovery net, so a delete it can
+//! catch needs no approval.
 
 use async_trait::async_trait;
 use clap::{CommandFactory, Parser};
@@ -9,6 +11,7 @@ use std::path::{Path, PathBuf};
 
 use crate::backend::BackendError;
 use crate::interpreter::ExecResult;
+use crate::ledger::KernelOperation;
 use crate::tools::{is_trash_excluded, schema_from_clap, ExecContext, ToolCtx, GlobalFlags, Tool, ToolArgs, ToolSchema};
 
 /// clap-derived argv layer for rm.
@@ -27,7 +30,7 @@ struct RmArgs {
     #[arg(short = 'f', long = "force")]
     force: bool,
 
-    /// Confirmation nonce for latch-gated operations.
+    /// Approval token for a gated delete (`--confirm=<token>`).
     #[arg(long = "confirm")]
     confirm: Option<String>,
 
@@ -48,14 +51,14 @@ enum RmAction {
     Trash(PathBuf),
     /// Permanent delete (via backend).
     Delete,
-    /// Latch gate: return exit code 2 with nonce.
-    Latch,
+    /// Hold behind an approval request (exit 2 until it is granted).
+    Gate,
 }
 
-/// Determine the rm action based on trash/latch settings and file properties.
+/// Determine the rm action based on trash/approval settings and file properties.
 fn decide_rm_action(
     trash_enabled: bool,
-    latch_enabled: bool,
+    enforce: bool,
     real_path: Option<&Path>,
     file_size: Option<u64>,
     trash_max_size: u64,
@@ -66,10 +69,10 @@ fn decide_rm_action(
     // *through* the link, so trashing a symlink would move its TARGET to trash —
     // exactly the follow-the-symlink hazard we're closing. The link itself is
     // trivially recreatable, so symlinks bypass trash and are unlinked directly.
-    // Latch still applies (it gates on the kaish path, not the resolved target).
+    // The gate still applies (it gates on the kaish path, not the resolved target).
     if is_symlink {
-        if latch_enabled {
-            return RmAction::Latch;
+        if enforce {
+            return RmAction::Gate;
         }
         return RmAction::Delete;
     }
@@ -88,9 +91,9 @@ fn decide_rm_action(
                 if size <= trash_max_size {
                     return RmAction::Trash(rp.to_path_buf());
                 }
-                // File too big for trash — fall through to latch check
-                if latch_enabled {
-                    return RmAction::Latch;
+                // File too big for trash — fall through to the gate check
+                if enforce {
+                    return RmAction::Gate;
                 }
                 return RmAction::Delete;
             }
@@ -98,8 +101,8 @@ fn decide_rm_action(
         // Virtual path (no real path) or excluded path — fall through
     }
 
-    if latch_enabled {
-        return RmAction::Latch;
+    if enforce {
+        return RmAction::Gate;
     }
 
     RmAction::Delete
@@ -120,7 +123,7 @@ impl Tool for Rm {
                 ("Remove a file", "rm temp.txt"),
                 ("Remove directory recursively", "rm -rf build/"),
                 (
-                    "Confirm latched removal",
+                    "Confirm gated removal",
                     "rm --confirm=4b1e0d9a7c3f28e6b5a0c1d4e7f2938a bigfile.bin",
                 ),
             ],
@@ -154,12 +157,13 @@ impl Tool for Rm {
         let confirm = parsed.confirm.clone();
 
         let trash_enabled = ctx.scope.trash_enabled();
-        let latch_enabled = ctx.scope.latch_enabled();
+        let enforce = ctx.scope.approvals_enabled();
         let trash_max_size = ctx.scope.trash_max_size();
 
-        // Collect per-path decisions in one pass so latch can issue ONE nonce
-        // that authorizes the whole batch (NonceScope.paths is a set; one
-        // nonce validates any subset). Stat-failures short-circuit unless -f.
+        // Collect per-path decisions in one pass so ONE approval request
+        // covers the whole batch — a request names its resources as a set, and
+        // a grant authorizes exactly that set. Stat-failures short-circuit
+        // unless -f.
         struct Decision {
             path: String,
             resolved: PathBuf,
@@ -189,7 +193,7 @@ impl Tool for Rm {
             let is_symlink = entry.as_ref().is_some_and(|s| s.is_symlink());
             let action = decide_rm_action(
                 trash_enabled,
-                latch_enabled,
+                enforce,
                 real_path.as_deref(),
                 file_size,
                 trash_max_size,
@@ -204,27 +208,30 @@ impl Tool for Rm {
             return ExecResult::success("");
         }
 
-        // If ANY decision is Latch, issue one nonce for the full set of
-        // latched paths so the user can re-run with `--confirm=NONCE` on the
-        // same argv. Without a valid nonce, return the latch error listing
-        // every path that triggered it.
-        let latched_paths: Vec<&str> = decisions
+        // If ANY decision is Gate, one request covers the full set of gated
+        // paths so the operator approves the batch once and the user re-runs
+        // the same argv with `--confirm=<token>`. Without an approval, return
+        // the pending request listing every path that raised it.
+        let gated_paths: Vec<&str> = decisions
             .iter()
-            .filter(|d| matches!(d.action, RmAction::Latch))
+            .filter(|d| matches!(d.action, RmAction::Gate))
             .map(|d| d.path.as_str())
             .collect();
-        if !latched_paths.is_empty() {
-            if let Some(nonce) = &confirm {
-                if let Err(e) = ctx.verify_nonce(nonce, "rm", &latched_paths) {
-                    return ExecResult::failure(1, format!("rm: {}", e));
-                }
-                // Nonce valid — fall through and execute each decision.
-            } else {
-                let joined = latched_paths.join(" ");
-                return ctx.latch_result("rm", &latched_paths, "latch enabled", |nonce| {
-                    format!("rm --confirm=\"{}\" {}", nonce, joined)
-                });
+        if !gated_paths.is_empty() {
+            let joined = gated_paths.join(" ");
+            if let Err(result) = ctx
+                .request_gate(
+                    KernelOperation::FsRemove,
+                    &gated_paths,
+                    "the fs.* enforce policy is on and the trash cannot catch this delete",
+                    format!("rm --confirm=<token> {joined}"),
+                    confirm.as_deref(),
+                )
+                .await
+            {
+                return crate::tools::prefix_error("rm", result);
             }
+            // Authorized — fall through and execute each decision.
         }
 
         // Execute each decision. Continue past per-path errors so users see
@@ -248,7 +255,7 @@ impl Tool for Rm {
                         )
                     })
                 }
-                RmAction::Latch | RmAction::Delete => {
+                RmAction::Gate | RmAction::Delete => {
                     // Single recursive remover lives on the backend (symlink-safe:
                     // it lstats the recurse decision and unlinks links directly).
                     match ctx.backend.remove(Path::new(&d.resolved), recursive).await {
@@ -417,12 +424,63 @@ mod tests {
         assert!(!ctx.backend.exists(Path::new("/deep/a/b")).await);
     }
 
-    // ── Latch tests (MemoryFs — no real filesystem) ──
+    // ── Approval-gate tests (MemoryFs — no real filesystem) ──
+
+    /// Wire a ledger, turn the `fs.*` enforce policy on, and hand back the
+    /// authority a test grants through.
+    async fn gated_ctx() -> (ExecContext, crate::ledger::ApproverHandle) {
+        let mut ctx = make_ctx().await;
+        let authority = ctx.wire_test_ledger();
+        ctx.scope.set_approvals_enabled(true);
+        (ctx, authority)
+    }
+
+    /// Grant the one pending request and return its bearer key. Mirrors what
+    /// an embedder does between the exit-2 result and the re-run.
+    async fn grant_the_pending_request(
+        ctx: &ExecContext,
+        authority: &crate::ledger::ApproverHandle,
+    ) -> (kaish_types::approval::RequestId, String) {
+        use kaish_types::approval::{ApprovalRequest, GrantTerms};
+        let approvals = ctx
+            .ledger_access
+            .as_ref()
+            .expect("a wired ledger")
+            .approvals
+            .clone();
+        let pending = approvals.pending();
+        assert_eq!(pending.len(), 1, "exactly one request must be pending");
+        let id = pending[0].id.clone();
+        let chain = approvals.get(&id).expect("the chain");
+        // `GrantTerms::once_for` wants the stamped request; the view carries
+        // every field it reads except the ones a grant does not touch.
+        let request: ApprovalRequest = ApprovalRequest::builder(chain.request.operation.as_str())
+            .risk(chain.request.risk)
+            .build()
+            .expect("a well-formed draft")
+            .stamp(
+                id.clone(),
+                chain.request.principal.clone(),
+                chain.request.capture.clone(),
+                chain.request.context.clone(),
+                chain.request.requested_at,
+                chain.request.ttl,
+                chain.request.job_id,
+            );
+        let terms = GrantTerms::once_for(
+            &request,
+            std::time::SystemTime::now() + std::time::Duration::from_secs(300),
+        );
+        authority.grant(&id, terms).await.expect("the grant must post");
+        let token = authority.token_for(&id).expect("a credential for a granted request");
+        (id, token.reveal().to_string())
+    }
 
     #[tokio::test]
-    async fn test_rm_latch_off_deletes_normally() {
+    async fn rm_with_the_policy_off_deletes_directly() {
         let mut ctx = make_ctx().await;
-        // latch is off by default
+        ctx.wire_test_ledger();
+        // The fs.* enforce policy is off by default.
 
         let mut args = ToolArgs::new();
         args.positional.push(Value::String("/file.txt".into()));
@@ -433,147 +491,281 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_rm_latch_on_no_confirm_returns_code_2() {
+    async fn rm_with_no_subscription_and_no_policy_posts_nothing() {
+        // Spec §C.5's free-when-unsubscribed rule: an ungated `fs.*`
+        // operation must not pay a ledger cost, and the log must stay empty.
         let mut ctx = make_ctx().await;
-        ctx.scope.set_latch_enabled(true);
+        ctx.wire_test_ledger();
+
+        let mut args = ToolArgs::new();
+        args.positional.push(Value::String("/file.txt".into()));
+        let result = Rm.execute(args, &mut ctx).await;
+        assert!(result.ok());
+
+        let approvals = ctx.ledger_access.as_ref().expect("a wired ledger").approvals.clone();
+        assert!(
+            approvals.log(0).is_empty(),
+            "an unsubscribed, ungated rm must post NOTHING: {:?}",
+            approvals.log(0)
+        );
+        assert!(approvals.pending().is_empty());
+    }
+
+    #[tokio::test]
+    async fn rm_under_the_policy_with_no_approval_returns_code_2() {
+        let (mut ctx, _authority) = gated_ctx().await;
 
         let mut args = ToolArgs::new();
         args.positional.push(Value::String("/file.txt".into()));
 
         let result = Rm.execute(args, &mut ctx).await;
         assert_eq!(result.code, 2);
-        // Error message should contain a hex nonce pattern and authorized paths
-        assert!(result.err.contains("confirmation required"));
-        assert!(result.err.contains("Authorized: /file.txt"));
-        assert!(result.err.contains("--confirm="));
-        assert!(result.err.contains("60 seconds"));
-        // File should still exist
+        assert!(result.err.contains("pending approval"), "{}", result.err);
+        // The file must still exist.
         assert!(ctx.backend.exists(Path::new("/file.txt")).await);
 
-        // The latch rides its own typed control-plane field; the accessor ties
-        // `latch_result` construction to `LatchRequest` so the keys can't drift
-        // apart silently. (Embedders hook this seam.) The data-plane `.data`
-        // stays empty — a latch is not stdout.
-        assert!(result.data.is_none(), "latch must not use the data-plane .data");
-        let req = result.latch_request().expect("a latch request on the .latch field");
-        assert_eq!(req.command, "rm");
-        assert_eq!(req.paths, vec!["/file.txt".to_string()]);
-        assert_eq!(req.ttl, 60);
+        // The request rides its own typed control-plane field. The data-plane
+        // `.data` stays empty — a pending approval is not stdout.
+        assert!(result.data.is_none(), "a gate must not use the data-plane .data");
+        let req = result.approval_request().expect("a request on the .approval field");
+        assert_eq!(req.operation.as_str(), "fs.remove");
+        assert_eq!(req.resources.len(), 1);
+        assert_eq!(req.resources[0].id, "/file.txt");
         assert!(req.hint.contains("--confirm="));
-        assert!(!req.nonce.is_empty());
+        // A direct `tool.execute` has no dispatch seam above it, so the
+        // capture says so rather than recording a silently empty argv.
+        assert_eq!(req.capture, kaish_types::approval::Capture::DirectExecution);
     }
 
     #[tokio::test]
-    async fn test_rm_latch_on_valid_confirm_deletes() {
-        let mut ctx = make_ctx().await;
-        ctx.scope.set_latch_enabled(true);
-
-        // Issue a nonce manually
-        let nonce = ctx.nonce_store.issue("rm", &["/file.txt"]).expect("entropy");
+    async fn the_full_entry_chain_lands_under_the_policy() {
+        // Requested → Granted → Redeemed → Settled{Exit(0)} (spec §H).
+        use kaish_types::approval::{LedgerEntry, Outcome};
+        let (mut ctx, authority) = gated_ctx().await;
 
         let mut args = ToolArgs::new();
         args.positional.push(Value::String("/file.txt".into()));
-        args.named.insert("confirm".to_string(), Value::String(nonce));
+        assert_eq!(Rm.execute(args, &mut ctx).await.code, 2);
 
+        let (_id, token) = grant_the_pending_request(&ctx, &authority).await;
+
+        let mut args = ToolArgs::new();
+        args.positional.push(Value::String("/file.txt".into()));
+        args.named.insert("confirm".to_string(), Value::String(token));
         let result = Rm.execute(args, &mut ctx).await;
-        assert!(result.ok());
+        assert!(result.ok(), "{}", result.err);
         assert!(!ctx.backend.exists(Path::new("/file.txt")).await);
+
+        // A direct `tool.execute` has no dispatch seam to settle the attempt,
+        // so settle it the way the seam would.
+        ctx.settle_attempts(0).await;
+
+        let approvals = ctx.ledger_access.as_ref().expect("a wired ledger").approvals.clone();
+        let kinds: Vec<&str> = approvals
+            .log(0)
+            .iter()
+            .map(|e| match e {
+                LedgerEntry::Requested { .. } => "Requested",
+                LedgerEntry::Granted { .. } => "Granted",
+                LedgerEntry::Redeemed { .. } => "Redeemed",
+                LedgerEntry::Settled { .. } => "Settled",
+                LedgerEntry::KeyRetrieved { .. } => "KeyRetrieved",
+                _ => "other",
+            })
+            .collect();
+        assert!(
+            kinds.contains(&"Requested")
+                && kinds.contains(&"Granted")
+                && kinds.contains(&"Redeemed")
+                && kinds.contains(&"Settled"),
+            "the full chain must be on the log: {kinds:?}"
+        );
+        let settled = approvals
+            .log(0)
+            .into_iter()
+            .find_map(|e| match e {
+                LedgerEntry::Settled { outcome, .. } => Some(outcome),
+                _ => None,
+            })
+            .expect("a Settled entry");
+        assert_eq!(settled, Outcome::Exit(0));
     }
 
     #[tokio::test]
-    async fn test_rm_latch_on_invalid_confirm_fails() {
-        let mut ctx = make_ctx().await;
-        ctx.scope.set_latch_enabled(true);
+    async fn a_wrong_key_fails_and_the_file_survives() {
+        let (mut ctx, authority) = gated_ctx().await;
 
         let mut args = ToolArgs::new();
         args.positional.push(Value::String("/file.txt".into()));
-        args.named.insert("confirm".to_string(), Value::String("bogus123".into()));
+        assert_eq!(Rm.execute(args, &mut ctx).await.code, 2);
+        grant_the_pending_request(&ctx, &authority).await;
+
+        let mut args = ToolArgs::new();
+        args.positional.push(Value::String("/file.txt".into()));
+        args.named
+            .insert("confirm".to_string(), Value::String("bogus123".into()));
 
         let result = Rm.execute(args, &mut ctx).await;
         assert_eq!(result.code, 1);
-        assert!(result.err.contains("invalid nonce"));
         assert!(ctx.backend.exists(Path::new("/file.txt")).await);
     }
 
     #[tokio::test]
-    async fn test_rm_latch_on_force_nonexistent() {
-        let mut ctx = make_ctx().await;
-        ctx.scope.set_latch_enabled(true);
+    async fn a_key_that_describes_no_request_is_refused_and_voids_nothing() {
+        // Spec §F.3 item 2: a guesser cannot void a request it cannot
+        // describe. The presentation is recorded against nothing.
+        use kaish_types::approval::LedgerEntry;
+        let (mut ctx, _authority) = gated_ctx().await;
+
+        let mut args = ToolArgs::new();
+        args.positional.push(Value::String("/file.txt".into()));
+        args.named
+            .insert("confirm".to_string(), Value::String("bogus123".into()));
+
+        let result = Rm.execute(args, &mut ctx).await;
+        assert_eq!(result.code, 1);
+        assert!(result.err.contains("matches no approval request"), "{}", result.err);
+        assert!(ctx.backend.exists(Path::new("/file.txt")).await);
+
+        let approvals = ctx.ledger_access.as_ref().expect("a wired ledger").approvals.clone();
+        let rejections: Vec<_> = approvals
+            .log(0)
+            .into_iter()
+            .filter_map(|e| match e {
+                LedgerEntry::TokenRejected { request, .. } => Some(request),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            rejections,
+            vec![None],
+            "the presentation must be recorded against no request"
+        );
+    }
+
+    #[tokio::test]
+    async fn force_on_a_missing_path_never_gates() {
+        let (mut ctx, _authority) = gated_ctx().await;
 
         let mut args = ToolArgs::new();
         args.positional.push(Value::String("/nonexistent".into()));
         args.flags.insert("f".to_string());
 
-        // -f on nonexistent should succeed silently (no latch — nothing to gate)
+        // -f on a nonexistent path succeeds silently — nothing to gate.
         let result = Rm.execute(args, &mut ctx).await;
         assert!(result.ok());
     }
 
     #[tokio::test]
-    async fn test_rm_latch_on_nonexistent_no_force() {
-        let mut ctx = make_ctx().await;
-        ctx.scope.set_latch_enabled(true);
+    async fn a_missing_path_without_force_errors_rather_than_gating() {
+        let (mut ctx, _authority) = gated_ctx().await;
 
         let mut args = ToolArgs::new();
         args.positional.push(Value::String("/nonexistent".into()));
 
-        // Should error with NotFound, NOT exit code 2
         let result = Rm.execute(args, &mut ctx).await;
         assert_eq!(result.code, 1);
         assert!(result.err.contains("No such file"));
     }
 
     #[tokio::test]
-    async fn test_rm_latch_nonce_reuse_idempotent() {
-        let mut ctx = make_ctx().await;
-        ctx.scope.set_latch_enabled(true);
+    async fn re_presenting_a_key_after_success_reports_the_settled_outcome() {
+        // **The behavior change the latch's reusable nonce hid.** Under the
+        // latch this test asserted the opposite: a nonce stayed valid inside
+        // its TTL and re-presenting it silently ran the operation again. A
+        // grant now authorizes exactly one *successful* settlement, so the
+        // second presentation reports what already happened.
+        let (mut ctx, authority) = gated_ctx().await;
+        ctx.backend
+            .write(Path::new("/file.txt"), b"data", kaish_types::WriteMode::Truncate)
+            .await
+            .expect("seed the file");
 
-        let nonce = ctx.nonce_store.issue("rm", &["/file.txt"]).expect("entropy");
-
-        // First confirm: deletes the file
         let mut args = ToolArgs::new();
         args.positional.push(Value::String("/file.txt".into()));
-        args.named.insert("confirm".to_string(), Value::String(nonce.clone()));
+        assert_eq!(Rm.execute(args, &mut ctx).await.code, 2);
+        let (_id, token) = grant_the_pending_request(&ctx, &authority).await;
 
-        let result = Rm.execute(args, &mut ctx).await;
-        assert!(result.ok());
+        let mut args = ToolArgs::new();
+        args.positional.push(Value::String("/file.txt".into()));
+        args.named
+            .insert("confirm".to_string(), Value::String(token.clone()));
+        assert!(Rm.execute(args, &mut ctx).await.ok());
         assert!(!ctx.backend.exists(Path::new("/file.txt")).await);
+        ctx.settle_attempts(0).await;
 
-        // Second confirm: file is gone, NotFound error (not exit code 2)
-        let mut args2 = ToolArgs::new();
-        args2.positional.push(Value::String("/file.txt".into()));
-        args2.named.insert("confirm".to_string(), Value::String(nonce));
+        // Put the file back. If the second presentation re-ran the delete,
+        // the file would vanish a second time — which is exactly what the
+        // reusable nonce did.
+        ctx.backend
+            .write(Path::new("/file.txt"), b"data", kaish_types::WriteMode::Truncate)
+            .await
+            .expect("restore the file");
 
-        let result2 = Rm.execute(args2, &mut ctx).await;
-        assert_eq!(result2.code, 1);
+        let mut args = ToolArgs::new();
+        args.positional.push(Value::String("/file.txt".into()));
+        args.named.insert("confirm".to_string(), Value::String(token));
+        let second = Rm.execute(args, &mut ctx).await;
+        assert_eq!(second.code, 1, "a settled grant must not re-execute");
+        assert!(
+            second.err.contains("already settled"),
+            "the refusal must report the settled outcome: {}",
+            second.err
+        );
+        assert!(
+            ctx.backend.exists(Path::new("/file.txt")).await,
+            "the file must be deleted exactly once"
+        );
     }
 
     #[tokio::test]
-    async fn test_rm_latch_error_message_is_parseable() {
-        let mut ctx = make_ctx().await;
-        ctx.scope.set_latch_enabled(true);
+    async fn the_gate_message_names_the_request_and_the_re_run() {
+        let (mut ctx, _authority) = gated_ctx().await;
 
         let mut args = ToolArgs::new();
         args.positional.push(Value::String("/file.txt".into()));
 
         let result = Rm.execute(args, &mut ctx).await;
         assert_eq!(result.code, 2);
+        let view = result.approval_request().expect("a request");
+        assert!(
+            result.err.contains(view.id.as_str()),
+            "the diagnostic must name the request id: {}",
+            result.err
+        );
+        assert!(view.hint.contains("rm --confirm=<token>"), "{}", view.hint);
+        assert!(view.hint.contains("/file.txt"), "{}", view.hint);
+        // The view is tokenless by construction (spec §A.2): no field of it,
+        // at any depth, is a credential. Walk the serialized keys rather than
+        // grepping the text — the hint deliberately contains the literal
+        // placeholder `<token>`, which is display text, not a secret.
+        let json = serde_json::to_value(&view).expect("the view serializes");
+        let mut keys = Vec::new();
+        collect_keys(&json, &mut keys);
+        for forbidden in ["token", "nonce", "credential", "secret"] {
+            assert!(
+                !keys.iter().any(|k| k == forbidden),
+                "no credential field may reach the view: found {forbidden:?} in {keys:?}"
+            );
+        }
+    }
 
-        // Parse the nonce from the error message
-        let err = &result.err;
-        assert!(err.contains("rm --confirm="));
-        assert!(err.contains("/file.txt"));
-        assert!(err.contains("60 seconds"));
-
-        // Extract nonce: find '--confirm="' then take up to the closing quote.
-        // Don't assume a fixed nonce length here — the generator's width is an
-        // implementation detail (see nonce.rs), not part of this contract.
-        let confirm_prefix = "rm --confirm=\"";
-        let idx = err.find(confirm_prefix).expect("should contain confirm prefix");
-        let nonce_start = idx + confirm_prefix.len();
-        let nonce: String = err[nonce_start..].chars().take_while(|&c| c != '"').collect();
-        assert!(!nonce.is_empty());
-        assert!(nonce.chars().all(|c| c.is_ascii_hexdigit()));
+    /// Every object key in a JSON value, at any depth.
+    fn collect_keys(value: &serde_json::Value, out: &mut Vec<String>) {
+        match value {
+            serde_json::Value::Object(map) => {
+                for (k, v) in map {
+                    out.push(k.clone());
+                    collect_keys(v, out);
+                }
+            }
+            serde_json::Value::Array(items) => {
+                for v in items {
+                    collect_keys(v, out);
+                }
+            }
+            _ => {}
+        }
     }
 
     // ── Decision logic unit tests ──
@@ -585,9 +777,9 @@ mod tests {
     }
 
     #[test]
-    fn test_decide_rm_action_latch_only() {
+    fn test_decide_rm_action_gate_only() {
         let action = decide_rm_action(false, true, None, Some(100), 10_000_000, false, false);
-        assert_eq!(action, RmAction::Latch);
+        assert_eq!(action, RmAction::Gate);
     }
 
     #[test]
@@ -598,7 +790,7 @@ mod tests {
     }
 
     #[test]
-    fn test_decide_rm_action_trash_small_with_latch() {
+    fn test_decide_rm_action_trash_small_with_approvals() {
         // Small file → trash catches it, latch irrelevant
         let real = PathBuf::from("/home/user/file.txt");
         let action = decide_rm_action(true, true, Some(&real), Some(100), 10_000_000, false, false);
@@ -613,10 +805,10 @@ mod tests {
     }
 
     #[test]
-    fn test_decide_rm_action_trash_large_with_latch() {
+    fn test_decide_rm_action_trash_large_with_approvals() {
         let real = PathBuf::from("/home/user/bigfile.bin");
         let action = decide_rm_action(true, true, Some(&real), Some(100_000_000), 10_000_000, false, false);
-        assert_eq!(action, RmAction::Latch);
+        assert_eq!(action, RmAction::Gate);
     }
 
     #[test]
@@ -655,7 +847,7 @@ mod tests {
     }
 
     #[test]
-    fn test_decide_rm_action_dir_trashes_with_latch() {
+    fn test_decide_rm_action_dir_trashes_with_approvals() {
         let real = PathBuf::from("/home/user/mydir");
         // Directory always trashes when trash enabled — latch irrelevant
         let action = decide_rm_action(true, true, Some(&real), Some(0), 10_000_000, true, false);
@@ -676,14 +868,14 @@ mod tests {
     enum Outcome {
         Deleted,
         Trashed,
-        Latched,
+        Gated,
     }
 
     fn matrix_action_to_outcome(action: &RmAction) -> Outcome {
         match action {
             RmAction::Trash(_) => Outcome::Trashed,
             RmAction::Delete => Outcome::Deleted,
-            RmAction::Latch => Outcome::Latched,
+            RmAction::Gate => Outcome::Gated,
         }
     }
 
@@ -697,26 +889,26 @@ mod tests {
         // (trash, latch, size, is_dir, is_symlink) → expected outcome
         let cases = vec![
             (false, false, small, false, false, Outcome::Deleted),
-            (false, true,  small, false, false, Outcome::Latched),
+            (false, true,  small, false, false, Outcome::Gated),
             (true,  false, small, false, false, Outcome::Trashed),
             (true,  true,  small, false, false, Outcome::Trashed),   // trash catches small, latch irrelevant
             (false, false, large, false, false, Outcome::Deleted),
-            (false, true,  large, false, false, Outcome::Latched),
+            (false, true,  large, false, false, Outcome::Gated),
             (true,  false, large, false, false, Outcome::Deleted),    // too big for trash, no latch → delete
-            (true,  true,  large, false, false, Outcome::Latched),    // too big for trash + latch → gate
+            (true,  true,  large, false, false, Outcome::Gated),    // too big for trash + latch → gate
             // Directories always trash (size irrelevant)
             (true,  false, 0,     true,  false, Outcome::Trashed),
             (true,  true,  0,     true,  false, Outcome::Trashed),
             // Dir without trash enabled → normal flow
             (false, false, 0,     true,  false, Outcome::Deleted),
-            (false, true,  0,     true,  false, Outcome::Latched),
+            (false, true,  0,     true,  false, Outcome::Gated),
             // Symlinks NEVER trash (trashing follows to the target); they unlink
             // directly, but latch still gates. is_dir is moot for a symlink.
             (true,  false, small, false, true,  Outcome::Deleted),
-            (true,  true,  small, false, true,  Outcome::Latched),
+            (true,  true,  small, false, true,  Outcome::Gated),
             (true,  false, 0,     true,  true,  Outcome::Deleted),    // symlink-to-dir: still just unlink
             (false, false, small, false, true,  Outcome::Deleted),
-            (false, true,  small, false, true,  Outcome::Latched),
+            (false, true,  small, false, true,  Outcome::Gated),
         ];
 
         for (trash, latch, size, is_dir, is_symlink, expected) in cases {

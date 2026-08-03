@@ -6,6 +6,7 @@ use std::path::{Path, PathBuf};
 
 use crate::backend::{BackendError, KernelBackend, WriteMode};
 use crate::interpreter::ExecResult;
+use crate::ledger::KernelOperation;
 use crate::tools::{cas_overwrite, schema_from_clap, ExecContext, ToolCtx, GlobalFlags, Tool, ToolArgs, ToolSchema};
 
 /// Cp tool: copy files and directories.
@@ -19,7 +20,7 @@ struct CpArgs {
     #[arg(short = 'r', long = "recursive")]
     recursive: bool,
 
-    /// Confirmation nonce for a latch-gated overwrite.
+    /// Approval token for a gated overwrite (`--confirm=<token>`).
     #[arg(long = "confirm")]
     confirm: Option<String>,
 
@@ -106,7 +107,7 @@ impl Tool for Cp {
             }
         }
 
-        // Gate a direct file clobber (`cp SRC EXISTING_FILE`) through latch +
+        // Gate a direct file clobber (`cp SRC EXISTING_FILE`) through approvals +
         // trash. Copying *into* a directory or a recursive directory merge is
         // not a single-file truncation, so it stays ungated (documented
         // write-model residual). Only the named destination is gated here.
@@ -131,9 +132,13 @@ impl Tool for Cp {
             // take a spurious trash snapshot of a file that's never overwritten.
             if dst_is_existing_file && !src_is_dir {
                 let snapshots = match ctx
-                    .gate_overwrites("cp", &[(dest.clone(), false)], parsed.confirm.as_deref(), |nonce, joined| {
-                        format!("cp --confirm=\"{nonce}\" {src_display} {joined}")
-                    })
+                    .gate_overwrites(
+                        KernelOperation::FsOverwrite,
+                        "cp",
+                        &[(dest.clone(), false)],
+                        parsed.confirm.as_deref(),
+                        |joined| format!("cp --confirm=<token> {src_display} {joined}"),
+                    )
                     .await
                 {
                     Ok(s) => s,

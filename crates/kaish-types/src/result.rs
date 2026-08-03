@@ -55,67 +55,6 @@ impl<'de> serde::Deserialize<'de> for OutputPayload {
     }
 }
 
-/// A pending confirmation-latch request, decoded from a latched [`ExecResult`].
-///
-/// When the confirmation latch (`set -o latch`) gates a destructive operation,
-/// the kernel returns exit code 2 with this typed payload on the dedicated
-/// [`ExecResult::latch`] field. Embedders read it via
-/// [`ExecResult::latch_request`] — the seam to apply preapproval policy or a
-/// model review before approving the operation. It is deliberately *not* the
-/// data-plane [`ExecResult::data`]: a stdout redirect clears `.data` but never
-/// this control-plane signal, and it survives `--json` formatting (surfaced
-/// under a `latch` key in the error envelope).
-///
-/// To approve, re-run the *same argv* with `--confirm=<nonce>` (the `hint`
-/// shows the exact form). The nonce is command- and path-scoped, so it cannot
-/// authorize a different command or a path outside `paths`.
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
-#[serde(deny_unknown_fields)]
-pub struct LatchRequest {
-    /// Confirmation nonce — pass back as `--confirm=<nonce>` on the same command.
-    pub nonce: String,
-    /// The canonical command being gated (e.g. `"rm"`, `"kaish-trash empty"`).
-    /// A human/display label — for a precise machine replay use `tool` + `argv`.
-    pub command: String,
-    /// The resolved paths the operation would touch. Empty for command-only ops.
-    pub paths: Vec<String>,
-    /// A ready-to-run confirmation command string (informational, for humans).
-    /// Machine fulfillment should prefer `Kernel::confirm` (which replays the
-    /// captured `tool`/`argv`); the hint is a display string and does not
-    /// robustly quote paths with spaces or glob characters.
-    pub hint: String,
-    /// The dispatch name of the gated tool (e.g. `"rm"`, `"kaish-trash"`), as
-    /// resolved at the dispatch seam — the argv0 for a replay via
-    /// `Kernel::execute_argv`. Empty only when the latch was produced outside a
-    /// dispatch (a direct `tool.execute` in a unit test).
-    #[serde(default)]
-    pub tool: String,
-    /// The exact captured argv (`ToolArgs::to_argv`) of the gated invocation,
-    /// minus the tool name and the `--confirm` nonce. `Kernel::confirm` prepends
-    /// `--confirm=<nonce>` and replays `execute_argv(tool, argv)` — the
-    /// highest-fidelity fulfillment, with no re-parsing of the `hint`.
-    #[serde(default)]
-    pub argv: Vec<String>,
-    /// Seconds until the nonce expires.
-    pub ttl: u64,
-    /// The id of the *backgrounded* job that raised this latch, if any —
-    /// `Some` only when the gate came from a job the `JobManager` is tracking
-    /// (`rm x &` reaching its gate), `None` for a foreground latch (the common
-    /// case: `rm x` gated directly at the dispatch seam, no job involved).
-    ///
-    /// Deliberately a bare `u64`, not a `JobId`: this crate (`kaish-types`) is
-    /// a dependency-light leaf with no notion of `JobId` — that type lives in
-    /// `kaish-kernel`'s scheduler module, which depends on `kaish-types`, not
-    /// the other way around. `kaish-kernel` re-wraps this as `JobId(id)` at
-    /// the two call sites that care (`JobManager`'s `Job::latch()` stamps
-    /// it; `Kernel::confirm` reads it back to retire the originating job
-    /// after a successful replay). Skipped on the wire when absent, so a
-    /// foreground latch's `--json` shape is unchanged.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub job_id: Option<u64>,
-}
-
 /// Returned when a binary result is asked to behave as text.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BinaryNotText {
@@ -163,7 +102,7 @@ pub struct ExecResult {
     pub data: Option<Value>,
     /// Structured output data for rendering.
     ///
-    /// Boxed like [`Self::latch`]: `OutputData` is ~120 B and `ExecResult` (and
+    /// Boxed like [`Self::approval`]: `OutputData` is ~120 B and `ExecResult` (and
     /// the `ControlFlow` that wraps it) is returned up every level of deep
     /// `$()`/pipeline recursion, so an inline `Option<OutputData>` fattened every
     /// frame. The box is allocated only when a builtin sets structured output,
@@ -193,31 +132,23 @@ pub struct ExecResult {
     /// application-level hints, etc.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub baggage: BTreeMap<String, String>,
-    /// A pending confirmation-latch request — the *control-plane* signal a
-    /// gated destructive op (`rm`/`kaish-trash`/an overwrite under `set -o
-    /// latch`) raises alongside exit code 2. First-class and typed, distinct
-    /// from the data-plane `.data`: a stdout redirect clears `.data` but never
-    /// this. Read it via [`Self::latch_request`]; set it via
-    /// `ToolCtx::latch_result`.
+    /// A pending approval request — the *control-plane* signal a gated
+    /// destructive op (`rm`/`kaish-trash`/an overwrite under the `fs.*`
+    /// enforce policy) raises alongside exit code 2. First-class and typed,
+    /// distinct from the data-plane `.data`: a stdout redirect clears
+    /// `.data` but never this. Read it via [`Self::approval_request`]; a
+    /// gate site sets it through `ApprovalOutcome::proceed()`
+    /// (`kaish-tool-api`).
+    ///
+    /// The view is tokenless by construction (`docs/approval-ledger.md`
+    /// §A.2) — it names the request, never its credential, so it is safe to
+    /// serialize into `--json`, `/v/jobs/{id}/approval`, and a job listing.
     ///
     /// Boxed: `ExecResult` is returned up every level of deep `$()`/pipeline
-    /// recursion, and `LatchRequest` is ~150 bytes — inline it would fatten
-    /// every stack frame and cost interpreter stack headroom (GH #46/#47). The
-    /// box is allocated only when a latch actually fires. Serializes identically
-    /// to an unboxed `Option` (Box is transparent to serde).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub latch: Option<Box<LatchRequest>>,
-    /// A pending approval-ledger request — the control-plane signal
-    /// `ApprovalOutcome::proceed()` (`kaish-tool-api`, ledger PR 3) raises
-    /// alongside exit code 2 when a gate site defers. Sits alongside
-    /// [`Self::latch`] rather than replacing it: no gate site posts to the
-    /// ledger yet (that cutover is ledger PR 5, which retires `.latch` per
-    /// the approval-ledger spec's §F.2 rename table), so both fields are
-    /// live during the transition. Read it via [`Self::approval_request`].
-    ///
-    /// Boxed for the same reason as `.latch`: `ExecResult` rides every level
-    /// of `$()`/pipeline recursion, and the view is large enough to be worth
-    /// keeping out of the common (`None`) case's stack footprint.
+    /// recursion, so an inline view would fatten every stack frame and cost
+    /// interpreter stack headroom (GH #46/#47). The box is allocated only
+    /// when a gate actually fires. Serializes identically to an unboxed
+    /// `Option` (Box is transparent to serde).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub approval: Option<Box<crate::approval::ApprovalRequestView>>,
 }
@@ -235,7 +166,6 @@ impl ExecResult {
             original_code: None,
             content_type: None,
             baggage: BTreeMap::new(),
-            latch: None,
             approval: None,
         }
     }
@@ -259,8 +189,7 @@ impl ExecResult {
                 original_code: None,
                 content_type: None,
                 baggage: BTreeMap::new(),
-                latch: None,
-                approval: None,
+                    approval: None,
             },
         }
     }
@@ -297,7 +226,6 @@ impl ExecResult {
             original_code: None,
             content_type: None,
             baggage: BTreeMap::new(),
-            latch: None,
             approval: None,
         }
     }
@@ -321,7 +249,6 @@ impl ExecResult {
             original_code: None,
             content_type: None,
             baggage: BTreeMap::new(),
-            latch: None,
             approval: None,
         }
     }
@@ -338,7 +265,6 @@ impl ExecResult {
             original_code: None,
             content_type: None,
             baggage: BTreeMap::new(),
-            latch: None,
             approval: None,
         }
     }
@@ -359,7 +285,6 @@ impl ExecResult {
             original_code: None,
             content_type: None,
             baggage: BTreeMap::new(),
-            latch: None,
             approval: None,
         }
     }
@@ -379,7 +304,6 @@ impl ExecResult {
             original_code: None,
             content_type: None,
             baggage: BTreeMap::new(),
-            latch: None,
             approval: None,
         }
     }
@@ -401,7 +325,6 @@ impl ExecResult {
             original_code: None,
             content_type: None,
             baggage: BTreeMap::new(),
-            latch: None,
             approval: None,
         }
     }
@@ -512,9 +435,10 @@ impl ExecResult {
     /// its own redirect (`x=$(fromjson … > file)` capturing the value instead
     /// of `""`).
     ///
-    /// The confirmation-latch request is untouched by design: it is a
-    /// *control-plane* signal on the dedicated `.latch` field, not stdout, so a
-    /// redirect can't drop it — `rm precious > log` still gates.
+    /// The pending approval request is untouched by design: it is a
+    /// *control-plane* signal on the dedicated `.approval` field, not
+    /// stdout, so a redirect can't drop it — `rm precious > log` still
+    /// gates.
     pub fn clear_stdout(&mut self) {
         self.out = OutputPayload::Text(String::new());
         self.output = None;
@@ -557,28 +481,17 @@ impl ExecResult {
         self.code == 0
     }
 
-    /// The pending confirmation-latch request, if this result is a latch gate.
+    /// The pending approval request, if this result is a deferred gate.
     ///
-    /// A gated destructive op (`rm`/`kaish-trash`/an overwrite under `set -o
-    /// latch`) returns exit code 2 with the typed request on the `.latch` field.
-    /// This is the seam an embedder hooks to apply preapproval policy or a model
-    /// review before re-running the command with `--confirm=<nonce>`, instead of
-    /// string-matching the error. A plain usage error (also exit 2, but no
-    /// latch) returns `None`. Unlike the data-plane `.data`, `.latch` survives
-    /// `--json` formatting, so this is safe to call before or after it.
-    pub fn latch_request(&self) -> Option<LatchRequest> {
-        self.latch.as_deref().cloned()
-    }
-
-    /// The pending approval-ledger request, if this result is a deferred
-    /// approval gate.
-    ///
-    /// A gate site that calls `ApprovalOutcome::proceed()` (ledger PR 3) and
-    /// gets `Pending` back returns exit code 2 with the typed view on the
-    /// `.approval` field. Read it here instead of string-matching `.err`.
-    /// Distinct from [`Self::latch_request`]: no gate site posts to the
-    /// ledger yet, so the two fields are never both `Some` on the same
-    /// result today.
+    /// A gated destructive op (`rm`/`kaish-trash`/an overwrite under the
+    /// `fs.*` enforce policy) returns exit code 2 with the tokenless view on
+    /// the `.approval` field. This is the seam an embedder hooks to apply
+    /// preapproval policy or a model review before granting through
+    /// `ApproverHandle::grant` (or re-running with `--confirm=<token>`),
+    /// instead of string-matching the error. A plain usage error (also exit
+    /// 2, but no gate) returns `None`. Unlike the data-plane `.data`,
+    /// `.approval` survives `--json` formatting, so this is safe to call
+    /// before or after it.
     pub fn approval_request(&self) -> Option<crate::approval::ApprovalRequestView> {
         self.approval.as_deref().cloned()
     }
@@ -963,81 +876,67 @@ mod tests {
         assert!(json_result.data.is_none());
     }
 
-    fn latch_req(paths: &[&str]) -> LatchRequest {
-        LatchRequest {
-            nonce: "4b1e0d9a7c3f28e6b5a0c1d4e7f2938a".to_string(),
-            command: "rm".to_string(),
-            paths: paths.iter().map(|p| (*p).to_string()).collect(),
-            hint: "rm --confirm=\"4b1e0d9a7c3f28e6b5a0c1d4e7f2938a\" important.dat".to_string(),
-            tool: "rm".to_string(),
-            argv: paths.iter().map(|p| (*p).to_string()).collect(),
-            ttl: 60,
-            job_id: None,
-        }
+    use crate::approval::sample_view;
+
+    fn approval_view(paths: &[&str]) -> crate::approval::ApprovalRequestView {
+        sample_view("fs.remove", paths)
     }
 
     #[test]
-    fn latch_request_reads_the_latch_field() {
-        let mut result = ExecResult::failure(2, "rm: confirmation required (latch enabled)");
-        result.latch = Some(Box::new(latch_req(&["important.dat"])));
+    fn approval_request_reads_the_approval_field() {
+        let mut result = ExecResult::failure(2, "rm: approval required");
+        result.approval = Some(Box::new(approval_view(&["important.dat"])));
 
-        let req = result.latch_request().expect("a latch request");
-        assert_eq!(req.nonce, "4b1e0d9a7c3f28e6b5a0c1d4e7f2938a");
-        assert_eq!(req.command, "rm");
-        assert_eq!(req.paths, vec!["important.dat".to_string()]);
-        assert_eq!(req.ttl, 60);
+        let req = result.approval_request().expect("an approval request");
+        assert_eq!(req.operation.as_str(), "fs.remove");
+        assert_eq!(req.resources.len(), 1);
+        assert_eq!(req.resources[0].id, "important.dat");
+        assert_eq!(req.ttl, std::time::Duration::from_secs(60));
         assert!(req.hint.contains("--confirm"));
     }
 
     #[test]
-    fn latch_request_handles_command_only_empty_paths() {
-        let mut result = ExecResult::failure(2, "kaish-trash empty: confirmation required");
-        result.latch = Some(Box::new(LatchRequest {
-            nonce: "4b1e0d9a7c3f28e6b5a0c1d4e7f2938a".to_string(),
-            command: "kaish-trash empty".to_string(),
-            paths: vec![],
-            hint: "kaish-trash empty --confirm=4b1e0d9a7c3f28e6b5a0c1d4e7f2938a".to_string(),
-            tool: "kaish-trash".to_string(),
-            argv: vec!["--".to_string(), "empty".to_string()],
-            ttl: 60,
-            job_id: None,
-        }));
+    fn approval_request_handles_an_operation_with_no_resources() {
+        let mut result = ExecResult::failure(2, "kaish-trash empty: approval required");
+        result.approval = Some(Box::new(sample_view("trash.empty", &[])));
 
-        let req = result.latch_request().expect("a latch request");
-        assert_eq!(req.command, "kaish-trash empty");
-        assert!(req.paths.is_empty());
+        let req = result.approval_request().expect("an approval request");
+        assert_eq!(req.operation.as_str(), "trash.empty");
+        assert!(req.resources.is_empty());
     }
 
     #[test]
-    fn latch_request_none_when_no_latch_set() {
-        // A success result and a plain exit-2 usage error both carry no latch.
-        assert!(ExecResult::success("").latch_request().is_none());
+    fn approval_request_none_when_no_gate_fired() {
+        // A success result and a plain exit-2 usage error both carry no gate.
+        assert!(ExecResult::success("").approval_request().is_none());
         assert!(ExecResult::failure(2, "rm: unknown flag --bogus")
-            .latch_request()
+            .approval_request()
             .is_none());
     }
 
     #[test]
-    fn latch_request_ignores_data_plane_data() {
-        // Data-plane `.data` (even on an exit-2 result) is never a latch — the
-        // latch lives on its own field. Structural guarantee, pinned.
+    fn approval_request_ignores_data_plane_data() {
+        // Data-plane `.data` (even on an exit-2 result) is never an approval
+        // request — the request lives on its own field. Structural guarantee,
+        // pinned.
         let mut result = ExecResult::failure(2, "boom");
         result.data = Some(Value::Json(serde_json::json!({"count": 3})));
-        assert!(result.latch_request().is_none());
+        assert!(result.approval_request().is_none());
     }
 
     #[test]
-    fn clear_stdout_drops_data_but_never_the_latch() {
-        // A stdout redirect clears the data-plane .data unconditionally, but the
-        // control-plane latch on its own field survives (rm precious > log still
-        // gates). Guards the plane split at the type level.
+    fn clear_stdout_drops_data_but_never_the_approval() {
+        // A stdout redirect clears the data-plane .data unconditionally, but
+        // the control-plane approval request on its own field survives (rm
+        // precious > log still gates). Guards the plane split at the type
+        // level.
         let mut result = ExecResult::success_data(Value::Json(serde_json::json!([1, 2, 3])));
-        result.latch = Some(Box::new(latch_req(&["precious.txt"])));
+        result.approval = Some(Box::new(approval_view(&["precious.txt"])));
         result.clear_stdout();
         assert!(result.data.is_none(), "data-plane .data must clear");
         assert!(
-            result.latch_request().is_some(),
-            "control-plane latch must survive a stdout redirect"
+            result.approval_request().is_some(),
+            "a control-plane approval request must survive a stdout redirect"
         );
     }
 

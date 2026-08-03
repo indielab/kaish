@@ -127,15 +127,17 @@ impl Filesystem for JobFs {
                     .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "job not found"))?;
                 Ok(format!("{}\n", command).into_bytes())
             }
-            "latch" => {
-                // A gated job's pending confirmation-latch request as JSON, so
-                // a VFS consumer can read the nonce and fulfill a backgrounded
-                // gate (GH #96). Empty body when the job isn't latched — a
-                // consumer reads, then parses only if non-empty.
-                match self.jobs.get_latch(job_id).await {
-                    Some(latch) => {
-                        let json = serde_json::to_string_pretty(&latch)
-                            .map_err(|e| io::Error::other(format!("latch serialize: {e}")))?;
+            "approval" => {
+                // A held job's pending approval request as JSON, so a VFS
+                // consumer can read it and fulfill a backgrounded gate (GH
+                // #96). Tokenless by construction (`docs/approval-ledger.md`
+                // §A.2), so this node carries no credential. Empty body when
+                // the job is not held — a consumer reads, then parses only if
+                // non-empty.
+                match self.jobs.get_approval(job_id).await {
+                    Some(approval) => {
+                        let json = serde_json::to_string_pretty(&approval)
+                            .map_err(|e| io::Error::other(format!("approval serialize: {e}")))?;
                         Ok(format!("{json}\n").into_bytes())
                     }
                     None => Ok(Vec::new()),
@@ -228,11 +230,11 @@ impl Filesystem for JobFs {
                         symlink_target: None,
                     },
                     DirEntry {
-                        name: "latch".to_string(),
+                        name: "approval".to_string(),
                         kind: DirEntryKind::File,
                         modified: None,
                         permissions: None,
-                        size: 0, // JSON when gated, empty otherwise
+                        size: 0, // JSON when held, empty otherwise
                         symlink_target: None,
                     },
                 ])
@@ -275,7 +277,7 @@ impl Filesystem for JobFs {
                 }
 
                 // Validate file name
-                if !["stdout", "stderr", "status", "command", "latch"].contains(&file) {
+                if !["stdout", "stderr", "status", "command", "approval"].contains(&file) {
                     return Err(io::Error::new(
                         io::ErrorKind::NotFound,
                         format!("unknown file: {}", file),

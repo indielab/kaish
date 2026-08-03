@@ -358,7 +358,7 @@ mod tests {
         // default must still accept the call harmlessly rather than panic,
         // since a tool calling `settle_with` unconditionally must not crash
         // in a context that never supported approvals in the first place.
-        let attempt = AttemptHandle::from_ids(
+        let attempt = AttemptHandle::from_reservation(
             kaish_types::approval::RequestId::new(1, 1),
             kaish_types::approval::AttemptId::new(1),
         );

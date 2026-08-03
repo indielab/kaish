@@ -6,6 +6,7 @@ use std::path::{Path, PathBuf};
 
 use crate::backend::{BackendError, KernelBackend, WriteMode};
 use crate::interpreter::ExecResult;
+use crate::ledger::KernelOperation;
 use crate::tools::{schema_from_clap, ExecContext, ToolCtx, GlobalFlags, Tool, ToolArgs, ToolSchema};
 
 /// Mv tool: move/rename files and directories.
@@ -15,7 +16,7 @@ pub struct Mv;
 #[derive(Parser, Debug)]
 #[command(name = "mv", about = "Move (rename) files and directories")]
 struct MvArgs {
-    /// Confirmation nonce for a latch-gated overwrite.
+    /// Approval token for a gated overwrite (`--confirm=<token>`).
     #[arg(long = "confirm")]
     confirm: Option<String>,
 
@@ -98,9 +99,9 @@ impl Tool for Mv {
             }
         }
 
-        // Gate a direct file clobber (`mv SRC EXISTING_FILE`) through latch +
+        // Gate a direct file clobber (`mv SRC EXISTING_FILE`) through approvals +
         // trash. The gate snapshots the prior destination content to trash (the
-        // recovery copy) and handles the latch prompt; the move itself replaces
+        // recovery copy) and handles the approval prompt; the move itself replaces
         // it (an atomic same-mount `rename`, or unlink+write cross-mount), so no
         // CAS is threaded. Moving *into* a directory or a recursive merge isn't
         // a single-file truncation and stays ungated (documented residual).
@@ -114,9 +115,13 @@ impl Tool for Mv {
             if dst_is_existing_file {
                 let src_display = &sources[0];
                 if let Err(blocked) = ctx
-                    .gate_overwrites("mv", &[(dest.clone(), false)], parsed.confirm.as_deref(), |nonce, joined| {
-                        format!("mv --confirm=\"{nonce}\" {src_display} {joined}")
-                    })
+                    .gate_overwrites(
+                        KernelOperation::FsRename,
+                        "mv",
+                        &[(dest.clone(), false)],
+                        parsed.confirm.as_deref(),
+                        |joined| format!("mv --confirm=<token> {src_display} {joined}"),
+                    )
                     .await
                 {
                     return blocked;

@@ -67,6 +67,10 @@ impl WallClock for SystemWallClock {
 /// chain is never removed, however much ring pressure there is.
 struct Chain {
     request: ApprovalRequest,
+    /// The `seq` of this chain's `Requested` entry — a total order over
+    /// chains, so the draft matcher can pick the newest of several requests
+    /// describing the same operation without parsing the id back apart.
+    posted_seq: u64,
     state: RequestState,
     grant: Option<Grant>,
     /// The real credential. `None` until granted; cleared the moment the
@@ -621,6 +625,7 @@ impl LedgerInner {
         let request = draft.stamp(id.clone(), principal.clone(), capture, context, wall, ttl, job_id);
         let chain = Chain {
             request: request.clone(),
+            posted_seq: seq,
             state: RequestState::Requested,
             grant: None,
             token: None,
@@ -677,26 +682,7 @@ impl LedgerInner {
         let mut all_committed = self.materialize_expiry(&mut guard, id, mono, wall)?;
 
         let Some(chain) = guard.chains.get(id) else {
-            // A guessed id that matches nothing counts against nothing, so a
-            // guesser cannot void a request it cannot describe (spec §F.3).
-            // Best-effort: if the ring/sink has no room even for this one
-            // bookkeeping entry, skip recording it rather than failing a
-            // rejection that was never going to succeed anyway — seq is
-            // only allocated once capacity is confirmed, so a skip here
-            // never opens a gap.
-            if let Ok(reserved) = guard.reserve_capacity(1, self.config.retained_entries) {
-                let seq = guard.alloc_seq();
-                let entries = vec![(
-                    LedgerEntry::TokenRejected {
-                        seq,
-                        at: wall,
-                        request: None,
-                        attempts: 0,
-                    },
-                    None,
-                )];
-                all_committed.extend(guard.commit(entries, reserved));
-            }
+            all_committed.extend(self.record_unmatched_key_locked(&mut guard, wall));
             drop(guard);
             emit_events(&all_committed);
             return Err(LedgerError::NotAuthorized(id.clone()));
@@ -807,6 +793,72 @@ impl LedgerInner {
         drop(guard);
         emit_events(&all_committed);
         Err(LedgerError::NotAuthorized(id.clone()))
+    }
+
+    /// Record a credential presentation that names no request kaish can
+    /// identify. It counts against nothing, so a guesser cannot void a
+    /// request it cannot describe (spec §F.3).
+    ///
+    /// Best-effort: if the ring/sink has no room even for this one
+    /// bookkeeping entry, skip recording it rather than failing a rejection
+    /// that was never going to succeed anyway — `seq` is only allocated once
+    /// capacity is confirmed, so a skip here never opens a gap.
+    fn record_unmatched_key_locked(&self, guard: &mut LedgerState, wall: SystemTime) -> Vec<LedgerEntry> {
+        let Ok(reserved) = guard.reserve_capacity(1, self.config.retained_entries) else {
+            return Vec::new();
+        };
+        let seq = guard.alloc_seq();
+        let entries = vec![(
+            LedgerEntry::TokenRejected {
+                seq,
+                at: wall,
+                request: None,
+                attempts: 0,
+            },
+            None,
+        )];
+        guard.commit(entries, reserved)
+    }
+
+    /// The gate site's draft matcher found no request this presentation
+    /// could be for (spec §F.3 item 2). Records the fact and counts it
+    /// against nothing.
+    pub(crate) fn record_unmatched_key(&self) {
+        let mut guard = self.lock();
+        let (_mono, wall) = self.now();
+        let committed = self.record_unmatched_key_locked(&mut guard, wall);
+        drop(guard);
+        emit_events(&committed);
+    }
+
+    /// Which request a fresh draft describes (spec §B.4's draft matcher):
+    /// same operation, same resource-reference set. The **newest** match
+    /// wins — a re-request after a void or a denial is the one a
+    /// presentation is for, not the dead predecessor it superseded.
+    ///
+    /// Deliberately matches closed chains too: that is what lets a key
+    /// presented after a successful settlement report the settled outcome
+    /// instead of silently posting a fresh request and running the
+    /// operation a second time.
+    pub(crate) fn match_draft(
+        &self,
+        operation: &kaish_types::approval::OperationId,
+        refs: &[kaish_types::approval::ResourceRef],
+    ) -> Option<RequestId> {
+        let guard = self.lock();
+        guard
+            .chains
+            .values()
+            .filter(|c| {
+                &c.request.operation == operation && {
+                    let mut have: Vec<_> = c.request.resources.iter().map(|r| r.to_ref()).collect();
+                    have.sort_by(|a, b| (&a.kind, &a.id).cmp(&(&b.kind, &b.id)));
+                    have.dedup();
+                    have == refs
+                }
+            })
+            .max_by_key(|c| c.posted_seq)
+            .map(|c| c.request.id.clone())
     }
 
     /// The shared core of both redemption entry points: state check,

@@ -13,6 +13,7 @@ use std::path::Path;
 
 use crate::ast::Value;
 use crate::backend::PatchOp;
+use crate::ledger::KernelOperation;
 use crate::tools::builtin::get_path_string;
 use crate::tools::builtin::regex_dialect::{append_dialect_hint, bre_metas_to_ere};
 use crate::interpreter::{ExecResult, OutputData};
@@ -52,7 +53,7 @@ struct SedArgs {
     #[arg(short = 'i', long = "in-place")]
     in_place: bool,
 
-    /// Confirmation nonce for a latch-gated in-place overwrite.
+    /// Approval token for a gated in-place overwrite (`--confirm=<token>`).
     #[arg(long = "confirm")]
     confirm: Option<String>,
 
@@ -202,7 +203,7 @@ impl Tool for Sed {
 
         // In-place: edit each file operand on disk instead of streaming to
         // stdout. It is *always* a truncating overwrite of an existing file, so
-        // it routes through the same latch+trash gate as tee/patch. Editing a
+        // it routes through the same approval+trash gate as tee/patch. Editing a
         // stream in place is meaningless, so no operands is a loud error.
         if in_place {
             let operands = args.positional.get(file_pos..).unwrap_or(&[]);
@@ -218,7 +219,7 @@ impl Tool for Sed {
             }
 
             // Gate every target with one nonce before touching any file. The
-            // latch hint must reinject the flags the operation can't run without:
+            // the hint must reinject the flags the operation can't run without:
             // a bare `sed --confirm=… file` would read `file` as the expression
             // and then hang on stdin. Rebuild `-i [-n] -e '<expr>'…` so the
             // advertised re-run actually does the in-place edit.
@@ -232,9 +233,13 @@ impl Tool for Sed {
             }
             let targets: Vec<(String, bool)> = files.iter().map(|f| (f.clone(), false)).collect();
             if let Err(blocked) = ctx
-                .gate_overwrites("sed", &targets, confirm.as_deref(), |nonce, joined| {
-                    format!("{hint_prefix} --confirm=\"{nonce}\" {joined}")
-                })
+                .gate_overwrites(
+                    KernelOperation::FsOverwrite,
+                    "sed",
+                    &targets,
+                    confirm.as_deref(),
+                    |joined| format!("{hint_prefix} --confirm=<token> {joined}"),
+                )
                 .await
             {
                 return blocked;
