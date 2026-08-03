@@ -157,7 +157,7 @@ async fn cmd_empty(args: &ToolArgs, ctx: &mut ExecContext) -> ExecResult {
     if let Err(result) = ctx
         .request_gate(
             KernelOperation::TrashEmpty,
-            &[],
+            Vec::new(),
             "emptying the trash is irreversible",
             "kaish-trash empty --confirm=<token>".to_string(),
             confirm.as_deref(),

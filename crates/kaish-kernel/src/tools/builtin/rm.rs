@@ -222,7 +222,15 @@ impl Tool for Rm {
             if let Err(result) = ctx
                 .request_gate(
                     KernelOperation::FsRemove,
-                    &gated_paths,
+                    // No transition claim: a delete's prior state is the
+                    // whole subtree, and digesting one per path would make
+                    // `rm -rf` over a large tree pay a full read per file.
+                    // A resource with no transition implies no condition, so
+                    // the grant is unconditioned — and the record says so.
+                    gated_paths
+                        .iter()
+                        .map(|p| kaish_types::approval::Resource::plain("path", *p))
+                        .collect(),
                     "the fs.* enforce policy is on and the trash cannot catch this delete",
                     format!("rm --confirm=<token> {joined}"),
                     confirm.as_deref(),

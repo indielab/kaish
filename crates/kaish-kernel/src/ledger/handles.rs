@@ -8,11 +8,12 @@ use std::time::Duration;
 
 use kaish_types::approval::{
     ApprovalRequest, ApprovalRequestDraft, AttemptId, AttemptState, Capture, Grant, GrantTerms,
-    Grounds, LedgerEntry, Observation, Outcome, Principal, RequestContext, RequestId,
-    RequestState, StandingGrant, StandingId, Token,
+    Grounds, LedgerEntry, Outcome, Principal, RequestContext, RequestId, RequestState,
+    StandingGrant, StandingId, Token,
 };
 
 use super::core::{build_inner, LedgerInner, SystemWallClock};
+use super::resolver::ConditionReport;
 use super::config::{LedgerConfig, LedgerSink};
 use super::error::LedgerError;
 
@@ -191,14 +192,16 @@ impl Requester {
 
     /// Reserve an attempt by name, using an internal redemption context
     /// (the replay path — spec §B.4) rather than a presented credential.
-    /// `observed` is what a `StateResolver` (PR 6) saw for each of the
-    /// grant's conditions, evaluated *outside* the ledger lock and carried
-    /// in (spec §B.1); pass an empty `Vec` for an unconditioned grant.
+    /// `report` is what the [`StateResolver`](super::StateResolver)s saw for
+    /// each of the grant's conditions, evaluated *outside* the ledger lock
+    /// and carried in (spec §B.1); pass [`ConditionReport::none`] for an
+    /// unconditioned grant. A report that could not observe a resource
+    /// refuses and voids the grant — it never passes.
     pub async fn redeem(
         &self,
         id: &RequestId,
         by: Principal,
-        observed: Vec<Observation>,
+        report: ConditionReport,
     ) -> Result<AttemptHandle, LedgerError> {
         // A stale queued `Unknown` for this chain's live attempt would leave
         // `live_attempt` looking occupied to this call — drain first so a
@@ -206,7 +209,7 @@ impl Requester {
         // reads it (spec §C.1's "drains on its next append").
         self.0.drain_outbox();
         self.0
-            .redeem(id, by, observed)
+            .redeem(id, by, report)
             .map(|attempt| AttemptHandle {
                 request: id.clone(),
                 attempt,
@@ -225,13 +228,13 @@ impl Requester {
         id: &RequestId,
         presented: &str,
         by: Principal,
-        observed: Vec<Observation>,
+        report: ConditionReport,
     ) -> Result<AttemptHandle, LedgerError> {
         // See `redeem`'s identical drain — the same `live_attempt` staleness
         // concern applies to the token-presentation path.
         self.0.drain_outbox();
         self.0
-            .redeem_with_token(id, presented, by, observed)
+            .redeem_with_token(id, presented, by, report)
             .map(|attempt| AttemptHandle {
                 request: id.clone(),
                 attempt,

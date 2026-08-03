@@ -7,8 +7,8 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use kaish_types::approval::{
-    ApprovalRequest, ApprovalRequestDraft, AttemptId, Capture, Invocation, Observation, Outcome,
-    Principal, RequestContext, RequestId, Resource, ResourceRef,
+    ApprovalRequest, ApprovalRequestDraft, AttemptId, Capture, Condition, Invocation, Observation,
+    Outcome, Principal, RequestContext, RequestId, Resource, ResourceRef,
 };
 
 use crate::ast::Value;
@@ -17,8 +17,8 @@ use crate::dispatch::PipelinePosition;
 use crate::ignore_config::IgnoreConfig;
 use crate::interpreter::{ExecResult, Scope};
 use crate::ledger::{
-    Approvals, AttemptGuard, ChainContext, ChainOutcome, DecisionChain, KernelOperation, LedgerError,
-    Requester,
+    Approvals, AttemptGuard, ChainContext, ChainOutcome, ConditionReport, DecisionChain,
+    KernelOperation, LedgerError, PathResolver, Requester, StateResolver, StateResolvers, PATH_KIND,
 };
 use crate::output_limit::OutputLimitConfig;
 use crate::scheduler::{JobManager, PipeReader, PipeWriter, StderrStream};
@@ -268,6 +268,12 @@ pub struct LedgerAccess {
     /// that minted `requester` (only the handle), so this is threaded
     /// alongside it rather than re-derived.
     pub request_ttl: Duration,
+    /// The embedder- and plugin-registered [`StateResolver`]s a redemption
+    /// consults for non-`path` resource kinds (spec §B.4). `path` is not in
+    /// here — it is served by a [`PathResolver`] built from *this* context's
+    /// backend and cwd, so a request posted inside an overlay is re-observed
+    /// through the same overlay.
+    pub resolvers: Arc<StateResolvers>,
 }
 
 /// What the write-model gate chose for a single truncating overwrite.
@@ -939,6 +945,7 @@ impl ExecContext {
             principal: Principal::new("test-session", kaish_types::approval::PrincipalKind::Agent),
             request_ttl: crate::ledger::LedgerConfig::default().request_ttl,
             job_id: None,
+            resolvers: Arc::new(StateResolvers::default()),
         });
         authority
     }
@@ -996,7 +1003,7 @@ impl ExecContext {
     pub(crate) async fn request_gate(
         &mut self,
         operation: KernelOperation,
-        paths: &[&str],
+        resources: Vec<Resource>,
         reason: &str,
         hint: String,
         presented: Option<&str>,
@@ -1005,13 +1012,8 @@ impl ExecContext {
             .risk(operation.risk())
             .reason(reason)
             .hint(hint);
-        for path in paths {
-            // No transition claim: PR 5 is a pure migration, and
-            // redemption-time state verification (the `StateResolver` that
-            // makes a claim checkable) is ledger PR 6. A resource with no
-            // transition implies no condition, so a grant over it is
-            // unconditioned — and the record says so.
-            builder = builder.resource(Resource::plain("path", *path));
+        for resource in resources {
+            builder = builder.resource(resource);
         }
         let draft = match builder.build() {
             Ok(draft) => draft,
@@ -1087,8 +1089,14 @@ impl ExecContext {
             access.chain.decide(&request, &chain_ctx).await
         };
         match outcome {
-            Ok(ChainOutcome::Granted { .. }) => {
-                self.reserve(&access, &request.id, Vec::new()).await
+            Ok(ChainOutcome::Granted { grant, .. }) => {
+                // Evaluate the grant's preconditions here, outside the
+                // ledger lock, and carry the result in (spec §B.1). A
+                // standing grant or a policy hook can decide in the same
+                // breath as the request, so this path re-observes too —
+                // a grant is never redeemed on an unchecked claim.
+                let report = self.observe_conditions(&grant.conditions).await;
+                self.reserve(&access, &request.id, report).await
             }
             Ok(ChainOutcome::Denied { reason, .. }) => ApprovalOutcome::Denied {
                 request: request.id,
@@ -1189,9 +1197,21 @@ impl ExecContext {
                 ),
             };
         };
+        // Observe before presenting, because the observation has to be
+        // *inside* the reservation transaction (spec §B.1) and the I/O has
+        // to be outside the lock. The ledger still checks the credential
+        // first, so a wrong key lands on `TokenRejected` and never reaches
+        // the condition check — an invalid presentation cannot void a grant.
+        let conditions = access
+            .approvals
+            .get(&id)
+            .and_then(|chain| chain.grant)
+            .map(|grant| grant.conditions)
+            .unwrap_or_default();
+        let report = self.observe_conditions(&conditions).await;
         match access
             .requester
-            .redeem_with_token(&id, key, access.principal.clone(), Vec::new())
+            .redeem_with_token(&id, key, access.principal.clone(), report)
             .await
         {
             Ok(attempt) => {
@@ -1202,17 +1222,69 @@ impl ExecContext {
         }
     }
 
+    /// The resolver for one resource kind. `path` is the kernel's own,
+    /// rebuilt per call from this context's backend and cwd so an overlay or
+    /// an in-memory mount is observed exactly the way the gate site resolved
+    /// it; every other kind comes from the registry an embedder configured.
+    pub(crate) fn state_resolver(&self, kind: &str) -> Option<Arc<dyn StateResolver>> {
+        if kind == PATH_KIND {
+            return Some(Arc::new(PathResolver::new(
+                Arc::clone(&self.backend),
+                self.cwd.clone(),
+            )));
+        }
+        self.ledger_access
+            .as_ref()
+            .and_then(|access| access.resolvers.get(kind).cloned())
+    }
+
+    /// Read the current state of every condition that claims a prior state
+    /// (spec §B.4), for a redemption to carry into the ledger.
+    ///
+    /// Runs outside the ledger lock, because it is I/O. An unreadable
+    /// resource — or one whose kind has no registered resolver — becomes
+    /// [`ConditionReport::Unobservable`], which refuses; it is never a
+    /// silent pass.
+    pub(crate) async fn observe_conditions(&self, conditions: &[Condition]) -> ConditionReport {
+        let mut observed = Vec::new();
+        // A condition that claims nothing has nothing to check, and costs no
+        // I/O here (spec §A.3) — see `conditions_to_observe`.
+        for condition in crate::ledger::conditions_to_observe(conditions) {
+            let resource = condition.resource.clone();
+            let Some(resolver) = self.state_resolver(&resource.kind) else {
+                return ConditionReport::Unobservable {
+                    detail: format!("no state resolver is registered for the '{}' resource kind", resource.kind),
+                    resource,
+                };
+            };
+            match resolver.observe(&resource.id).await {
+                Ok(claim) => observed.push(Observation {
+                    resource,
+                    claim,
+                    at: kaish_types::clock::system_now(),
+                }),
+                Err(err) => {
+                    return ConditionReport::Unobservable {
+                        detail: err.to_string(),
+                        resource,
+                    }
+                }
+            }
+        }
+        ConditionReport::observed(observed)
+    }
+
     /// Reserve an attempt against a request this execution just had granted.
     async fn reserve(
         &mut self,
         access: &LedgerAccess,
         id: &RequestId,
-        observed: Vec<Observation>,
+        report: ConditionReport,
     ) -> kaish_tool_api::ApprovalOutcome {
         use kaish_tool_api::ApprovalOutcome;
         match access
             .requester
-            .redeem(id, access.principal.clone(), observed)
+            .redeem(id, access.principal.clone(), report)
             .await
         {
             Ok(attempt) => {
@@ -1348,17 +1420,51 @@ impl ExecContext {
             decided.push(Decided { display: display.clone(), resolved, action });
         }
 
-        // One request covers every gated path in the batch.
-        let gated: Vec<&str> = decided
+        // One request covers every gated path in the batch. Each gated
+        // target declares the digest its content has *right now* as the
+        // transition's `from`, which becomes a redemption-time condition
+        // (spec §B.4): this is `cas_overwrite`'s snapshot-compare, lifted
+        // onto the ledger. The ledger stores the digest, never the content —
+        // the byte snapshot stays with the trash, where the recovery copy
+        // lives.
+        let gated: Vec<&Decided> = decided
             .iter()
             .filter(|d| matches!(d.action, MutationAction::Gate))
-            .map(|d| d.display.as_str())
             .collect();
         if !gated.is_empty() {
-            let joined = gated.join(" ");
+            let joined = gated
+                .iter()
+                .map(|d| d.display.as_str())
+                .collect::<Vec<_>>()
+                .join(" ");
+            let mut resources = Vec::with_capacity(gated.len());
+            for d in &gated {
+                // A target whose prior content cannot be digested cannot be
+                // protected by the condition, so it must not be written
+                // under one either — refuse rather than gate on a claim
+                // nobody can check later.
+                let from = crate::ledger::digest_path(&*self.backend, &d.resolved)
+                    .await
+                    .map_err(|e| {
+                        ExecResult::failure(
+                            1,
+                            format!("{command}: {}: cannot record the prior state: {e}", d.display),
+                        )
+                    })?;
+                resources.push(Resource::transition(
+                    PATH_KIND,
+                    d.display.clone(),
+                    from,
+                    // The resulting content is not known here — `patch` and
+                    // `sed -i` compute it from the prior bytes — and an
+                    // unclaimed post-state is exactly what `Unspecified` is
+                    // for.
+                    kaish_types::approval::StateClaim::Unspecified,
+                ));
+            }
             self.request_gate(
                 operation,
-                &gated,
+                resources,
                 "the fs.* enforce policy is on and this overwrite has no recoverable prior copy",
                 confirm_hint(&joined),
                 confirm,
