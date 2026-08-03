@@ -56,7 +56,7 @@ fn build_script(statements: usize) -> String {
 
 /// Time `parse` over `source`, returning the per-parse duration.
 fn time_parse(source: &str, iterations: usize) -> Duration {
-    kaish_kernel::parser::parse(source).expect("fixture must parse");
+    kaish_kernel::parser::parse(source).expect("fixture must parse (warmup)");
 
     let start = Instant::now();
     for _ in 0..iterations {
@@ -70,8 +70,8 @@ fn time_parse(source: &str, iterations: usize) -> Duration {
 
 fn main() {
     println!(
-        "{:>8}  {:>8}  {:>14}  {:>12}",
-        "stmts", "tokens", "per parse", "per token"
+        "{:>8}  {:>8}  {:>16}  {:>14}",
+        "stmts", "tokens", "lex+parse", "per token (ns)"
     );
 
     for statements in [1usize, 2, 5, 10, 20, 50, 100, 200] {
@@ -85,6 +85,6 @@ fn main() {
         let elapsed = time_parse(&source, iterations);
         let per_token = elapsed.as_nanos() as f64 / tokens as f64;
 
-        println!("{statements:>8}  {tokens:>8}  {elapsed:>14?}  {per_token:>9.1} ns");
+        println!("{statements:>8}  {tokens:>8}  {elapsed:>16?}  {per_token:>14.1}");
     }
 }
