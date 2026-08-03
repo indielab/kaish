@@ -656,15 +656,87 @@ mod tests {
         assert!(param_names("revoke").is_empty());
     }
 
-    /// Every flag the subcommand schemas advertise must also parse at the
-    /// flat argv layer — the two halves are declared separately, and a flag
-    /// in the schema that clap rejects would exit 2 on a documented spelling.
+    /// Values tried for a value-taking flag, in order; the first that parses
+    /// wins. `param_type` cannot pick for us — clap erases the field type, so
+    /// `params_from_clap` reports `"string"` for both `--since` (a `u64`) and
+    /// `--reason` (a `String`). A flag that accepts none of these is a
+    /// prompt to add a sample here, not a drift failure, and the panic says
+    /// so.
+    const FLAG_SAMPLES: &[&str] = &["1", "5m", "x"];
+
+    /// **Every flag the schema advertises must parse at the flat argv layer.**
+    ///
+    /// The two halves are declared separately on purpose (see
+    /// `ApprovalsArgs`), and this is the seam between them. The drift it
+    /// exists to catch: a new `Args` struct registered in `schema()` through
+    /// `child::<New>()` but never `#[command(flatten)]`ed into the flat
+    /// parser. The flag is then advertised to the model and accepted by
+    /// pipeline validation, and the runtime parse rejects it with exit 2 on a
+    /// documented spelling.
+    ///
+    /// Reflective, not a list: enumerating the flags by hand cannot catch a
+    /// flag nobody thought to list, which is exactly the failure mode.
     #[test]
     fn every_advertised_flag_parses() {
+        let schema = Approvals.schema();
+        let mut checked = 0usize;
+
+        for node in std::iter::once(&schema).chain(schema.subcommands.iter()) {
+            for param in &node.params {
+                if param.positional {
+                    continue; // positionals ride the `--` tail, not a flag
+                }
+                checked += 1;
+                let flag = format!("--{}", param.name);
+
+                if crate::scheduler::is_bool_type(&param.param_type) {
+                    let argv = vec!["approvals".to_string(), flag.clone()];
+                    ApprovalsArgs::try_parse_from(&argv).unwrap_or_else(|e| {
+                        panic!(
+                            "`{flag}` is advertised on `approvals {}` but the flat parser \
+                             rejects it — is its Args struct #[command(flatten)]ed into \
+                             ApprovalsArgs? clap said: {e}",
+                            node.name
+                        )
+                    });
+                    continue;
+                }
+
+                // A value flag: one sample per value it consumes.
+                let accepted = FLAG_SAMPLES.iter().any(|sample| {
+                    let mut argv = vec!["approvals".to_string(), flag.clone()];
+                    argv.extend(std::iter::repeat_n(
+                        (*sample).to_string(),
+                        param.consumes.max(1),
+                    ));
+                    ApprovalsArgs::try_parse_from(&argv).is_ok()
+                });
+                assert!(
+                    accepted,
+                    "`{flag}` is advertised on `approvals {}` but the flat parser accepted \
+                     none of {FLAG_SAMPLES:?} for it. Either its Args struct is not \
+                     #[command(flatten)]ed into ApprovalsArgs, or it takes a value shape \
+                     no sample covers — add one to FLAG_SAMPLES.",
+                    node.name
+                );
+            }
+        }
+
+        assert!(
+            checked >= 6,
+            "the walk found only {checked} flags — a schema that advertises nothing \
+             would pass this test vacuously"
+        );
+    }
+
+    /// The subcommand *path* still parses with the flags, in the shape
+    /// `ToolArgs::to_argv()` actually emits (flags, then `--`, then the
+    /// subcommand words as positionals). The reflective guard above checks
+    /// the flags alone; this checks that the `--` tail does not disturb them.
+    #[test]
+    fn a_flag_parses_alongside_the_subcommand_tail() {
         for argv in [
-            vec!["approvals", "--pending", "--", "list"],
             vec!["approvals", "--all", "--", "list"],
-            vec!["approvals", "--standing", "--", "list"],
             vec!["approvals", "--since=12", "--", "log"],
             vec!["approvals", "--until=1h", "--", "grant", "req_0badcafe_1"],
             vec!["approvals", "--reason=no", "--", "deny", "req_0badcafe_1"],
