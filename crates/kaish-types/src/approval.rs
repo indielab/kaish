@@ -882,11 +882,25 @@ impl GrantTerms {
         Self { not_after, conditions }
     }
 
+    /// The same terms, from the tokenless [`ApprovalRequestView`] an
+    /// approver actually holds.
+    ///
+    /// **This is what an approver should call.** An approver never sees the
+    /// stamped [`ApprovalRequest`], and rebuilding one from a view to reach
+    /// [`Self::once_for`] drops the request's resources unless the caller
+    /// remembers to copy them one by one — which produces terms with no
+    /// conditions, and the ledger rejects those as widening (spec §A.4).
+    pub fn once_for_view(view: &ApprovalRequestView, not_after: SystemTime) -> Self {
+        let conditions = view.resources.iter().filter_map(Resource::to_condition).collect();
+        Self { not_after, conditions }
+    }
+
     /// Build terms directly from an explicit condition list. The only other
     /// external constructor for this `#[non_exhaustive]` type besides
-    /// [`Self::once_for`] — an approver that narrows (adds or tightens)
-    /// beyond the request's declared transitions, rather than accepting
-    /// them verbatim, needs this rather than a struct literal.
+    /// [`Self::once_for`] and [`Self::once_for_view`] — an approver that
+    /// narrows (adds or tightens) beyond the request's declared transitions,
+    /// rather than accepting them verbatim, needs this rather than a struct
+    /// literal.
     pub fn new(not_after: SystemTime, conditions: Vec<Condition>) -> Self {
         Self { not_after, conditions }
     }

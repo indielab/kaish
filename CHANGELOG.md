@@ -101,6 +101,24 @@ breaking entries are marked **BREAKING**.
   and `CLAUDE.md` — weights, not gates, groomed at the point of touch.
 - Inspired by the structure of ASD-STE100 Simplified Technical English, not STE —
   its dictionary is copyrighted and aerospace-shaped, so we keep our own terms.
+- **Redemption-time precondition verification** (ledger PR 6,
+  `docs/approval-ledger.md` §B.4) — a grant is re-checked against the world before
+  it runs; a resource that moved appends `Refused` + `Voided`, exits 1 naming what
+  changed, and reserves no attempt.
+- A gated overwrite declares its target's `sha256` content digest as the transition
+  it expects, so `cas_overwrite`'s snapshot-compare now covers the gated path too —
+  previously only trash-snapshotted targets carried a compare.
+- `kaish_tool_api::StateResolver` reads one resource kind's current state, so a
+  plugin's own kinds (`git.ref`) are checkable without depending on `kaish-kernel`.
+  `KernelConfig::with_state_resolver` registers one.
+- A resolver that returns `Err`, or a kind with no registered resolver, refuses the
+  redemption — there is no `Ok(Unspecified)` path that silently passes.
+- Registering a resolver for `path`, or two for one kind, fails `Kernel::build` —
+  which resolver decides whether a resource changed must not depend on registration
+  order.
+- `GrantTerms::once_for_view` builds terms from the tokenless `ApprovalRequestView`
+  an approver holds; rebuilding an `ApprovalRequest` to reach `once_for` drops the
+  request's resources and trips `ConditionsWidened`.
 
 ### Changed
 - **BREAKING: `kill %N` keeps the job instead of deleting it** (#244) — the job
@@ -218,6 +236,17 @@ breaking entries are marked **BREAKING**.
   only checker that sees them.
 
 ### Fixed
+- **An approval-gated overwrite that races a concurrent write now fails loud
+  instead of clobbering it** — the gate carried a compare-and-swap expectation only
+  for trash-snapshotted targets, so an approved target with the trash off (or one
+  too big for it) reached the write with no compare at all.
+- The approval path compares content digests rather than bytes, so an oversize
+  target costs one 256 KiB window instead of its whole size.
+- **A replay claiming a different prior state than the one approved is refused** —
+  the draft matcher compared resources by kind and id and dropped the state claim,
+  so a grant that went stale between the ledger's check and the gate site's arrival
+  still authorized. The credential router still ignores the claim, so a wrong key is
+  still counted against the request it named.
 - **`/v/jobs/N/status` reports `stopped` for a Ctrl-Z-stopped job** (#252) — it
   read `running` forever: `status()` had the stopped check but the status-string
   twin backing the VFS node did not, and a stopped job has no result channel to

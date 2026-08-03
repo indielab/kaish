@@ -291,6 +291,52 @@ operation a second time. A *failed* attempt does not consume the grant, so a
 transient failure retries inside the grant's lifetime. Repetition that is
 genuinely wanted has a first-class form: a standing grant with a use count.
 
+**A grant is re-checked against the world before it runs.** A request may
+declare a `transition` on a resource — the state it expects to find. The
+kernel's gated overwrite declares the target's `sha256` content digest; a
+grant copies those claims into its `conditions`, and redemption reads the
+resource again before reserving anything. A resource that moved in between
+appends `Refused` + `Voided`, returns **exit 1** naming what changed, and the
+operation does not run. This *detects* a stale authorization; it does not make
+the write atomic, which only a conditional write at the resource itself can do.
+
+Build a grant's terms with `GrantTerms::once_for_view(&view, not_after)` — it
+carries the request's declared transitions into the grant's conditions. Terms
+that drop one are rejected as widening (**exit 1**,
+`LedgerError::ConditionsWidened`).
+
+**A resource kind you introduce needs a resolver.** The kernel resolves `path`
+through its own backend. A tool that names any other kind registers a
+`StateResolver` for it:
+
+```rust
+#[async_trait]
+impl StateResolver for GitRefResolver {
+    fn kind(&self) -> &str { "git.ref" }
+    async fn observe(&self, id: &str) -> Result<StateClaim, ResolverError> {
+        Ok(StateClaim::Exact(self.repo.oid_of(id)?))  // Err refuses; never Ok(Unspecified)
+    }
+}
+
+let config = KernelConfig::repl().with_state_resolver(Arc::new(GitRefResolver::new(repo)));
+```
+
+Three rules the mechanism does not bend on:
+
+- A kind with **no registered resolver refuses** any grant that claims a prior
+  state for it. Registering the resolver is part of shipping the kind.
+- A resolver that returns `Err` **refuses**. There is no `Ok(Unspecified)`
+  escape — an unobservable precondition is never a passing one.
+- Registering a resolver for `path`, or two for one kind, fails
+  `Kernel::build`. Which resolver decides whether a resource changed must not
+  depend on registration order.
+
+A transition of `StateClaim::Unspecified` claims nothing and is never checked,
+so a resource that declares none (`Resource::plain`) costs no I/O at
+redemption. `rm` uses that form deliberately: digesting an `rm -rf` tree would
+cost a full read per path. The `Redeemed` entry records the observations, so an
+empty observation set is the record that a grant was unconditioned.
+
 The kernel owns the *mechanism* (posting the request, capturing the argv at the
 dispatch seam, minting and checking the credential); the embedder owns the
 *judgment*. The request is **never** folded into `.data` — a stdout redirect

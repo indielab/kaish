@@ -26,6 +26,10 @@
 //!   (`docs/approval-ledger.md`, ledger PR 3). A plugin depending on only
 //!   this crate can gate a privileged operation with no `kaish-kernel`
 //!   dependency and no downcast.
+//! - [`StateResolver`] — reads one resource kind's current state, so a
+//!   grant's preconditions are re-checked at redemption (ledger PR 6). The
+//!   kernel ships the `path` resolver; a plugin registers one per kind it
+//!   names in a `Resource`.
 //!
 //! The pure-data types tools traffic in (`Value`, `ToolArgs`, `ToolSchema`,
 //! `ExecResult`, `OutputData`, …) live one layer down in `kaish-types`.
@@ -38,7 +42,7 @@ mod global_flags;
 mod issue;
 mod tool;
 
-pub use approval::{ApprovalOutcome, Approvals, AttemptHandle};
+pub use approval::{ApprovalOutcome, Approvals, AttemptHandle, ResolverError, StateResolver};
 pub use backend::KernelBackend;
 pub use clap_schema::{params_from_clap, schema_from_clap, schema_tree_from_clap};
 pub use ctx::{PatientGuard, ToolCtx};

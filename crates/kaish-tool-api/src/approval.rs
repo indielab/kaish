@@ -11,7 +11,7 @@
 //! handles behind `Kernel::approvals()` (spec §D.2) and are unrelated types
 //! that happen to share a name with their tool-facing counterpart here.
 
-use kaish_types::approval::{AttemptId, RequestId};
+use kaish_types::approval::{AttemptId, RequestId, StateClaim};
 use kaish_types::ExecResult;
 
 /// What one execution reserved against a grant (spec §C.1). Exposes only its
@@ -191,3 +191,53 @@ impl Approvals {
         Self { pending }
     }
 }
+
+// ───────────────────────── State resolution ─────────────────────────
+
+/// Reads the current state of one resource kind, so a grant's preconditions
+/// can be re-checked at redemption (spec §B.4). The kernel ships one for
+/// `path`; a plugin ships one per kind it names in a `Resource` — kaish-git
+/// ships `git.ref`.
+///
+/// A resolver does I/O, so redemption calls it **outside** the ledger's
+/// critical section and carries the observation in (spec §B.1). It therefore
+/// detects a resource that moved between the grant and the redemption; it
+/// does not make the operation itself atomic.
+#[async_trait::async_trait]
+pub trait StateResolver: Send + Sync {
+    /// The [`kaish_types::approval::Resource`] kind this resolver answers
+    /// for, matched exactly. `path` is reserved for the kernel.
+    fn kind(&self) -> &str;
+
+    /// The resource's current state. An unreadable resource is `Err` and
+    /// **refuses the redemption** — never `Ok(StateClaim::Unspecified)`,
+    /// which would silently pass a precondition nobody checked.
+    async fn observe(&self, id: &str) -> Result<StateClaim, ResolverError>;
+}
+
+/// Why a [`StateResolver`] could not state a resource's current state. Every
+/// variant refuses the redemption: an unobservable precondition is never a
+/// passing one.
+#[non_exhaustive]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ResolverError {
+    /// The resource's store could not be read.
+    Io(String),
+    /// `id` is not well-formed for this resolver's kind.
+    InvalidId(String),
+    /// The resource exists but this kind has no state this resolver can
+    /// state — a directory has no content digest.
+    Unsupported(String),
+}
+
+impl std::fmt::Display for ResolverError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Io(detail) => write!(f, "{detail}"),
+            Self::InvalidId(detail) => write!(f, "malformed resource id: {detail}"),
+            Self::Unsupported(detail) => write!(f, "{detail}"),
+        }
+    }
+}
+
+impl std::error::Error for ResolverError {}

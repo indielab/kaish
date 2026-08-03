@@ -366,6 +366,11 @@ pub struct ApprovalConfig {
     /// §E.2, tier 1). Supplying one also adopts its ledger, so two kernels
     /// built from one handle share a single log.
     pub approver_handle: Option<crate::ledger::ApproverHandle>,
+    /// The state resolvers redemption consults, one per non-`path` resource
+    /// kind (spec §B.4). The kernel serves `path` itself; a resolver
+    /// claiming that kind, or a second resolver for a kind already
+    /// registered, fails [`Kernel::build`] loudly.
+    pub resolvers: Vec<Arc<dyn crate::ledger::StateResolver>>,
 }
 
 /// Names what is configured without printing an opaque `dyn Approver`
@@ -377,6 +382,10 @@ impl std::fmt::Debug for ApprovalConfig {
             .field("approver", &self.approver.is_some())
             .field("principal", &self.principal)
             .field("approver_handle", &self.approver_handle)
+            .field(
+                "resolvers",
+                &self.resolvers.iter().map(|r| r.kind()).collect::<Vec<_>>(),
+            )
             .finish()
     }
 }
@@ -834,6 +843,24 @@ impl KernelConfig {
         self.approval.approver_handle = Some(handle);
         self
     }
+
+    /// Register a [`StateResolver`](crate::ledger::StateResolver) for one
+    /// resource kind, so a grant over that kind's resources is re-checked at
+    /// redemption (spec §B.4).
+    ///
+    /// The kernel already resolves `path` through its own backend;
+    /// registering a second resolver for `path`, or two for the same kind,
+    /// fails [`Kernel::build`] rather than picking one — which resolver
+    /// decides whether a resource changed must not depend on registration
+    /// order.
+    ///
+    /// A resource kind with no registered resolver **refuses** any grant
+    /// that claims a prior state for it. Registering the resolver is
+    /// therefore part of shipping the resource kind, not an optimization.
+    pub fn with_state_resolver(mut self, resolver: Arc<dyn crate::ledger::StateResolver>) -> Self {
+        self.approval.resolvers.push(resolver);
+        self
+    }
 }
 
 /// Handle to an active overlay session, kept on the kernel and shared to
@@ -985,6 +1012,10 @@ struct KernelApprovals {
     /// Read off the `LedgerConfig` the ledger was built with, because a
     /// gate site holds only the handle.
     request_ttl: std::time::Duration,
+    /// The registered state resolvers, by resource kind (spec §B.4). Shared
+    /// by every fork, so a background job re-checks a precondition through
+    /// the same resolver the foreground would.
+    resolvers: Arc<crate::ledger::StateResolvers>,
 }
 
 impl KernelApprovals {
@@ -999,6 +1030,7 @@ impl KernelApprovals {
             principal: self.principal.clone(),
             request_ttl: self.request_ttl,
             job_id,
+            resolvers: Arc::clone(&self.resolvers),
         }
     }
 }
@@ -1491,7 +1523,11 @@ impl Kernel {
             approver,
             principal,
             approver_handle,
+            resolvers,
         } = config;
+
+        let resolvers = crate::ledger::StateResolvers::from_registrations(resolvers)
+            .context("the approval ledger's state resolvers conflict")?;
 
         if approver_handle.is_some() && (ledger_config.is_some() || ledger_sink.is_some()) {
             anyhow::bail!(
@@ -1527,6 +1563,7 @@ impl Kernel {
             authority,
             session_authority,
             request_ttl,
+            resolvers: Arc::new(resolvers),
         })
     }
 
@@ -1990,6 +2027,22 @@ impl Kernel {
         // `execute_argv_locked`).
         let _guard = self.acquire_execute_lock().await;
 
+        // Re-observe the grant's preconditions before reserving anything
+        // (spec §B.4). This is the redemption the check exists for: minutes
+        // may have passed between the request and the operator's decision,
+        // and the whole point is that a file which moved in that window does
+        // not get overwritten. The I/O runs here, outside the ledger lock;
+        // the ledger decides on what it saw.
+        let report = {
+            let ctx = self.exec_ctx.read().await;
+            let conditions = chain
+                .grant
+                .as_ref()
+                .map(|grant| grant.conditions.clone())
+                .unwrap_or_default();
+            ctx.observe_conditions(&conditions).await
+        };
+
         // Reserve the attempt before dispatching (spec §B.4): a bare replay
         // would re-enter the gate site, build a fresh draft, and post a
         // *second* request — the approval would authorize a request nobody
@@ -1997,7 +2050,7 @@ impl Kernel {
         let attempt = match self
             .approvals
             .requester
-            .redeem(request_id, self.approvals.principal.clone(), Vec::new())
+            .redeem(request_id, self.approvals.principal.clone(), report)
             .await
         {
             Ok(attempt) => attempt,

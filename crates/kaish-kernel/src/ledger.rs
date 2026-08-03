@@ -32,6 +32,7 @@ mod core;
 mod error;
 mod handles;
 mod operation;
+mod resolver;
 mod standing;
 
 pub use approver::{
@@ -42,6 +43,11 @@ pub use attempt_guard::AttemptGuard;
 pub use config::{LedgerConfig, LedgerSink, LedgerSinkError};
 pub use error::LedgerError;
 pub use operation::KernelOperation;
+pub use resolver::{
+    ConditionReport, PathResolver, ResolverError, StateResolver, StateResolverConflict,
+    StateResolvers, PATH_DIGEST_ALG, PATH_KIND,
+};
+pub(crate) use resolver::{conditions_to_observe, digest_path};
 pub use handles::{ApproverHandle, AttemptHandle, AttemptView, Approvals, Ledger, RequestChain, Requester};
 
 /// Test-only: a stamped, tokenless view for exercising the control-plane

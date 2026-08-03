@@ -111,7 +111,7 @@ impl Tool for Cp {
         // trash. Copying *into* a directory or a recursive directory merge is
         // not a single-file truncation, so it stays ungated (documented
         // write-model residual). Only the named destination is gated here.
-        let mut expected_dst: Option<Vec<u8>> = None;
+        let mut expected_dst: Option<crate::tools::OverwriteExpectation> = None;
         if sources.len() == 1 {
             let dst_is_existing_file = ctx
                 .backend
@@ -157,7 +157,7 @@ impl Tool for Cp {
                 &dst_path,
                 recursive,
                 no_clobber,
-                expected_dst.as_deref(),
+                expected_dst.as_ref(),
             )
             .await
             {
@@ -178,7 +178,7 @@ async fn copy_path(
     dst: &Path,
     recursive: bool,
     no_clobber: bool,
-    expected: Option<&[u8]>,
+    expected: Option<&crate::tools::OverwriteExpectation>,
 ) -> Result<(), BackendError> {
     let info = backend.stat(src).await?;
 

@@ -7,8 +7,8 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use kaish_types::approval::{
-    ApprovalRequest, ApprovalRequestDraft, AttemptId, Capture, Invocation, Observation, Outcome,
-    Principal, RequestContext, RequestId, Resource, ResourceRef,
+    ApprovalRequest, ApprovalRequestDraft, AttemptId, Capture, Condition, Invocation, Observation,
+    Outcome, Principal, RequestContext, RequestId, Resource, ResourceRef,
 };
 
 use crate::ast::Value;
@@ -17,8 +17,8 @@ use crate::dispatch::PipelinePosition;
 use crate::ignore_config::IgnoreConfig;
 use crate::interpreter::{ExecResult, Scope};
 use crate::ledger::{
-    Approvals, AttemptGuard, ChainContext, ChainOutcome, DecisionChain, KernelOperation, LedgerError,
-    Requester,
+    Approvals, AttemptGuard, ChainContext, ChainOutcome, ConditionReport, DecisionChain,
+    KernelOperation, LedgerError, PathResolver, Requester, StateResolver, StateResolvers, PATH_KIND,
 };
 use crate::output_limit::OutputLimitConfig;
 use crate::scheduler::{JobManager, PipeReader, PipeWriter, StderrStream};
@@ -268,6 +268,12 @@ pub struct LedgerAccess {
     /// that minted `requester` (only the handle), so this is threaded
     /// alongside it rather than re-derived.
     pub request_ttl: Duration,
+    /// The embedder- and plugin-registered [`StateResolver`]s a redemption
+    /// consults for non-`path` resource kinds (spec §B.4). `path` is not in
+    /// here — it is served by a [`PathResolver`] built from *this* context's
+    /// backend and cwd, so a request posted inside an overlay is re-observed
+    /// through the same overlay.
+    pub resolvers: Arc<StateResolvers>,
 }
 
 /// What the write-model gate chose for a single truncating overwrite.
@@ -281,12 +287,32 @@ pub(crate) enum MutationAction {
     Gate,
 }
 
-/// Prior content the gate snapshotted, keyed by resolved path, for callers that
-/// compare-and-swap their overwrite against it (see `overwrite_checked`). Only
-/// gated existing targets that were trash-snapshotted appear; a new file, an
-/// append, an excluded/ungated path, or a gate-only target is absent — the
-/// caller writes those without a CAS expectation.
-pub(crate) type GateSnapshots = std::collections::HashMap<PathBuf, Vec<u8>>;
+/// What a gated overwrite must still find at the target before it writes —
+/// the compare-and-swap expectation `overwrite_checked` enforces.
+///
+/// Two forms, because the two gate paths hold different things. The trash
+/// path already has the prior bytes (it had to copy them to the trash), so it
+/// compares bytes. The approval path never holds the content — it only
+/// digested it for the ledger condition — so it compares digests, which also
+/// bounds its memory: a 10 GiB target costs one 256 KiB window, not 10 GiB.
+/// That matters, because the oversize file the trash cannot snapshot is
+/// exactly the file that falls through to the approval gate.
+#[derive(Debug, Clone)]
+pub enum OverwriteExpectation {
+    /// The exact prior bytes, from the trash snapshot.
+    Bytes(Vec<u8>),
+    /// The prior content's digest, re-derived through the backend at write
+    /// time. The same claim the ledger holds as the grant's condition.
+    Digest(kaish_types::approval::StateClaim),
+}
+
+/// What each gated target must still look like when the caller writes it,
+/// keyed by resolved path (see `overwrite_checked`).
+///
+/// Every existing target the gate held appears — trash-snapshotted or
+/// approval-gated. A new file, an append, and an excluded or ungated path are
+/// absent, because none of them has prior content to lose.
+pub type GateExpectations = std::collections::HashMap<PathBuf, OverwriteExpectation>;
 
 /// Real paths the trash gate skips: host scratch under `/tmp`, where
 /// snapshotting prior content to trash is pointless. Shared by `rm`'s delete
@@ -312,9 +338,75 @@ pub(crate) fn resource_refs(draft: &ApprovalRequestDraft) -> Vec<ResourceRef> {
     refs
 }
 
+/// Whether a fresh draft claims the same prior state for each resource as
+/// the request that was approved (spec §B.4).
+///
+/// **The replay path only.** `draft_matches` compares resources through
+/// `Resource::to_ref()`, which drops the transition — deliberately, because
+/// the credential router (`Approvals::match_draft`) has to find the request a
+/// *wrong* presentation was aimed at so the rejection counts against it, and
+/// a presentation whose state claim drifted still names the same request. The
+/// replay has no such need: `Kernel::confirm` already knows which request it
+/// is replaying, so it can afford to be strict — and it must be, because the
+/// gate site builds its draft from the world as it stands *now*, after the
+/// ledger already observed and reserved. A claim that drifted in that window
+/// is the last signal that the approval no longer describes the operation.
+///
+/// `Err(detail)` names both claims: "this replay is not what was approved" is
+/// only actionable if it says how.
+fn transitions_match(
+    draft: &ApprovalRequestDraft,
+    resources: &[Resource],
+) -> Result<(), String> {
+    for approved in resources {
+        let reference = approved.to_ref();
+        let Some(presented) = draft
+            .resources
+            .iter()
+            .find(|r| r.to_ref() == reference)
+        else {
+            // `draft_matches` runs first and compares the reference sets, so
+            // this is unreachable in practice. It is still not an occasion to
+            // assume a match.
+            return Err(format!(
+                "it does not name {}:{}, which was approved",
+                reference.kind, reference.id
+            ));
+        };
+        if presented.transition != approved.transition {
+            return Err(format!(
+                "it claims {}:{} is at {} where {} was approved",
+                reference.kind,
+                reference.id,
+                render_claim(presented.transition.as_ref()),
+                render_claim(approved.transition.as_ref()),
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// One resource's prior-state claim, for a diagnostic an operator reads.
+fn render_claim(transition: Option<&kaish_types::approval::Transition>) -> String {
+    use kaish_types::approval::StateClaim;
+    match transition.map(|t| &t.from) {
+        None | Some(StateClaim::Unspecified) => "no claimed prior state".to_string(),
+        Some(StateClaim::Absent) => "absent".to_string(),
+        Some(StateClaim::Exact(id)) => id.clone(),
+        Some(StateClaim::Digest { alg, hex }) => format!("{alg}:{hex}"),
+        // `StateClaim` is `#[non_exhaustive]`; an unrecognized claim is still
+        // a claim, and still has to render as something an operator can read.
+        Some(other) => format!("{other:?}"),
+    }
+}
+
 /// Whether a fresh draft describes the operation and resources that were
 /// approved (spec §B.4). Set semantics on resources, matching how a standing
 /// grant covers them (§C.4): a duplicate imposes no extra requirement.
+///
+/// Compares resources by reference (kind + id) only — the transition claim is
+/// checked separately by [`transitions_match`], and only on the replay path.
+/// See that function for why the two differ.
 ///
 /// `Err(detail)` names the first difference, because "this replay is not what
 /// was approved" is only actionable if it says *how*.
@@ -420,38 +512,66 @@ pub(crate) fn decide_mutation_action(
     MutationAction::Proceed
 }
 
-/// Overwrite `resolved` with `content`, optionally compare-and-swapping against
-/// `expected` first. When `expected` is `Some`, the current bytes are re-read
-/// and must equal it (the write-model gate's snapshot), else a concurrent
-/// change is a loud conflict — never a silent clobber. Binary-safe (raw bytes,
-/// unlike the `String`-based `PatchOp` CAS). Shared by the byte-oriented gated
-/// builtins via `ExecContext::overwrite_checked` (`tee`/`write`/`dd`) and
-/// directly by `cp`'s free copy path. Not OS-atomic — a crash mid-write can
-/// still truncate (the atomic write-temp-then-rename primitive is a tracked
-/// write-model residual).
+/// Overwrite `resolved` with `content`, compare-and-swapping against
+/// `expected` first when there is one. The target's current state is
+/// re-derived and must match, else a concurrent change is a loud conflict —
+/// never a silent clobber. Binary-safe (raw bytes, unlike the `String`-based
+/// `PatchOp` CAS). Shared by the byte-oriented gated builtins via
+/// `ExecContext::overwrite_checked` (`tee`/`write`/`dd`) and directly by
+/// `cp`'s free copy path.
+///
+/// This is the write-side half of the ledger's precondition check, and it is
+/// the half that matters at the mutation: the ledger detects an
+/// authorization that went stale between the grant and the redemption, and
+/// this catches a change between the redemption and the write. Neither makes
+/// the write OS-atomic — a crash mid-write can still truncate (the atomic
+/// write-temp-then-rename primitive is a tracked write-model residual).
 pub(crate) async fn cas_overwrite(
     backend: &dyn KernelBackend,
     resolved: &Path,
     content: &[u8],
-    expected: Option<&[u8]>,
+    expected: Option<&OverwriteExpectation>,
 ) -> Result<(), crate::backend::BackendError> {
-    if let Some(exp) = expected {
-        // Propagate a re-read failure loudly — never `unwrap_or_default()` it to
-        // empty bytes, which would false-match an empty snapshot (silent
-        // overwrite) or report a bogus "file changed" for a real I/O error. A
-        // target that vanished since the gate (NotFound) is a change → abort.
-        let current = backend.read(resolved, None).await?;
-        if current != exp {
-            return Err(crate::backend::BackendError::InvalidOperation(
-                "file changed since the write-model gate checked it (concurrent write); \
-                 aborting overwrite"
-                    .to_string(),
-            ));
+    // A re-read or re-digest failure propagates loudly — never
+    // `unwrap_or_default()` to empty bytes, which would false-match an empty
+    // snapshot (silent overwrite) or report a bogus "file changed" for a real
+    // I/O error. A target that vanished since the gate is a change → abort.
+    match expected {
+        Some(OverwriteExpectation::Bytes(exp)) => {
+            let current = backend.read(resolved, None).await?;
+            if current != *exp {
+                return Err(concurrent_change_error(resolved));
+            }
         }
+        Some(OverwriteExpectation::Digest(exp)) => {
+            let current = crate::ledger::digest_path(backend, resolved)
+                .await
+                .map_err(|e| {
+                    crate::backend::BackendError::InvalidOperation(format!(
+                        "{}: cannot re-check the approved content before overwriting it: {e}",
+                        resolved.display()
+                    ))
+                })?;
+            if current != *exp {
+                return Err(concurrent_change_error(resolved));
+            }
+        }
+        None => {}
     }
     backend
         .write(resolved, content, crate::backend::WriteMode::Overwrite)
         .await
+}
+
+/// One wording for "somebody else wrote this while the gate was deciding",
+/// whether the expectation was bytes or a digest — a reader should not have
+/// to learn which form the gate happened to hold.
+fn concurrent_change_error(resolved: &Path) -> crate::backend::BackendError {
+    crate::backend::BackendError::InvalidOperation(format!(
+        "{}: changed since the write-model gate checked it (concurrent write); \
+         aborting overwrite",
+        resolved.display()
+    ))
 }
 
 impl ExecContext {
@@ -939,6 +1059,7 @@ impl ExecContext {
             principal: Principal::new("test-session", kaish_types::approval::PrincipalKind::Agent),
             request_ttl: crate::ledger::LedgerConfig::default().request_ttl,
             job_id: None,
+            resolvers: Arc::new(StateResolvers::default()),
         });
         authority
     }
@@ -996,7 +1117,7 @@ impl ExecContext {
     pub(crate) async fn request_gate(
         &mut self,
         operation: KernelOperation,
-        paths: &[&str],
+        resources: Vec<Resource>,
         reason: &str,
         hint: String,
         presented: Option<&str>,
@@ -1005,13 +1126,8 @@ impl ExecContext {
             .risk(operation.risk())
             .reason(reason)
             .hint(hint);
-        for path in paths {
-            // No transition claim: PR 5 is a pure migration, and
-            // redemption-time state verification (the `StateResolver` that
-            // makes a claim checkable) is ledger PR 6. A resource with no
-            // transition implies no condition, so a grant over it is
-            // unconditioned — and the record says so.
-            builder = builder.resource(Resource::plain("path", *path));
+        for resource in resources {
+            builder = builder.resource(resource);
         }
         let draft = match builder.build() {
             Ok(draft) => draft,
@@ -1087,8 +1203,14 @@ impl ExecContext {
             access.chain.decide(&request, &chain_ctx).await
         };
         match outcome {
-            Ok(ChainOutcome::Granted { .. }) => {
-                self.reserve(&access, &request.id, Vec::new()).await
+            Ok(ChainOutcome::Granted { grant, .. }) => {
+                // Evaluate the grant's preconditions here, outside the
+                // ledger lock, and carry the result in (spec §B.1). A
+                // standing grant or a policy hook can decide in the same
+                // breath as the request, so this path re-observes too —
+                // a grant is never redeemed on an unchecked claim.
+                let report = self.observe_conditions(&grant.conditions).await;
+                self.reserve(&access, &request.id, report).await
             }
             Ok(ChainOutcome::Denied { reason, .. }) => ApprovalOutcome::Denied {
                 request: request.id,
@@ -1137,8 +1259,12 @@ impl ExecContext {
                 reason: LedgerError::NotFound(redemption.request_id).to_string(),
             };
         };
-        if let Err(detail) = draft_matches(draft, &chain.request.operation, &chain.request.resources)
-        {
+        // Two checks, in order: the operation and the resource set, then the
+        // prior-state claim on each resource. The second is replay-only —
+        // see `transitions_match`.
+        let matched = draft_matches(draft, &chain.request.operation, &chain.request.resources)
+            .and_then(|()| transitions_match(draft, &chain.request.resources));
+        if let Err(detail) = matched {
             // Settle the attempt `confirm` reserved rather than leaving it
             // in flight: a failed attempt does not consume the grant, so the
             // operator can correct the replay and try again inside
@@ -1189,9 +1315,21 @@ impl ExecContext {
                 ),
             };
         };
+        // Observe before presenting, because the observation has to be
+        // *inside* the reservation transaction (spec §B.1) and the I/O has
+        // to be outside the lock. The ledger still checks the credential
+        // first, so a wrong key lands on `TokenRejected` and never reaches
+        // the condition check — an invalid presentation cannot void a grant.
+        let conditions = access
+            .approvals
+            .get(&id)
+            .and_then(|chain| chain.grant)
+            .map(|grant| grant.conditions)
+            .unwrap_or_default();
+        let report = self.observe_conditions(&conditions).await;
         match access
             .requester
-            .redeem_with_token(&id, key, access.principal.clone(), Vec::new())
+            .redeem_with_token(&id, key, access.principal.clone(), report)
             .await
         {
             Ok(attempt) => {
@@ -1202,17 +1340,69 @@ impl ExecContext {
         }
     }
 
+    /// The resolver for one resource kind. `path` is the kernel's own,
+    /// rebuilt per call from this context's backend and cwd so an overlay or
+    /// an in-memory mount is observed exactly the way the gate site resolved
+    /// it; every other kind comes from the registry an embedder configured.
+    pub(crate) fn state_resolver(&self, kind: &str) -> Option<Arc<dyn StateResolver>> {
+        if kind == PATH_KIND {
+            return Some(Arc::new(PathResolver::new(
+                Arc::clone(&self.backend),
+                self.cwd.clone(),
+            )));
+        }
+        self.ledger_access
+            .as_ref()
+            .and_then(|access| access.resolvers.get(kind).cloned())
+    }
+
+    /// Read the current state of every condition that claims a prior state
+    /// (spec §B.4), for a redemption to carry into the ledger.
+    ///
+    /// Runs outside the ledger lock, because it is I/O. An unreadable
+    /// resource — or one whose kind has no registered resolver — becomes
+    /// [`ConditionReport::Unobservable`], which refuses; it is never a
+    /// silent pass.
+    pub(crate) async fn observe_conditions(&self, conditions: &[Condition]) -> ConditionReport {
+        let mut observed = Vec::new();
+        // A condition that claims nothing has nothing to check, and costs no
+        // I/O here (spec §A.3) — see `conditions_to_observe`.
+        for condition in crate::ledger::conditions_to_observe(conditions) {
+            let resource = condition.resource.clone();
+            let Some(resolver) = self.state_resolver(&resource.kind) else {
+                return ConditionReport::Unobservable {
+                    detail: format!("no state resolver is registered for the '{}' resource kind", resource.kind),
+                    resource,
+                };
+            };
+            match resolver.observe(&resource.id).await {
+                Ok(claim) => observed.push(Observation {
+                    resource,
+                    claim,
+                    at: kaish_types::clock::system_now(),
+                }),
+                Err(err) => {
+                    return ConditionReport::Unobservable {
+                        detail: err.to_string(),
+                        resource,
+                    }
+                }
+            }
+        }
+        ConditionReport::observed(observed)
+    }
+
     /// Reserve an attempt against a request this execution just had granted.
     async fn reserve(
         &mut self,
         access: &LedgerAccess,
         id: &RequestId,
-        observed: Vec<Observation>,
+        report: ConditionReport,
     ) -> kaish_tool_api::ApprovalOutcome {
         use kaish_tool_api::ApprovalOutcome;
         match access
             .requester
-            .redeem(id, access.principal.clone(), observed)
+            .redeem(id, access.principal.clone(), report)
             .await
         {
             Ok(attempt) => {
@@ -1294,7 +1484,8 @@ impl ExecContext {
         targets: &[(String, bool)],
         confirm: Option<&str>,
         confirm_hint: impl FnOnce(&str) -> String,
-    ) -> Result<GateSnapshots, ExecResult> {
+    ) -> Result<GateExpectations, ExecResult> {
+        let mut expectations = GateExpectations::new();
         let trash_enabled = self.scope.trash_enabled();
         let enforce = self.scope.approvals_enabled();
         // Fast path: nothing is subscribed and nothing is trashed, so this
@@ -1302,7 +1493,7 @@ impl ExecContext {
         // must not pay a per-path ledger cost unless an operator asked for
         // it).
         if !trash_enabled && !enforce {
-            return Ok(GateSnapshots::new());
+            return Ok(expectations);
         }
         let trash_max_size = self.scope.trash_max_size();
 
@@ -1348,17 +1539,60 @@ impl ExecContext {
             decided.push(Decided { display: display.clone(), resolved, action });
         }
 
-        // One request covers every gated path in the batch.
-        let gated: Vec<&str> = decided
+        // One request covers every gated path in the batch. Each gated
+        // target declares the digest its content has *right now* as the
+        // transition's `from`, which becomes a redemption-time condition
+        // (spec §B.4): this is `cas_overwrite`'s snapshot-compare, lifted
+        // onto the ledger. The ledger stores the digest, never the content —
+        // the byte snapshot stays with the trash, where the recovery copy
+        // lives.
+        let gated: Vec<&Decided> = decided
             .iter()
             .filter(|d| matches!(d.action, MutationAction::Gate))
-            .map(|d| d.display.as_str())
             .collect();
         if !gated.is_empty() {
-            let joined = gated.join(" ");
+            let joined = gated
+                .iter()
+                .map(|d| d.display.as_str())
+                .collect::<Vec<_>>()
+                .join(" ");
+            let mut resources = Vec::with_capacity(gated.len());
+            for d in &gated {
+                // A target whose prior content cannot be digested cannot be
+                // protected by the condition, so it must not be written
+                // under one either — refuse rather than gate on a claim
+                // nobody can check later.
+                let from = crate::ledger::digest_path(&*self.backend, &d.resolved)
+                    .await
+                    .map_err(|e| {
+                        ExecResult::failure(
+                            1,
+                            format!("{command}: {}: cannot record the prior state: {e}", d.display),
+                        )
+                    })?;
+                // The same digest becomes this target's write-time
+                // expectation, so the gate pays for it once. The ledger
+                // catches a file that moved while the operator was deciding;
+                // this catches one that moves between the ledger's check and
+                // the write itself.
+                expectations.insert(
+                    d.resolved.clone(),
+                    OverwriteExpectation::Digest(from.clone()),
+                );
+                resources.push(Resource::transition(
+                    PATH_KIND,
+                    d.display.clone(),
+                    from,
+                    // The resulting content is not known here — `patch` and
+                    // `sed -i` compute it from the prior bytes — and an
+                    // unclaimed post-state is exactly what `Unspecified` is
+                    // for.
+                    kaish_types::approval::StateClaim::Unspecified,
+                ));
+            }
             self.request_gate(
                 operation,
-                &gated,
+                resources,
                 "the fs.* enforce policy is on and this overwrite has no recoverable prior copy",
                 confirm_hint(&joined),
                 confirm,
@@ -1369,18 +1603,17 @@ impl ExecContext {
 
         // Snapshot prior content for every trash-first target before any write,
         // keeping the bytes so a byte-oriented caller can CAS against them.
-        let mut snapshots = GateSnapshots::new();
         for d in &decided {
             if matches!(d.action, MutationAction::TrashFirst) {
                 match self.snapshot_for_overwrite(&d.display, &d.resolved).await {
                     Ok(bytes) => {
-                        snapshots.insert(d.resolved.clone(), bytes);
+                        expectations.insert(d.resolved.clone(), OverwriteExpectation::Bytes(bytes));
                     }
                     Err(e) => return Err(ExecResult::failure(1, format!("{command}: {e}"))),
                 }
             }
         }
-        Ok(snapshots)
+        Ok(expectations)
     }
 
     /// Copy the prior content of `resolved` into the trash before it's
@@ -1427,7 +1660,7 @@ impl ExecContext {
         &self,
         resolved: &Path,
         content: &[u8],
-        expected: Option<&[u8]>,
+        expected: Option<&OverwriteExpectation>,
     ) -> Result<(), String> {
         cas_overwrite(&*self.backend, resolved, content, expected)
             .await

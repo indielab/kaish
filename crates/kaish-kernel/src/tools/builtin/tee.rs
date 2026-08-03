@@ -122,7 +122,7 @@ impl Tool for Tee {
                     .await
                     .map_err(|e| e.to_string())
             } else {
-                let expected = snapshots.get(&resolved).map(|v| v.as_slice());
+                let expected = snapshots.get(&resolved);
                 ctx.overwrite_checked(path, &input, expected).await
             };
 
@@ -253,7 +253,7 @@ mod tests {
     async fn overwrite_checked_rejects_concurrent_change() {
         let ctx = make_ctx().await; // /existing.txt = "original content\n"
         let path = Path::new("/existing.txt");
-        let snapshot = b"original content\n".to_vec();
+        let snapshot = crate::tools::OverwriteExpectation::Bytes(b"original content\n".to_vec());
 
         // A concurrent writer changes the file after the gate snapshotted it.
         ctx.backend
@@ -274,7 +274,7 @@ mod tests {
     async fn overwrite_checked_writes_when_snapshot_matches() {
         let ctx = make_ctx().await;
         let path = Path::new("/existing.txt");
-        let snapshot = b"original content\n".to_vec();
+        let snapshot = crate::tools::OverwriteExpectation::Bytes(b"original content\n".to_vec());
 
         ctx.overwrite_checked(path, b"new content\n", Some(&snapshot))
             .await
@@ -283,6 +283,60 @@ mod tests {
             ctx.backend.read(path, None).await.unwrap(),
             b"new content\n"
         );
+    }
+
+    /// The digest arm is the approval gate's expectation: it never holds the
+    /// prior bytes (the trash is off, or the file is too big for it), so it
+    /// compares the content digest instead. Same refusal, bounded memory.
+    #[tokio::test]
+    async fn overwrite_checked_rejects_concurrent_change_against_a_digest() {
+        let ctx = make_ctx().await; // /existing.txt = "original content\n"
+        let path = Path::new("/existing.txt");
+        let expected = crate::tools::OverwriteExpectation::Digest(
+            crate::ledger::digest_path(&*ctx.backend, path).await.unwrap(),
+        );
+
+        ctx.backend
+            .write(path, b"changed elsewhere\n", WriteMode::Overwrite)
+            .await
+            .unwrap();
+
+        let result = ctx.overwrite_checked(path, b"my content\n", Some(&expected)).await;
+        assert!(result.is_err(), "expected a conflict, got {result:?}");
+        assert_eq!(
+            ctx.backend.read(path, None).await.unwrap(),
+            b"changed elsewhere\n",
+            "the concurrent writer's content must survive"
+        );
+    }
+
+    #[tokio::test]
+    async fn overwrite_checked_writes_when_the_digest_matches() {
+        let ctx = make_ctx().await;
+        let path = Path::new("/existing.txt");
+        let expected = crate::tools::OverwriteExpectation::Digest(
+            crate::ledger::digest_path(&*ctx.backend, path).await.unwrap(),
+        );
+
+        ctx.overwrite_checked(path, b"new content\n", Some(&expected))
+            .await
+            .unwrap();
+        assert_eq!(ctx.backend.read(path, None).await.unwrap(), b"new content\n");
+    }
+
+    /// A target that vanished is a change, not a missing observation: the
+    /// digest arm sees `Absent`, which never equals a content digest.
+    #[tokio::test]
+    async fn overwrite_checked_rejects_a_vanished_target_against_a_digest() {
+        let ctx = make_ctx().await;
+        let path = Path::new("/existing.txt");
+        let expected = crate::tools::OverwriteExpectation::Digest(
+            crate::ledger::digest_path(&*ctx.backend, path).await.unwrap(),
+        );
+        ctx.backend.remove(path, false).await.unwrap();
+
+        let result = ctx.overwrite_checked(path, b"new\n", Some(&expected)).await;
+        assert!(result.is_err(), "a vanished target must error, got {result:?}");
     }
 
     #[tokio::test]
@@ -301,7 +355,7 @@ mod tests {
         // Snapshot an EMPTY file, then have it vanish (concurrent delete).
         let path = Path::new("/empty.txt");
         ctx.backend.write(path, b"", WriteMode::Overwrite).await.unwrap();
-        let empty_snapshot: Vec<u8> = Vec::new();
+        let empty_snapshot = crate::tools::OverwriteExpectation::Bytes(Vec::new());
         ctx.backend.remove(path, false).await.unwrap();
 
         // A failed re-read must surface loudly — not be swallowed to `[]` and

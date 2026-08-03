@@ -41,6 +41,7 @@ use tokio::sync::mpsc::OwnedPermit;
 
 use super::config::{LedgerConfig, LedgerSink};
 use super::error::LedgerError;
+use super::resolver::ConditionReport;
 
 /// A monotonic clock is `std::time::Instant`/`kaish_types::clock::Instant`
 /// everywhere; only the *wall-clock* stamp on each entry is worth
@@ -658,12 +659,12 @@ impl LedgerInner {
         &self,
         id: &RequestId,
         by: Principal,
-        observed: Vec<Observation>,
+        report: ConditionReport,
     ) -> Result<AttemptId, LedgerError> {
         let mut guard = self.lock();
         let (mono, wall) = self.now();
         let mut all_committed = self.materialize_expiry(&mut guard, id, mono, wall)?;
-        let (result, committed) = self.redeem_locked(&mut guard, id, by, observed, mono, wall);
+        let (result, committed) = self.redeem_locked(&mut guard, id, by, report, mono, wall);
         all_committed.extend(committed);
         drop(guard);
         emit_events(&all_committed);
@@ -675,7 +676,7 @@ impl LedgerInner {
         id: &RequestId,
         presented: &str,
         by: Principal,
-        observed: Vec<Observation>,
+        report: ConditionReport,
     ) -> Result<AttemptId, LedgerError> {
         let mut guard = self.lock();
         let (mono, wall) = self.now();
@@ -724,7 +725,7 @@ impl LedgerInner {
             .is_some_and(|t| constant_time_eq(t.reveal(), presented));
 
         if matches_real_token {
-            let (result, committed) = self.redeem_locked(&mut guard, id, by, observed, mono, wall);
+            let (result, committed) = self.redeem_locked(&mut guard, id, by, report, mono, wall);
             all_committed.extend(committed);
             drop(guard);
             emit_events(&all_committed);
@@ -875,7 +876,7 @@ impl LedgerInner {
         guard: &mut LedgerState,
         id: &RequestId,
         by: Principal,
-        observed: Vec<Observation>,
+        report: ConditionReport,
         mono: Instant,
         wall: SystemTime,
     ) -> (Result<AttemptId, LedgerError>, Vec<LedgerEntry>) {
@@ -912,26 +913,16 @@ impl LedgerInner {
             return (Err(err), Vec::new());
         };
 
-        let mut refusal: Option<(Condition, StateClaim)> = None;
-        for condition in &grant.conditions {
-            let claim = observed
-                .iter()
-                .find(|o| o.resource == condition.resource)
-                .map(|o| o.claim.clone());
-            let holds = matches!(&claim, Some(c) if *c == condition.expected_from);
-            if !holds {
-                refusal = Some((condition.clone(), claim.unwrap_or(StateClaim::Unspecified)));
-                break;
-            }
-        }
+        // Preconditions were evaluated outside this lock (spec §B.1); what
+        // arrives here is the observation, and this is where it decides.
+        let (observed, refusal) = evaluate_conditions(&grant.conditions, report);
 
-        if let Some((condition, found)) = refusal {
+        if let Some((condition, found, reason)) = refusal {
             let reserved = match guard.reserve_capacity(2, self.config.retained_entries) {
                 Ok(r) => r,
                 Err(err) => return (Err(err), Vec::new()),
             };
             let seq1 = guard.alloc_seq();
-            let reason = "redemption-time conditions no longer hold".to_string();
             let mut entries = vec![(
                 LedgerEntry::Refused {
                     seq: seq1,
@@ -1761,6 +1752,84 @@ fn find_widened_condition(request: &ApprovalRequest, terms: &GrantTerms) -> Opti
     None
 }
 
+/// Decide a grant's preconditions against what the resolvers saw (spec
+/// §B.4). Returns the observations to record on `Redeemed`, and `Some` when
+/// one condition refuses — the condition, what was found instead, and the
+/// reason both `Voided` and the caller's error carry.
+///
+/// Three ways a condition is answered, and they are deliberately distinct:
+///
+/// - `expected_from: Unspecified` claims nothing, so there is nothing to
+///   check. It holds, contributes no observation, and the empty observation
+///   set on `Redeemed` is what tells an auditor the grant was unconditioned.
+/// - An observation that does not equal `expected_from` refuses: the world
+///   moved between the grant and the redemption.
+/// - No observation, or an [`ConditionReport::Unobservable`] report, refuses
+///   too. A precondition nobody could check has not been met — this is the
+///   one place a silent pass would be a data-loss bug rather than an
+///   inconvenience.
+fn evaluate_conditions(
+    conditions: &[Condition],
+    report: ConditionReport,
+) -> (Vec<Observation>, Option<(Condition, StateClaim, String)>) {
+    let observed = match report {
+        ConditionReport::Observed(observed) => observed,
+        ConditionReport::Unobservable { resource, detail } => {
+            // An unobservable resource refuses whenever this grant claims a
+            // prior state at all. Name the condition that resource carries
+            // when there is one, else the first condition still unchecked —
+            // either way the reason names the resource that could not be
+            // read, which is the actionable part.
+            let concrete = super::resolver::conditions_to_observe(conditions);
+            let Some(condition) = concrete
+                .iter()
+                .find(|c| c.resource == resource)
+                .or(concrete.first())
+            else {
+                // Nothing to check: the grant is unconditioned, so a
+                // resource nobody had to observe cannot refuse it.
+                return (Vec::new(), None);
+            };
+            let reason = format!("{}:{} could not be observed: {detail}", resource.kind, resource.id);
+            return (
+                Vec::new(),
+                Some(((*condition).clone(), StateClaim::Unspecified, reason)),
+            );
+        }
+    };
+
+    for condition in conditions {
+        if condition.expected_from == StateClaim::Unspecified {
+            continue;
+        }
+        let claim = observed
+            .iter()
+            .find(|o| o.resource == condition.resource)
+            .map(|o| o.claim.clone());
+        match claim {
+            Some(claim) if claim == condition.expected_from => {}
+            Some(claim) => {
+                let reason = format!(
+                    "{}:{} changed since the grant",
+                    condition.resource.kind, condition.resource.id
+                );
+                return (Vec::new(), Some((condition.clone(), claim, reason)));
+            }
+            None => {
+                let reason = format!(
+                    "{}:{} was not observed at redemption",
+                    condition.resource.kind, condition.resource.id
+                );
+                return (
+                    Vec::new(),
+                    Some((condition.clone(), StateClaim::Unspecified, reason)),
+                );
+            }
+        }
+    }
+    (observed, None)
+}
+
 /// Constant-time string equality (review NIT — defense in depth on
 /// credential comparison; see its call site for the threat-model caveat).
 fn constant_time_eq(a: &str, b: &str) -> bool {
@@ -1989,7 +2058,7 @@ mod tests {
         let req = post(&inner, &principal);
 
         let err = inner
-            .redeem_with_token(&req.id, "wrong", principal, Vec::new())
+            .redeem_with_token(&req.id, "wrong", principal, ConditionReport::none())
             .unwrap_err();
         assert!(matches!(err, LedgerError::RingAtCapacity), "got {err:?}");
 
@@ -2095,7 +2164,7 @@ mod tests {
             .grant(&req.id, GrantTerms::once_for(&req, not_after), principal.clone(), Grounds::Embedder)
             .unwrap();
         #[allow(clippy::unwrap_used)]
-        let attempt_a = inner.redeem(&req.id, principal.clone(), Vec::new()).unwrap();
+        let attempt_a = inner.redeem(&req.id, principal.clone(), ConditionReport::none()).unwrap();
         // Normal API usage can never reserve a second live attempt against
         // one grant (`AttemptInFlight` blocks it) — reach past that guard
         // directly to prove the settlement-side invariant check exists
@@ -2107,7 +2176,7 @@ mod tests {
             }
         }
         #[allow(clippy::unwrap_used)]
-        let attempt_b = inner.redeem(&req.id, principal.clone(), Vec::new()).unwrap();
+        let attempt_b = inner.redeem(&req.id, principal.clone(), ConditionReport::none()).unwrap();
         assert!(inner.settle(&req.id, attempt_a, Outcome::Exit(0)).unwrap_or(false));
         // This settle call `debug_assert!`s and panics under the standard
         // debug test profile (`cargo test --all`), matching spec §B.3's
@@ -2149,7 +2218,7 @@ mod tests {
             .grant(&req.id, GrantTerms::once_for(&req, not_after), principal.clone(), Grounds::Embedder)
             .unwrap();
         #[allow(clippy::unwrap_used)]
-        let attempt = inner.redeem(&req.id, principal.clone(), Vec::new()).unwrap();
+        let attempt = inner.redeem(&req.id, principal.clone(), ConditionReport::none()).unwrap();
 
         // Let real monotonic time actually advance past the (zero) bound.
         std::thread::sleep(Duration::from_millis(5));
@@ -2165,7 +2234,7 @@ mod tests {
         // "already settled" (spec §B.2: an abandoned attempt's effects are
         // unknown, same as `Outcome::Unknown`) rather than reserving a new
         // attempt against a grant nobody can vouch for.
-        let err = inner.redeem(&req.id, principal, Vec::new()).unwrap_err();
+        let err = inner.redeem(&req.id, principal, ConditionReport::none()).unwrap_err();
         assert!(matches!(err, LedgerError::AlreadySettled { .. }));
     }
 
@@ -2195,13 +2264,13 @@ mod tests {
             .grant(&req_a.id, GrantTerms::once_for(&req_a, not_after), principal.clone(), Grounds::Embedder)
             .unwrap();
         #[allow(clippy::unwrap_used)]
-        let attempt_a = inner.redeem(&req_a.id, principal.clone(), Vec::new()).unwrap();
+        let attempt_a = inner.redeem(&req_a.id, principal.clone(), ConditionReport::none()).unwrap();
 
         // Void chain A via 5 bad keys while its attempt is still `Reserved`
         // — this closes the chain (freeing its live slot) without settling
         // the attempt.
         for _ in 0..5 {
-            let _ = inner.redeem_with_token(&req_a.id, "wrong", principal.clone(), Vec::new());
+            let _ = inner.redeem_with_token(&req_a.id, "wrong", principal.clone(), ConditionReport::none());
         }
         assert_eq!(inner.state(&req_a.id), Some(RequestState::Voided));
 
@@ -2251,11 +2320,11 @@ mod tests {
             .unwrap();
         // Step 1: reserve an attempt.
         #[allow(clippy::unwrap_used)]
-        let _attempt = inner.redeem(&req_a.id, principal.clone(), Vec::new()).unwrap();
+        let _attempt = inner.redeem(&req_a.id, principal.clone(), ConditionReport::none()).unwrap();
         // Step 2: void via 5 bad keys while the attempt is still Reserved
         // — closes the chain once, frees the live slot.
         for _ in 0..5 {
-            let _ = inner.redeem_with_token(&req_a.id, "wrong", principal.clone(), Vec::new());
+            let _ = inner.redeem_with_token(&req_a.id, "wrong", principal.clone(), ConditionReport::none());
         }
         assert_eq!(inner.state(&req_a.id), Some(RequestState::Voided));
 
@@ -2307,7 +2376,7 @@ mod tests {
             .grant(&req.id, GrantTerms::once_for(&req, not_after), principal.clone(), Grounds::Embedder)
             .unwrap(); // 2: Granted
         #[allow(clippy::unwrap_used)]
-        let attempt = inner.redeem(&req.id, principal, Vec::new()).unwrap(); // 3: Redeemed, + 1 banked for the terminal — ring is now exactly full at 4
+        let attempt = inner.redeem(&req.id, principal, ConditionReport::none()).unwrap(); // 3: Redeemed, + 1 banked for the terminal — ring is now exactly full at 4
 
         // The terminal entry must still land — never refused.
         let appended = inner
@@ -2367,7 +2436,7 @@ mod tests {
             .grant(&req.id, GrantTerms::once_for(&req, not_after), principal.clone(), Grounds::Embedder)
             .unwrap();
         #[allow(clippy::unwrap_used)]
-        let attempt = inner.redeem(&req.id, principal, Vec::new()).unwrap();
+        let attempt = inner.redeem(&req.id, principal, ConditionReport::none()).unwrap();
 
         // Terminal capacity was banked at redemption time — settle must
         // succeed regardless of anything else contending for the queue.

@@ -742,6 +742,38 @@ For git this is the whole story: approve `refs/heads/main: a1b2… → c3d4…`;
 to `e5f6…` while the human was thinking, the push does not happen and the record says
 exactly why.
 
+*Settled at implementation time (PR 6),* because the text above leaves them open:
+
+- **`StateResolver` lives in `kaish-tool-api`, not the kernel.** The party that names a
+  resource kind is the party that knows how to read it, and a plugin depends on
+  `kaish-tool-api` rather than on `kaish-kernel`. Registration is
+  `KernelConfig::with_state_resolver`; a resolver claiming `path`, or two claiming one
+  kind, fails `Kernel::build` — the same rule §A.6 gives the `fs.` operation namespace,
+  for the same reason. A kind with **no** registered resolver refuses, so registering
+  the resolver is part of shipping the kind rather than an optimization.
+- **A failure to observe reaches the ledger as a fact, not as a missing observation.**
+  `redeem` takes a `ConditionReport` (`Observed` | `Unobservable{resource, detail}`)
+  rather than a bare `Vec<Observation>`. "Nobody looked" and "we looked and could not
+  tell" cannot be the same value, because the second one has to refuse. Carrying the
+  failure *into* the transaction rather than refusing at the gate site also fixes an
+  ordering hazard on the `--confirm=<token>` path: the ledger checks the credential
+  first, so a wrong key lands on `TokenRejected` and never reaches the condition check.
+  An invalid presentation cannot void a grant.
+- **`expected_from: Unspecified` is skipped, not compared.** A claim of nothing has
+  nothing to check, so it holds, costs no I/O, and contributes no observation — which
+  is what makes §A.3's "a grant whose conditions are all `Unspecified` records that
+  fact" true: `Redeemed{observed: []}`. This does not make `Unspecified` a wildcard; it
+  is never compared at all.
+- **`rm` declares no prior state.** Digesting an `rm -rf` tree would cost a full read
+  per path, so the delete gate posts `Resource::plain` and its grant is unconditioned.
+  The overwrite gate is where the digest claim lives, because that is where
+  `cas_overwrite` already paid for the bytes.
+- **`GrantTerms::once_for_view`** exists because an approver holds a tokenless
+  `ApprovalRequestView`, and rebuilding an `ApprovalRequest` from one to reach
+  `once_for` drops the resources — producing empty terms the ledger then rejects as
+  widening. Five call sites had the bug at once, invisibly, until a request first
+  declared a transition.
+
 ### B.5 Expiry and renewal — the dead-nonce-forever fix
 
 Today a `Latched` background job at T+61s is unfulfillable and unkillable-without-discard.
