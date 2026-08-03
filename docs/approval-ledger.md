@@ -790,6 +790,13 @@ Under the ledger:
   legible. **Renewal is a requester action, not an approval action** — the principal that
   owns the request may renew it without holding any authority, which is what lets a gated
   agent keep its own request alive.
+- A session holding the ledger's authority may also renew any request, not only its own: it
+  could already `grant` or `deny` that request, so withholding renewal from it would be a
+  special case with nothing behind it. Every other session renewing another principal's
+  request is refused. Either way the renewed request names the **original** requester as its
+  principal — the renewer is not separately attributed, because renewal carries the thread
+  of intent forward rather than restarting it under a new name, and who acted is already in
+  the record (§A.2).
 - Renewal re-observes the transitions before posting. If the world already moved, renewal
   fails loud rather than posting a request whose claims are already false.
 - `JobStatus::Latched` keeps its name and meaning ("held on an unsatisfied gate"). What

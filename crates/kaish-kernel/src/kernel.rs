@@ -111,7 +111,7 @@ use crate::tools::{resolve_in_path, virtual_cwd_error};
 use crate::validator::{Severity, Validator};
 #[cfg(feature = "localfs")]
 use crate::vfs::LocalFs;
-use crate::vfs::{BuiltinFs, DevFs, JobFs, MemoryFs, VfsRouter};
+use crate::vfs::{ApprovalsFs, BuiltinFs, DevFs, JobFs, MemoryFs, VfsRouter};
 use kaish_vfs::ByteBudget;
 #[cfg(all(feature = "localfs", feature = "overlay"))]
 use kaish_vfs::OverlayFs;
@@ -1031,6 +1031,11 @@ impl KernelApprovals {
             request_ttl: self.request_ttl,
             job_id,
             resolvers: Arc::clone(&self.resolvers),
+            // `session_authority`, not `authority`: a context gets what the
+            // *session* was given, never the minted authority the embedder
+            // kept. A session built without one has no bridge to `grant`,
+            // which is the property `approvals grant` enforces (spec §D.3).
+            session_authority: self.session_authority.clone(),
         }
     }
 }
@@ -1431,6 +1436,12 @@ impl Kernel {
 
         // Mount BuiltinFs so `ls /v/bin` lists builtins
         vfs.mount("/v/bin", BuiltinFs::new(tools.clone()));
+
+        // Mount ApprovalsFs so `cat /v/approvals/pending` reads the ledger.
+        // Here rather than beside `/v/jobs` because the ledger does not exist
+        // until `build_approvals` above has run — and it must be the same
+        // ledger the gate sites post to, not a second one.
+        vfs.mount("/v/approvals", ApprovalsFs::new(approvals.approvals.clone()));
 
         let vfs = Arc::new(vfs);
 
@@ -2104,6 +2115,48 @@ impl Kernel {
         }
 
         Ok(result)
+    }
+
+    /// Renew an expired approval request (`docs/approval-ledger.md` §B.5):
+    /// post a fresh `Requested` carrying the original's operation, resources,
+    /// capture, principal, and trace context, linked by `supersedes`. Returns
+    /// the new request's id.
+    ///
+    /// **This is the dead-request fix.** Before it, a backgrounded gate that
+    /// nobody decided within `request_ttl` was unfulfillable *and*
+    /// undiscardable: the job could not run, the request could not be
+    /// granted, and there was no way to raise the same intent again except by
+    /// re-running the command — which a backgrounded job cannot do for
+    /// itself. Renewal walks the chain forward instead: `supersedes` links
+    /// each attempt to the last, so "this took four tries over two hours" is
+    /// legible in the log.
+    ///
+    /// **Renewal is not re-approval.** The renewed request starts at
+    /// `Requested` and needs a fresh decision — a standing grant will
+    /// auto-approve it again, a human will be asked again. Nothing about the
+    /// passage of an hour makes a stale approval better.
+    ///
+    /// Takes no [`ApproverHandle`](crate::ledger::ApproverHandle), unlike
+    /// [`Self::confirm`]: renewal is a *requester* action, so a session
+    /// holding no authority renews its own requests. It cannot renew another
+    /// principal's.
+    ///
+    /// If the request came from a backgrounded job, that job is restamped
+    /// with the renewed request, so `wait`, `jobs`, and
+    /// `/v/jobs/{id}/approval` name the live id rather than the dead one.
+    ///
+    /// # Errors
+    ///
+    /// The request is unknown, is not `Expired`, belongs to another principal
+    /// in a session with no authority, or declares a transition the world no
+    /// longer shows — the last being the loud refusal §B.5 requires, so a
+    /// renewal never posts claims that are already false.
+    pub async fn renew(
+        &self,
+        request_id: &kaish_types::approval::RequestId,
+    ) -> Result<kaish_types::approval::RequestId> {
+        let ctx = self.exec_ctx.read().await;
+        ctx.renew_request(request_id).await.map_err(|e| anyhow::anyhow!(e))
     }
 
     /// Run `work` under the movable-deadline watchdog for `timeout`, shared by the

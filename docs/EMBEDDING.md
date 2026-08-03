@@ -358,8 +358,53 @@ and the request is surfaced under its own `approval` key:
 "resources": [...], "hint": ..., ... } }`. The typed `approval_request()`
 accessor works the same either way, so it's the recommended path.
 
-A request nobody decides expires after 60s, and the expiry is recorded rather
-than silently forgotten. To decide a request raised in one `execute()` call from
+**A request nobody decides expires after 60s, and the expiry is recorded**
+rather than silently forgotten — the ledger materializes an `Expired` entry
+the first time anything observes it, so "nobody decided in 60s" stays
+readable.
+
+**An expired request is not the end of the intent.** `Kernel::renew(&id)`
+posts a fresh request carrying the original's operation, resources, capture,
+principal, and trace context, linked to it by `supersedes`, and returns the
+new id. Grant *that* one and `confirm` it as usual. Three properties an
+embedder should know:
+
+- **Renewal takes no `ApproverHandle`.** It is a requester action: a session
+  holding no authority renews its own requests, which is what lets a gated
+  agent keep its own request alive rather than watch it die unfulfillable. A
+  session *with* this ledger's authority may renew any request; a session
+  without it may not renew another principal's, and the refusal names both
+  principals. `approvals renew <id>` is the same call from the shell.
+- **Renewal is not re-approval.** The new request starts undecided. A standing
+  grant auto-approves it again; a human is asked again. Nothing about the
+  passage of an hour makes a stale approval better.
+- **Renewal re-observes the resource first**, through the same check
+  redemption makes, and fails with **exit 1** naming what changed rather than
+  posting claims that are already false.
+
+If the expired request came from a backgrounded job, that job is restamped
+with the renewed request, so `JobInfo.approval`, `/v/jobs/{id}/approval`, and
+`wait` all name the live id rather than the dead one.
+
+**Reading the ledger.** `Kernel::approvals()` is the read side (it grants
+nothing): `pending()`, `ids()`, `get(&id)`, `standing()`, and `log(since)`.
+The same read model is projected at **`/v/approvals`** — `pending`,
+`standing`, and `log` at the root, and `{id}/{request,state,attempts,grant}`
+per request — and surfaced by the `approvals` builtin (`list`, `show`,
+`log`). `/v/approvals` is **read-only: every write path returns
+`Unsupported`**, because granting by file write would make "the agent can
+write files" equivalent to "the agent can approve its own operations". No
+projection carries a credential; there is no redaction step, because no
+projected type has a credential field.
+
+**Deciding from inside a session.** `KernelConfig::with_approver_handle()`
+installs an authority *on the session*, which is what lets `approvals
+grant`/`deny`/`revoke` work there. Without one those three exit **1** naming
+the reason, while `list`, `show`, `log`, and `renew` keep working. That is
+the whole separation: an agent that can run any shell command can see what is
+pending and re-raise its own expired requests, and cannot approve itself.
+
+To decide a request raised in one `execute()` call from
 a *later* call — or from a different kernel — share the ledger with
 `KernelConfig::with_approver_handle()`; the default is a fresh ledger per
 kernel. `KernelConfig::with_ledger(config)` tunes retention and the
@@ -913,7 +958,10 @@ background rather than running: `status` is `gated`, `JobInfo.approval` (from
 `JobManager::list`/`get`) and `/v/jobs/{id}/approval` (JSON) carry the pending
 request, and `wait` surfaces it on the result's `.approval` field (exit 2). The
 request carries the `job_id` it was posted for, stamped once at post time, so
-every one of those surfaces reports the same correlation. An embedder fulfills
+every one of those surfaces reports the same correlation. Waiting on several
+gated jobs still surfaces **one** request on `.approval` — one operation, one
+request — while the message names the total (`wait: 3 approvals pending — run
+`approvals list``); `/v/approvals/pending` enumerates all of them. An embedder fulfills
 the backgrounded gate with `Kernel::confirm(&handle, &id)` — the
 same API as a foreground gate.
 

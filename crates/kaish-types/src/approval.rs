@@ -103,6 +103,24 @@ impl RequestId {
     pub fn as_str(&self) -> &str {
         &self.0
     }
+
+    /// The allocation sequence this id carries — the `42` in
+    /// `req_9c1a4f2e_42`.
+    ///
+    /// This is what orders requests chronologically. Sorting the id *text*
+    /// does not: `req_9c1a4f2e_10` sorts before `req_9c1a4f2e_9`, so a tenth
+    /// request would list ahead of the ninth on every surface that
+    /// enumerates them.
+    ///
+    /// Returns 0 for a value holding a non-canonical id. Both constructors
+    /// render the canonical form, so that cannot happen through the public
+    /// API; 0 sorts such a value first rather than panicking a listing.
+    pub fn seq(&self) -> u64 {
+        self.0
+            .rsplit_once('_')
+            .and_then(|(_, seq)| seq.parse().ok())
+            .unwrap_or(0)
+    }
 }
 
 impl std::fmt::Display for RequestId {

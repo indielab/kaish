@@ -1664,12 +1664,29 @@ impl LedgerInner {
         // `Result`-free signature.
         self.sweep();
         let guard = self.lock();
-        guard
+        let mut pending: Vec<ApprovalRequest> = guard
             .chains
             .values()
             .filter(|c| c.state == RequestState::Requested)
             .map(|c| c.request.clone())
-            .collect()
+            .collect();
+        // Chains live in a `HashMap`, so this is otherwise in whatever order
+        // hashing produced — which reaches an operator as an
+        // `approvals list` that reshuffles between calls. Allocation order
+        // is the order an operator thinks in.
+        pending.sort_by_key(|request| request.id.seq());
+        pending
+    }
+
+    pub(crate) fn ids(&self) -> Vec<RequestId> {
+        // Same full sweep `pending` runs: a request whose deadline passed
+        // must be listed as `Expired`, not `Requested`, the moment anything
+        // enumerates it (spec §B.5 — expiry materializes on observation).
+        self.sweep();
+        let guard = self.lock();
+        let mut ids: Vec<RequestId> = guard.chains.keys().cloned().collect();
+        ids.sort_by_key(RequestId::seq);
+        ids
     }
 
     pub(crate) fn state(&self, id: &RequestId) -> Option<RequestState> {
@@ -1828,6 +1845,22 @@ fn evaluate_conditions(
         }
     }
     (observed, None)
+}
+
+/// Why `report` refuses `conditions`, if it does — the same decision
+/// [`evaluate_conditions`] makes at redemption, exposed for the one caller
+/// that has to make it *before* anything is posted: renewal (spec §B.5, "if
+/// the world already moved, renewal fails loud rather than posting a request
+/// whose claims are already false").
+///
+/// Shares the redemption path's implementation deliberately. A renewal that
+/// judged staleness by its own rules would let a request through that its own
+/// redemption then refuses, which is the drift this indirection exists to
+/// prevent.
+pub(crate) fn condition_conflict(conditions: &[Condition], report: ConditionReport) -> Option<String> {
+    evaluate_conditions(conditions, report)
+        .1
+        .map(|(_, _, reason)| reason)
 }
 
 /// Constant-time string equality (review NIT — defense in depth on

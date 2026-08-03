@@ -339,6 +339,21 @@ failed attempt leaves the grant live to retry. The prompt prints to stderr
 surfaced under an `approval` key in the error envelope when `--json` is on.
 It never carries the token.
 
+**Reading and deciding:** `approvals list` names what is pending, `approvals
+show <id>` one request with its decision and attempts, and `approvals log`
+the retained entries. `/v/approvals` projects the same read model as files
+and is read-only — every write returns `Unsupported`, because granting by
+file write would make "can write files" mean "can approve itself".
+`approvals grant`, `deny`, and `revoke` exit **1** in a session with no
+approval authority.
+
+**Expiry and renewal:** an undecided request expires after **60s**, and the
+ledger records that nobody decided. `approvals renew <id>` posts a new
+request carrying the original's operation, resources, and capture, linked by
+`supersedes`; renewing your own request needs no authority. Renewal is not
+re-approval — the new request starts undecided. It fails loud, changing
+nothing, when the resource moved since the original was raised.
+
 An embedder can pin the policy so `set +o approvals` fails with exit 1
 instead of disarming the session.
 

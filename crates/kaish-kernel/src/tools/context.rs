@@ -263,6 +263,18 @@ pub struct LedgerAccess {
     /// Who this context's requests are attributed to. Set by
     /// `KernelConfig::with_principal`.
     pub principal: Principal,
+    /// The approval authority **this session** holds, if any (spec §D.3).
+    /// `None` means the session may not approve anything, and `approvals
+    /// grant` exits 1 naming that.
+    ///
+    /// The `approvals` builtin is the only reader, and the registry test in
+    /// `approvals_builtin_tests.rs` is what keeps it that way. This is a
+    /// deliberate widening of what a builtin can reach: the type-system tier
+    /// of the enforcement ladder (§E.2, tier 1) stops at the crate boundary,
+    /// and inside the crate the boundary is the one builtin that reads this
+    /// field. The threat model says so explicitly — the ledger does not
+    /// defend against hostile Rust compiled into the process (§A.2).
+    pub session_authority: Option<crate::ledger::ApproverHandle>,
     /// How long a posted request stays live with no decision, when this
     /// context posts one. `ExecContext` has no access to the `LedgerConfig`
     /// that minted `requester` (only the handle), so this is threaded
@@ -1060,6 +1072,10 @@ impl ExecContext {
             request_ttl: crate::ledger::LedgerConfig::default().request_ttl,
             job_id: None,
             resolvers: Arc::new(StateResolvers::default()),
+            // A wired test context is an authority-holding session: the
+            // caller gets the handle back, so the builtin surface must
+            // behave the way it does for a REPL that was given one.
+            session_authority: Some(authority.clone()),
         });
         authority
     }
@@ -1390,6 +1406,80 @@ impl ExecContext {
             }
         }
         ConditionReport::observed(observed)
+    }
+
+    /// Renew an expired request (`docs/approval-ledger.md` §B.5): post a
+    /// fresh `Requested` carrying the original's operation, resources,
+    /// capture, principal, and trace context, linked by `supersedes`.
+    ///
+    /// **Renewal is a requester action, not an approval action.** The
+    /// principal that owns the request may renew it holding no authority at
+    /// all — that is what lets a gated agent keep its own request alive
+    /// instead of watching it die at `not_after` with no way to re-raise it.
+    /// A session holding this ledger's authority may renew any request,
+    /// because it could already grant or deny that request; withholding
+    /// renewal from it would be a special case with nothing behind it. Any
+    /// other session renewing another principal's request is refused.
+    ///
+    /// **The transitions are re-observed first.** A renewal posts the
+    /// original's resource claims verbatim, so if the world moved while
+    /// nobody was deciding, the fresh request would carry claims that are
+    /// already false and an approver would be deciding on fiction. The check
+    /// is the same one redemption makes, so a renewal can never post a
+    /// request its own redemption would refuse.
+    ///
+    /// The originating background job, if there was one, is restamped with
+    /// the renewed request — otherwise `wait`, `jobs`, and
+    /// `/v/jobs/{id}/approval` keep reporting the dead id.
+    pub(crate) async fn renew_request(&self, id: &RequestId) -> Result<RequestId, String> {
+        let Some(access) = self.ledger_access.as_ref() else {
+            return Err("this session has no approval ledger".to_string());
+        };
+        let Some(chain) = access.approvals.get(id) else {
+            return Err(format!("no approval request {id} in this ledger"));
+        };
+
+        let owned = chain.request.principal == access.principal;
+        if !owned && access.session_authority.is_none() {
+            return Err(format!(
+                "{id} was raised by {}, not {} — renewal is the requester's action, and this \
+                 session holds no approval authority over another principal's request",
+                chain.request.principal.id, access.principal.id
+            ));
+        }
+
+        let conditions: Vec<kaish_types::approval::Condition> = chain
+            .request
+            .resources
+            .iter()
+            .filter_map(kaish_types::approval::Resource::to_condition)
+            .collect();
+        let report = self.observe_conditions(&conditions).await;
+        if let Some(reason) = crate::ledger::condition_conflict(&conditions, report) {
+            return Err(format!(
+                "{id} cannot be renewed: {reason} — the request's claims are no longer true, so \
+                 re-run the command to raise a request describing the world as it is now"
+            ));
+        }
+
+        let renewed = access
+            .requester
+            .renew(id)
+            .await
+            .map_err(|e| format!("{id} cannot be renewed: {e}"))?;
+
+        // Point the originating background job at the live request. Without
+        // this the job keeps surfacing the expired id through `wait`,
+        // `jobs`, and `/v/jobs/{id}/approval`, and an operator who granted
+        // the renewal has no way to see which job it belongs to.
+        if let Some(job_id) = chain.request.job_id
+            && let Some(manager) = self.job_manager.as_ref()
+            && let Some(view) = access.approvals.get(&renewed).map(|c| c.request)
+        {
+            manager.renew_gate(crate::scheduler::JobId(job_id), view).await;
+        }
+
+        Ok(renewed)
     }
 
     /// Reserve an attempt against a request this execution just had granted.

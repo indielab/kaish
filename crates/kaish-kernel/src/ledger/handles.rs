@@ -329,6 +329,18 @@ impl Approvals {
             .unwrap_or_default()
     }
 
+    /// Every request the ledger still holds a chain for — pending, decided,
+    /// and closed-but-retained — sorted by id.
+    ///
+    /// This is what enumerates `/v/approvals`: a request that has already
+    /// been decided still has a `state`, a `grant`, and an attempt chain
+    /// worth reading, so listing only the pending set would hide exactly the
+    /// records §E asks an auditor to read. Bounded by the ledger's retention
+    /// (`LedgerConfig::retained_entries`), never by the process's lifetime.
+    pub fn ids(&self) -> Vec<RequestId> {
+        self.0.as_ref().map(|inner| inner.ids()).unwrap_or_default()
+    }
+
     /// The current top-level state of one request, if it exists.
     pub fn state(&self, id: &RequestId) -> Option<RequestState> {
         self.0.as_ref().and_then(|inner| inner.state(id))

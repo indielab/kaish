@@ -119,8 +119,49 @@ breaking entries are marked **BREAKING**.
 - `GrantTerms::once_for_view` builds terms from the tokenless `ApprovalRequestView`
   an approver holds; rebuilding an `ApprovalRequest` to reach `once_for` drops the
   request's resources and trips `ConditionsWidened`.
+- **BREAKING: `/v/approvals` mount** (ledger PR 7, `docs/approval-ledger.md` §D.3) —
+  a new reserved VFS path; an embedder mounting there through
+  `Kernel::with_backend`'s `configure_vfs` closure now collides with a kernel mount.
+- `/v/approvals/{pending,standing,log}` and `/v/approvals/<id>/{request,state,attempts,grant}`
+  project the ledger's read side; `log` is NDJSON so a consumer can tail it.
+- **Read-only: every write path returns `Unsupported`** — granting by file write
+  would make "the agent can write files" mean "the agent can approve itself".
+- No projection carries a credential, because no projected type has a credential
+  field — there is no redaction step to forget.
+- **`approvals` builtin** (ledger PR 7) — `list`, `show`, `log`, `renew`, `grant`,
+  `deny`, `revoke`; the only builtin that reaches the approval side.
+- `grant`/`deny`/`revoke` exit **1** in a session with no `ApproverHandle`, naming
+  the reason — an agent can see and renew its own requests, never approve them.
+- `list`/`show`/`log`/`renew` work in every session: reading is not deciding.
+- `approvals grant` defaults to a 5-minute window (`--until 30s|5m|1h` overrides);
+  every grant is still good for exactly one successful settlement.
+- An empty listing is `[]` under `--json`, not a string — "nothing pending" must
+  not be a different shape from "one request".
+- **`Kernel::renew(&id)` / `approvals renew <id>`** (ledger PR 7,
+  `docs/approval-ledger.md` §B.5) — an expired request is re-raised as a new one
+  linked by `supersedes`, closing the case where a backgrounded gate was both
+  unfulfillable and undiscardable.
+- Renewal takes no `ApproverHandle`: the owning principal renews without authority,
+  which is what lets a gated agent keep its own request alive. Renewing another
+  principal's request without authority exits 1.
+- Renewal re-observes the request's transitions first and exits 1 naming what
+  changed, so it never posts claims that are already false.
+- Renewal is not re-approval — the new request starts undecided.
+- `JobManager::renew_gate`/`Job::renew_gate` restamp the originating background
+  job, so `wait`, `jobs`, and `/v/jobs/{id}/approval` name the live request.
+- **`Approvals::ids()`** lists every request the ledger still holds, decided ones
+  included — the enumeration `/v/approvals` and `approvals list --all` read.
+- **`RequestId::seq()`** returns the id's allocation sequence; sorting the id text
+  puts `req_..._10` ahead of `req_..._9`.
 
 ### Changed
+- **`wait` on several gated jobs names the total** (ledger PR 7) —
+  `wait: 3 approvals pending — run \`approvals list\``. The result's `approval`
+  field still carries one request: one operation, one request, and widening it to
+  a list would push the multiplicity into every consumer for a rare case.
+- **`Approvals::pending()` returns requests in allocation order** (ledger PR 7) —
+  it was `HashMap` order, so `approvals list` and `/v/approvals/pending`
+  reshuffled between calls.
 - **BREAKING: `kill %N` keeps the job instead of deleting it** (#244) — the job
   lands on new terminal status `JobStatus::Killed` (wire `"killed"`, status file
   `killed:{code}`) with its result and output intact until reaped, so `wait %N`
