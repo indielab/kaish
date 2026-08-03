@@ -101,6 +101,24 @@ breaking entries are marked **BREAKING**.
   and `CLAUDE.md` — weights, not gates, groomed at the point of touch.
 - Inspired by the structure of ASD-STE100 Simplified Technical English, not STE —
   its dictionary is copyrighted and aerospace-shaped, so we keep our own terms.
+- **Redemption-time precondition verification** (ledger PR 6,
+  `docs/approval-ledger.md` §B.4) — a grant is re-checked against the world before
+  it runs; a resource that moved appends `Refused` + `Voided`, exits 1 naming what
+  changed, and reserves no attempt.
+- A gated overwrite declares its target's `sha256` content digest as the transition
+  it expects, so `cas_overwrite`'s snapshot-compare now covers the gated path too —
+  previously only trash-snapshotted targets carried a compare.
+- `kaish_tool_api::StateResolver` reads one resource kind's current state, so a
+  plugin's own kinds (`git.ref`) are checkable without depending on `kaish-kernel`.
+  `KernelConfig::with_state_resolver` registers one.
+- A resolver that returns `Err`, or a kind with no registered resolver, refuses the
+  redemption — there is no `Ok(Unspecified)` path that silently passes.
+- Registering a resolver for `path`, or two for one kind, fails `Kernel::build` —
+  which resolver decides whether a resource changed must not depend on registration
+  order.
+- `GrantTerms::once_for_view` builds terms from the tokenless `ApprovalRequestView`
+  an approver holds; rebuilding an `ApprovalRequest` to reach `once_for` drops the
+  request's resources and trips `ConditionsWidened`.
 
 ### Changed
 - **The confirmation latch is deleted; every destructive-op gate now runs through
