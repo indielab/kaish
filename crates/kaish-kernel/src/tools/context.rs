@@ -18,7 +18,8 @@ use crate::ignore_config::IgnoreConfig;
 use crate::interpreter::{ExecResult, Scope};
 use crate::ledger::{
     Approvals, AttemptGuard, ChainContext, ChainOutcome, ConditionReport, DecisionChain,
-    KernelOperation, LedgerError, PathResolver, Requester, StateResolver, StateResolvers, PATH_KIND,
+    KernelOperation, LedgerError, PathResolver, Posture, Requester, StateResolver, StateResolvers,
+    SubscriptionFilter, PATH_KIND,
 };
 use crate::output_limit::OutputLimitConfig;
 use crate::scheduler::{JobManager, PipeReader, PipeWriter, StderrStream};
@@ -1116,6 +1117,70 @@ impl ExecContext {
         self.redemption = redemption;
     }
 
+    /// The §C.5 filter every `fs.*` gate site classifies its paths with:
+    /// the `set -o approvals` enforce policy plus a snapshot of the
+    /// subscription registry.
+    ///
+    /// **Built once per gate call, and free when nothing is subscribed.**
+    /// The registry snapshot is taken only after
+    /// [`Approvals::any_subscriptions`] — one relaxed atomic load — says
+    /// there is something to snapshot, so an unsubscribed session pays a
+    /// branch and allocates nothing, however many paths the command names.
+    /// Call [`SubscriptionFilter::engaged`] on the result and return early
+    /// when it is `false`: that early-out is what keeps `rm -rf` over a large
+    /// tree from paying a per-path ledger cost nobody asked for.
+    pub(crate) fn fs_subscriptions(&self) -> SubscriptionFilter {
+        let policy = self.scope.approvals_enabled();
+        let subscriptions = match self.ledger_access.as_ref() {
+            Some(access) if access.approvals.any_subscriptions() => access.approvals.subscriptions(),
+            _ => Vec::new(),
+        };
+        SubscriptionFilter::new(policy, subscriptions)
+    }
+
+    /// Post the observe record for the paths an `observe` subscription covers
+    /// (spec §C.5), and let the operation proceed.
+    ///
+    /// Posts one `Requested`, which the subscription itself auto-grants as
+    /// `Granted{Observe}`; the reserved attempt settles with the invocation's
+    /// real exit code at the dispatch seam, like every other attempt. It
+    /// never defers and never returns exit 2 — an observe subscription
+    /// carries no permission semantics, and the decision chain's stage 1b is
+    /// what guarantees it.
+    ///
+    /// `Err(result)` means the ledger could not record the operation at all —
+    /// a full sink, a full ring. That is returned to the caller and **not**
+    /// swallowed: an operator who subscribed asked for a complete record, and
+    /// an operation that ran outside a record the operator believes is
+    /// complete is exactly the silent gap the subscription exists to close.
+    pub(crate) async fn record_observed(
+        &mut self,
+        operation: KernelOperation,
+        command: &str,
+        paths: Vec<String>,
+    ) -> Result<(), ExecResult> {
+        if paths.is_empty() {
+            return Ok(());
+        }
+        let resources = paths
+            .into_iter()
+            .map(|path| Resource::plain(PATH_KIND, path))
+            .collect();
+        self.request_gate(
+            operation,
+            resources,
+            "an observe subscription covers these paths",
+            // No re-run to advertise: the operation is running now. The hint
+            // is display-only, and inventing a command here would put a
+            // re-run in the record that nobody is meant to type.
+            String::new(),
+            None,
+        )
+        .await
+        .map(|_| ())
+        .map_err(|result| prefix_error(command, result))
+    }
+
     /// Request approval for one kernel operation — the single call every
     /// gate site makes (`docs/approval-ledger.md` §C.1).
     ///
@@ -1577,20 +1642,27 @@ impl ExecContext {
     ) -> Result<GateExpectations, ExecResult> {
         let mut expectations = GateExpectations::new();
         let trash_enabled = self.scope.trash_enabled();
-        let enforce = self.scope.approvals_enabled();
+        let subscriptions = self.fs_subscriptions();
         // Fast path: nothing is subscribed and nothing is trashed, so this
         // costs one branch and allocates nothing (spec §C.5 — a large tree
         // must not pay a per-path ledger cost unless an operator asked for
         // it).
-        if !trash_enabled && !enforce {
+        if !trash_enabled && !subscriptions.engaged() {
             return Ok(expectations);
         }
         let trash_max_size = self.scope.trash_max_size();
+        let operation_id = operation.id();
 
         struct Decided {
             display: String,
             resolved: PathBuf,
             action: MutationAction,
+            /// Whether an `observe` subscription covers this target. Kept
+            /// beside the gate decision rather than folded into it: observe
+            /// records what happened, so it fires for a target the trash
+            /// caught and for a brand-new file, neither of which the gate
+            /// holds.
+            observed: bool,
         }
         // Dedup by resolved path (keep first): a multi-file patch with an
         // explicit target lists the same file once per hunk-group, and we must
@@ -1617,16 +1689,22 @@ impl ExecContext {
             } else {
                 0
             };
+            let posture = subscriptions.posture(&operation_id, PATH_KIND, display);
             let action = decide_mutation_action(
                 trash_enabled,
-                enforce,
+                posture.enforces(),
                 real.as_deref(),
                 exists,
                 *is_append,
                 size,
                 trash_max_size,
             );
-            decided.push(Decided { display: display.clone(), resolved, action });
+            decided.push(Decided {
+                display: display.clone(),
+                resolved,
+                action,
+                observed: matches!(posture, Posture::Observe(_)),
+            });
         }
 
         // One request covers every gated path in the batch. Each gated
@@ -1690,6 +1768,17 @@ impl ExecContext {
             .await
             .map_err(|result| prefix_error(command, result))?;
         }
+
+        // The observe record goes on the log only once the enforce gate has
+        // authorized the batch: a batch held at exit 2 never runs, and
+        // recording it as observed would say an operation happened that did
+        // not.
+        let observed: Vec<String> = decided
+            .iter()
+            .filter(|d| d.observed)
+            .map(|d| d.display.clone())
+            .collect();
+        self.record_observed(operation, command, observed).await?;
 
         // Snapshot prior content for every trash-first target before any write,
         // keeping the bytes so a byte-oriented caller can CAS against them.

@@ -157,8 +157,13 @@ impl Tool for Rm {
         let confirm = parsed.confirm.clone();
 
         let trash_enabled = ctx.scope.trash_enabled();
-        let enforce = ctx.scope.approvals_enabled();
         let trash_max_size = ctx.scope.trash_max_size();
+        // The §C.5 filter, taken once for the whole batch. With nothing
+        // subscribed and no enforce policy it holds an empty vector and
+        // `posture` answers `Unsubscribed` for every path — so a 10,000-path
+        // `rm -rf` builds no request and posts no entry.
+        let subscriptions = ctx.fs_subscriptions();
+        let operation_id = KernelOperation::FsRemove.id();
 
         // Collect per-path decisions in one pass so ONE approval request
         // covers the whole batch — a request names its resources as a set, and
@@ -168,6 +173,11 @@ impl Tool for Rm {
             path: String,
             resolved: PathBuf,
             action: RmAction,
+            /// Whether an `observe` subscription covers this path. Separate
+            /// from `action` because observe records the delete whether the
+            /// trash caught it or not — §C.5 asks for a record of every
+            /// mutation, not only the gated ones.
+            observed: bool,
         }
         let mut decisions: Vec<Decision> = Vec::with_capacity(args.positional.len());
         for value in &args.positional {
@@ -191,16 +201,22 @@ impl Tool for Rm {
             let file_size = entry.as_ref().map(|s| s.size);
             let is_dir = entry.as_ref().is_some_and(|s| s.is_dir());
             let is_symlink = entry.as_ref().is_some_and(|s| s.is_symlink());
+            let posture = subscriptions.posture(&operation_id, crate::ledger::PATH_KIND, &path);
             let action = decide_rm_action(
                 trash_enabled,
-                enforce,
+                posture.enforces(),
                 real_path.as_deref(),
                 file_size,
                 trash_max_size,
                 is_dir,
                 is_symlink,
             );
-            decisions.push(Decision { path, resolved, action });
+            decisions.push(Decision {
+                path,
+                resolved,
+                action,
+                observed: matches!(posture, crate::ledger::Posture::Observe(_)),
+            });
         }
 
         if decisions.is_empty() {
@@ -240,6 +256,21 @@ impl Tool for Rm {
                 return crate::tools::prefix_error("rm", result);
             }
             // Authorized — fall through and execute each decision.
+        }
+
+        // The observe record lands after the gate authorized the batch: a
+        // delete held at exit 2 never happens, and recording it as observed
+        // would put an operation on the log that did not run.
+        let observed: Vec<String> = decisions
+            .iter()
+            .filter(|d| d.observed)
+            .map(|d| d.path.clone())
+            .collect();
+        if let Err(result) = ctx
+            .record_observed(KernelOperation::FsRemove, "rm", observed)
+            .await
+        {
+            return result;
         }
 
         // Execute each decision. Continue past per-path errors so users see

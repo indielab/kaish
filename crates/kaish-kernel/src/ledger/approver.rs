@@ -3,8 +3,10 @@
 //!
 //! Four stages, tried in order, and the **first non-`Defer` wins**:
 //!
-//! 1. **Standing grants** — a pure ledger lookup with no hook and no I/O,
-//!    the only stage that runs under the ledger lock (§C.4).
+//! 1. **Standing grants, then `observe` subscriptions** — pure ledger
+//!    lookups with no hook and no I/O, the only stage that runs under the
+//!    ledger lock (§C.4, §C.5). A standing grant is a decision and an
+//!    observe subscription is a note, so the decision answers first.
 //! 2. **[`Approver::policy`]** — synchronous, on the request path,
 //!    contractually non-blocking. Allowlists and risk-class rules.
 //! 3. **[`Approver::decide`]** — async, may take minutes. Runs under a
@@ -118,6 +120,9 @@ pub trait Approver: Send + Sync {
 pub enum ChainStage {
     /// Stage 1 — a standing grant covered the request.
     Standing,
+    /// Stage 1 — an `observe` subscription covered the request (spec §C.5).
+    /// Recorded and proceeded; carries no permission semantics.
+    Subscription,
     /// Stage 2 — [`Approver::policy`] decided.
     Policy,
     /// Stage 3 — [`Approver::decide`] decided.
@@ -301,6 +306,29 @@ impl DecisionChain {
                     ChainOutcome::Granted {
                         grant,
                         stage: ChainStage::Standing,
+                    },
+                    ctx,
+                )
+                .await;
+        }
+
+        // ── Stage 1b: observe subscriptions (spec §C.5) ─────────────
+        // Also a pure ledger lookup with no hook and no I/O, and also its
+        // own self-contained transaction. It runs *after* standing grants
+        // because a standing grant is a decision and an observe subscription
+        // is a note: when both cover a request, the record should name the
+        // rule that authorized it.
+        if let Some(grant) = self
+            .authority
+            .grant_from_observe(&request.id, self.grant_ttl)
+            .await?
+        {
+            return self
+                .undo_if_cancelled(
+                    request,
+                    ChainOutcome::Granted {
+                        grant,
+                        stage: ChainStage::Subscription,
                     },
                     ctx,
                 )

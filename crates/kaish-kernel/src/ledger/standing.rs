@@ -13,15 +13,18 @@
 //!   some pattern. A rule covering three of four resources does not match —
 //!   it does not auto-approve the three and gate the one.
 //! - **Kind matches exactly**; only `id` globs, via `kaish-glob`, so the
-//!   semantics are the ones the rest of kaish already uses.
+//!   semantics are the ones the rest of kaish already uses. Both pattern
+//!   primitives live in [`super::patterns`], shared with §C.5's
+//!   subscriptions.
 //! - **Transitions are not matched, they are conditioned.** Matching ignores
 //!   the declared oids entirely; the caller copies them into the resulting
 //!   grant's conditions so the redemption-time check still fires.
 
 use std::time::SystemTime;
 
-use kaish_glob::glob_match;
-use kaish_types::approval::{ApprovalRequest, Resource, StandingGrant};
+use kaish_types::approval::{ApprovalRequest, StandingGrant};
+
+use super::patterns::{covers_operation, covers_resource};
 
 /// Whether `rule` covers `request` as of `now`.
 ///
@@ -37,29 +40,19 @@ pub(crate) fn matches(rule: &StandingGrant, request: &ApprovalRequest, now: Syst
             return false;
         }
     }
-    // A rule that names no operation is inert rather than universal — an
-    // empty pattern list is far more likely to be a construction mistake
-    // than a deliberate "everything", and the safe reading of a mistake is
-    // "match nothing".
-    if !rule
-        .operations
-        .iter()
-        .any(|pattern| glob_match(pattern.as_str(), request.operation.as_str()))
-    {
+    // A rule that names no operation is inert rather than universal (see
+    // `super::patterns`).
+    if !covers_operation(&rule.operations, &request.operation) {
         return false;
     }
     // All-or-nothing, with set semantics: every resource needs *some*
     // covering pattern, one pattern may cover several resources, and
     // duplicate resources impose no extra requirement. A request with no
     // resources is covered vacuously.
-    request.resources.iter().all(|resource| covers(rule, resource))
-}
-
-/// Whether any of `rule`'s patterns covers `resource`: kind equal, id glob.
-fn covers(rule: &StandingGrant, resource: &Resource) -> bool {
-    rule.resources
+    request
+        .resources
         .iter()
-        .any(|pattern| pattern.kind == resource.kind && glob_match(&pattern.pattern, &resource.id))
+        .all(|resource| covers_resource(&rule.resources, resource))
 }
 
 #[cfg(test)]

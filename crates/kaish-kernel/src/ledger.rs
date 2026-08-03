@@ -32,8 +32,10 @@ mod core;
 mod error;
 mod handles;
 mod operation;
+mod patterns;
 mod resolver;
 mod standing;
+mod subscription;
 
 pub use approver::{
     Approver, ChainContext, ChainOutcome, ChainStage, DecisionChain, PatientSource,
@@ -43,6 +45,7 @@ pub use attempt_guard::AttemptGuard;
 pub use config::{LedgerConfig, LedgerSink, LedgerSinkError};
 pub use error::LedgerError;
 pub use operation::KernelOperation;
+pub use subscription::{Posture, SubscriptionFilter};
 pub use resolver::{
     ConditionReport, PathResolver, ResolverError, StateResolver, StateResolverConflict,
     StateResolvers, PATH_DIGEST_ALG, PATH_KIND,
