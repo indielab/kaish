@@ -191,7 +191,7 @@ impl Tool for Dd {
                     Err(blocked) => return blocked,
                 };
 
-                let expected = snapshots.get(&out_resolved).map(|v| v.as_slice());
+                let expected = snapshots.get(&out_resolved);
                 if let Err(e) = ctx
                     .overwrite_checked(Path::new(&out_resolved), &data, expected)
                     .await

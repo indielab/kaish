@@ -389,6 +389,11 @@ impl StateResolver for GitRefResolver {
 struct GitPush {
     refs: Arc<Mutex<Vec<(String, String)>>>,
     pushed: Arc<AtomicUsize>,
+    /// Overrides the oid this tool *drafts*, without touching what the
+    /// resolver *observes*. That decoupling is the whole point: it reproduces
+    /// the window between `Kernel::confirm`'s observation and the gate site's
+    /// arrival, in which the world can move, without needing a real race.
+    draft_oid: Arc<Mutex<Option<String>>>,
 }
 
 #[async_trait]
@@ -402,12 +407,15 @@ impl Tool for GitPush {
     }
 
     async fn execute(&self, _args: ToolArgs, ctx: &mut dyn ToolCtx) -> ExecResult {
-        let current = {
-            let refs = self.refs.lock().unwrap();
-            refs.iter()
-                .find(|(name, _)| name == "refs/heads/main")
-                .map(|(_, oid)| oid.clone())
-                .expect("the fixture seeds refs/heads/main")
+        let current = match self.draft_oid.lock().unwrap().clone() {
+            Some(oid) => oid,
+            None => {
+                let refs = self.refs.lock().unwrap();
+                refs.iter()
+                    .find(|(name, _)| name == "refs/heads/main")
+                    .map(|(_, oid)| oid.clone())
+                    .expect("the fixture seeds refs/heads/main")
+            }
         };
         let draft = ApprovalRequest::builder("git.push")
             .risk(kaish_types::approval::RiskClass::Irreversible)
@@ -437,6 +445,7 @@ impl Tool for GitPush {
 
 struct GitFixture {
     session: Session,
+    draft_oid: Arc<Mutex<Option<String>>>,
     refs: Arc<Mutex<Vec<(String, String)>>>,
     pushed: Arc<AtomicUsize>,
     observed: Arc<AtomicUsize>,
@@ -460,9 +469,16 @@ fn git_session(dir: &Path, failing_resolver: bool) -> GitFixture {
             fail: failing_resolver,
             observed: Arc::clone(&observed),
         }));
-    let kernel = build_tool_kernel(config, Arc::clone(&refs), Arc::clone(&pushed));
+    let draft_oid = Arc::new(Mutex::new(None));
+    let kernel = build_tool_kernel(
+        config,
+        Arc::clone(&refs),
+        Arc::clone(&pushed),
+        Arc::clone(&draft_oid),
+    );
     GitFixture {
         session: Session { kernel, authority },
+        draft_oid,
         refs,
         pushed,
         observed,
@@ -477,12 +493,17 @@ fn build_tool_kernel(
     config: KernelConfig,
     refs: Arc<Mutex<Vec<(String, String)>>>,
     pushed: Arc<AtomicUsize>,
+    draft_oid: Arc<Mutex<Option<String>>>,
 ) -> Kernel {
     let mut vfs = VfsRouter::new();
     vfs.mount("/", MemoryFs::new());
     let backend: Arc<dyn KernelBackend> = Arc::new(LocalBackend::new(Arc::new(vfs)));
     Kernel::with_backend(backend, config, |_| {}, move |tools| {
-        tools.register(GitPush { refs, pushed });
+        tools.register(GitPush {
+            refs,
+            pushed,
+            draft_oid,
+        });
     })
     .expect("kernel")
 }
@@ -603,7 +624,12 @@ async fn an_unregistered_resource_kind_refuses() {
         .with_approvals(false)
         .with_trash(false)
         .with_approver_handle(authority.clone());
-    let kernel = build_tool_kernel(config, Arc::clone(&refs), Arc::clone(&pushed));
+    let kernel = build_tool_kernel(
+        config,
+        Arc::clone(&refs),
+        Arc::clone(&pushed),
+        Arc::new(Mutex::new(None)),
+    );
     let session = Session { kernel, authority };
 
     session.run("git-push").await;
@@ -679,5 +705,280 @@ async fn the_path_resolver_reads_through_the_backend() {
         transition.to,
         StateClaim::Unspecified,
         "the resulting content is not claimed — `patch` and `sed -i` cannot know it"
+    );
+}
+
+/// **Review finding 2.** The replay's draft matcher compares resources
+/// through `Resource::to_ref()`, which keeps kind and id and drops the
+/// transition. So a replay that arrives claiming a *different* prior state
+/// than the one that was approved used to match anyway.
+///
+/// The window is narrow — `Kernel::confirm` observes and reserves, then the
+/// gate site drafts — but it is real, and it is the last check standing
+/// between a stale grant and the mutation. Here the tool drafts `e5f6` while
+/// the resolver still reports `a1b2`, which is that window without a race.
+///
+/// A mismatch settles the reserved attempt as failed rather than leaving it
+/// in flight. A failed attempt does not consume the grant (spec §A.1), so the
+/// second half of this test is the proof: with the draft back in agreement,
+/// a fresh `confirm` against the same grant runs.
+#[tokio::test]
+async fn a_replay_claiming_a_different_prior_state_is_refused() {
+    let dir = tempdir();
+    let fixture = git_session(dir.path(), false);
+
+    fixture.session.run("git-push").await;
+    let (id, _token) = fixture.session.approve_pending().await;
+
+    // The gate site now arrives claiming a prior state nobody approved,
+    // while the resolver still sees the state the grant was made against —
+    // so the ledger's own condition check passes and this is the only thing
+    // left to catch it.
+    *fixture.draft_oid.lock().unwrap() = Some("e5f6".to_string());
+
+    let refused = fixture
+        .session
+        .kernel
+        .confirm(&fixture.session.authority, &id)
+        .await
+        .expect("confirm executes");
+    assert_eq!(refused.code, 1, "a drifted claim must refuse: {}", refused.err);
+    assert!(
+        refused.err.contains("e5f6") && refused.err.contains("a1b2"),
+        "the message must name both claims so the operator can tell what drifted: {}",
+        refused.err
+    );
+    assert_eq!(fixture.pushed.load(Ordering::SeqCst), 0, "the push must not have run");
+
+    // The grant survives: the attempt settled failed, and settling in
+    // failure does not close the chain.
+    let chain = fixture
+        .session
+        .kernel
+        .approvals()
+        .get(&id)
+        .expect("the chain");
+    assert_eq!(chain.state, RequestState::Granted, "a failed attempt must not void the grant");
+    assert_eq!(chain.attempts.len(), 1, "exactly one attempt was reserved and settled");
+    assert_eq!(
+        chain.attempts[0].state,
+        kaish_types::approval::AttemptState::Settled,
+        "the refused replay must not leave its attempt in flight"
+    );
+
+    // With the claim back in agreement, the same grant still runs.
+    *fixture.draft_oid.lock().unwrap() = None;
+    let done = fixture
+        .session
+        .kernel
+        .confirm(&fixture.session.authority, &id)
+        .await
+        .expect("confirm executes");
+    assert_eq!(done.code, 0, "the grant must still be usable: {}", done.err);
+    assert_eq!(fixture.pushed.load(Ordering::SeqCst), 1, "the push must have run exactly once");
+}
+
+// ============================================================================
+// The seam between the ledger's check and the mutation
+// ============================================================================
+
+/// A backend that delegates everything, except that **once the ledger has
+/// reserved an attempt** every read of `raced` serves different bytes.
+///
+/// That trigger is semantic, not a read counter: it fires exactly on the
+/// reads that happen after the reservation — the builtin's own
+/// compare-and-swap — and never on the gate's digest or the ledger's
+/// observation. It is a third party writing in the window the ledger
+/// explicitly does not close (spec §B.1: the ledger detects stale
+/// authorization; closing the window is the resource's job).
+struct RacingBackend {
+    inner: Arc<dyn KernelBackend>,
+    approvals: kaish_kernel::ledger::Approvals,
+    raced: std::path::PathBuf,
+    after: Vec<u8>,
+    writes: Mutex<Vec<(std::path::PathBuf, Vec<u8>)>>,
+}
+
+impl RacingBackend {
+    fn racing(&self, path: &Path) -> bool {
+        path == self.raced
+            && self
+                .approvals
+                .log(0)
+                .iter()
+                .any(|e| matches!(e, LedgerEntry::Redeemed { .. }))
+    }
+}
+
+#[async_trait]
+impl KernelBackend for RacingBackend {
+    async fn read(
+        &self,
+        path: &Path,
+        range: Option<kaish_types::backend::ReadRange>,
+    ) -> kaish_types::backend::BackendResult<Vec<u8>> {
+        if !self.racing(path) {
+            return self.inner.read(path, range).await;
+        }
+        // Serve the raced content, honoring the byte window the streaming
+        // digest asks for — a resolver that loops until a short read must
+        // still terminate.
+        let bytes = &self.after;
+        let (offset, limit) = match &range {
+            Some(r) => (r.offset.unwrap_or(0) as usize, r.limit.map(|l| l as usize)),
+            None => (0, None),
+        };
+        let start = offset.min(bytes.len());
+        let end = limit.map_or(bytes.len(), |l| (start + l).min(bytes.len()));
+        Ok(bytes[start..end].to_vec())
+    }
+
+    async fn write(
+        &self,
+        path: &Path,
+        content: &[u8],
+        mode: kaish_types::backend::WriteMode,
+    ) -> kaish_types::backend::BackendResult<()> {
+        self.writes
+            .lock()
+            .unwrap()
+            .push((path.to_path_buf(), content.to_vec()));
+        self.inner.write(path, content, mode).await
+    }
+
+    async fn append(&self, path: &Path, content: &[u8]) -> kaish_types::backend::BackendResult<()> {
+        self.inner.append(path, content).await
+    }
+    async fn patch(
+        &self,
+        path: &Path,
+        ops: &[kaish_types::backend::PatchOp],
+    ) -> kaish_types::backend::BackendResult<()> {
+        self.inner.patch(path, ops).await
+    }
+    async fn list(&self, path: &Path) -> kaish_types::backend::BackendResult<Vec<kaish_types::DirEntry>> {
+        self.inner.list(path).await
+    }
+    async fn stat(&self, path: &Path) -> kaish_types::backend::BackendResult<kaish_types::DirEntry> {
+        self.inner.stat(path).await
+    }
+    async fn mkdir(&self, path: &Path) -> kaish_types::backend::BackendResult<()> {
+        self.inner.mkdir(path).await
+    }
+    async fn set_mtime(
+        &self,
+        path: &Path,
+        mtime: std::time::SystemTime,
+    ) -> kaish_types::backend::BackendResult<()> {
+        self.inner.set_mtime(path, mtime).await
+    }
+    async fn remove(&self, path: &Path, recursive: bool) -> kaish_types::backend::BackendResult<()> {
+        self.inner.remove(path, recursive).await
+    }
+    async fn rename(&self, from: &Path, to: &Path) -> kaish_types::backend::BackendResult<()> {
+        self.inner.rename(from, to).await
+    }
+    async fn exists(&self, path: &Path) -> bool {
+        self.inner.exists(path).await
+    }
+    async fn lstat(&self, path: &Path) -> kaish_types::backend::BackendResult<kaish_types::DirEntry> {
+        self.inner.lstat(path).await
+    }
+    async fn read_link(&self, path: &Path) -> kaish_types::backend::BackendResult<std::path::PathBuf> {
+        self.inner.read_link(path).await
+    }
+    async fn symlink(&self, target: &Path, link: &Path) -> kaish_types::backend::BackendResult<()> {
+        self.inner.symlink(target, link).await
+    }
+    async fn call_tool(
+        &self,
+        name: &str,
+        args: kaish_types::ToolArgs,
+        ctx: &mut dyn kaish_kernel::tools::ToolCtx,
+    ) -> kaish_types::backend::BackendResult<kaish_types::backend::ToolResult> {
+        self.inner.call_tool(name, args, ctx).await
+    }
+    async fn list_tools(&self) -> kaish_types::backend::BackendResult<Vec<kaish_types::backend::ToolInfo>> {
+        self.inner.list_tools().await
+    }
+    async fn get_tool(
+        &self,
+        name: &str,
+    ) -> kaish_types::backend::BackendResult<Option<kaish_types::backend::ToolInfo>> {
+        self.inner.get_tool(name).await
+    }
+    fn read_only(&self) -> bool {
+        self.inner.read_only()
+    }
+    fn backend_type(&self) -> &str {
+        self.inner.backend_type()
+    }
+    fn mounts(&self) -> Vec<kaish_types::backend::MountInfo> {
+        self.inner.mounts()
+    }
+    fn resolve_real_path(&self, path: &Path) -> Option<std::path::PathBuf> {
+        self.inner.resolve_real_path(path)
+    }
+}
+
+/// **Review finding 1.** The gate populated a compare-and-swap expectation
+/// only for trash-snapshotted targets. An approval-*gated* target — trash
+/// off, or a file too big for the trash — reached `cas_overwrite` with
+/// `expected: None`, which skips the compare and writes unconditionally.
+///
+/// So the operator confirmed, the ledger checked the digest, and then the
+/// write went in blind. This test puts a third party in exactly that window.
+#[tokio::test]
+async fn a_write_racing_the_ledger_check_fails_loud_instead_of_clobbering() {
+    let (_requester, approvals, authority) =
+        Ledger::build(LedgerConfig::default(), None).expect("ledger");
+    let mut vfs = VfsRouter::new();
+    vfs.mount("/", MemoryFs::new());
+    let inner: Arc<dyn KernelBackend> = Arc::new(LocalBackend::new(Arc::new(vfs)));
+    let racing = Arc::new(RacingBackend {
+        inner,
+        approvals: approvals.clone(),
+        raced: std::path::PathBuf::from("/dst.txt"),
+        after: b"someone else got here first".to_vec(),
+        writes: Mutex::new(Vec::new()),
+    });
+    let config = KernelConfig::isolated()
+        .with_approvals(false)
+        .with_trash(false)
+        .with_approver_handle(authority.clone());
+    let kernel = Kernel::with_backend(
+        Arc::clone(&racing) as Arc<dyn KernelBackend>,
+        config,
+        |_| {},
+        |_| {},
+    )
+    .expect("kernel");
+    let session = Session { kernel, authority };
+
+    session.run("write dst.txt 'as the operator saw it'").await;
+    session.run("set -o approvals").await;
+    racing.writes.lock().unwrap().clear();
+
+    let gated = session.run("write dst.txt 'the approved content'").await;
+    assert_eq!(gated.code, 2, "the overwrite must gate: {}", gated.err);
+    let (_id, token) = session.approve_pending().await;
+
+    let raced = session
+        .run(&format!("write --confirm={token} dst.txt 'the approved content'"))
+        .await;
+    assert_eq!(
+        raced.code, 1,
+        "a write racing the ledger's check must fail loud, not clobber: {}",
+        raced.err
+    );
+    assert!(
+        raced.err.contains("changed since"),
+        "the message must say the file moved under the approval: {}",
+        raced.err
+    );
+    assert!(
+        racing.writes.lock().unwrap().is_empty(),
+        "nothing may have been written: {:?}",
+        racing.writes.lock().unwrap()
     );
 }

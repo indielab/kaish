@@ -125,7 +125,7 @@ impl Tool for Write {
 
         // CAS against the gate snapshot: a concurrent change between the gate
         // and this write is a loud conflict, not a silent clobber.
-        let expected = snapshots.get(&resolved).map(|v| v.as_slice());
+        let expected = snapshots.get(&resolved);
         match ctx.overwrite_checked(Path::new(&resolved), &content, expected).await {
             Ok(()) => ExecResult::with_output(OutputData::text(format!("Wrote {} bytes to {}", content.len(), path))),
             Err(e) => ExecResult::failure(1, format!("write: {}: {}", path, e)),
