@@ -1664,12 +1664,18 @@ impl LedgerInner {
         // `Result`-free signature.
         self.sweep();
         let guard = self.lock();
-        guard
+        let mut pending: Vec<ApprovalRequest> = guard
             .chains
             .values()
             .filter(|c| c.state == RequestState::Requested)
             .map(|c| c.request.clone())
-            .collect()
+            .collect();
+        // Chains live in a `HashMap`, so this is otherwise in whatever order
+        // hashing produced — which reaches an operator as an
+        // `approvals list` that reshuffles between calls. Allocation order
+        // is the order an operator thinks in.
+        pending.sort_by_key(|request| request.id.seq());
+        pending
     }
 
     pub(crate) fn ids(&self) -> Vec<RequestId> {
@@ -1679,7 +1685,7 @@ impl LedgerInner {
         self.sweep();
         let guard = self.lock();
         let mut ids: Vec<RequestId> = guard.chains.keys().cloned().collect();
-        ids.sort_by(|a, b| a.as_str().cmp(b.as_str()));
+        ids.sort_by_key(RequestId::seq);
         ids
     }
 
@@ -1779,22 +1785,6 @@ fn find_widened_condition(request: &ApprovalRequest, terms: &GrantTerms) -> Opti
 ///   too. A precondition nobody could check has not been met — this is the
 ///   one place a silent pass would be a data-loss bug rather than an
 ///   inconvenience.
-/// Why `report` refuses `conditions`, if it does — the same decision
-/// [`evaluate_conditions`] makes at redemption, exposed for the one caller
-/// that has to make it *before* anything is posted: renewal (spec §B.5, "if
-/// the world already moved, renewal fails loud rather than posting a request
-/// whose claims are already false").
-///
-/// Shares the redemption path's implementation deliberately. A renewal that
-/// judged staleness by its own rules would let a request through that its own
-/// redemption then refuses, which is the drift this indirection exists to
-/// prevent.
-pub(crate) fn condition_conflict(conditions: &[Condition], report: ConditionReport) -> Option<String> {
-    evaluate_conditions(conditions, report)
-        .1
-        .map(|(_, _, reason)| reason)
-}
-
 fn evaluate_conditions(
     conditions: &[Condition],
     report: ConditionReport,
@@ -1855,6 +1845,22 @@ fn evaluate_conditions(
         }
     }
     (observed, None)
+}
+
+/// Why `report` refuses `conditions`, if it does — the same decision
+/// [`evaluate_conditions`] makes at redemption, exposed for the one caller
+/// that has to make it *before* anything is posted: renewal (spec §B.5, "if
+/// the world already moved, renewal fails loud rather than posting a request
+/// whose claims are already false").
+///
+/// Shares the redemption path's implementation deliberately. A renewal that
+/// judged staleness by its own rules would let a request through that its own
+/// redemption then refuses, which is the drift this indirection exists to
+/// prevent.
+pub(crate) fn condition_conflict(conditions: &[Condition], report: ConditionReport) -> Option<String> {
+    evaluate_conditions(conditions, report)
+        .1
+        .map(|(_, _, reason)| reason)
 }
 
 /// Constant-time string equality (review NIT — defense in depth on

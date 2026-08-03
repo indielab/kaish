@@ -48,6 +48,7 @@ async fn kernel_request_approval_round_trips_a_request_through_the_ledger() {
         request_ttl: Duration::from_secs(60),
         job_id: None,
         resolvers: std::sync::Arc::new(kaish_kernel::ledger::StateResolvers::default()),
+        session_authority: None,
     });
 
     let draft = ApprovalRequest::builder("plugin.dangerous")
@@ -168,6 +169,7 @@ async fn plugin_dangerous_fixture_gates_end_to_end_through_tool_api_alone() {
         request_ttl: Duration::from_secs(60),
         job_id: None,
         resolvers: std::sync::Arc::new(kaish_kernel::ledger::StateResolvers::default()),
+        session_authority: None,
     });
     let tool = PluginDangerous;
 

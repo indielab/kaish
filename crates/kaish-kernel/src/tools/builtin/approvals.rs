@@ -276,7 +276,7 @@ fn cmd_list(flags: &ListArgs, ctx: &ExecContext) -> ExecResult {
         }
         let standing = access.approvals.standing();
         if standing.is_empty() {
-            return ExecResult::with_output(OutputData::text("(no standing grants)\n"));
+            return empty_list("(no standing grants)\n");
         }
         let nodes: Vec<OutputNode> = standing
             .iter()
@@ -333,7 +333,7 @@ fn cmd_list(flags: &ListArgs, ctx: &ExecContext) -> ExecResult {
 
     if views.is_empty() {
         let what = if flags.all { "requests" } else { "pending approvals" };
-        return ExecResult::with_output(OutputData::text(format!("(no {what})\n")));
+        return empty_list(format!("(no {what})\n"));
     }
 
     let nodes: Vec<OutputNode> = views
@@ -435,7 +435,7 @@ fn cmd_log(flags: &LogArgs, ctx: &ExecContext) -> ExecResult {
     };
     let entries = access.approvals.log(flags.since.unwrap_or(0));
     if entries.is_empty() {
-        return ExecResult::with_output(OutputData::text("(no ledger entries)\n"));
+        return empty_list("(no ledger entries)\n");
     }
 
     let rows: Vec<serde_json::Value> = entries.iter().map(json_value).collect();
@@ -472,12 +472,16 @@ async fn cmd_renew(args: &ToolArgs, ctx: &ExecContext) -> ExecResult {
 }
 
 async fn cmd_grant(args: &ToolArgs, flags: &GrantArgs, ctx: &ExecContext) -> ExecResult {
-    let handle = match authority(ctx, "grant") {
-        Ok(h) => h,
-        Err(e) => return e,
-    };
+    // Usage first, authority second: a mistyped id is exit 2 in every
+    // session, so a caller never has to hold approval rights to learn it
+    // typed the command wrong. Nothing here touches the ledger — the id is
+    // checked for *shape*, not for existence.
     let id = match request_id(args, "grant") {
         Ok(id) => id,
+        Err(e) => return e,
+    };
+    let handle = match authority(ctx, "grant") {
+        Ok(h) => h,
         Err(e) => return e,
     };
     let window = match &flags.until {
@@ -509,12 +513,13 @@ async fn cmd_grant(args: &ToolArgs, flags: &GrantArgs, ctx: &ExecContext) -> Exe
 }
 
 async fn cmd_deny(args: &ToolArgs, flags: &DenyArgs, ctx: &ExecContext) -> ExecResult {
-    let handle = match authority(ctx, "deny") {
-        Ok(h) => h,
-        Err(e) => return e,
-    };
+    // Usage first, authority second — see `cmd_grant`.
     let id = match request_id(args, "deny") {
         Ok(id) => id,
+        Err(e) => return e,
+    };
+    let handle = match authority(ctx, "deny") {
+        Ok(h) => h,
         Err(e) => return e,
     };
     let reason = flags.reason.as_deref().unwrap_or("denied from the shell");
@@ -525,10 +530,7 @@ async fn cmd_deny(args: &ToolArgs, flags: &DenyArgs, ctx: &ExecContext) -> ExecR
 }
 
 async fn cmd_revoke(args: &ToolArgs, ctx: &ExecContext) -> ExecResult {
-    let handle = match authority(ctx, "revoke") {
-        Ok(h) => h,
-        Err(e) => return e,
-    };
+    // Usage first, authority second — see `cmd_grant`.
     let Some(raw) = args.get_string("id", 1) else {
         return ExecResult::failure(2, "approvals revoke: name a standing grant id, e.g. 3");
     };
@@ -538,6 +540,10 @@ async fn cmd_revoke(args: &ToolArgs, ctx: &ExecContext) -> ExecResult {
             format!("approvals revoke: {raw:?} is not a standing grant id — they are plain numbers"),
         );
     };
+    let handle = match authority(ctx, "revoke") {
+        Ok(h) => h,
+        Err(e) => return e,
+    };
     let id = StandingId::new(raw);
     match handle.revoke_standing(&id, "revoked from the shell").await {
         Ok(()) => ExecResult::with_output(OutputData::text(format!(
@@ -545,6 +551,19 @@ async fn cmd_revoke(args: &ToolArgs, ctx: &ExecContext) -> ExecResult {
         ))),
         Err(e) => ExecResult::failure(1, format!("approvals revoke: {e}")),
     }
+}
+
+/// An empty listing: `[]` under `--json`, and `text` for a reader.
+///
+/// A consumer that parses `approvals list --json` gets an array whether or
+/// not anything is pending — "nothing yet" must not be a different shape from
+/// "one request", or every caller needs a special case for the common state.
+fn empty_list(text: impl Into<String>) -> ExecResult {
+    let text = text.into();
+    ExecResult::with_output_and_text(
+        OutputData::text(text.clone()).with_rich_json(serde_json::Value::Array(Vec::new())),
+        text,
+    )
 }
 
 /// A request's resources, one line's worth: `path:/a/b`, comma-joined and

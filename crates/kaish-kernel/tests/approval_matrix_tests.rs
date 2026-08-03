@@ -747,17 +747,32 @@ async fn a_session_with_no_handle_has_no_reachable_grant_path() {
     // session an embedder gave no authority to.
     let kernel = Kernel::new(config).expect("kernel");
 
-    // No builtin names an approval verb. `approvals` is ledger PR 7; until it
-    // lands there is no script-reachable grant surface at all, and when it
-    // does land it must be the only one.
-    let listing = kernel.execute("help builtins").await.expect("help");
-    let text = listing.text_out().into_owned();
-    for verb in ["grant", "approve", "approvals"] {
-        assert!(
-            !text.split_whitespace().any(|w| w.trim_matches(',') == verb),
-            "no builtin may be a grant surface, found {verb:?} in the registry"
-        );
-    }
+    // Exactly one builtin bridges to the approval side (spec §D.3), and
+    // ledger PR 7 landed it: `approvals`. Walk the registry and assert
+    // nothing else names an approval verb — a second bridge would reopen the
+    // hole the authority check closes.
+    let bridges: Vec<String> = kernel
+        .tool_schemas()
+        .into_iter()
+        .filter(|schema| {
+            schema
+                .subcommands
+                .iter()
+                .any(|sub| matches!(sub.name.as_str(), "grant" | "deny" | "revoke"))
+                || matches!(schema.name.as_str(), "grant" | "approve")
+        })
+        .map(|schema| schema.name)
+        .collect();
+    assert_eq!(bridges, vec!["approvals".to_string()]);
+
+    // And the one bridge refuses this session, because it holds no handle.
+    let refused = kernel.execute("approvals grant req_00000000_1").await.expect("approvals");
+    assert_eq!(refused.code, 1, "a session with no handle cannot grant: {refused:?}");
+    assert!(
+        refused.err.contains("no approval authority"),
+        "the refusal must name the reason: {}",
+        refused.err
+    );
 
     // And the gate really is unfulfillable from inside the session.
     let gated = kernel.execute("rm precious.txt").await.expect("rm");
