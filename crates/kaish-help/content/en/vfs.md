@@ -21,6 +21,7 @@ In sandboxed mode, paths look native but access outside `$HOME` fails (except `/
 /v/blobs/      memory storage for blobs
 /v/bin/        read-only listing of builtins (can invoke: /v/bin/echo hello)
 /v/jobs/{id}/  live background job state (see below)
+/v/approvals/  the approval ledger, read-only (see below)
 ```
 
 Git is an ordinary external command (`git status`, `git log`, `git diff`) — it
@@ -49,6 +50,38 @@ cargo build &
 cat /v/jobs/1/status       # running
 cat /v/jobs/1/stdout       # build output so far
 jobs --cleanup             # remove completed jobs
+```
+
+## /v/approvals — The Approval Ledger
+
+The requests `set -o approvals` raises, and what was decided about them:
+
+```
+/v/approvals/pending      JSON array of requests awaiting a decision
+/v/approvals/standing     JSON array of live standing grants
+/v/approvals/log          NDJSON of the retained entries, oldest first
+/v/approvals/{id}/request the request as JSON
+/v/approvals/{id}/state   "requested" | "granted" | "denied" | "expired" | ...
+/v/approvals/{id}/attempts JSON array of attempts and their outcomes
+/v/approvals/{id}/grant   the grant as JSON, empty until it is decided
+```
+
+**Read-only, and every write returns `Unsupported`** — granting by writing a
+file would make "the agent can write files" mean "the agent can approve its
+own operations". Decide with the `approvals` builtin, which needs approval
+authority on the session for `grant`, `deny`, and `revoke`.
+
+**No node carries a token.** The redemption credential lives only in the
+kernel and is retrievable through an embedder's `ApproverHandle::token_for`.
+A grant carries `token_prefix`, four characters that correlate a rejected key
+with the grant it was aimed at — never the key.
+
+```sh
+rm precious.txt &                     # gates in the background
+cat /v/approvals/pending              # every request, across every job
+approvals list                        # the same, as a table
+approvals show req_9c1a4f2e_42        # one request, its decision, its attempts
+approvals renew req_9c1a4f2e_42       # re-raise it after it expires (60s)
 ```
 
 ## /tmp — Interop

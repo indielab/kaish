@@ -853,6 +853,42 @@ request raised in one `execute()` call is approvable and confirmable in a later
 one. A request nobody decides expires after 60 seconds, and the expiry is
 recorded rather than silently forgotten.
 
+**Renewing.** An expired request is re-raised with `approvals renew <id>`,
+which posts a new request carrying the original's operation, resources, and
+captured invocation, linked to it by `supersedes`. Renewing your **own**
+request needs no approval authority — that is what lets a gated command keep
+its intent alive instead of dying unfulfillable at 60 seconds. Renewing
+another principal's request without authority exits **1**. Renewal is not
+re-approval: the new request starts undecided and needs a fresh decision. It
+exits **1**, changing nothing, when the resource moved since the original was
+raised.
+
+**Reading and deciding from the shell.** The `approvals` builtin is the only
+one that reaches the approval side:
+
+| Command | What it does |
+|---|---|
+| `approvals list [--pending\|--all\|--standing]` | Requests awaiting a decision (default), every retained request, or the live standing grants |
+| `approvals show <id>` | One request: what was asked, what was decided, and every attempt |
+| `approvals log [--since <seq>]` | The retained entries, oldest first |
+| `approvals renew <id>` | Re-raise an expired request. Needs no authority for your own |
+| `approvals grant <id> [--until <duration>]` | Approve it. Defaults to 5m, and is good for one successful run |
+| `approvals deny <id> [--reason R]` | Refuse it |
+| `approvals revoke <standing-id>` | Retire a standing grant |
+
+`grant`, `deny`, and `revoke` exit **1** in a session with no approval
+authority, naming the reason. `list`, `show`, `log`, and `renew` work in every
+session: reading is not deciding, and renewing is the requester's own action.
+
+The same read model is a filesystem at `/v/approvals` — `pending`, `standing`,
+and `log` at the root, and `<id>/{request,state,attempts,grant}` per request.
+**It is read-only: every write returns `Unsupported`.** No node carries a
+token.
+
+`wait` on several gated background jobs surfaces one request on the result's
+`approval` field and names the total in its message
+(``wait: 3 approvals pending — run `approvals list` ``).
+
 - **REPL** — one kernel per session; requests persist across commands naturally.
 - **Embedders** — share one ledger across kernels with
   `KernelConfig::with_approver_handle()`, or accept the default (a fresh ledger
@@ -1159,6 +1195,7 @@ VFS mounts provide unified resource access:
 /v/bin/            → read-only builtin listing (invocable: /v/bin/echo hi)
 /v/blobs/          → in-memory blob storage
 /v/jobs/<id>/      → live background job state (stdout, stderr, status, command, approval)
+/v/approvals/      → the approval ledger, read-only (pending, standing, log, <id>/…)
 /dev/              → synthetic devices: /dev/null, /dev/zero, /dev/urandom, /dev/random
 ```
 
