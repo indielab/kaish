@@ -91,16 +91,18 @@ fn build(config: KernelConfig) -> Session {
 /// `with_ledger` cannot be combined with `with_approver_handle` (an adopted
 /// ledger already has a configuration), so this is always an agent session.
 fn short_ttl_session(dir: &Path, ttl: Duration) -> Session {
-    build(
-        KernelConfig::repl()
-            .with_cwd(dir.to_path_buf())
-            .with_approvals(false)
-            .with_trash(false)
-            .with_ledger(LedgerConfig {
-                request_ttl: ttl,
-                ..LedgerConfig::default()
-            }),
-    )
+    build(short_ttl_config(dir, ttl))
+}
+
+fn short_ttl_config(dir: &Path, ttl: Duration) -> KernelConfig {
+    KernelConfig::repl()
+        .with_cwd(dir.to_path_buf())
+        .with_approvals(false)
+        .with_trash(false)
+        .with_ledger(LedgerConfig {
+            request_ttl: ttl,
+            ..LedgerConfig::default()
+        })
 }
 
 // ============================================================================
@@ -514,6 +516,72 @@ async fn a_session_renews_its_own_request_and_not_another_principals() {
         refused.err.contains("someone-else"),
         "the refusal must name the principal that owns it: {}",
         refused.err
+    );
+}
+
+/// The other half of the ownership rule: a session **holding this ledger's
+/// authority** may renew any request, not only its own. It could already
+/// grant or deny that request, so withholding renewal from it would be a
+/// special case with nothing behind it (spec §B.5).
+///
+/// Flip `renew_request`'s `!owned && session_authority.is_none()` to a bare
+/// `!owned` and this test exits 1 — it is what pins the authority path, and
+/// nothing else does.
+#[tokio::test]
+async fn an_authority_holding_session_renews_another_principals_request() {
+    let dir = tempdir();
+    std::fs::write(dir.path().join("theirs.txt"), "keep me").expect("write");
+
+    // The raiser mints the ledger (short TTL) and asks as "someone-else". It
+    // holds no session authority itself — `with_approver_handle` is what
+    // installs one, and this kernel is the one being adopted *from*.
+    let raiser = build(
+        short_ttl_config(dir.path(), Duration::from_millis(30))
+            .with_principal(Principal::new("someone-else", PrincipalKind::Agent)),
+    );
+    raiser.run("set -o approvals").await;
+    let gated = raiser.run("rm theirs.txt").await;
+    let id = gated.approval_request().expect("a gated request").id;
+
+    // The operator adopts that ledger, so it holds the authority — and it is
+    // a different principal from the one that asked.
+    let operator = build(
+        KernelConfig::repl()
+            .with_cwd(dir.path().to_path_buf())
+            .with_approvals(false)
+            .with_trash(false)
+            .with_approver_handle(raiser.authority.clone()),
+    );
+    assert!(
+        operator.kernel.session_authority().is_some(),
+        "the operator session must hold the authority"
+    );
+    assert_ne!(
+        operator.kernel.principal().id, "someone-else",
+        "and must not be the principal that asked"
+    );
+
+    tokio::time::sleep(Duration::from_millis(60)).await;
+    let renewed = operator.run(&format!("approvals renew {id}")).await;
+    assert_eq!(
+        renewed.code, 0,
+        "an authority-holding session renews another principal's request: {}",
+        renewed.err
+    );
+
+    // The record names the ORIGINAL requester, not the renewer — renewal
+    // carries the thread of intent forward, it does not re-attribute it
+    // (spec §A.2, accountability is the record).
+    let fresh = operator
+        .kernel
+        .approvals()
+        .pending()
+        .into_iter()
+        .find(|view| view.supersedes.as_ref() == Some(&id))
+        .expect("the renewed request supersedes the expired one");
+    assert_eq!(
+        fresh.principal.id, "someone-else",
+        "the renewed request must still name who asked"
     );
 }
 
