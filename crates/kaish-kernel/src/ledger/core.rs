@@ -2058,7 +2058,7 @@ mod tests {
         let req = post(&inner, &principal);
 
         let err = inner
-            .redeem_with_token(&req.id, "wrong", principal, Vec::new())
+            .redeem_with_token(&req.id, "wrong", principal, ConditionReport::none())
             .unwrap_err();
         assert!(matches!(err, LedgerError::RingAtCapacity), "got {err:?}");
 
@@ -2164,7 +2164,7 @@ mod tests {
             .grant(&req.id, GrantTerms::once_for(&req, not_after), principal.clone(), Grounds::Embedder)
             .unwrap();
         #[allow(clippy::unwrap_used)]
-        let attempt_a = inner.redeem(&req.id, principal.clone(), Vec::new()).unwrap();
+        let attempt_a = inner.redeem(&req.id, principal.clone(), ConditionReport::none()).unwrap();
         // Normal API usage can never reserve a second live attempt against
         // one grant (`AttemptInFlight` blocks it) — reach past that guard
         // directly to prove the settlement-side invariant check exists
@@ -2176,7 +2176,7 @@ mod tests {
             }
         }
         #[allow(clippy::unwrap_used)]
-        let attempt_b = inner.redeem(&req.id, principal.clone(), Vec::new()).unwrap();
+        let attempt_b = inner.redeem(&req.id, principal.clone(), ConditionReport::none()).unwrap();
         assert!(inner.settle(&req.id, attempt_a, Outcome::Exit(0)).unwrap_or(false));
         // This settle call `debug_assert!`s and panics under the standard
         // debug test profile (`cargo test --all`), matching spec §B.3's
@@ -2218,7 +2218,7 @@ mod tests {
             .grant(&req.id, GrantTerms::once_for(&req, not_after), principal.clone(), Grounds::Embedder)
             .unwrap();
         #[allow(clippy::unwrap_used)]
-        let attempt = inner.redeem(&req.id, principal.clone(), Vec::new()).unwrap();
+        let attempt = inner.redeem(&req.id, principal.clone(), ConditionReport::none()).unwrap();
 
         // Let real monotonic time actually advance past the (zero) bound.
         std::thread::sleep(Duration::from_millis(5));
@@ -2234,7 +2234,7 @@ mod tests {
         // "already settled" (spec §B.2: an abandoned attempt's effects are
         // unknown, same as `Outcome::Unknown`) rather than reserving a new
         // attempt against a grant nobody can vouch for.
-        let err = inner.redeem(&req.id, principal, Vec::new()).unwrap_err();
+        let err = inner.redeem(&req.id, principal, ConditionReport::none()).unwrap_err();
         assert!(matches!(err, LedgerError::AlreadySettled { .. }));
     }
 
@@ -2264,13 +2264,13 @@ mod tests {
             .grant(&req_a.id, GrantTerms::once_for(&req_a, not_after), principal.clone(), Grounds::Embedder)
             .unwrap();
         #[allow(clippy::unwrap_used)]
-        let attempt_a = inner.redeem(&req_a.id, principal.clone(), Vec::new()).unwrap();
+        let attempt_a = inner.redeem(&req_a.id, principal.clone(), ConditionReport::none()).unwrap();
 
         // Void chain A via 5 bad keys while its attempt is still `Reserved`
         // — this closes the chain (freeing its live slot) without settling
         // the attempt.
         for _ in 0..5 {
-            let _ = inner.redeem_with_token(&req_a.id, "wrong", principal.clone(), Vec::new());
+            let _ = inner.redeem_with_token(&req_a.id, "wrong", principal.clone(), ConditionReport::none());
         }
         assert_eq!(inner.state(&req_a.id), Some(RequestState::Voided));
 
@@ -2320,11 +2320,11 @@ mod tests {
             .unwrap();
         // Step 1: reserve an attempt.
         #[allow(clippy::unwrap_used)]
-        let _attempt = inner.redeem(&req_a.id, principal.clone(), Vec::new()).unwrap();
+        let _attempt = inner.redeem(&req_a.id, principal.clone(), ConditionReport::none()).unwrap();
         // Step 2: void via 5 bad keys while the attempt is still Reserved
         // — closes the chain once, frees the live slot.
         for _ in 0..5 {
-            let _ = inner.redeem_with_token(&req_a.id, "wrong", principal.clone(), Vec::new());
+            let _ = inner.redeem_with_token(&req_a.id, "wrong", principal.clone(), ConditionReport::none());
         }
         assert_eq!(inner.state(&req_a.id), Some(RequestState::Voided));
 
@@ -2376,7 +2376,7 @@ mod tests {
             .grant(&req.id, GrantTerms::once_for(&req, not_after), principal.clone(), Grounds::Embedder)
             .unwrap(); // 2: Granted
         #[allow(clippy::unwrap_used)]
-        let attempt = inner.redeem(&req.id, principal, Vec::new()).unwrap(); // 3: Redeemed, + 1 banked for the terminal — ring is now exactly full at 4
+        let attempt = inner.redeem(&req.id, principal, ConditionReport::none()).unwrap(); // 3: Redeemed, + 1 banked for the terminal — ring is now exactly full at 4
 
         // The terminal entry must still land — never refused.
         let appended = inner
@@ -2436,7 +2436,7 @@ mod tests {
             .grant(&req.id, GrantTerms::once_for(&req, not_after), principal.clone(), Grounds::Embedder)
             .unwrap();
         #[allow(clippy::unwrap_used)]
-        let attempt = inner.redeem(&req.id, principal, Vec::new()).unwrap();
+        let attempt = inner.redeem(&req.id, principal, ConditionReport::none()).unwrap();
 
         // Terminal capacity was banked at redemption time — settle must
         // succeed regardless of anything else contending for the queue.

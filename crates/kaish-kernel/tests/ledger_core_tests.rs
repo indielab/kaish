@@ -10,7 +10,9 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime};
 
-use kaish_kernel::ledger::{Ledger, LedgerConfig, LedgerError, LedgerSink, LedgerSinkError};
+use kaish_kernel::ledger::{
+    ConditionReport, Ledger, LedgerConfig, LedgerError, LedgerSink, LedgerSinkError,
+};
 use kaish_types::approval::{
     ApprovalRequest, Capture, Decision, GrantTerms, LedgerEntry, Observation, Outcome, Principal,
     PrincipalKind, RequestContext, RequestId, RequestState, Resource, ResourceRef, RiskClass,
@@ -98,7 +100,7 @@ async fn redeem_before_any_decision_is_not_authorized_and_counts_a_rejection() {
     let (requester, approvals, _approver) = Ledger::build(LedgerConfig::default(), None).unwrap();
     let req = post(&requester, "fs.remove", Duration::from_secs(60)).await;
     let err = requester
-        .redeem_with_token(&req.id, "whatever", agent("agent-1"), Vec::new())
+        .redeem_with_token(&req.id, "whatever", agent("agent-1"), ConditionReport::none())
         .await
         .unwrap_err();
     assert!(matches!(err, LedgerError::NotAuthorized(id) if id == req.id));
@@ -115,7 +117,7 @@ async fn bad_key_against_a_granted_request_is_not_authorized_and_counts() {
     let req = post(&requester, "fs.remove", Duration::from_secs(60)).await;
     approver.grant(&req.id, terms(&req, far_future())).await.unwrap();
     let err = requester
-        .redeem_with_token(&req.id, "wrong", agent("agent-1"), Vec::new())
+        .redeem_with_token(&req.id, "wrong", agent("agent-1"), ConditionReport::none())
         .await
         .unwrap_err();
     assert!(matches!(err, LedgerError::NotAuthorized(id) if id == req.id));
@@ -135,7 +137,7 @@ async fn fifth_bad_key_voids_and_a_later_good_key_fails_naming_the_void() {
 
     for n in 1..5 {
         let err = requester
-            .redeem_with_token(&req.id, "wrong", agent("agent-1"), Vec::new())
+            .redeem_with_token(&req.id, "wrong", agent("agent-1"), ConditionReport::none())
             .await
             .unwrap_err();
         assert!(matches!(err, LedgerError::NotAuthorized(_)), "rejection {n}");
@@ -144,7 +146,7 @@ async fn fifth_bad_key_voids_and_a_later_good_key_fails_naming_the_void() {
 
     // The 5th rejection voids the request.
     let err = requester
-        .redeem_with_token(&req.id, "wrong", agent("agent-1"), Vec::new())
+        .redeem_with_token(&req.id, "wrong", agent("agent-1"), ConditionReport::none())
         .await
         .unwrap_err();
     assert!(matches!(err, LedgerError::NotAuthorized(_)));
@@ -155,7 +157,7 @@ async fn fifth_bad_key_voids_and_a_later_good_key_fails_naming_the_void() {
 
     // Even the REAL key fails now, naming the void.
     let err = requester
-        .redeem_with_token(&req.id, real.reveal(), agent("agent-1"), Vec::new())
+        .redeem_with_token(&req.id, real.reveal(), agent("agent-1"), ConditionReport::none())
         .await
         .unwrap_err();
     match err {
@@ -176,7 +178,7 @@ async fn bad_key_matching_no_live_request_appends_token_rejected_none_and_voids_
 
     for _ in 0..5 {
         let err = requester
-            .redeem_with_token(&bogus, "guess", agent("agent-1"), Vec::new())
+            .redeem_with_token(&bogus, "guess", agent("agent-1"), ConditionReport::none())
             .await
             .unwrap_err();
         assert!(matches!(err, LedgerError::NotAuthorized(id) if id == bogus));
@@ -202,7 +204,7 @@ async fn redeem_with_the_real_credential_succeeds_and_reserves_an_attempt() {
     let token = approver.token_for(&req.id).unwrap();
 
     let attempt = requester
-        .redeem_with_token(&req.id, token.reveal(), agent("someone-else"), Vec::new())
+        .redeem_with_token(&req.id, token.reveal(), agent("someone-else"), ConditionReport::none())
         .await
         .unwrap();
     assert_eq!(attempt.request_id(), &req.id);
@@ -237,7 +239,7 @@ async fn condition_failure_refuses_and_voids_reserving_no_attempt() {
         claim: StateClaim::Exact("e5f6".to_string()),
         at: SystemTime::now(),
     }];
-    let err = requester.redeem(&req.id, agent("agent-1"), observed).await.unwrap_err();
+    let err = requester.redeem(&req.id, agent("agent-1"), ConditionReport::observed(observed)).await.unwrap_err();
     assert!(matches!(err, LedgerError::Refused { .. }));
     assert_eq!(approvals.state(&req.id), Some(RequestState::Voided));
     let log = approvals.log(0);
@@ -253,10 +255,10 @@ async fn redeem_while_an_attempt_is_in_flight_is_rejected() {
     let (requester, approvals, approver) = Ledger::build(LedgerConfig::default(), None).unwrap();
     let req = post(&requester, "fs.remove", Duration::from_secs(60)).await;
     approver.grant(&req.id, terms(&req, far_future())).await.unwrap();
-    let attempt = requester.redeem(&req.id, agent("agent-1"), Vec::new()).await.unwrap();
+    let attempt = requester.redeem(&req.id, agent("agent-1"), ConditionReport::none()).await.unwrap();
     let before = approvals.log(0).len();
 
-    let err = requester.redeem(&req.id, agent("agent-1"), Vec::new()).await.unwrap_err();
+    let err = requester.redeem(&req.id, agent("agent-1"), ConditionReport::none()).await.unwrap_err();
     assert!(matches!(err, LedgerError::AttemptInFlight(id) if id == req.id));
     assert_eq!(approvals.state(&req.id), Some(RequestState::Granted), "state must not move");
     assert_eq!(approvals.log(0).len(), before, "a rejected in-flight redemption must append nothing");
@@ -270,11 +272,11 @@ async fn redeem_after_a_successful_settlement_reports_the_outcome_and_does_not_r
     let (requester, approvals, approver) = Ledger::build(LedgerConfig::default(), None).unwrap();
     let req = post(&requester, "fs.remove", Duration::from_secs(60)).await;
     approver.grant(&req.id, terms(&req, far_future())).await.unwrap();
-    let attempt = requester.redeem(&req.id, agent("agent-1"), Vec::new()).await.unwrap();
+    let attempt = requester.redeem(&req.id, agent("agent-1"), ConditionReport::none()).await.unwrap();
     requester.settle(&attempt, Outcome::Exit(0)).await.unwrap();
 
     let before = approvals.log(0).len();
-    let err = requester.redeem(&req.id, agent("agent-1"), Vec::new()).await.unwrap_err();
+    let err = requester.redeem(&req.id, agent("agent-1"), ConditionReport::none()).await.unwrap_err();
     match err {
         LedgerError::AlreadySettled { outcome, .. } => {
             assert!(matches!(outcome, Some(Outcome::Exit(0))));
@@ -289,16 +291,16 @@ async fn a_reported_failure_leaves_the_grant_live_for_a_retry() {
     let (requester, approvals, approver) = Ledger::build(LedgerConfig::default(), None).unwrap();
     let req = post(&requester, "fs.remove", Duration::from_secs(60)).await;
     approver.grant(&req.id, terms(&req, far_future())).await.unwrap();
-    let attempt1 = requester.redeem(&req.id, agent("agent-1"), Vec::new()).await.unwrap();
+    let attempt1 = requester.redeem(&req.id, agent("agent-1"), ConditionReport::none()).await.unwrap();
     requester.settle(&attempt1, Outcome::Exit(1)).await.unwrap();
 
     // The chain must still be Granted — a retry can redeem again.
     assert_eq!(approvals.state(&req.id), Some(RequestState::Granted));
-    let attempt2 = requester.redeem(&req.id, agent("agent-1"), Vec::new()).await.unwrap();
+    let attempt2 = requester.redeem(&req.id, agent("agent-1"), ConditionReport::none()).await.unwrap();
     assert_ne!(attempt1.attempt_id(), attempt2.attempt_id());
     requester.settle(&attempt2, Outcome::Exit(0)).await.unwrap();
     // Now it really is closed.
-    let err = requester.redeem(&req.id, agent("agent-1"), Vec::new()).await.unwrap_err();
+    let err = requester.redeem(&req.id, agent("agent-1"), ConditionReport::none()).await.unwrap_err();
     assert!(matches!(err, LedgerError::AlreadySettled { .. }));
 }
 
@@ -307,13 +309,13 @@ async fn an_unknown_outcome_closes_the_chain_without_reopening_the_grant() {
     let (requester, _approvals, approver) = Ledger::build(LedgerConfig::default(), None).unwrap();
     let req = post(&requester, "fs.remove", Duration::from_secs(60)).await;
     approver.grant(&req.id, terms(&req, far_future())).await.unwrap();
-    let attempt = requester.redeem(&req.id, agent("agent-1"), Vec::new()).await.unwrap();
+    let attempt = requester.redeem(&req.id, agent("agent-1"), ConditionReport::none()).await.unwrap();
     requester
         .settle(&attempt, Outcome::Unknown { cause: kaish_types::approval::LostCause::Cancelled })
         .await
         .unwrap();
 
-    let err = requester.redeem(&req.id, agent("agent-1"), Vec::new()).await.unwrap_err();
+    let err = requester.redeem(&req.id, agent("agent-1"), ConditionReport::none()).await.unwrap_err();
     assert!(matches!(err, LedgerError::AlreadySettled { outcome: Some(Outcome::Unknown { .. }), .. }));
 }
 
@@ -392,7 +394,7 @@ async fn terminal_states_reject_any_further_transition_and_leave_state_unchanged
             claim: StateClaim::Exact("moved".to_string()),
             at: SystemTime::now(),
         }];
-        requester.redeem(&req.id, agent("agent-1"), observed).await.unwrap_err();
+        requester.redeem(&req.id, agent("agent-1"), ConditionReport::observed(observed)).await.unwrap_err();
         assert_eq!(approvals.state(&req.id), Some(RequestState::Voided));
         let before = approvals.log(0).clone();
         let err = approver.grant(&req.id, terms(&req, far_future())).await.unwrap_err();
@@ -435,7 +437,7 @@ async fn settling_the_same_attempt_twice_appends_one_entry_and_returns_ok() {
     let (requester, approvals, approver) = Ledger::build(LedgerConfig::default(), None).unwrap();
     let req = post(&requester, "fs.remove", Duration::from_secs(60)).await;
     approver.grant(&req.id, terms(&req, far_future())).await.unwrap();
-    let attempt = requester.redeem(&req.id, agent("agent-1"), Vec::new()).await.unwrap();
+    let attempt = requester.redeem(&req.id, agent("agent-1"), ConditionReport::none()).await.unwrap();
 
     let first = requester.settle(&attempt, Outcome::Exit(0)).await.unwrap();
     assert!(first, "first settlement appends an entry");
@@ -466,7 +468,7 @@ async fn concurrent_redemptions_of_one_grant_produce_exactly_one_redeemed() {
         let requester = requester.clone();
         let id = req.id.clone();
         tasks.push(tokio::spawn(async move {
-            requester.redeem(&id, agent(&format!("racer-{i}")), Vec::new()).await
+            requester.redeem(&id, agent(&format!("racer-{i}")), ConditionReport::none()).await
         }));
     }
     let mut ok_count = 0;

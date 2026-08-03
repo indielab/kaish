@@ -449,7 +449,7 @@ mod tests {
         ctx: &ExecContext,
         authority: &crate::ledger::ApproverHandle,
     ) -> (kaish_types::approval::RequestId, String) {
-        use kaish_types::approval::{ApprovalRequest, GrantTerms};
+        use kaish_types::approval::GrantTerms;
         let approvals = ctx
             .ledger_access
             .as_ref()
@@ -460,23 +460,8 @@ mod tests {
         assert_eq!(pending.len(), 1, "exactly one request must be pending");
         let id = pending[0].id.clone();
         let chain = approvals.get(&id).expect("the chain");
-        // `GrantTerms::once_for` wants the stamped request; the view carries
-        // every field it reads except the ones a grant does not touch.
-        let request: ApprovalRequest = ApprovalRequest::builder(chain.request.operation.as_str())
-            .risk(chain.request.risk)
-            .build()
-            .expect("a well-formed draft")
-            .stamp(
-                id.clone(),
-                chain.request.principal.clone(),
-                chain.request.capture.clone(),
-                chain.request.context.clone(),
-                chain.request.requested_at,
-                chain.request.ttl,
-                chain.request.job_id,
-            );
-        let terms = GrantTerms::once_for(
-            &request,
+        let terms = GrantTerms::once_for_view(
+            &chain.request,
             std::time::SystemTime::now() + std::time::Duration::from_secs(300),
         );
         authority.grant(&id, terms).await.expect("the grant must post");

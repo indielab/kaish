@@ -10,7 +10,7 @@
 
 use std::time::{Duration, SystemTime};
 
-use kaish_kernel::ledger::{AttemptGuard, Ledger, LedgerConfig};
+use kaish_kernel::ledger::{AttemptGuard, ConditionReport, Ledger, LedgerConfig};
 use kaish_types::approval::{
     ApprovalRequest, Capture, GrantTerms, LostCause, Outcome, Principal, PrincipalKind,
     RequestContext, RequestState,
@@ -47,7 +47,7 @@ async fn dropped_attempt_guard_settles_as_unknown_cancelled_never_an_exit_code()
         .await
         .unwrap();
     approver.grant(&req.id, GrantTerms::once_for(&req, far_future())).await.unwrap();
-    let attempt = requester.redeem(&req.id, agent("agent-1"), Vec::new()).await.unwrap();
+    let attempt = requester.redeem(&req.id, agent("agent-1"), ConditionReport::none()).await.unwrap();
 
     // The dispatcher's shape: build the guard, then the tool's future is
     // dropped before it ever reports an outcome (cancellation, task abort).
@@ -71,7 +71,7 @@ async fn dropped_attempt_guard_settles_as_unknown_cancelled_never_an_exit_code()
     // Unknown closes the chain (spec §B.2) — it stays nominally `Granted`
     // (there is no separate "closed" state) but is not reservable again.
     assert_eq!(approvals.state(&req.id), Some(RequestState::Granted));
-    let err = requester.redeem(&req.id, agent("agent-1"), Vec::new()).await.unwrap_err();
+    let err = requester.redeem(&req.id, agent("agent-1"), ConditionReport::none()).await.unwrap_err();
     assert!(
         matches!(err, kaish_kernel::ledger::LedgerError::AlreadySettled { .. }),
         "a closed chain must refuse a second reservation, got {err:?}"
@@ -86,7 +86,7 @@ async fn panicking_tool_future_settles_the_same_way_as_a_drop() {
         .await
         .unwrap();
     approver.grant(&req.id, GrantTerms::once_for(&req, far_future())).await.unwrap();
-    let attempt = requester.redeem(&req.id, agent("agent-1"), Vec::new()).await.unwrap();
+    let attempt = requester.redeem(&req.id, agent("agent-1"), ConditionReport::none()).await.unwrap();
 
     let task_requester = requester.clone();
     let join = tokio::spawn(async move {
@@ -117,7 +117,7 @@ async fn explicit_settle_before_drop_wins_and_the_drop_push_is_a_no_op() {
         .await
         .unwrap();
     approver.grant(&req.id, GrantTerms::once_for(&req, far_future())).await.unwrap();
-    let attempt = requester.redeem(&req.id, agent("agent-1"), Vec::new()).await.unwrap();
+    let attempt = requester.redeem(&req.id, agent("agent-1"), ConditionReport::none()).await.unwrap();
 
     let guard = AttemptGuard::new(requester.clone(), attempt);
     // The dispatcher's normal-return path: settle with the real outcome
@@ -164,7 +164,7 @@ async fn dropped_attempt_guard_does_not_falsely_exhaust_capacity_for_the_next_po
         .await
         .unwrap();
     approver.grant(&req_a.id, GrantTerms::once_for(&req_a, far_future())).await.unwrap();
-    let attempt = requester.redeem(&req_a.id, agent("agent-1"), Vec::new()).await.unwrap();
+    let attempt = requester.redeem(&req_a.id, agent("agent-1"), ConditionReport::none()).await.unwrap();
 
     // Drop without an explicit settle and without any intervening drain
     // (no `force_drain`, no `redeem`/`settle`/`abandon_request` call) —

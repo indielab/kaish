@@ -37,7 +37,7 @@ use kaish_kernel::interpreter::ExecResult;
 use kaish_kernel::ledger::ApproverHandle;
 use kaish_kernel::trash::{TrashBackend, TrashEntry, TrashError};
 use kaish_kernel::{Kernel, KernelConfig};
-use kaish_types::approval::{ApprovalRequest, GrantTerms, LedgerEntry, Outcome, RequestId};
+use kaish_types::approval::{GrantTerms, LedgerEntry, Outcome, RequestId};
 use rstest::rstest;
 
 fn tempdir() -> tempfile::TempDir {
@@ -106,24 +106,11 @@ impl Session {
             .get(id)
             .expect("the request's chain")
             .request;
-        let request = ApprovalRequest::builder(view.operation.as_str())
-            .risk(view.risk)
-            .build()
-            .unwrap()
-            .stamp(
-                view.id.clone(),
-                view.principal.clone(),
-                view.capture.clone(),
-                view.context.clone(),
-                view.requested_at,
-                view.ttl,
-                view.job_id,
-            );
         self.authority
             .grant(
                 id,
-                GrantTerms::once_for(
-                    &request,
+                GrantTerms::once_for_view(
+                    &view,
                     std::time::SystemTime::now() + std::time::Duration::from_secs(300),
                 ),
             )
@@ -137,24 +124,11 @@ impl Session {
         let pending = approvals.pending();
         assert_eq!(pending.len(), 1, "exactly one request must be pending");
         let view = pending[0].clone();
-        let request = ApprovalRequest::builder(view.operation.as_str())
-            .risk(view.risk)
-            .build()
-            .unwrap()
-            .stamp(
-                view.id.clone(),
-                view.principal.clone(),
-                view.capture.clone(),
-                view.context.clone(),
-                view.requested_at,
-                view.ttl,
-                view.job_id,
-            );
         self.authority
             .grant(
                 &view.id,
-                GrantTerms::once_for(
-                    &request,
+                GrantTerms::once_for_view(
+                    &view,
                     std::time::SystemTime::now() + std::time::Duration::from_secs(300),
                 ),
             )

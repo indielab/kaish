@@ -9,7 +9,7 @@
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 
-use kaish_kernel::ledger::{DecisionChain, Ledger, LedgerConfig};
+use kaish_kernel::ledger::{ConditionReport, DecisionChain, Ledger, LedgerConfig};
 use kaish_kernel::vfs::{MemoryFs, VfsRouter};
 use kaish_kernel::{ExecContext, LedgerAccess};
 use kaish_tool_api::{ApprovalOutcome, Tool, ToolArgs, ToolCtx};
@@ -47,6 +47,7 @@ async fn kernel_request_approval_round_trips_a_request_through_the_ledger() {
         principal: agent("agent-1"),
         request_ttl: Duration::from_secs(60),
         job_id: None,
+        resolvers: std::sync::Arc::new(kaish_kernel::ledger::StateResolvers::default()),
     });
 
     let draft = ApprovalRequest::builder("plugin.dangerous")
@@ -166,6 +167,7 @@ async fn plugin_dangerous_fixture_gates_end_to_end_through_tool_api_alone() {
         principal: agent("agent-1"),
         request_ttl: Duration::from_secs(60),
         job_id: None,
+        resolvers: std::sync::Arc::new(kaish_kernel::ledger::StateResolvers::default()),
     });
     let tool = PluginDangerous;
 
@@ -231,7 +233,7 @@ async fn plugin_dangerous_fixture_gates_end_to_end_through_tool_api_alone() {
         claim: StateClaim::Exact("a1b2c3d".to_string()),
         at: SystemTime::now(),
     }];
-    let attempt = requester.redeem(&view.id, agent("agent-1"), observed).await.unwrap();
+    let attempt = requester.redeem(&view.id, agent("agent-1"), ConditionReport::observed(observed)).await.unwrap();
 
     // 4. Settle.
     let appended = requester.settle(&attempt, Outcome::Exit(0)).await.unwrap();

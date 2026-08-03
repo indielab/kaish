@@ -86,6 +86,15 @@ pub struct StateResolvers {
     by_kind: HashMap<String, Arc<dyn StateResolver>>,
 }
 
+/// Names the kinds it serves — a `dyn StateResolver` has no `Debug`, and
+/// requiring one of every embedder's hook to print a registry would be a
+/// tax with no payoff.
+impl std::fmt::Debug for StateResolvers {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("StateResolvers").field("kinds", &self.kinds()).finish()
+    }
+}
+
 impl StateResolvers {
     /// Build a registry from the resolvers an embedder registered, in
     /// registration order.

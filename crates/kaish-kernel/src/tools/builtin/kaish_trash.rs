@@ -311,7 +311,7 @@ mod tests {
     #[ignore] // calls real OS trash — flaky in CI
     #[tokio::test]
     async fn empty_with_a_granted_key_on_an_empty_trash() {
-        use kaish_types::approval::{ApprovalRequest, GrantTerms};
+        use kaish_types::approval::GrantTerms;
         let mut ctx = make_ctx();
         let authority = ctx.wire_test_ledger();
         ctx.trash_backend = Some(Arc::new(crate::trash_system::SystemTrash));
@@ -323,24 +323,11 @@ mod tests {
         let approvals = ctx.ledger_access.as_ref().expect("a wired ledger").approvals.clone();
         let id = approvals.pending()[0].id.clone();
         let chain = approvals.get(&id).expect("the chain");
-        let request = ApprovalRequest::builder(chain.request.operation.as_str())
-            .risk(chain.request.risk)
-            .build()
-            .expect("a well-formed draft")
-            .stamp(
-                id.clone(),
-                chain.request.principal.clone(),
-                chain.request.capture.clone(),
-                chain.request.context.clone(),
-                chain.request.requested_at,
-                chain.request.ttl,
-                None,
-            );
         authority
             .grant(
                 &id,
-                GrantTerms::once_for(
-                    &request,
+                GrantTerms::once_for_view(
+                    &chain.request,
                     std::time::SystemTime::now() + std::time::Duration::from_secs(300),
                 ),
             )

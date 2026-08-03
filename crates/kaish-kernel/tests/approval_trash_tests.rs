@@ -27,7 +27,7 @@ use kaish_kernel::interpreter::ExecResult;
 use kaish_kernel::ledger::ApproverHandle;
 use kaish_kernel::trash::{TrashBackend, TrashEntry, TrashError};
 use kaish_kernel::{Kernel, KernelConfig};
-use kaish_types::approval::{ApprovalRequest, GrantTerms, RequestId};
+use kaish_types::approval::{GrantTerms, RequestId};
 
 fn tempdir() -> tempfile::TempDir {
     tempfile::Builder::new()
@@ -73,25 +73,12 @@ impl Session {
     }
 
     /// Grant `id` for the next five minutes, on the terms the request itself
-    /// declared. `GrantTerms::once_for` needs the stamped request; the
-    /// tokenless view carries every field it reads.
+    /// declared — including its transitions, which become the redemption's
+    /// conditions.
     async fn grant(&self, id: &RequestId) {
         let chain = self.kernel.approvals().get(id).expect("the request's chain");
-        let request = ApprovalRequest::builder(chain.request.operation.as_str())
-            .risk(chain.request.risk)
-            .build()
-            .expect("a well-formed draft")
-            .stamp(
-                id.clone(),
-                chain.request.principal.clone(),
-                chain.request.capture.clone(),
-                chain.request.context.clone(),
-                chain.request.requested_at,
-                chain.request.ttl,
-                chain.request.job_id,
-            );
-        let terms = GrantTerms::once_for(
-            &request,
+        let terms = GrantTerms::once_for_view(
+            &chain.request,
             std::time::SystemTime::now() + std::time::Duration::from_secs(300),
         );
         self.authority.grant(id, terms).await.expect("the grant must post");
