@@ -103,6 +103,25 @@ breaking entries are marked **BREAKING**.
   its dictionary is copyrighted and aerospace-shaped, so we keep our own terms.
 
 ### Changed
+- **BREAKING: `kill %N` keeps the job instead of deleting it** (#244) — the job
+  lands on new terminal status `JobStatus::Killed` (wire `"killed"`, status file
+  `killed:{code}`) with its result and output intact until reaped, so `wait %N`
+  after a kill returns the result and a second `kill %N` is a clean no-op naming
+  the status, not `not found`.
+- **BREAKING: `kill %N` confirms the death** (#244) — it waits (bounded by
+  `kill_grace` + 3s) for the job to unwind, so exit 0 means dead, and it prints
+  what it did (`kill: job 1 exited (killed:130)`) instead of empty output; new
+  `--no-wait` returns at dispatch.
+- `JobManager` keeps at most 100 finished jobs (#244) — oldest evicted at
+  registration and at completion observation (`list`/`wait`), gated jobs
+  never; `set_finished_retention` tunes it.
+- `kill %N` treats a stale recorded process group (ESRCH) as "keep going",
+  not a failure (#244) — a pipeline job records one group per external child
+  and a finished child's group used to abort the whole kill.
+- `kill %N` on a stopped (Ctrl-Z) job now also delivers `CONT` (#244) — a
+  suspended process cannot act on a pending signal; the entry is untracked as
+  before, since a stopped job has no result to keep.
+- `wait %N` reports a killed job as `[N] Killed`, not `[N] Failed` (#244).
 - **The confirmation latch is deleted; every destructive-op gate now runs through
   the approval ledger** (ledger PR 5, `docs/approval-ledger.md` §F). The ten gate
   sites (`rm`, `kaish-trash empty`, and the seven callers of `gate_overwrites`)
@@ -199,6 +218,10 @@ breaking entries are marked **BREAKING**.
   only checker that sees them.
 
 ### Fixed
+- **`/v/jobs/N/status` reports `stopped` for a Ctrl-Z-stopped job** (#252) — it
+  read `running` forever: `status()` had the stopped check but the status-string
+  twin backing the VFS node did not, and a stopped job has no result channel to
+  poll.
 - **`grep -c` over multiple files prints a `name:count` line per file** (GNU
   parity), zero counts included — it used to print one aggregate total.
 - **`kill` signals every target, not just the first.** `kill %1 %2` used to signal

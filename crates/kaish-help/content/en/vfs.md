@@ -33,7 +33,7 @@ Each background job gets a directory:
 ```
 /v/jobs/{id}/stdout    live output (ring buffer, 10MB max)
 /v/jobs/{id}/stderr    live error stream
-/v/jobs/{id}/status    "running" | "done:0" | "gated" | "failed:N"
+/v/jobs/{id}/status    "running" | "stopped" | "done:0" | "gated" | "killed:N" | "failed:N"
 /v/jobs/{id}/command   original command string
 /v/jobs/{id}/approval  pending approval request (JSON) if gated, else empty
 ```

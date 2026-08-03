@@ -1058,6 +1058,9 @@ impl Kernel {
     pub fn new(config: KernelConfig) -> Result<Self> {
         let mut setup = Self::setup_vfs(&config)?;
         let jobs = Arc::new(JobManager::new());
+        // Mirror the cascade's SIGTERM->SIGKILL grace onto the manager so the
+        // kill builtin bounds its wait-for-death on the same number (GH #244).
+        jobs.set_kill_grace(config.kill_grace);
 
         // Mount JobFs for job observability at /v/jobs
         setup.vfs.mount("/v/jobs", JobFs::new(jobs.clone()));
@@ -1313,6 +1316,9 @@ impl Kernel {
 
         let mut vfs = VfsRouter::new();
         let jobs = Arc::new(JobManager::new());
+        // Mirror the cascade's SIGTERM->SIGKILL grace onto the manager so the
+        // kill builtin bounds its wait-for-death on the same number (GH #244).
+        jobs.set_kill_grace(config.kill_grace);
 
         // Create the budget from config so `with_vfs_budget` / `without_vfs_budget`
         // work for `with_backend` callers too. The /v/blobs MemoryFs is the only

@@ -685,9 +685,16 @@ async fn kill_signals_external_background_job_process_group() {
         result.err
     );
 
-    // The job is gone after the terminating kill.
+    // GH #244: the terminating kill confirms the death but keeps the job
+    // tracked with terminal status Killed — a second kill is an idempotent
+    // no-op naming that status, not "not found".
     let again = kernel.execute("kill %1").await.expect("execute");
-    assert!(again.err.contains("not found"), "job should be gone: {}", again.err);
+    assert_eq!(again.code, 0, "re-kill of a killed job is a clean no-op: {}", again.err);
+    assert!(
+        again.text_out().contains("already finished (killed:"),
+        "job must be tracked as killed, got: {}",
+        again.text_out()
+    );
 }
 
 // ── External-command binary I/O (binary-data Phase C) ───────────────────────

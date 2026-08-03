@@ -55,6 +55,14 @@ pub struct Job {
     pgid: Option<u32>,
     /// Whether this job is stopped (SIGTSTP).
     stopped: bool,
+    /// Whether a terminating kill was dispatched at this job (`kill %N`, or
+    /// an embedder's cancel). Once the job unwinds, this turns its terminal
+    /// status into `Killed` instead of `Failed` — "someone killed it" and
+    /// "it errored on its own" stay distinguishable after the fact (GH #244).
+    /// A job that manages to finish successfully before the cascade lands
+    /// still reports `Done`: the result is the truth, the flag only colors
+    /// a non-ok exit.
+    killed: bool,
     /// Cancellation token of the background fork running this job. Cancelling
     /// it stops the job whether it is an in-process builtin future or wraps
     /// external children (the cancellation cascade SIGTERM→SIGKILLs their
@@ -94,6 +102,7 @@ impl Job {
             pid: None,
             pgid: None,
             stopped: false,
+            killed: false,
             cancel: None,
             pgids: Vec::new(),
             started_at: kaish_types::clock::system_now(),
@@ -117,6 +126,7 @@ impl Job {
             pid: None,
             pgid: None,
             stopped: false,
+            killed: false,
             cancel: None,
             pgids: Vec::new(),
             started_at: kaish_types::clock::system_now(),
@@ -149,6 +159,7 @@ impl Job {
             pid: None,
             pgid: None,
             stopped: false,
+            killed: false,
             cancel: None,
             pgids: Vec::new(),
             started_at: kaish_types::clock::system_now(),
@@ -172,6 +183,7 @@ impl Job {
             pid: Some(pid),
             pgid: Some(pgid),
             stopped: true,
+            killed: false,
             cancel: None,
             pgids: Vec::new(),
             // The foreground process actually started earlier (before Ctrl-Z
@@ -211,6 +223,7 @@ impl Job {
             // request) is *held*, not failed — surface it distinctly so
             // `Kernel::confirm` can still fulfill it (GH #96).
             Some(r) if r.approval_request().is_some() => JobStatus::Gated,
+            Some(_) if self.killed => JobStatus::Killed,
             Some(_) => JobStatus::Failed,
             None => JobStatus::Running,
         }
@@ -220,14 +233,26 @@ impl Job {
     ///
     /// Returns:
     /// - `"running"` if the job is still running
+    /// - `"stopped"` if the job is stopped (Ctrl-Z / SIGTSTP)
     /// - `"done:0"` if the job completed successfully
     /// - `"gated"` if the job is held on an unsatisfied approval gate
+    /// - `"killed:{code}"` if the job was terminated by `kill %N`
     /// - `"failed:{code}"` if the job failed with an exit code
+    ///
+    /// The vocabulary must stay in step with [`Self::status`] — GH #252 was
+    /// exactly this pair drifting: `status()` learned the `stopped` check and
+    /// this string twin didn't, so `/v/jobs/N/status` reported a Ctrl-Z'd job
+    /// as `"running"` forever (a stopped job has no result channel, so
+    /// `try_poll` can never produce a result).
     pub fn status_string(&mut self) -> String {
+        if self.stopped {
+            return "stopped".to_string();
+        }
         self.try_poll();
         match &self.result {
             Some(r) if r.ok() => "done:0".to_string(),
             Some(r) if r.approval_request().is_some() => "gated".to_string(),
+            Some(r) if self.killed => format!("killed:{}", r.code),
             Some(r) => format!("failed:{}", r.code),
             None => "running".to_string(),
         }
@@ -297,7 +322,16 @@ impl Job {
 
         let mut content = String::new();
         content.push_str(&format!("# Job {}: {}\n", self.id, self.command));
-        content.push_str(&format!("# Status: {}\n\n", if result.ok() { "Done" } else { "Failed" }));
+        // Same terminal-status words as `status()` — a killed job's persisted
+        // log must not claim it "Failed" on its own (GH #244 review finding).
+        let status = if result.ok() {
+            "Done"
+        } else if self.killed {
+            "Killed"
+        } else {
+            "Failed"
+        };
+        content.push_str(&format!("# Status: {status}\n\n"));
 
         if is_bytes {
             let n = result.out_bytes().map(|b| b.len()).unwrap_or(0);
@@ -515,7 +549,25 @@ pub struct JobManager {
     /// [`set_persist_output_files`](Self::set_persist_output_files)). Stamped
     /// onto each [`Job`] at registration.
     persist_output_files: std::sync::atomic::AtomicBool,
+    /// SIGTERM→SIGKILL grace of the cancellation cascade, in milliseconds —
+    /// mirrored from `KernelConfig::kill_grace` at kernel construction so the
+    /// `kill` builtin can bound its wait-for-death on the same number the
+    /// cascade actually uses (GH #244). Milliseconds in an atomic rather than
+    /// a locked `Duration` because readers are on the kill path and never
+    /// need sub-millisecond precision.
+    kill_grace_ms: AtomicU64,
+    /// How many finished jobs stay tracked before the oldest are reaped to
+    /// make room (GH #244: nothing auto-reaped, so a long-lived embedder
+    /// accumulated results, streams, and temp files without bound). Enforced
+    /// at registration time — see [`Self::enforce_retention_locked`] for what
+    /// "finished" excludes (gated and stopped jobs are never evicted).
+    finished_retention: AtomicU64,
 }
+
+/// Default for [`JobManager::set_finished_retention`]: keep the last 100
+/// finished jobs. Interactive sessions never notice (the REPL reaps every
+/// prompt); an embedder that never reaps stays bounded.
+pub const DEFAULT_FINISHED_RETENTION: u64 = 100;
 
 impl JobManager {
     /// Create a new job manager.
@@ -544,7 +596,27 @@ impl JobManager {
             next_id: AtomicU64::new(1),
             jobs: Arc::new(Mutex::new(HashMap::new())),
             persist_output_files: std::sync::atomic::AtomicBool::new(true),
+            kill_grace_ms: AtomicU64::new(2_000),
+            finished_retention: AtomicU64::new(DEFAULT_FINISHED_RETENTION),
         }
+    }
+
+    /// Mirror `KernelConfig::kill_grace` onto the manager (see the field doc).
+    pub fn set_kill_grace(&self, grace: std::time::Duration) {
+        self.kill_grace_ms
+            .store(grace.as_millis().min(u128::from(u64::MAX)) as u64, Ordering::Relaxed);
+    }
+
+    /// The cancellation cascade's SIGTERM→SIGKILL grace (see [`Self::set_kill_grace`]).
+    pub fn kill_grace(&self) -> std::time::Duration {
+        std::time::Duration::from_millis(self.kill_grace_ms.load(Ordering::Relaxed))
+    }
+
+    /// Set how many finished jobs stay tracked (default 100,
+    /// `DEFAULT_FINISHED_RETENTION`). `0` keeps no finished jobs beyond the
+    /// gate-safety rule — gated and stopped jobs are never evicted regardless.
+    pub fn set_finished_retention(&self, keep: u64) {
+        self.finished_retention.store(keep, Ordering::Relaxed);
     }
 
     /// Toggle whether completed jobs persist their output to a host temp file.
@@ -586,7 +658,9 @@ impl JobManager {
         // await can never make progress to release it. `lock().await` yields
         // instead. The insert still completes before we return, so the job is
         // immediately queryable via `exists()`/`get()`.
-        self.jobs.lock().await.insert(id, job);
+        let mut jobs = self.jobs.lock().await;
+        jobs.insert(id, job);
+        self.enforce_retention_locked(&mut jobs);
 
         id
     }
@@ -599,6 +673,7 @@ impl JobManager {
 
         let mut jobs = self.jobs.lock().await;
         jobs.insert(id, job);
+        self.enforce_retention_locked(&mut jobs);
 
         id
     }
@@ -619,6 +694,7 @@ impl JobManager {
 
         let mut jobs = self.jobs.lock().await;
         jobs.insert(id, job);
+        self.enforce_retention_locked(&mut jobs);
 
         id
     }
@@ -674,6 +750,12 @@ impl JobManager {
                     {
                         job.output_file = Some(path);
                     }
+                    // A completion was just observed — enforce retention here
+                    // too, not only at registration (an embedder that stops
+                    // registering must still stay bounded). The result is
+                    // already cloned, so evicting this very job (cap 0) is
+                    // safe.
+                    self.enforce_retention_locked(&mut jobs);
                     return Some(result);
                 }
             }
@@ -719,15 +801,22 @@ impl JobManager {
     }
 
     /// List all jobs with their status.
+    ///
+    /// Listing polls every job, so this is also a completion-observation
+    /// point: retention is enforced here (after the snapshot is taken — the
+    /// returned list is complete even for entries evicted by it).
     pub async fn list(&self) -> Vec<JobInfo> {
         let mut jobs = self.jobs.lock().await;
-        jobs.values_mut()
+        let infos: Vec<JobInfo> = jobs
+            .values_mut()
             .map(|job| {
                 let status = job.status();
                 let approval = job.approval();
                 job.to_info(status, approval)
             })
-            .collect()
+            .collect();
+        self.enforce_retention_locked(&mut jobs);
+        infos
     }
 
     /// Get the number of running jobs.
@@ -781,6 +870,40 @@ impl JobManager {
     /// this is the count-only form `jobs --cleanup` reports.
     pub async fn cleanup(&self) {
         self.reap_finished().await;
+    }
+
+    /// Evict the oldest finished jobs beyond the retention cap
+    /// ([`Self::set_finished_retention`]). Called with the jobs lock held at
+    /// registration time (the moment the tracked-job count grows) **and** at
+    /// the completion-observation points (`list`, `wait`'s finalize) — so an
+    /// embedder that stops registering but keeps observing stays bounded
+    /// without a background sweeper (GH #244). A session that registers jobs
+    /// and then never calls anything at all holds what it registered; there
+    /// is no sweeper task by design. "Finished" follows `reap_finished`'s reap-safety
+    /// rule: gated jobs are never evicted (their cached result holds the only
+    /// pending approval request) and stopped jobs are not finished. Eviction
+    /// is oldest `finished_at` first, so the survivors are the newest N.
+    fn enforce_retention_locked(&self, jobs: &mut HashMap<JobId, Job>) {
+        let keep = self.finished_retention.load(Ordering::Relaxed) as usize;
+        let mut finished: Vec<(JobId, SystemTime)> = jobs
+            .iter_mut()
+            .filter_map(|(id, job)| {
+                (job.is_done() && job.approval().is_none())
+                    .then(|| (*id, job.finished_at.unwrap_or(job.started_at)))
+            })
+            .collect();
+        if finished.len() <= keep {
+            return;
+        }
+        // Job IDs tie-break equal timestamps (they grow monotonically), so
+        // eviction order is deterministic even under a coarse clock.
+        finished.sort_by_key(|&(id, finished_at)| (finished_at, id.0));
+        let evict = finished.len() - keep;
+        for (id, _) in finished.into_iter().take(evict) {
+            if let Some(mut job) = jobs.remove(&id) {
+                job.cleanup_files();
+            }
+        }
     }
 
     /// Check if a specific job exists.
@@ -866,6 +989,7 @@ impl JobManager {
         let job = Job::stopped(id, self.session_id, command, pid, pgid);
         let mut jobs = self.jobs.lock().await;
         jobs.insert(id, job);
+        self.enforce_retention_locked(&mut jobs);
         id
     }
 
@@ -923,6 +1047,38 @@ impl JobManager {
         if let Some(job) = jobs.get_mut(&id) {
             job.cancel = Some(token);
         }
+    }
+
+    /// Flag a terminating kill and trip the job's cancellation token, as one
+    /// operation under the jobs lock. Returns `false` — and leaves the job
+    /// **unflagged** — when there is no lever to kill with: no cancellation
+    /// token recorded and no OS signal already delivered (`delivered`). The
+    /// flag turns the job's terminal status into `Killed`, so setting it
+    /// without a working delivery would misclassify a later *organic* failure
+    /// as a kill (found in review: `JobManager::spawn`/`register` jobs have
+    /// no token unless the kernel records one).
+    ///
+    /// The flag is set *before* the token trips (the job can unwind the
+    /// instant it does; a flag set after races the status read), and the
+    /// token is cancelled after the lock drops — `CancellationToken::cancel`
+    /// is synchronous, but waking waiters under the jobs lock buys nothing.
+    pub async fn mark_killed_and_cancel(&self, id: JobId, delivered: bool) -> bool {
+        let token = {
+            let mut jobs = self.jobs.lock().await;
+            let Some(job) = jobs.get_mut(&id) else {
+                return false;
+            };
+            let token = job.cancel.clone();
+            if token.is_none() && !delivered {
+                return false;
+            }
+            job.killed = true;
+            token
+        };
+        if let Some(token) = token {
+            token.cancel();
+        }
+        true
     }
 
     /// Cancel a job by its token. Returns `true` if a token was recorded and
@@ -1645,6 +1801,192 @@ mod tests {
         assert!(
             !results.iter().any(|(rid, _)| *rid == id),
             "a job that stopped mid-wait_all yields no result"
+        );
+    }
+
+    /// GH #252: the status *string* (backing `/v/jobs/N/status`) must agree
+    /// with `status()` about a stopped job. A stopped job has no result
+    /// channel, so `try_poll` can never resolve it — without the explicit
+    /// check it read `running` forever while `status()` said `Stopped`.
+    #[tokio::test]
+    async fn status_string_reports_stopped() {
+        let manager = JobManager::new();
+        let id = manager.register_stopped("vi".to_string(), 4242, 4242).await;
+        assert_eq!(manager.get_status_string(id).await.as_deref(), Some("stopped"));
+        assert_eq!(
+            manager.get(id).await.map(|info| info.status),
+            Some(JobStatus::Stopped),
+            "status() and status_string() must agree"
+        );
+    }
+
+    /// GH #244: a killed job's terminal status is `Killed`/`killed:{code}`,
+    /// not `Failed` — the flag is set by `mark_killed_and_cancel` before the
+    /// cancel trips, and only colors a non-ok exit (a job that finished ok
+    /// anyway still reads `Done`).
+    #[tokio::test]
+    async fn mark_killed_colors_the_terminal_status() {
+        let manager = JobManager::new();
+        manager.set_persist_output_files(false);
+        let (tx, rx) = oneshot::channel::<()>();
+        let id = manager
+            .spawn("victim".to_string(), async move {
+                let _ = rx.await;
+                ExecResult::failure(130, "cancelled")
+            })
+            .await;
+        // delivered=true stands in for a real killpg delivery — spawn()'d
+        // jobs record no cancellation token.
+        assert!(manager.mark_killed_and_cancel(id, true).await);
+        drop(tx); // unblock the future — it returns the 130 result
+        let result = manager.wait(id).await.expect("job finishes");
+        assert_eq!(result.code, 130);
+        assert_eq!(
+            manager.get(id).await.map(|info| info.status),
+            Some(JobStatus::Killed)
+        );
+        assert_eq!(manager.get_status_string(id).await.as_deref(), Some("killed:130"));
+
+        // A successful exit is never re-colored: the result is the truth.
+        let id2 = manager
+            .spawn("survivor".to_string(), async { ExecResult::success("done") })
+            .await;
+        assert!(manager.mark_killed_and_cancel(id2, true).await);
+        let result = manager.wait(id2).await.expect("job finishes");
+        assert!(result.ok());
+        assert_eq!(
+            manager.get(id2).await.map(|info| info.status),
+            Some(JobStatus::Done),
+            "a job that finished ok before the kill landed reports Done"
+        );
+    }
+
+    /// Review finding (GH #244): with no cancellation token and nothing
+    /// delivered, `mark_killed_and_cancel` must refuse AND leave the flag
+    /// unset — otherwise a later organic failure reads as a kill that never
+    /// happened.
+    #[tokio::test]
+    async fn no_lever_kill_does_not_color_a_later_organic_failure() {
+        let manager = JobManager::new();
+        manager.set_persist_output_files(false);
+        let (tx, rx) = oneshot::channel::<()>();
+        let id = manager
+            .spawn("doomed anyway".to_string(), async move {
+                let _ = rx.await;
+                ExecResult::failure(7, "organic failure")
+            })
+            .await;
+        assert!(
+            !manager.mark_killed_and_cancel(id, false).await,
+            "no token + nothing delivered must refuse"
+        );
+        drop(tx);
+        let result = manager.wait(id).await.expect("job finishes");
+        assert_eq!(result.code, 7);
+        assert_eq!(
+            manager.get(id).await.map(|info| info.status),
+            Some(JobStatus::Failed),
+            "the failed kill attempt must not have colored the status"
+        );
+        assert_eq!(manager.get_status_string(id).await.as_deref(), Some("failed:7"));
+    }
+
+    /// Review finding (GH #244): retention must also hold when jobs finish
+    /// AFTER registration stopped — `list()` observes completions and
+    /// enforces. (The registration-time test above releases each job before
+    /// the next spawn, which masked this.)
+    #[tokio::test]
+    async fn retention_enforced_when_completion_is_observed_by_list() {
+        let manager = JobManager::new();
+        manager.set_persist_output_files(false);
+        manager.set_finished_retention(2);
+
+        let mut releases = Vec::new();
+        let mut ids = Vec::new();
+        for n in 0..5 {
+            let (tx, rx) = oneshot::channel::<()>();
+            releases.push(tx);
+            ids.push(
+                manager
+                    .spawn(format!("held {n}"), async move {
+                        let _ = rx.await;
+                        ExecResult::success("")
+                    })
+                    .await,
+            );
+        }
+        // All five registered while RUNNING — registration-time enforcement
+        // had nothing to evict. Now they all finish with no registration
+        // following. (Not waited one-by-one: wait() itself now evicts at
+        // each observed completion, so a sequential wait on the oldest ids
+        // finds them already gone — which is the feature, not the fixture.)
+        for tx in releases {
+            drop(tx);
+        }
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        loop {
+            let infos = manager.list().await;
+            if infos.iter().all(|info| info.status != JobStatus::Running) {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "jobs did not finish in time"
+            );
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        let mut tracked = 0;
+        for id in &ids {
+            if manager.exists(*id).await {
+                tracked += 1;
+            }
+        }
+        assert!(
+            tracked <= 2,
+            "finished jobs beyond the cap must be evicted once observed, still tracked: {tracked}"
+        );
+    }
+
+    /// GH #244: registration evicts the oldest finished jobs beyond the
+    /// retention cap, so a never-reaping embedder stays bounded. Running jobs
+    /// are never evicted.
+    #[tokio::test]
+    async fn finished_retention_evicts_oldest_at_registration() {
+        let manager = JobManager::new();
+        manager.set_persist_output_files(false);
+        manager.set_finished_retention(2);
+
+        let mut finished_ids = Vec::new();
+        for n in 0..4 {
+            let id = manager
+                .spawn(format!("quick {n}"), async { ExecResult::success("") })
+                .await;
+            manager.wait(id).await.expect("job finishes");
+            finished_ids.push(id);
+        }
+        // A still-running job to prove eviction only touches finished ones.
+        let (_tx, rx) = oneshot::channel::<()>();
+        let running = manager
+            .spawn("blocker".to_string(), async move {
+                let _ = rx.await;
+                ExecResult::success("")
+            })
+            .await;
+
+        assert!(manager.exists(running).await, "running job is never evicted");
+        let tracked_finished: Vec<bool> = {
+            let mut v = Vec::new();
+            for id in &finished_ids {
+                v.push(manager.exists(*id).await);
+            }
+            v
+        };
+        // Registering the 3rd and 4th quick jobs (and the blocker) evicted the
+        // oldest finished entries down to the cap of 2.
+        assert_eq!(
+            tracked_finished,
+            vec![false, false, true, true],
+            "oldest finished jobs evicted first: {finished_ids:?}"
         );
     }
 }
