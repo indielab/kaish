@@ -1117,18 +1117,17 @@ impl ExecContext {
         self.redemption = redemption;
     }
 
-    /// The §C.5 filter every `fs.*` gate site classifies its paths with:
-    /// the `set -o approvals` enforce policy plus a snapshot of the
-    /// subscription registry.
+    /// The filter every `fs.*` gate site classifies its paths with: the
+    /// `set -o approvals` enforce policy plus a snapshot of the subscription
+    /// registry.
     ///
     /// **Built once per gate call, and free when nothing is subscribed.**
-    /// The registry snapshot is taken only after
-    /// [`Approvals::any_subscriptions`] — one relaxed atomic load — says
-    /// there is something to snapshot, so an unsubscribed session pays a
-    /// branch and allocates nothing, however many paths the command names.
-    /// Call [`SubscriptionFilter::engaged`] on the result and return early
-    /// when it is `false`: that early-out is what keeps `rm -rf` over a large
-    /// tree from paying a per-path ledger cost nobody asked for.
+    /// The snapshot is taken only after [`Approvals::any_subscriptions`] —
+    /// one relaxed atomic load — says there is something to snapshot, so an
+    /// unsubscribed session allocates nothing however many paths the command
+    /// names. Call [`SubscriptionFilter::engaged`] on the result and return
+    /// early when it is `false`: that early-out is what keeps `rm -rf` over a
+    /// large tree from paying a per-path ledger cost nobody asked for.
     pub(crate) fn fs_subscriptions(&self) -> SubscriptionFilter {
         let policy = self.scope.approvals_enabled();
         let subscriptions = match self.ledger_access.as_ref() {
@@ -1138,30 +1137,29 @@ impl ExecContext {
         SubscriptionFilter::new(policy, subscriptions)
     }
 
-    /// Post the observe record for the paths an `observe` subscription covers
-    /// (spec §C.5), and let the operation proceed.
+    /// Post the observe record for the paths an `observe` subscription
+    /// covers, and let the operation proceed.
     ///
-    /// Posts one `Requested`, which the subscription itself auto-grants as
-    /// `Granted{Observe}`; the reserved attempt settles with the invocation's
-    /// real exit code at the dispatch seam, like every other attempt. It
-    /// never defers and never returns exit 2 — an observe subscription
-    /// carries no permission semantics, and the decision chain's stage 1b is
-    /// what guarantees it.
+    /// Posts one `Requested`, which stage 1b of the decision chain
+    /// auto-grants as `Granted{Observe}`; the reserved attempt settles with
+    /// the invocation's real exit code at the dispatch seam, like every other
+    /// attempt. It never defers and never exits 2 — an observe subscription
+    /// decides nothing.
     ///
     /// `Err(result)` means the ledger could not record the operation at all —
-    /// a full sink, a full ring. That is returned to the caller and **not**
+    /// a full sink, a full ring. That is returned to the caller and never
     /// swallowed: an operator who subscribed asked for a complete record, and
-    /// an operation that ran outside a record the operator believes is
-    /// complete is exactly the silent gap the subscription exists to close.
+    /// an operation running outside a record the operator believes is
+    /// complete is the exact gap a subscription exists to close.
     ///
     /// A **deferral** here exits 1, never 2. The gate site classified these
-    /// paths as observed and the chain then declined to auto-grant them,
-    /// which means the filter's registry snapshot and the registry disagree —
-    /// either the subscription was revoked while the command ran, or a
-    /// mismatch between [`SubscriptionFilter::posture`] and stage 1b let a
-    /// record turn into a gate. Reporting it as exit 2 would advertise a
-    /// grantable request for an operation with no permission semantics, and
-    /// hide the disagreement behind a plausible-looking prompt.
+    /// paths as observed and the chain then declined to auto-grant them, so
+    /// the filter's snapshot and the registry disagree — either the
+    /// subscription was revoked while the command ran, or
+    /// [`SubscriptionFilter::posture`] and stage 1b have drifted apart and a
+    /// record turned into a gate. Exit 2 would offer an operator a request to
+    /// grant for a decision nobody is making, and hide the disagreement
+    /// behind it.
     pub(crate) async fn record_observed(
         &mut self,
         operation: KernelOperation,
@@ -1180,9 +1178,9 @@ impl ExecContext {
         let mut builder = ApprovalRequest::builder(operation.as_str())
             .risk(operation.risk())
             .reason("an observe subscription covers these paths")
-            // No re-run to advertise: the operation is running now. The hint
-            // is display-only, and inventing a command here would put a
-            // re-run in the record that nobody is meant to type.
+            // No re-run to offer: the operation is running now. The hint is
+            // display-only, and inventing a command would record a re-run
+            // nobody should type.
             .hint("");
         for resource in resources {
             builder = builder.resource(resource);
@@ -1676,9 +1674,8 @@ impl ExecContext {
         let trash_enabled = self.scope.trash_enabled();
         let subscriptions = self.fs_subscriptions();
         // Fast path: nothing is subscribed and nothing is trashed, so this
-        // costs one branch and allocates nothing (spec §C.5 — a large tree
-        // must not pay a per-path ledger cost unless an operator asked for
-        // it).
+        // costs one branch and allocates nothing. A large tree must not pay
+        // a per-path ledger cost unless an operator asked for one.
         if !trash_enabled && !subscriptions.engaged() {
             return Ok(expectations);
         }
@@ -1692,8 +1689,7 @@ impl ExecContext {
             /// Whether an `observe` subscription covers this target. Kept
             /// beside the gate decision rather than folded into it: observe
             /// records what happened, so it fires for a target the trash
-            /// caught and for a brand-new file, neither of which the gate
-            /// holds.
+            /// caught and for a new file, neither of which the gate holds.
             observed: bool,
         }
         // Dedup by resolved path (keep first): a multi-file patch with an
@@ -1722,11 +1718,12 @@ impl ExecContext {
                 0
             };
             // Matched on the **resolved** path, recorded under the display
-            // path. A subscription is a scope, and a scope a relative path
-            // could step outside of would not be one — `cd /workspace && tee
-            // secret` must land inside `/workspace/**`. The record still
-            // shows what the operator's command named, because that is what
-            // an auditor reading the log is trying to recognize.
+            // path. Matching the resolved path is what makes the glob a
+            // scope: `cd /workspace && tee secret` must match
+            // `/workspace/**`, and a relative path that escaped the glob
+            // would leave the scope meaningless. The record still shows what
+            // the command named, because that is the string an auditor
+            // reading the log can recognize.
             let posture =
                 subscriptions.posture(&operation_id, PATH_KIND, &resolved.to_string_lossy());
             let action = decide_mutation_action(
@@ -1809,9 +1806,8 @@ impl ExecContext {
         }
 
         // The observe record goes on the log only once the enforce gate has
-        // authorized the batch: a batch held at exit 2 never runs, and
-        // recording it as observed would say an operation happened that did
-        // not.
+        // authorized the batch. A batch held at exit 2 never runs, so
+        // recording it would claim an operation happened that did not.
         let observed: Vec<String> = decided
             .iter()
             .filter(|d| d.observed)

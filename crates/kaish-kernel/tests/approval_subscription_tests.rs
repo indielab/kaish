@@ -1,5 +1,5 @@
-//! `fs.*` observability subscriptions (`docs/approval-ledger.md` §C.5, ledger
-//! PR 8): the glob filter, `Grounds::Observe`, and the two modes.
+//! `fs.*` observability subscriptions: the glob filter, `Grounds::Observe`,
+//! and the two modes.
 //!
 //! Everything drives real command strings through `kernel.execute()`, so the
 //! full path runs — glob expansion, the gate site's per-path classification,
@@ -34,7 +34,7 @@ fn tempdir() -> tempfile::TempDir {
 
 /// A kernel, the authority its construction minted, and a two-directory tree:
 /// `workspace/` (what the tests subscribe to) and `scratch/` (what they leave
-/// unsubscribed, standing in for §C.5's `/tmp/**`).
+/// unsubscribed).
 struct Session {
     kernel: Kernel,
     authority: ApproverHandle,
@@ -158,8 +158,8 @@ fn entry_kind(entry: &LedgerEntry) -> &'static str {
     }
 }
 
-/// §C.5's worked example: subscribe `fs.remove` under the workspace as
-/// `observe`, and everything outside it stays unsubscribed and free.
+/// The scoping case: subscribe `fs.remove` under the workspace as `observe`,
+/// and everything outside it stays unsubscribed and free.
 #[tokio::test]
 async fn an_observe_subscription_records_matching_paths_and_stays_silent_about_the_rest() {
     let session = Session::new();
@@ -306,8 +306,8 @@ async fn an_enforce_subscription_over_the_same_glob_gates() {
     assert_eq!(session.entry_kinds(), vec!["Subscribed", "Requested"]);
 }
 
-/// Spec §C.5, and the reason it is worth stating: an audit scope that changed
-/// with no record of the change makes the record it produced unreadable.
+/// An audit scope that changed with no record of the change makes the record
+/// it produced unreadable, so the scope changes are themselves entries.
 #[tokio::test]
 async fn subscription_and_revocation_are_themselves_ledger_entries() {
     let session = Session::new();

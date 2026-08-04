@@ -623,14 +623,13 @@ impl ApprovalRequest {
     /// one per [`ApprovalRequest::builder`] call, counted whether or not the
     /// draft is ever built, stamped, or posted.
     ///
-    /// This exists to be asserted on. Spec §C.5 requires that an `fs.*`
-    /// operation nothing is subscribed to allocate **no** request at all, no
-    /// matter how many paths it touches, and a counter is the only way to
-    /// state that in numbers: run a 10,000-path `rm -rf` between two reads
-    /// and the difference must be 0. Relaxed ordering, because it is a
-    /// process-wide diagnostic total and never a synchronization point —
-    /// read it from one task at a time or accept that a concurrent builder
-    /// may or may not be included.
+    /// A test asserts on this. An `fs.*` operation nothing is subscribed to
+    /// must build **no** request at all, however many paths it names, and a
+    /// counter is the only way to state that as a number: read it either
+    /// side of a 10,000-path `rm -rf` and the difference must be 0. Relaxed
+    /// ordering, because it is a process-wide diagnostic total and never a
+    /// synchronization point — read it from one task at a time, or accept
+    /// that a concurrent builder may or may not be counted yet.
     pub fn constructed_count() -> u64 {
         REQUESTS_CONSTRUCTED.load(Ordering::Relaxed)
     }
@@ -1107,11 +1106,11 @@ impl ResourcePattern {
 }
 
 /// A glob-scoped registration making matching operations `observe` (record
-/// only) or `enforce` (decide) — spec §C.5.
+/// only) or `enforce` (decide).
 ///
-/// Itself a ledger entry (`Subscribed`), and so is its revocation
-/// (`Unsubscribed`): an audit record whose own scope changed without a
-/// record of the change would be unreadable.
+/// Registering one appends a `Subscribed` entry, and revoking one appends
+/// `Unsubscribed` — an audit record whose own scope changed with no record
+/// of the change would be unreadable.
 #[non_exhaustive]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Subscription {
@@ -1129,11 +1128,11 @@ pub struct Subscription {
 }
 
 impl Subscription {
-    /// Build a not-yet-registered subscription. `id` is a placeholder —
+    /// Build a not-yet-registered subscription. `id` is a placeholder:
     /// `ApproverHandle::subscribe` overwrites it with a ledger-allocated
-    /// [`SubscriptionId`], and the returned id is the authoritative one
-    /// (same shape as [`StandingGrant::new`], for the same reason). The only
-    /// external constructor for this `#[non_exhaustive]` type.
+    /// [`SubscriptionId`] and returns the authoritative one, the same shape
+    /// [`StandingGrant::new`] has. This is the only constructor outside the
+    /// crate — the type is `#[non_exhaustive]`.
     pub fn new(
         operations: Vec<OperationPattern>,
         resources: Vec<ResourcePattern>,
@@ -1150,7 +1149,7 @@ impl Subscription {
     }
 }
 
-/// The two subscription modes (spec §C.5) — the audit-versus-enforce split.
+/// The two subscription modes — record, or decide.
 #[non_exhaustive]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -1158,7 +1157,7 @@ pub enum SubscriptionMode {
     /// Matching operations post `Requested` + immediate `Granted{Observe}`
     /// and proceed; they never defer, never block, never prompt.
     Observe,
-    /// Matching operations go through the real decision chain (spec §C.2).
+    /// Matching operations go through the decision chain, and may defer.
     Enforce,
 }
 
@@ -1435,7 +1434,7 @@ pub enum LedgerEntry {
         /// Why.
         reason: String,
     },
-    /// A subscription was registered (spec §C.5).
+    /// A subscription was registered.
     Subscribed {
         /// Monotonic per-ledger sequence number.
         seq: u64,

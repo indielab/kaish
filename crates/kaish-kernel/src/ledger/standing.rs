@@ -14,8 +14,7 @@
 //!   it does not auto-approve the three and gate the one.
 //! - **Kind matches exactly**; only `id` globs, via `kaish-glob`, so the
 //!   semantics are the ones the rest of kaish already uses. Both pattern
-//!   primitives live in [`super::patterns`], shared with §C.5's
-//!   subscriptions.
+//!   primitives live in [`super::patterns`], shared with subscriptions.
 //! - **Transitions are not matched, they are conditioned.** Matching ignores
 //!   the declared oids entirely; the caller copies them into the resulting
 //!   grant's conditions so the redemption-time check still fires.

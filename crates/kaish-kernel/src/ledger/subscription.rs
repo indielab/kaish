@@ -1,29 +1,28 @@
-//! Subscription matching (`docs/approval-ledger.md` §C.5).
+//! Subscription matching.
 //!
 //! A subscription is a glob over (operation, resource) that puts matching
 //! filesystem operations into one of two postures: `observe` records them and
-//! lets them run, `enforce` sends them through the real decision chain. It is
-//! the generalization of the whole-`fs.*` enforce policy `set -o approvals`
+//! lets them run, `enforce` sends them through the decision chain. It is the
+//! generalization of the whole-`fs.*` enforce policy `set -o approvals`
 //! installs.
 //!
-//! **The dominant constraint is that nothing subscribed costs nothing.** A
-//! `rm -rf` over 10,000 paths must not pay a per-path ledger cost unless an
-//! operator asked for one, so the filter is built in two steps: one relaxed
-//! atomic load answering "is anything subscribed at all?" — almost always no,
-//! branch predicted, done — and only then the glob work. Nothing is allocated
-//! on the unsubscribed path, and `ApprovalRequest::constructed_count` is what
-//! proves it.
+//! **An unsubscribed session pays nothing.** A `rm -rf` over 10,000 paths
+//! must not pay a per-path ledger cost unless an operator asked for one, so
+//! the filter answers in two steps: one relaxed atomic load for "is anything
+//! subscribed at all?" — almost always no — and only then the glob work.
+//! Nothing is allocated when nothing is subscribed, and
+//! `ApprovalRequest::constructed_count` is what proves it: 10,000 paths, 0
+//! requests built.
 //!
-//! Two rules this module fixes, neither of which the spec states outright:
+//! Two precedence rules:
 //!
 //! - **`enforce` beats `observe` when both cover a path.** Enforce is the
-//!   strictly stronger posture and produces a superset of observe's record,
-//!   so the reverse precedence could silently downgrade a gate to a note.
+//!   stronger posture and its record is a superset of observe's, so the
+//!   reverse order would turn a gate into a bare record.
 //! - **A subscription matches per resource, not all-or-nothing.** A standing
-//!   grant is all-or-nothing because it *authorizes*; a subscription only
-//!   scopes, and `rm /workspace/a /tmp/b` under an `observe` subscription on
-//!   `/workspace/**` must record `/workspace/a` and stay silent about
-//!   `/tmp/b` (spec §C.5's own worked example).
+//!   grant is all-or-nothing because it authorizes; a subscription only
+//!   scopes. `rm /workspace/a /tmp/b` under an `observe` subscription on
+//!   `/workspace/**` records `/workspace/a` and stays silent about `/tmp/b`.
 
 use kaish_types::approval::{
     ApprovalRequest, OperationId, Subscription, SubscriptionId, SubscriptionMode,
@@ -31,12 +30,11 @@ use kaish_types::approval::{
 
 use super::patterns::{covers_operation, covers_resource, covers_resource_parts};
 
-/// What the §C.5 registry says about one operation on one resource.
+/// What the registry says about one operation on one resource.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Posture {
-    /// Nothing covers it. No request exists, nothing is allocated, and the
-    /// ledger stays empty — spec §C.5's "unsubscribed and ungated means
-    /// unposted".
+    /// Nothing covers it. No request is built, nothing is allocated, and no
+    /// ledger entry is posted.
     Unsubscribed,
     /// An `observe` subscription covers it: post the record, auto-grant it,
     /// and proceed. Never defers, never blocks, never returns exit 2.
@@ -56,21 +54,21 @@ impl Posture {
 /// A snapshot of the registry, taken once per gate call and matched per
 /// path.
 ///
-/// Taken once rather than queried per path so a 10,000-path `rm` under a
-/// live subscription acquires the ledger lock once, not 10,000 times. The
-/// snapshot can go stale within a single command — a subscription revoked
-/// mid-`rm` still covers the paths that command already classified — which is
-/// the same "takes effect for operations not yet posted" rule revocation has
-/// everywhere else (§C.4).
+/// One snapshot rather than a query per path, so a 10,000-path `rm` under a
+/// live subscription takes the ledger lock once, not 10,000 times. The
+/// snapshot can go stale within a single command: a subscription revoked
+/// mid-`rm` still covers the paths that command already classified. That is
+/// the same rule every revocation here follows — it takes effect for
+/// operations not yet posted.
 #[derive(Debug, Clone, Default)]
 pub struct SubscriptionFilter {
     /// The whole-`fs.*` enforce policy (`set -o approvals`). Kept separate
     /// from the registry because a session flag is not a subscription: it is
-    /// scoped to the session, not recorded as a ledger entry, and script can
-    /// turn it on.
+    /// scoped to the session, script can turn it on, and it posts no ledger
+    /// entry of its own.
     policy: bool,
-    /// The live registry, empty whenever the atomic said nothing was
-    /// subscribed — which is what keeps the unsubscribed path allocation-free.
+    /// The live registry. Empty whenever nothing is subscribed, which is
+    /// what keeps that case free of allocation.
     subscriptions: Vec<Subscription>,
 }
 
@@ -93,7 +91,8 @@ impl SubscriptionFilter {
     /// The posture for one `path` resource under `operation`.
     ///
     /// `enforce` wins over `observe`, and the whole-namespace policy is an
-    /// enforce subscription over everything, so it answers first and cheapest.
+    /// enforce subscription over everything, so it answers first and without
+    /// touching the registry.
     pub fn posture(&self, operation: &OperationId, kind: &str, id: &str) -> Posture {
         if self.policy {
             return Posture::Enforce;
@@ -109,8 +108,8 @@ impl SubscriptionFilter {
                 // Short-circuit: nothing weaker can overturn an enforce.
                 SubscriptionMode::Enforce => return Posture::Enforce,
                 // Lowest id wins among observers — issue order, the same
-                // deterministic precedence standing grants use (§C.4), rather
-                // than a specificity metric nobody has defined.
+                // deterministic precedence standing grants use, rather than
+                // a specificity metric nobody has defined.
                 SubscriptionMode::Observe => {
                     observed.get_or_insert(subscription.id);
                 }
@@ -131,13 +130,13 @@ impl SubscriptionFilter {
 /// and which one.
 ///
 /// All-or-nothing here, unlike [`SubscriptionFilter::posture`], because this
-/// is the auto-grant decision rather than the scoping filter: a grant
-/// authorizes the request's whole resource set or it authorizes nothing
-/// (§C.4). The gate site is what makes that reachable — it partitions paths
-/// by posture and posts the observe-covered ones as their own request.
+/// is the auto-grant decision and not the scoping filter: a grant authorizes
+/// the request's whole resource set or it authorizes nothing. The gate site
+/// is what makes that reachable — it splits its paths by posture and posts
+/// the observe-covered ones as their own request.
 ///
 /// Pure glob work with no I/O, so the ledger's critical section may call it
-/// under the lock (§B.1).
+/// while holding the lock.
 pub(crate) fn observing(
     subscriptions: &[Subscription],
     request: &ApprovalRequest,

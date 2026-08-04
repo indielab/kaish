@@ -13,9 +13,9 @@
 //! (§A.1), partitioned retention with a ring that refuses to evict a live
 //! chain (§D.4), sink backpressure, the invariant checks, the recovery
 //! sweep, the four-stage [`DecisionChain`] (standing → `policy` → `decide` →
-//! defer) with standing-grant matching (§C.2, §C.4), redemption-time
-//! precondition verification through the [`StateResolver`]s (§B.4), and the
-//! §C.5 subscription registry with its [`SubscriptionFilter`].
+//! defer) with standing-grant matching, redemption-time precondition
+//! verification through the [`StateResolver`]s, and the subscription
+//! registry with its [`SubscriptionFilter`].
 //!
 //! **What is not:** the gate sites. They live where the operations do —
 //! `tools/context.rs`'s `gate_overwrites`, `rm`'s `decide_rm_action`, and
@@ -44,11 +44,11 @@ pub use attempt_guard::AttemptGuard;
 pub use config::{LedgerConfig, LedgerSink, LedgerSinkError};
 pub use error::LedgerError;
 pub use operation::KernelOperation;
-pub use subscription::{Posture, SubscriptionFilter};
 pub use resolver::{
     ConditionReport, PathResolver, ResolverError, StateResolver, StateResolverConflict,
     StateResolvers, PATH_DIGEST_ALG, PATH_KIND,
 };
+pub use subscription::{Posture, SubscriptionFilter};
 pub(crate) use core::condition_conflict;
 pub(crate) use resolver::{conditions_to_observe, digest_path};
 pub use handles::{ApproverHandle, AttemptHandle, AttemptView, Approvals, Ledger, RequestChain, Requester};

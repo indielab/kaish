@@ -158,10 +158,10 @@ impl Tool for Rm {
 
         let trash_enabled = ctx.scope.trash_enabled();
         let trash_max_size = ctx.scope.trash_max_size();
-        // The §C.5 filter, taken once for the whole batch. With nothing
-        // subscribed and no enforce policy it holds an empty vector and
-        // `posture` answers `Unsubscribed` for every path — so a 10,000-path
-        // `rm -rf` builds no request and posts no entry.
+        // The subscription filter, taken once for the whole batch. With
+        // nothing subscribed and no enforce policy it holds an empty vector
+        // and `posture` answers `Unsubscribed` for every path, so a
+        // 10,000-path `rm -rf` builds no request and posts no entry.
         let subscriptions = ctx.fs_subscriptions();
         let operation_id = KernelOperation::FsRemove.id();
 
@@ -175,7 +175,7 @@ impl Tool for Rm {
             action: RmAction,
             /// Whether an `observe` subscription covers this path. Separate
             /// from `action` because observe records the delete whether the
-            /// trash caught it or not — §C.5 asks for a record of every
+            /// trash caught it or not — a subscription records every
             /// mutation, not only the gated ones.
             observed: bool,
         }
@@ -201,8 +201,9 @@ impl Tool for Rm {
             let file_size = entry.as_ref().map(|s| s.size);
             let is_dir = entry.as_ref().is_some_and(|s| s.is_dir());
             let is_symlink = entry.as_ref().is_some_and(|s| s.is_symlink());
-            // Matched on the **resolved** path, recorded under the display
-            // path — see `gate_overwrites` for why the two differ.
+            // Matched on the **resolved** path so a relative path cannot
+            // escape the glob, recorded under the display path so the log
+            // shows what the command named. `gate_overwrites` does the same.
             let posture = subscriptions.posture(
                 &operation_id,
                 crate::ledger::PATH_KIND,
@@ -264,9 +265,9 @@ impl Tool for Rm {
             // Authorized — fall through and execute each decision.
         }
 
-        // The observe record lands after the gate authorized the batch: a
-        // delete held at exit 2 never happens, and recording it as observed
-        // would put an operation on the log that did not run.
+        // The observe record lands after the gate authorized the batch. A
+        // delete held at exit 2 never happens, so recording it would put an
+        // operation on the log that never ran.
         let observed: Vec<String> = decisions
             .iter()
             .filter(|d| d.observed)

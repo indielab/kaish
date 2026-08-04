@@ -5,8 +5,8 @@
 //!
 //! 1. **Standing grants, then `observe` subscriptions** — pure ledger
 //!    lookups with no hook and no I/O, the only stage that runs under the
-//!    ledger lock (§C.4, §C.5). A standing grant is a decision and an
-//!    observe subscription is a note, so the decision answers first.
+//!    ledger lock. A standing grant authorizes the request; an observe
+//!    subscription only records it, so the authorization answers first.
 //! 2. **[`Approver::policy`]** — synchronous, on the request path,
 //!    contractually non-blocking. Allowlists and risk-class rules.
 //! 3. **[`Approver::decide`]** — async, may take minutes. Runs under a
@@ -120,8 +120,8 @@ pub trait Approver: Send + Sync {
 pub enum ChainStage {
     /// Stage 1 — a standing grant covered the request.
     Standing,
-    /// Stage 1 — an `observe` subscription covered the request (spec §C.5).
-    /// Recorded and proceeded; carries no permission semantics.
+    /// Stage 1 — an `observe` subscription covered the request. The
+    /// operation was recorded and allowed to proceed; nothing decided it.
     Subscription,
     /// Stage 2 — [`Approver::policy`] decided.
     Policy,
@@ -312,12 +312,11 @@ impl DecisionChain {
                 .await;
         }
 
-        // ── Stage 1b: observe subscriptions (spec §C.5) ─────────────
+        // ── Stage 1b: observe subscriptions ─────────────────────────
         // Also a pure ledger lookup with no hook and no I/O, and also its
-        // own self-contained transaction. It runs *after* standing grants
-        // because a standing grant is a decision and an observe subscription
-        // is a note: when both cover a request, the record should name the
-        // rule that authorized it.
+        // own self-contained transaction. It runs *after* standing grants:
+        // when both cover a request, the record should name the rule that
+        // authorized the operation, not the rule that only watched it.
         if let Some(grant) = self
             .authority
             .grant_from_observe(&request.id, self.grant_ttl)

@@ -164,9 +164,9 @@ struct LedgerState {
     /// count is reconstructible from the log as the number of
     /// `Granted{grounds: Standing{id}}` entries naming the rule.
     standing_uses: HashMap<StandingId, u32>,
-    /// The §C.5 subscription registry, ordered by id so a snapshot always
-    /// comes out in issue order — which is the precedence the filter and the
-    /// observe auto-grant both rely on.
+    /// The subscription registry, ordered by id so a snapshot always comes
+    /// out in issue order — the precedence the filter and the observe
+    /// auto-grant both rely on.
     subscriptions: BTreeMap<SubscriptionId, Subscription>,
     ring: VecDeque<RingSlot>,
     /// Ring slots promised to a not-yet-landed terminal entry (review
@@ -449,16 +449,15 @@ pub(crate) struct LedgerInner {
     /// whose own correctness depends on live-attempt state (`settle`,
     /// `redeem`, `redeem_with_token`, `abandon_request`) and from `sweep`.
     outbox: Mutex<Vec<(RequestId, AttemptId, Outcome)>>,
-    /// Whether `state.subscriptions` is non-empty — the §C.5 fast path.
+    /// Whether `state.subscriptions` is non-empty.
     ///
     /// Duplicated out of the locked state on purpose: a gate site asks this
-    /// question once per `fs.*` command, and the answer is almost always no.
-    /// One relaxed atomic load costs a branch the predictor gets right, where
-    /// taking the ledger's single mutex would serialize every filesystem
-    /// operation in the process against every other one for a question whose
-    /// answer is "nothing is subscribed". Written under the lock by
-    /// `subscribe`/`unsubscribe`, so it can never disagree with the registry
-    /// for longer than one uncontended store.
+    /// question once per `fs.*` command and the answer is almost always no.
+    /// Asking the registry itself would take the ledger's single mutex,
+    /// serializing every filesystem operation in the process against every
+    /// other one to learn that nothing is subscribed. Written under the lock
+    /// by `subscribe`/`unsubscribe`, so it can never disagree with the
+    /// registry for longer than one uncontended store.
     any_subscriptions: AtomicBool,
 }
 
@@ -1562,10 +1561,9 @@ impl LedgerInner {
         Ok(())
     }
 
-    /// Register a subscription (spec §C.5). Allocates its id, appends
-    /// `Subscribed`, and arms the atomic fast path — in that order, under one
-    /// lock, so a gate site can never see the flag set with an empty registry
-    /// behind it.
+    /// Register a subscription. Allocates its id, appends `Subscribed`, and
+    /// sets `any_subscriptions` — in that order, under one lock, so a gate
+    /// site can never see the flag set with an empty registry behind it.
     pub(crate) fn subscribe(
         &self,
         mut subscription: Subscription,
@@ -1594,9 +1592,9 @@ impl LedgerInner {
         Ok(id)
     }
 
-    /// Revoke a subscription. Takes effect for operations not yet posted;
-    /// a request already granted under it is unaffected, the same rule
-    /// standing-grant revocation follows (spec §C.4).
+    /// Revoke a subscription. Takes effect for operations not yet posted; a
+    /// request already granted under it is unaffected, the same rule
+    /// standing-grant revocation follows.
     pub(crate) fn unsubscribe(
         &self,
         id: SubscriptionId,
@@ -1622,8 +1620,9 @@ impl LedgerInner {
             None,
         )];
         let committed = guard.commit(entries, reserved);
-        // Disarm only once the registry is actually empty: the flag answers
-        // "is anything subscribed", not "was something just removed".
+        // Clear the flag only once the registry is actually empty: it
+        // answers "is anything subscribed", not "was something just
+        // removed".
         self.any_subscriptions
             .store(!guard.subscriptions.is_empty(), Ordering::Relaxed);
         drop(guard);
@@ -1631,8 +1630,8 @@ impl LedgerInner {
         Ok(())
     }
 
-    /// The §C.5 fast path: whether anything is subscribed at all. One relaxed
-    /// atomic load, no lock — see [`LedgerInner::any_subscriptions`].
+    /// Whether anything is subscribed at all. One relaxed atomic load and no
+    /// lock — see [`LedgerInner::any_subscriptions`].
     pub(crate) fn any_subscriptions(&self) -> bool {
         self.any_subscriptions.load(Ordering::Relaxed)
     }
@@ -1643,26 +1642,26 @@ impl LedgerInner {
         self.lock().subscriptions.values().cloned().collect()
     }
 
-    /// Stage 1b of the decision chain (spec §C.2, §C.5): if an `observe`
-    /// subscription covers **every** resource on `id`'s request, post
-    /// `Granted{grounds: Observe}` for it in the same lock acquisition as the
-    /// match, and let the operation proceed.
+    /// Stage 1b of the decision chain: if an `observe` subscription covers
+    /// **every** resource on `id`'s request, post `Granted{grounds: Observe}`
+    /// for it in the same lock acquisition as the match, and let the
+    /// operation proceed.
     ///
-    /// This is the whole mechanism behind "record everything with no
-    /// permission semantics": an observe subscription reduces to an
-    /// unconditional auto-grant, so the chain closes as soon as the operation
-    /// settles and the entries become evictable (§B.2). It charges no use
-    /// against anything — a subscription is a scope, not a budget — and it
-    /// never denies: `Ok(None)` means no observe subscription covered the
-    /// request and the caller falls through to the next stage.
+    /// This is how a subscription records an operation without deciding it.
+    /// An observe subscription reduces to an unconditional auto-grant, so the
+    /// chain closes as soon as the operation settles and its entries become
+    /// evictable. It charges no use against anything — a subscription is a
+    /// scope, not a budget — and it never denies. `Ok(None)` means no observe
+    /// subscription covered the request and the caller falls through to the
+    /// next stage.
     pub(crate) fn grant_from_observe(
         &self,
         id: &RequestId,
         grant_ttl: Duration,
     ) -> Result<Option<Grant>, LedgerError> {
         // Drawn before the lock for the same reason `grant_from_standing`
-        // draws it there: `getrandom::fill` can block on entropy starvation
-        // and the ledger lock must never gate on I/O (spec §B.1).
+        // draws it there: `getrandom::fill` can block on entropy starvation,
+        // and the ledger lock must never wait on I/O.
         let token = Token::new(
             generate_credential().map_err(|e| LedgerError::CredentialUnavailable(e.to_string()))?,
         );
@@ -1708,17 +1707,16 @@ impl LedgerInner {
         };
 
         // The request's own declared transitions become the grant's
-        // conditions, exactly as a standing grant's do (§C.4): observing an
+        // conditions, exactly as a standing grant's do: observing an
         // operation must not weaken the redemption-time check it would
         // otherwise get.
         let not_after = wall + grant_ttl;
         let terms = GrantTerms::once_for(&request, not_after);
         let grant = Grant::from_terms(
             id.clone(),
-            // The subscription is a record-keeping rule with no principal of
-            // its own, so the requester is named as the decider — an observe
-            // grant decides nothing, and inventing an approver here would put
-            // a judgment in the record that nobody made.
+            // The requester is named as the decider. A subscription is a
+            // record-keeping rule with no principal of its own, and naming
+            // an approver here would record a judgment nobody made.
             request.principal.clone(),
             Grounds::Observe {
                 subscription: winner,

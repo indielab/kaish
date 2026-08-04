@@ -1,16 +1,17 @@
-//! Spec §C.5's hard requirement, stated in numbers: **with nothing
-//! subscribed, an `fs.*` operation is free.**
+//! The subscription feature's hard requirement, stated in numbers: **with
+//! nothing subscribed, an `fs.*` operation is free.**
 //!
-//! One test, and it is alone in its own integration binary on purpose.
+//! One test, alone in its own integration binary on purpose.
 //! [`ApprovalRequest::constructed_count`] is a process-wide counter, so a
-//! neighbouring test that gated anything would inflate the delta and turn a
-//! real regression into a flaky one. A file with a single test is a file with
-//! a single process.
+//! neighboring test that gated anything would inflate the delta and turn a
+//! real regression into a flaky one. A file with a single test is a file
+//! with a single process.
 //!
-//! The claim under test is the one that decides whether the subscription
-//! feature is worth shipping at all: kaish's large-filesystem-job performance
-//! is a first-class property, and a ledger that taxes it by default is a
-//! ledger operators turn off.
+//! This claim decides whether the feature is worth shipping at all. A
+//! recursive delete over a large tree is a first-class kaish workload, and a
+//! ledger that slows it down by default is a ledger operators turn off — at
+//! which point the audit trail nobody paid for is also an audit trail nobody
+//! has.
 
 // Test-fixture code: unwrap/expect on known-good setup is the idiom here.
 #![allow(clippy::unwrap_used, clippy::expect_used)]
@@ -21,7 +22,7 @@
 use kaish_kernel::{Kernel, KernelConfig};
 use kaish_types::approval::ApprovalRequest;
 
-/// How many paths the delete names. Spec §H, PR 8: "a 10,000-path `rm -rf`".
+/// How many paths the delete names.
 const PATHS: usize = 10_000;
 
 #[tokio::test]
@@ -62,7 +63,7 @@ async fn an_unsubscribed_ten_thousand_path_delete_posts_nothing_and_builds_no_re
     assert_eq!(
         after - before,
         0,
-        "an unsubscribed {PATHS}-path delete built {} approval requests — spec §C.5 allows 0",
+        "an unsubscribed {PATHS}-path delete built {} approval requests — 0 are allowed",
         after - before
     );
     assert!(
