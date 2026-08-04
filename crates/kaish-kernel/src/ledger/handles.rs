@@ -9,7 +9,7 @@ use std::time::Duration;
 use kaish_types::approval::{
     ApprovalRequest, ApprovalRequestDraft, AttemptId, AttemptState, Capture, Grant, GrantTerms,
     Grounds, LedgerEntry, Outcome, Principal, RequestContext, RequestId, RequestState,
-    StandingGrant, StandingId, Token,
+    StandingGrant, StandingId, Subscription, SubscriptionId, Token,
 };
 
 use super::core::{build_inner, LedgerInner, SystemWallClock};
@@ -356,6 +356,26 @@ impl Approvals {
         self.0.as_ref().map(|inner| inner.standing()).unwrap_or_default()
     }
 
+    /// Whether anything at all is subscribed.
+    ///
+    /// **One relaxed atomic load and no lock**, so a gate site may call it
+    /// once per command and still cost an unsubscribed session nothing.
+    /// `false` means [`Self::subscriptions`] would return an empty vector, so
+    /// a caller that would allocate only to find nothing can skip the
+    /// allocation.
+    pub fn any_subscriptions(&self) -> bool {
+        self.0.as_ref().is_some_and(|inner| inner.any_subscriptions())
+    }
+
+    /// Every live subscription, in issue order. Allocates — call
+    /// [`Self::any_subscriptions`] first on a hot path.
+    pub fn subscriptions(&self) -> Vec<Subscription> {
+        self.0
+            .as_ref()
+            .map(|inner| inner.subscriptions())
+            .unwrap_or_default()
+    }
+
     /// Which request a fresh draft describes: same operation, same
     /// resource-reference set, newest first (spec §B.4's draft matcher).
     ///
@@ -464,6 +484,45 @@ impl ApproverHandle {
         grant_ttl: Duration,
     ) -> Result<Option<Grant>, LedgerError> {
         self.0.grant_from_standing(id, grant_ttl)
+    }
+
+    /// Register a subscription: a glob over (operation, resource) that puts
+    /// matching filesystem operations into `observe` (record and proceed) or
+    /// `enforce` (decide) posture. `s.id` is overwritten with a
+    /// ledger-allocated id whatever the caller set — the returned
+    /// [`SubscriptionId`] is the authoritative one, the same contract
+    /// [`Self::grant_standing`] has.
+    ///
+    /// Appends a `Subscribed` entry, so the registration is itself a ledger
+    /// fact — an audit scope that changed with no record of the change would
+    /// make the record it produced unreadable.
+    pub async fn subscribe(&self, s: Subscription) -> Result<SubscriptionId, LedgerError> {
+        self.0.drain_outbox();
+        self.0.subscribe(s)
+    }
+
+    /// Revoke a subscription, appending `Unsubscribed`. Takes effect for
+    /// operations not yet posted; a request already granted under it is
+    /// unaffected, the same rule standing-grant revocation follows.
+    pub async fn unsubscribe(&self, id: &SubscriptionId, reason: &str) -> Result<(), LedgerError> {
+        self.0.drain_outbox();
+        let by = self.principal();
+        self.0.unsubscribe(*id, by, reason.to_string())
+    }
+
+    /// Stage 1b of the decision chain: if an `observe` subscription covers
+    /// every resource on this request, post `Granted{grounds: Observe}` and
+    /// let the operation proceed. `Ok(None)` means no observe subscription
+    /// covered it and the caller falls through to the next stage.
+    ///
+    /// Lives on the authority handle because it posts a `Granted` entry;
+    /// [`DecisionChain`](super::DecisionChain) is the only caller.
+    pub async fn grant_from_observe(
+        &self,
+        id: &RequestId,
+        grant_ttl: Duration,
+    ) -> Result<Option<Grant>, LedgerError> {
+        self.0.grant_from_observe(id, grant_ttl)
     }
 
     /// How many uses have been charged against a standing grant so far

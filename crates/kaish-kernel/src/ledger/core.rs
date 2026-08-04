@@ -26,7 +26,7 @@
 //! public wrappers around the `pub(crate)` methods here; this file has no
 //! public API of its own.
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime};
@@ -34,7 +34,8 @@ use std::time::{Duration, SystemTime};
 use kaish_types::approval::{
     ApprovalRequest, ApprovalRequestDraft, AttemptId, AttemptState, Capture, Condition, Expiring,
     Grant, GrantTerms, Grounds, LedgerEntry, Observation, Outcome, Principal, RequestContext,
-    RequestId, RequestState, ResourceRef, StandingGrant, StandingId, StateClaim, Token,
+    RequestId, RequestState, ResourceRef, StandingGrant, StandingId, StateClaim, Subscription,
+    SubscriptionId, Token,
 };
 use kaish_types::clock::Instant;
 use tokio::sync::mpsc::OwnedPermit;
@@ -152,6 +153,7 @@ struct LedgerState {
     next_seq: u64,
     next_attempt_seq: u64,
     next_standing_seq: u64,
+    next_subscription_seq: u64,
     chains: HashMap<RequestId, Chain>,
     live_count_total: usize,
     live_count_by_principal: HashMap<String, usize>,
@@ -162,6 +164,10 @@ struct LedgerState {
     /// count is reconstructible from the log as the number of
     /// `Granted{grounds: Standing{id}}` entries naming the rule.
     standing_uses: HashMap<StandingId, u32>,
+    /// The subscription registry, ordered by id so a snapshot always comes
+    /// out in issue order — the precedence the filter and the observe
+    /// auto-grant both rely on.
+    subscriptions: BTreeMap<SubscriptionId, Subscription>,
     ring: VecDeque<RingSlot>,
     /// Ring slots promised to a not-yet-landed terminal entry (review
     /// finding B3) — counted against `retained_entries` alongside
@@ -443,6 +449,16 @@ pub(crate) struct LedgerInner {
     /// whose own correctness depends on live-attempt state (`settle`,
     /// `redeem`, `redeem_with_token`, `abandon_request`) and from `sweep`.
     outbox: Mutex<Vec<(RequestId, AttemptId, Outcome)>>,
+    /// Whether `state.subscriptions` is non-empty.
+    ///
+    /// Duplicated out of the locked state on purpose: a gate site asks this
+    /// question once per `fs.*` command and the answer is almost always no.
+    /// Asking the registry itself would take the ledger's single mutex,
+    /// serializing every filesystem operation in the process against every
+    /// other one to learn that nothing is subscribed. Written under the lock
+    /// by `subscribe`/`unsubscribe`, so it can never disagree with the
+    /// registry for longer than one uncontended store.
+    any_subscriptions: AtomicBool,
 }
 
 impl LedgerInner {
@@ -1545,6 +1561,193 @@ impl LedgerInner {
         Ok(())
     }
 
+    /// Register a subscription. Allocates its id, appends `Subscribed`, and
+    /// sets `any_subscriptions` — in that order, under one lock, so a gate
+    /// site can never see the flag set with an empty registry behind it.
+    pub(crate) fn subscribe(
+        &self,
+        mut subscription: Subscription,
+    ) -> Result<SubscriptionId, LedgerError> {
+        let mut guard = self.lock();
+        let (_, wall) = self.now();
+        let reserved = guard.reserve_capacity(1, self.config.retained_entries)?;
+        let raw = guard.next_subscription_seq;
+        guard.next_subscription_seq += 1;
+        let id = SubscriptionId::new(raw);
+        subscription.id = id;
+        guard.subscriptions.insert(id, subscription.clone());
+        let seq = guard.alloc_seq();
+        let entries = vec![(
+            LedgerEntry::Subscribed {
+                seq,
+                at: wall,
+                subscription,
+            },
+            None,
+        )];
+        let committed = guard.commit(entries, reserved);
+        self.any_subscriptions.store(true, Ordering::Relaxed);
+        drop(guard);
+        emit_events(&committed);
+        Ok(id)
+    }
+
+    /// Revoke a subscription. Takes effect for operations not yet posted; a
+    /// request already granted under it is unaffected, the same rule
+    /// standing-grant revocation follows.
+    pub(crate) fn unsubscribe(
+        &self,
+        id: SubscriptionId,
+        by: Principal,
+        reason: String,
+    ) -> Result<(), LedgerError> {
+        let mut guard = self.lock();
+        let (_, wall) = self.now();
+        if !guard.subscriptions.contains_key(&id) {
+            return Err(LedgerError::SubscriptionNotFound(id));
+        }
+        let reserved = guard.reserve_capacity(1, self.config.retained_entries)?;
+        guard.subscriptions.remove(&id);
+        let seq = guard.alloc_seq();
+        let entries = vec![(
+            LedgerEntry::Unsubscribed {
+                seq,
+                at: wall,
+                id,
+                by,
+                reason,
+            },
+            None,
+        )];
+        let committed = guard.commit(entries, reserved);
+        // Clear the flag only once the registry is actually empty: it
+        // answers "is anything subscribed", not "was something just
+        // removed".
+        self.any_subscriptions
+            .store(!guard.subscriptions.is_empty(), Ordering::Relaxed);
+        drop(guard);
+        emit_events(&committed);
+        Ok(())
+    }
+
+    /// Whether anything is subscribed at all. One relaxed atomic load and no
+    /// lock — see [`LedgerInner::any_subscriptions`].
+    pub(crate) fn any_subscriptions(&self) -> bool {
+        self.any_subscriptions.load(Ordering::Relaxed)
+    }
+
+    /// A snapshot of the registry in issue order. Taken once per gate call,
+    /// never per path.
+    pub(crate) fn subscriptions(&self) -> Vec<Subscription> {
+        self.lock().subscriptions.values().cloned().collect()
+    }
+
+    /// Stage 1b of the decision chain: if an `observe` subscription covers
+    /// **every** resource on `id`'s request, post `Granted{grounds: Observe}`
+    /// for it in the same lock acquisition as the match, and let the
+    /// operation proceed.
+    ///
+    /// This is how a subscription records an operation without deciding it.
+    /// An observe subscription reduces to an unconditional auto-grant, so the
+    /// chain closes as soon as the operation settles and its entries become
+    /// evictable. It charges no use against anything — a subscription is a
+    /// scope, not a budget — and it never denies. `Ok(None)` means no observe
+    /// subscription covered the request and the caller falls through to the
+    /// next stage.
+    pub(crate) fn grant_from_observe(
+        &self,
+        id: &RequestId,
+        grant_ttl: Duration,
+    ) -> Result<Option<Grant>, LedgerError> {
+        // Drawn before the lock for the same reason `grant_from_standing`
+        // draws it there: `getrandom::fill` can block on entropy starvation,
+        // and the ledger lock must never wait on I/O.
+        let token = Token::new(
+            generate_credential().map_err(|e| LedgerError::CredentialUnavailable(e.to_string()))?,
+        );
+        let mut guard = self.lock();
+        let (mono, wall) = self.now();
+        let mut all_committed = self.materialize_expiry(&mut guard, id, mono, wall)?;
+        macro_rules! bail {
+            ($err:expr) => {{
+                let err = $err;
+                drop(guard);
+                emit_events(&all_committed);
+                return Err(err);
+            }};
+        }
+        macro_rules! no_match {
+            () => {{
+                drop(guard);
+                emit_events(&all_committed);
+                return Ok(None);
+            }};
+        }
+        if guard.subscriptions.is_empty() {
+            no_match!();
+        }
+        let Some(chain) = guard.chains.get(id) else {
+            bail!(LedgerError::NotFound(id.clone()));
+        };
+        match chain.state {
+            RequestState::Requested => {}
+            RequestState::Granted => bail!(LedgerError::AlreadyDecided(id.clone())),
+            other => bail!(self.terminal_error(id, other, chain.void_reason.clone())),
+        }
+        let request = chain.request.clone();
+
+        let subscriptions: Vec<Subscription> = guard.subscriptions.values().cloned().collect();
+        let Some(winner) = super::subscription::observing(&subscriptions, &request) else {
+            no_match!();
+        };
+
+        let reserved = match guard.reserve_capacity(1, self.config.retained_entries) {
+            Ok(reserved) => reserved,
+            Err(err) => bail!(err),
+        };
+
+        // The request's own declared transitions become the grant's
+        // conditions, exactly as a standing grant's do: observing an
+        // operation must not weaken the redemption-time check it would
+        // otherwise get.
+        let not_after = wall + grant_ttl;
+        let terms = GrantTerms::once_for(&request, not_after);
+        let grant = Grant::from_terms(
+            id.clone(),
+            // The requester is named as the decider. A subscription is a
+            // record-keeping rule with no principal of its own, and naming
+            // an approver here would record a judgment nobody made.
+            request.principal.clone(),
+            Grounds::Observe {
+                subscription: winner,
+            },
+            terms,
+            token.token_prefix(),
+            wall,
+        );
+        let remaining = not_after.duration_since(wall).unwrap_or(Duration::ZERO);
+
+        let seq = guard.alloc_seq();
+        let entries = vec![(
+            LedgerEntry::Granted {
+                seq,
+                at: wall,
+                grant: grant.clone(),
+            },
+            Some(id.clone()),
+        )];
+        all_committed.extend(guard.commit(entries, reserved));
+        if let Some(chain) = guard.chains.get_mut(id) {
+            chain.grant = Some(grant.clone());
+            chain.state = RequestState::Granted;
+            chain.grant_deadline = Some(mono + remaining);
+            chain.token = Some(token);
+        }
+        drop(guard);
+        emit_events(&all_committed);
+        Ok(Some(grant))
+    }
+
     /// Retrieve the credential. Appends `KeyRetrieved` naming `by`, and
     /// returns `None` — never handing out the key — when that entry cannot
     /// be recorded (review finding S2: accountability is the record, not
@@ -1921,6 +2124,12 @@ fn emit_events(entries: &[LedgerEntry]) {
             LedgerEntry::StandingRevoked { id, .. } => {
                 tracing::info!(standing_id = %id, "approval.standing_revoked");
             }
+            LedgerEntry::Subscribed { subscription, .. } => {
+                tracing::info!(subscription_id = %subscription.id, mode = ?subscription.mode, "approval.subscribed");
+            }
+            LedgerEntry::Unsubscribed { id, .. } => {
+                tracing::info!(subscription_id = %id, "approval.unsubscribed");
+            }
             LedgerEntry::TokenRejected { request, attempts, .. } => {
                 tracing::warn!(request_id = ?request.as_ref().map(ToString::to_string), attempts = attempts, "approval.token_rejected");
             }
@@ -1995,11 +2204,13 @@ pub(crate) fn build_inner(
         next_seq: 1,
         next_attempt_seq: 1,
         next_standing_seq: 1,
+        next_subscription_seq: 1,
         chains: HashMap::new(),
         live_count_total: 0,
         live_count_by_principal: HashMap::new(),
         standing: HashMap::new(),
         standing_uses: HashMap::new(),
+        subscriptions: BTreeMap::new(),
         ring: VecDeque::new(),
         reserved_ring_slots: 0,
         sink_tx,
@@ -2013,6 +2224,7 @@ pub(crate) fn build_inner(
         state: Mutex::new(state),
         wall,
         outbox: Mutex::new(Vec::new()),
+        any_subscriptions: AtomicBool::new(false),
     }))
 }
 

@@ -1,4 +1,4 @@
-//! The approval ledger (`docs/approval-ledger.md`, ledger PRs 2 and 4).
+//! The approval ledger (`docs/approval-ledger.md`).
 //!
 //! One append-only log, two posting authorities, and a linearization
 //! contract enforced by a single lock (spec §A.1, §B.1). This module is the
@@ -12,18 +12,17 @@
 //! index and its rejected-attempt voiding (§F.3), idempotent settlement
 //! (§A.1), partitioned retention with a ring that refuses to evict a live
 //! chain (§D.4), sink backpressure, the invariant checks, the recovery
-//! sweep, and — from PR 4 — the four-stage [`DecisionChain`] (standing →
-//! `policy` → `decide` → defer) with standing-grant matching (§C.2, §C.4).
+//! sweep, the four-stage [`DecisionChain`] (standing → `policy` → `decide` →
+//! defer) with standing-grant matching, redemption-time precondition
+//! verification through the [`StateResolver`]s, and the subscription
+//! registry with its [`SubscriptionFilter`].
 //!
-//! **What is not:** this module is wired to no gate site. Nothing in
-//! `kaish-kernel`'s dispatch path calls into it yet, and building it changed
-//! no observable behavior anywhere else in the crate. `ToolCtx` gained its
-//! `request_approval`/`approvals`/`settle_with` methods and `ExecContext`
-//! its real implementations in PR 3, alongside this module's
-//! [`AttemptGuard`]; `Kernel::build` constructs a ledger and a
-//! [`DecisionChain`] (PR 4) — but no gate site calls either yet.
-//! `Kernel::confirm` and the ten gate sites (PR 5, the cutover) are what
-//! give them callers.
+//! **What is not:** the gate sites. They live where the operations do —
+//! `tools/context.rs`'s `gate_overwrites`, `rm`'s `decide_rm_action`, and
+//! `kaish-trash empty` — and reach this module through `ToolCtx`'s
+//! `request_approval`/`approvals`/`settle_with` and the dispatcher's
+//! [`AttemptGuard`]. `Kernel::build` is what constructs a ledger and a
+//! [`DecisionChain`] and hands the embedder the one [`ApproverHandle`].
 
 mod approver;
 mod attempt_guard;
@@ -32,8 +31,10 @@ mod core;
 mod error;
 mod handles;
 mod operation;
+mod patterns;
 mod resolver;
 mod standing;
+mod subscription;
 
 pub use approver::{
     Approver, ChainContext, ChainOutcome, ChainStage, DecisionChain, PatientSource,
@@ -47,6 +48,7 @@ pub use resolver::{
     ConditionReport, PathResolver, ResolverError, StateResolver, StateResolverConflict,
     StateResolvers, PATH_DIGEST_ALG, PATH_KIND,
 };
+pub use subscription::{Posture, SubscriptionFilter};
 pub(crate) use core::condition_conflict;
 pub(crate) use resolver::{conditions_to_observe, digest_path};
 pub use handles::{ApproverHandle, AttemptHandle, AttemptView, Approvals, Ledger, RequestChain, Requester};

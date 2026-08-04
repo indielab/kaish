@@ -10,7 +10,9 @@
 
 use std::fmt;
 
-use kaish_types::approval::{Outcome, RequestId, RequestState, ResourceRef, StandingId, StateClaim};
+use kaish_types::approval::{
+    Outcome, RequestId, RequestState, ResourceRef, StandingId, StateClaim, SubscriptionId,
+};
 
 /// Why a ledger transaction did not commit. Every non-`InvariantViolated`
 /// variant is an ordinary runtime outcome, not a bug (spec §B.3).
@@ -41,6 +43,8 @@ pub enum LedgerError {
     },
     /// No standing grant exists with this id.
     StandingNotFound(StandingId),
+    /// No subscription exists with this id.
+    SubscriptionNotFound(SubscriptionId),
     /// A redemption arrived after the grant already closed — either a
     /// successful (or `Unknown`) settlement, or the recovery sweep closing
     /// an unreported `Reserved` attempt as `Abandoned` (spec §B.2 treats
@@ -150,6 +154,7 @@ impl fmt::Display for LedgerError {
                 Ok(())
             }
             Self::StandingNotFound(id) => write!(f, "standing grant {id} does not exist"),
+            Self::SubscriptionNotFound(id) => write!(f, "subscription {id} does not exist"),
             Self::AlreadySettled { id, outcome } => match outcome {
                 Some(outcome) => write!(
                     f,

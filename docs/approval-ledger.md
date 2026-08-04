@@ -1026,6 +1026,36 @@ Those two rules together are the whole posting posture, and they replace the ear
 "gate sites always post" framing, which could not coexist with the free-when-unsubscribed
 requirement.
 
+**Decided while building PR 8** — four questions this section left open, answered in the
+code and recorded here so they are not re-litigated:
+
+1. **`enforce` beats `observe`** when both cover one path. Enforce is the strictly
+   stronger posture and its record is a superset of observe's, so the other precedence
+   could silently downgrade a gate to a note. Among several `observe` subscriptions the
+   lowest `SubscriptionId` wins — issue order, the same deterministic precedence §C.4
+   gives standing grants.
+2. **A subscription matches per resource; it is not all-or-nothing.** A standing grant is
+   all-or-nothing because it *authorizes*; a subscription only *scopes*. This section's own
+   worked example — record `/workspace/**`, stay silent about `/tmp/**` — is unreachable
+   under all-or-nothing, so the gate site partitions its paths by posture and posts the
+   observe-covered ones as their own request. The auto-grant that closes that request is
+   still all-or-nothing, because it is a grant.
+3. **The glob matches the resolved path; the record names the display path.** A scope a
+   relative path could step outside of would not be a scope — `cd /workspace && tee secret`
+   has to land inside `/workspace/**`. The recorded resource keeps the string the command
+   named, because that is what an auditor is trying to recognize. This is the narrow answer
+   for `path` only; §I.3's general canonicalization question stays open.
+4. **An observe record that fails to auto-grant exits 1, never 2.** The gate site's registry
+   snapshot and the registry itself are two reads of one question, and a deferral means they
+   disagreed — the subscription was revoked mid-command, or the filter and the chain's stage
+   1b have drifted apart. Exit 2 would advertise a grantable request for an operation with no
+   permission semantics, hiding the disagreement behind a plausible prompt.
+
+**Observe fires for every mutation the glob covers, not only the ones a gate would have
+held.** A brand-new file, an append, and a delete the trash caught all produce an observe
+record; §C.5 asks for "a complete, typed record of every filesystem mutation", and a record
+that skipped the survivable ones would answer a different question.
+
 **Prior art worth mining at implementation time:**
 
 - **ZFS / Solaris VSCAN** (the `vscan` dataset property + `vscand`): the property being

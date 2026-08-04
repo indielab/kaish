@@ -26,6 +26,7 @@
 //!   that knows those values can call it (spec §D.1).
 
 use std::collections::BTreeMap;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, SystemTime};
 
 use serde::{Deserialize, Serialize};
@@ -607,6 +608,7 @@ impl ApprovalRequest {
     /// `"git.push"`). The draft carries no principal, capture, id, context,
     /// or timing — those are kernel-stamped (spec §D.1).
     pub fn builder(operation: impl Into<String>) -> ApprovalRequestBuilder {
+        REQUESTS_CONSTRUCTED.fetch_add(1, Ordering::Relaxed);
         ApprovalRequestBuilder {
             operation: operation.into(),
             risk: None,
@@ -616,7 +618,25 @@ impl ApprovalRequest {
             supersedes: None,
         }
     }
+
+    /// How many approval requests this process has begun building, ever —
+    /// one per [`ApprovalRequest::builder`] call, counted whether or not the
+    /// draft is ever built, stamped, or posted.
+    ///
+    /// A test asserts on this. An `fs.*` operation nothing is subscribed to
+    /// must build **no** request at all, however many paths it names, and a
+    /// counter is the only way to state that as a number: read it either
+    /// side of a 10,000-path `rm -rf` and the difference must be 0. Relaxed
+    /// ordering, because it is a process-wide diagnostic total and never a
+    /// synchronization point — read it from one task at a time, or accept
+    /// that a concurrent builder may or may not be counted yet.
+    pub fn constructed_count() -> u64 {
+        REQUESTS_CONSTRUCTED.load(Ordering::Relaxed)
+    }
 }
+
+/// Backing store for [`ApprovalRequest::constructed_count`].
+static REQUESTS_CONSTRUCTED: AtomicU64 = AtomicU64::new(0);
 
 /// The public view of a request: everything in [`ApprovalRequest`] and
 /// nothing else — deliberately no credential field, so there is nothing to
@@ -1086,10 +1106,16 @@ impl ResourcePattern {
 }
 
 /// A glob-scoped registration making matching operations `observe` (record
-/// only) or `enforce` (decide) — spec §C.5.
+/// only) or `enforce` (decide).
+///
+/// Registering one appends a `Subscribed` entry, and revoking one appends
+/// `Unsubscribed` — an audit record whose own scope changed with no record
+/// of the change would be unreadable.
 #[non_exhaustive]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Subscription {
+    /// This subscription's id.
+    pub id: SubscriptionId,
     /// Operation patterns this subscription covers.
     pub operations: Vec<OperationPattern>,
     /// Resource patterns this subscription covers.
@@ -1101,7 +1127,29 @@ pub struct Subscription {
     pub reason: String,
 }
 
-/// The two subscription modes (spec §C.5) — the audit-versus-enforce split.
+impl Subscription {
+    /// Build a not-yet-registered subscription. `id` is a placeholder:
+    /// `ApproverHandle::subscribe` overwrites it with a ledger-allocated
+    /// [`SubscriptionId`] and returns the authoritative one, the same shape
+    /// [`StandingGrant::new`] has. This is the only constructor outside the
+    /// crate — the type is `#[non_exhaustive]`.
+    pub fn new(
+        operations: Vec<OperationPattern>,
+        resources: Vec<ResourcePattern>,
+        mode: SubscriptionMode,
+        reason: impl Into<String>,
+    ) -> Self {
+        Self {
+            id: SubscriptionId::new(0),
+            operations,
+            resources,
+            mode,
+            reason: reason.into(),
+        }
+    }
+}
+
+/// The two subscription modes — record, or decide.
 #[non_exhaustive]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -1109,7 +1157,7 @@ pub enum SubscriptionMode {
     /// Matching operations post `Requested` + immediate `Granted{Observe}`
     /// and proceed; they never defer, never block, never prompt.
     Observe,
-    /// Matching operations go through the real decision chain (spec §C.2).
+    /// Matching operations go through the decision chain, and may defer.
     Enforce,
 }
 
@@ -1386,6 +1434,31 @@ pub enum LedgerEntry {
         /// Why.
         reason: String,
     },
+    /// A subscription was registered.
+    Subscribed {
+        /// Monotonic per-ledger sequence number.
+        seq: u64,
+        /// Wall-clock post time.
+        #[serde(with = "crate::rfc3339::system_time")]
+        at: SystemTime,
+        /// The subscription registered, carrying its allocated id.
+        subscription: Subscription,
+    },
+    /// A subscription was revoked. Takes effect immediately for operations
+    /// not yet posted; requests already granted under it are unaffected.
+    Unsubscribed {
+        /// Monotonic per-ledger sequence number.
+        seq: u64,
+        /// Wall-clock post time.
+        #[serde(with = "crate::rfc3339::system_time")]
+        at: SystemTime,
+        /// The subscription revoked.
+        id: SubscriptionId,
+        /// Who revoked it.
+        by: Principal,
+        /// Why.
+        reason: String,
+    },
     /// A bad credential was presented.
     TokenRejected {
         /// Monotonic per-ledger sequence number.
@@ -1422,6 +1495,8 @@ impl LedgerEntry {
             | Self::Voided { seq, .. }
             | Self::StandingIssued { seq, .. }
             | Self::StandingRevoked { seq, .. }
+            | Self::Subscribed { seq, .. }
+            | Self::Unsubscribed { seq, .. }
             | Self::TokenRejected { seq, .. } => *seq,
         }
     }

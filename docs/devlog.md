@@ -15,6 +15,75 @@ before it ships.
 
 ---
 
+## The ledger learns to watch without stopping you (2026-08-03)
+
+PR 8 of the nine. The feature is small and the constraint is the whole job:
+`fs.*` observability subscriptions — a glob that says "record every mutation
+under `/workspace/**`" without turning a single write into a prompt.
+
+Everything in §C.5 hangs off one sentence: *free when nothing is subscribed.* A
+recursive delete over a large tree is a first-class kaish workload, and a ledger
+that taxes it by default is a ledger operators turn off — at which point the
+audit trail nobody paid for is also an audit trail nobody has. So the question I
+kept asking was not "does the filter work" but "what does the filter cost when it
+has nothing to say".
+
+Three answers, in order of how much they mattered:
+
+- **One relaxed atomic load.** `LedgerInner.any_subscriptions`, written under the
+  lock and read without it. The alternative — asking the registry — takes the
+  ledger's single mutex, which would serialize every filesystem operation in the
+  process against every other one to learn that nothing is subscribed.
+- **One snapshot per command, not per path.** `SubscriptionFilter` holds the
+  registry for the length of one gate call. A per-path query would acquire that
+  same lock ten thousand times on one delete.
+- **A counter, because "free" is a number.** `ApprovalRequest::constructed_count()`
+  increments in `ApprovalRequest::builder`. The test creates 10,000 files, deletes
+  them with a glob that really does hand the gate site 10,000 positionals, and
+  asserts the delta is 0. It lives alone in its own integration binary — the
+  counter is process-wide, and a neighbour that gated anything would turn a real
+  regression into a flake.
+
+Then the tests found the thing I had not thought about. The gate site classifies a
+path as observed from its snapshot; the decision chain re-derives the same answer
+under the lock. Two reads of one question — and when they disagree, the observe
+request *defers*, so the command exits 2 with a grantable-looking prompt attached
+to an operation that has no permission semantics at all. The mutation that exposed
+it: make `enforce` behave like `observe` in the filter. Every test still passed.
+The enforce test's exit 2 was arriving from the deferral instead of from the gate —
+the right answer for the wrong reason, which is precisely what a test suite exists
+to notice and this one did not.
+
+The fix is a refusal to paper over it. `record_observed` gates its draft directly
+and treats a deferral as **exit 1**, naming the disagreement: either the
+subscription was revoked while the command ran, or the filter and the chain's
+stage 1b have drifted apart. Exit 2 would advertise a request an operator could
+grant, for a decision nobody is making.
+
+Four things the spec left to the implementation, decided and written into §C.5 so
+PR 9 does not have to rediscover them:
+
+1. **`enforce` beats `observe`.** The stronger posture wins; the other order could
+   quietly downgrade a gate to a note.
+2. **Subscriptions match per resource, not all-or-nothing.** A standing grant is
+   all-or-nothing because it authorizes; a subscription only scopes. §C.5's own
+   worked example — record `/workspace/**`, stay silent about `/tmp/**` — is
+   unreachable any other way. So the gate site partitions its paths by posture and
+   posts the observed ones as their own request; the auto-grant that closes that
+   request is still all-or-nothing, because it *is* a grant.
+3. **Match the resolved path, record the display path.** A scope a relative path
+   could step outside of is not a scope. The record still names the string the
+   command wrote, because that is what an auditor is trying to recognize.
+4. **Observe fires for every mutation the glob covers**, including the ones a gate
+   would never have held — a new file, an append, a delete the trash caught. §C.5
+   asks for a record of every filesystem mutation, and one that skipped the
+   survivable ones would be answering a different question.
+
+The one thing I did *not* do: give `subscribe` a shell surface. A session that
+could subscribe itself could also unsubscribe itself, and an audit scope an agent
+can turn off is decoration. It stays on `ApproverHandle`, where the embedder holds
+it.
+
 ## The cutover: the latch becomes the ledger, and the word goes with it (2026-08-02)
 
 PR 5 of the nine — the one the plan called "aggressive-clean: no compatibility
