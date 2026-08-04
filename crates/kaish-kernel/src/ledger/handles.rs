@@ -8,8 +8,8 @@ use std::time::Duration;
 
 use kaish_types::approval::{
     ApprovalRequest, ApprovalRequestDraft, AttemptId, AttemptState, Capture, Grant, GrantTerms,
-    Grounds, LedgerEntry, Outcome, Principal, RequestContext, RequestId, RequestState,
-    StandingGrant, StandingId, Subscription, SubscriptionId, Token,
+    Grounds, LedgerEntry, ObservedResource, OperationId, Outcome, Principal, RequestContext,
+    RequestId, RequestState, StandingGrant, StandingId, Subscription, SubscriptionId, Token,
 };
 
 use super::core::{build_inner, LedgerInner, SystemWallClock};
@@ -310,6 +310,28 @@ impl Requester {
         self.0.drain_outbox();
         self.0.renew(id)
     }
+
+    /// Post one `Observed` entry: an `observe` subscription covered a
+    /// mutation, which proceeds (spec §C.5). A record, not a request — no
+    /// chain is opened, nothing lands in the live index, and there is no
+    /// grant to redeem. Lives on the implementation side because the gate
+    /// sites are what classify a path as observed; nothing here decides
+    /// anything.
+    ///
+    /// `Err` fails the operation closed at the gate site: an operator who
+    /// subscribed asked for a complete record, and a mutation that runs
+    /// outside it is the gap the subscription exists to close.
+    pub async fn observed(
+        &self,
+        operation: OperationId,
+        by: Principal,
+        resources: Vec<ObservedResource>,
+    ) -> Result<(), LedgerError> {
+        // Same reason as `post_request`: a queued settlement can be what
+        // frees the ring capacity this append reserves.
+        self.0.drain_outbox();
+        self.0.post_observed(operation, by, resources)
+    }
 }
 
 impl Approvals {
@@ -508,21 +530,6 @@ impl ApproverHandle {
         self.0.drain_outbox();
         let by = self.principal();
         self.0.unsubscribe(*id, by, reason.to_string())
-    }
-
-    /// Stage 1b of the decision chain: if an `observe` subscription covers
-    /// every resource on this request, post `Granted{grounds: Observe}` and
-    /// let the operation proceed. `Ok(None)` means no observe subscription
-    /// covered it and the caller falls through to the next stage.
-    ///
-    /// Lives on the authority handle because it posts a `Granted` entry;
-    /// [`DecisionChain`](super::DecisionChain) is the only caller.
-    pub async fn grant_from_observe(
-        &self,
-        id: &RequestId,
-        grant_ttl: Duration,
-    ) -> Result<Option<Grant>, LedgerError> {
-        self.0.grant_from_observe(id, grant_ttl)
     }
 
     /// How many uses have been charged against a standing grant so far

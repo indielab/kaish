@@ -382,13 +382,14 @@ pub enum Grounds {
     /// A standing grant already in the ledger fired. Automation is auditable
     /// because the auto-approval names the rule that produced it.
     Standing { grant: StandingId },
-    /// An `observe` subscription matched (§C.5). Records the operation and
-    /// proceeds; carries no permission semantics.
-    Observe { subscription: SubscriptionId },
     /// The embedder granted directly through its `ApproverHandle`.
     Embedder,
 }
 ```
+
+An `observe` subscription (§C.5) has no `Grounds` variant, because it grants nothing:
+a covered operation posts a chainless `Observed` entry (§A.5) that names the
+subscription per resource, and no request exists to decide.
 
 The `Standing` variant is the load-bearing one for "the approval side can automate some". A
 standing grant is *itself a ledger entry* (`StandingIssued`), and every request it
@@ -428,6 +429,12 @@ pub enum LedgerEntry {
     Voided      { seq: u64, at: SystemTime, request: RequestId, reason: String },
     StandingIssued  { seq: u64, at: SystemTime, grant: StandingGrant },
     StandingRevoked { seq: u64, at: SystemTime, id: StandingId, by: Principal, reason: String },
+    /// An `observe` subscription covered a mutation, which proceeded (§C.5).
+    /// A record with no chain behind it: no request, no grant, no attempt.
+    /// Each resource carries the display path, the resolved path the glob
+    /// matched, and the covering subscription's id.
+    Observed    { seq: u64, at: SystemTime, operation: OperationId, by: Principal,
+                  resources: Vec<ObservedResource> },
     /// A bad credential was presented. `request` is `Some` when the presenting
     /// draft matched a live request (so the count means something) and `None`
     /// when it matched nothing. Carries the running count; the fifth rejection
@@ -881,9 +888,10 @@ and nothing about provenance.
 
 Four stages, tried in order, first non-`Defer` wins:
 
-1. **Standing grants and subscriptions** — pure ledger lookup, no hook, no I/O, runs under
-   the ledger lock. This is the auto-approve fast path, and §C.5's `observe` subscriptions
-   resolve here too.
+1. **Standing grants** — pure ledger lookup, no hook, no I/O, runs under the ledger lock.
+   This is the auto-approve fast path. (§C.5's `observe` subscriptions never reach the
+   chain at all — a covered operation posts a chainless `Observed` entry at the gate site
+   and proceeds; only `enforce` posts a request.)
 2. **`Approver::policy`** — synchronous, on the request path, contractually non-blocking.
    Suitable for allowlists, risk-class rules, and "never `git.push.force`, full stop".
 3. **`Approver::decide`** — async, may take minutes. Runs under a `ctx.patient(budget)`
@@ -1001,13 +1009,17 @@ ledger must not tax it by default.
 
 **Two subscription modes** — the audit-versus-enforce split, which is the whole point:
 
-- **`observe`** — matching operations post `Requested` + immediate `Granted{Observe}` and
+- **`observe`** — matching operations post one chainless `Observed` entry (§A.5) and
   proceed; they never defer, never block, never prompt. This is "record everything" with no
-  permission semantics. Mechanically it is a standing rule with `Grounds::Observe` (§A.4)
-  that auto-grants each matching request, so the chain closes as soon as the operation
-  settles successfully — or at `not_after` if it never does — and the entries become
-  evictable (§B.2). It needs no new state-machine surface — the `Grounds` variant, the subscription registry, and the fast-path filter are
-  the whole feature.
+  permission semantics — and because no permission is involved, no authorization machinery
+  runs: no request is built, no grant exists, nothing lands in the live index, and the
+  entry is evictable the moment it commits. The gate site's classification is the whole
+  decision — each recorded resource carries the display path, the resolved path the glob
+  matched, and the covering subscription's id, so there is no second matcher to disagree
+  with the filter. (This is the fanotify notification mark made literal; the chain-backed
+  first design auto-granted a request per observed batch, which cost four entries plus
+  grant machinery to record a fact nobody decided, and put a second glob matcher behind
+  the filter that could — and in review, did — disagree with it.)
 - **`enforce`** — matching operations go through the real decision chain (§C.2). This is
   what `set -o approvals` becomes: an enforce subscription over `fs.*`. The cutover (§H, PR 5)
   ships exactly that one degenerate case — whole namespace, no glob, no `observe` — because
@@ -1037,19 +1049,22 @@ code and recorded here so they are not re-litigated:
 2. **A subscription matches per resource; it is not all-or-nothing.** A standing grant is
    all-or-nothing because it *authorizes*; a subscription only *scopes*. This section's own
    worked example — record `/workspace/**`, stay silent about `/tmp/**` — is unreachable
-   under all-or-nothing, so the gate site partitions its paths by posture and posts the
-   observe-covered ones as their own request. The auto-grant that closes that request is
-   still all-or-nothing, because it is a grant.
-3. **The glob matches the resolved path; the record names the display path.** A scope a
+   under all-or-nothing, so the gate site partitions its paths by posture and records the
+   observe-covered ones, each tagged with the subscription that covered it. One command's
+   covered paths post as one `Observed` entry, however many subscriptions their coverage
+   came from.
+3. **The glob matches the resolved path; the record carries both spellings.** A scope a
    relative path could step outside of would not be a scope — `cd /workspace && tee secret`
-   has to land inside `/workspace/**`. The recorded resource keeps the string the command
-   named, because that is what an auditor is trying to recognize. This is the narrow answer
-   for `path` only; §I.3's general canonicalization question stays open.
-4. **An observe record that fails to auto-grant exits 1, never 2.** The gate site's registry
-   snapshot and the registry itself are two reads of one question, and a deferral means they
-   disagreed — the subscription was revoked mid-command, or the filter and the chain's stage
-   1b have drifted apart. Exit 2 would advertise a grantable request for an operation with no
-   permission semantics, hiding the disagreement behind a plausible prompt.
+   has to land inside `/workspace/**`. Each `ObservedResource` keeps the string the command
+   named, because that is what an auditor is trying to recognize, alongside the resolved
+   path the glob matched. This is the narrow answer for `path` only; §I.3's general
+   canonicalization question stays open.
+4. **An observe record that cannot commit exits 1, never 2.** The only failure left on the
+   observe path is the ledger refusing the append (a full ring, a full sink) — an operator
+   who subscribed asked for a complete record, and a mutation running outside it is the gap
+   the subscription exists to close. Exit 2 would advertise a grantable request for an
+   operation with no permission semantics. (The first design's other exit-1 case — the
+   filter and the chain's auto-grant matcher disagreeing — is gone with the second matcher.)
 
 **Observe fires for every mutation the glob covers, not only the ones a gate would have
 held.** A brand-new file, an append, and a delete the trash caught all produce an observe
@@ -1073,10 +1088,9 @@ that skipped the survivable ones would answer a different question.
   permission mark.
 
 The registry lives on the approval side and is consulted at the gate before
-`request_approval` does any work. Because an `observe` subscription reduces to a standing
-grant with `Grounds::Observe`, the incremental mechanism is small — the variant, the
-registry with its atomic any-subscription flag, and the glob filter. It changes no default
-posture, so it lands after the cutover rather than gating it (§H, PR 8).
+`request_approval` does any work. The incremental mechanism is small — the `Observed`
+entry, the registry with its atomic any-subscription flag, and the glob filter. It changes
+no default posture, so it lands after the cutover rather than gating it (§H, PR 8).
 
 ---
 
@@ -1937,17 +1951,28 @@ surfacing one on `.approval`.
 
 **PR 8 — `feat(kernel): fs.* observability subscriptions`**
 
-The subscription registry, `Grounds::Observe`, the atomic any-subscription fast path, and
-the glob filter (§C.5), generalizing PR 5's whole-namespace enforce policy into a scoped
-subscription. Additive and deliberately after the cutover: it changes no default posture,
-and the unsubscribed path must be provably free before it is worth shipping.
+The subscription registry, the atomic any-subscription fast path, and the glob filter
+(§C.5), generalizing PR 5's whole-namespace enforce policy into a scoped subscription.
+Additive and deliberately after the cutover: it changes no default posture, and the
+unsubscribed path must be provably free before it is worth shipping.
+
+*As landed (PR 8 + the tap refinement that followed its review):* PR 8 shipped observe as
+a chain — `Requested` + auto-`Granted{Grounds::Observe}` per covered batch, matched a
+second time inside the decision chain. Its two-family review found three bugs in exactly
+that second matching (a resolved-vs-display mismatch, an all-or-nothing batch grouping,
+and an enforce request auto-granted by an overlapping observe rule), and the follow-up PR
+replaced the chain with the chainless `Observed` entry §C.5 now describes — the
+subscription registry and filter were unchanged; the auto-grant machinery was deleted
+rather than repaired.
 
 *Tests:* with nothing subscribed, a 10,000-path `rm -rf` posts zero entries and allocates no
 `ApprovalRequest` (a counter on the constructor); an `observe` subscription over
-`/workspace/**` posts `Requested` + `Granted{Observe}` for matching paths and nothing for
-`/tmp/**`; an `observe` subscription never blocks and never returns exit 2; an `enforce`
-subscription over the same glob does gate; subscription and revocation are themselves ledger
-entries.
+`/workspace/**` posts one `Observed` entry naming matching paths and nothing for
+`/tmp/**`; an `observe` subscription never blocks and never returns exit 2; a relative
+path is recorded under both spellings; one batch spanning two observe subscriptions
+records both paths; an `enforce` subscription over the same glob does gate, including
+when an observe subscription also covers it; subscription and revocation are themselves
+ledger entries.
 
 ---
 

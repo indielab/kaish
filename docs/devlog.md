@@ -15,6 +15,61 @@ before it ships.
 
 ---
 
+## The watcher loses its paperwork (2026-08-04)
+
+Four days after PR 8 merged, its post-merge review took the observe design
+apart — and Amy's question mid-review took it further than the reviewers did.
+
+The review first. deepseek and gpt read the merged tree independently, and
+every correctness finding pointed at the same seam: the *second* glob matcher.
+The gate site's filter classified each path against the resolved form; then
+`record_observed` posted a request carrying display paths, and the decision
+chain's stage 1b re-matched the subscriptions against *those*. Two matchers,
+one question, two different answers. A relative path under observe exited 1
+claiming the subscription was gone (it wasn't — the path spelling had
+diverged). A batch spanning two disjoint observe subscriptions exited 1
+because the auto-grant was all-or-nothing per subscription. And — gpt's
+find, the worst of the three — stage 1b considered only observe rules, so an
+enforce-classified request could be auto-granted by an overlapping observe
+subscription. The gate downgraded to a note, silently, which is the exact
+sentence the precedence rule in §C.5 was written to forbid.
+
+We were mid-conversation about ledger use cases when the findings landed, and
+Amy asked the question that reframed them: *"can filesystem be hooked without
+the ledger for observability only? that would probably be a big bulk."* She
+was right on both counts. Record-only observation was paying for authorization
+bookkeeping it never used — four entries per covered batch (`Requested`,
+`Granted{Observe}`, `Redeemed`, `Settled`), a credential minted for a grant
+nobody could redeem by hand, live-index traffic, and that second matcher — all
+to write down a fact nobody decided. fanotify has this distinction exactly:
+notification marks stream events; only permission marks block for a verdict.
+PR 8 quoted that analogy and then built a permission mark that always says
+yes.
+
+So the fix deleted the machinery instead of repairing it. An observed
+mutation now posts one chainless `LedgerEntry::Observed` — per resource: the
+display path the command named, the resolved path the glob matched, and the
+covering subscription's id. The gate site's classification *is* the decision;
+there is no second matcher left to disagree with the first. Bugs one and two
+didn't get fixes, they got deleted, and with stage 1b gone from the chain,
+bug three's code path does not exist — the only things that can grant a
+request are standing grants, policy, decide, and out-of-band authority, which
+is the sentence §C.2 wanted to be true all along.
+
+Two things worth keeping from the exercise. First: the review pattern held
+for the sixth PR running — a clean-looking merge, then real bugs behind it,
+found by models reading the whole tree rather than the diff. PR 8's own
+mutation table proved the filter; nothing proved the handoff, and all three
+bugs lived in the handoff. The new regression tests pin exactly that seam
+(relative path, disjoint subscriptions, enforce-observe overlap, end to end
+through `kernel.execute`). Second: when a review finds three bugs in one
+structure, the structure is the finding. The instinct to patch all three in
+place would have left the two-matcher design intact and the next drift
+between them unfound.
+
+This entry rides the refinements PR; the chain-backed design it replaces
+lived on main for four days and never shipped in a release.
+
 ## The ledger learns to watch without stopping you (2026-08-03)
 
 PR 8 of the nine. The feature is small and the constraint is the whole job:

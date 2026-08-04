@@ -1,5 +1,5 @@
-//! `fs.*` observability subscriptions: the glob filter, `Grounds::Observe`,
-//! and the two modes.
+//! `fs.*` observability subscriptions: the glob filter, the `Observed`
+//! entry, and the two modes.
 //!
 //! Everything drives real command strings through `kernel.execute()`, so the
 //! full path runs — glob expansion, the gate site's per-path classification,
@@ -21,7 +21,7 @@ use kaish_kernel::interpreter::ExecResult;
 use kaish_kernel::ledger::ApproverHandle;
 use kaish_kernel::{Kernel, KernelConfig};
 use kaish_types::approval::{
-    ApprovalRequest, Grounds, LedgerEntry, OperationPattern, ResourcePattern, Subscription,
+    LedgerEntry, ObservedResource, OperationPattern, ResourcePattern, Subscription,
     SubscriptionId, SubscriptionMode,
 };
 
@@ -74,22 +74,32 @@ impl Session {
         self.kernel.execute(script).await.expect("kernel execute")
     }
 
+    /// Subscribe `mode` to `operations` over everything under `dir/`.
+    async fn subscribe_dir(
+        &self,
+        dir: &str,
+        operations: &[&str],
+        mode: SubscriptionMode,
+    ) -> SubscriptionId {
+        let glob = format!("{}/**", self.root.path().join(dir).display());
+        self.authority
+            .subscribe(Subscription::new(
+                operations.iter().map(|o| OperationPattern::new(*o)).collect(),
+                vec![ResourcePattern::new("path", glob)],
+                mode,
+                format!("the test subscribes to {dir}"),
+            ))
+            .await
+            .expect("the subscription must register")
+    }
+
     /// Subscribe `mode` to `operations` over everything under `workspace/`.
     async fn subscribe_workspace(
         &self,
         operations: &[&str],
         mode: SubscriptionMode,
     ) -> SubscriptionId {
-        let glob = format!("{}/**", self.root.path().join("workspace").display());
-        self.authority
-            .subscribe(Subscription::new(
-                operations.iter().map(|o| OperationPattern::new(*o)).collect(),
-                vec![ResourcePattern::new("path", glob)],
-                mode,
-                "the test subscribes to the workspace",
-            ))
-            .await
-            .expect("the subscription must register")
+        self.subscribe_dir("workspace", operations, mode).await
     }
 
     /// Every retained entry's variant name, in commit order.
@@ -102,37 +112,17 @@ impl Session {
             .collect()
     }
 
-    /// The grounds on every `Granted` entry, in commit order.
-    fn grounds(&self) -> Vec<Grounds> {
+    /// Every resource on every `Observed` entry, in commit order.
+    fn observed_resources(&self) -> Vec<ObservedResource> {
         self.kernel
             .approvals()
             .log(0)
             .into_iter()
             .filter_map(|entry| match entry {
-                LedgerEntry::Granted { grant, .. } => Some(grant.grounds),
+                LedgerEntry::Observed { resources, .. } => Some(resources),
                 _ => None,
             })
-            .collect()
-    }
-
-    /// Every `path` resource id named by every `Requested` entry, in commit
-    /// order.
-    fn requested_paths(&self) -> Vec<String> {
-        self.kernel
-            .approvals()
-            .log(0)
-            .into_iter()
-            .filter_map(|entry| match entry {
-                LedgerEntry::Requested { request, .. } => Some(request),
-                _ => None,
-            })
-            .flat_map(|request| {
-                request
-                    .resources
-                    .into_iter()
-                    .map(|resource| resource.id)
-                    .collect::<Vec<_>>()
-            })
+            .flatten()
             .collect()
     }
 }
@@ -153,6 +143,7 @@ fn entry_kind(entry: &LedgerEntry) -> &'static str {
         LedgerEntry::StandingIssued { .. } => "StandingIssued",
         LedgerEntry::StandingRevoked { .. } => "StandingRevoked",
         LedgerEntry::Subscribed { .. } => "Subscribed",
+        LedgerEntry::Observed { .. } => "Observed",
         LedgerEntry::Unsubscribed { .. } => "Unsubscribed",
         _ => "other",
     }
@@ -178,29 +169,16 @@ async fn an_observe_subscription_records_matching_paths_and_stays_silent_about_t
     assert_eq!(result.code, 0, "{}", result.text_out());
     assert!(!inside.exists() && !outside.exists(), "both must be deleted");
 
-    // One full chain for the covered path: posted, auto-granted by the
-    // subscription, redeemed, and settled with the invocation's exit code.
+    // One `Observed` entry for the covered path — a record with no chain
+    // behind it: no request, no grant, no attempt.
+    assert_eq!(session.entry_kinds(), vec!["Subscribed", "Observed"]);
+    let resources = session.observed_resources();
+    assert_eq!(resources.len(), 1, "{resources:?}");
+    assert_eq!(resources[0].id, inside.display().to_string());
+    assert_eq!(resources[0].resolved, inside.display().to_string());
     assert_eq!(
-        session.entry_kinds(),
-        vec![
-            "Subscribed",
-            "Requested",
-            "Granted",
-            "Redeemed",
-            "Settled"
-        ],
-    );
-    assert_eq!(
-        session.grounds(),
-        vec![Grounds::Observe { subscription: id }],
-        "an observe subscription must name itself as the grounds"
-    );
-    // The unsubscribed path is absent from the record entirely — it was never
-    // a resource on any request.
-    assert_eq!(
-        session.requested_paths(),
-        vec![inside.display().to_string()],
-        "only the covered path may reach the ledger"
+        resources[0].subscription, id,
+        "the entry must name the subscription that covered it"
     );
 }
 
@@ -229,8 +207,9 @@ async fn an_observe_subscription_records_an_overwrite_through_the_write_gate() {
     assert_eq!(std::fs::read_to_string(&inside).unwrap().trim(), "after");
     assert_eq!(std::fs::read_to_string(&outside).unwrap().trim(), "after");
 
+    let resources = session.observed_resources();
     assert_eq!(
-        session.requested_paths(),
+        resources.iter().map(|r| r.id.clone()).collect::<Vec<_>>(),
         vec![inside.display().to_string()],
         "only the covered path may reach the ledger"
     );
@@ -249,14 +228,13 @@ async fn an_observe_subscription_never_blocks_and_never_returns_exit_two() {
         .subscribe_workspace(&["fs.*"], SubscriptionMode::Observe)
         .await;
 
-    // The counter proves the request really was built — without it, "never
-    // exit 2" would also pass on a filter that matched nothing at all.
-    let before = ApprovalRequest::constructed_count();
+    // The `Observed` entry below proves the tap really engaged — without
+    // it, "never exit 2" would also pass on a filter that matched nothing
+    // at all. That the log holds no `Requested` proves the tap built no
+    // request while doing it. (`ApprovalRequest::constructed_count` is
+    // process-wide and this binary's other tests gate things in parallel,
+    // so this session's own log is the assertion, not the counter.)
     let result = session.run(&format!("rm {}", target.display())).await;
-    assert!(
-        ApprovalRequest::constructed_count() > before,
-        "the observe path must actually build a request"
-    );
 
     assert_eq!(result.code, 0, "{}", result.text_out());
     assert!(
@@ -267,6 +245,11 @@ async fn an_observe_subscription_never_blocks_and_never_returns_exit_two() {
     assert!(
         session.kernel.approvals().pending().is_empty(),
         "an observe subscription must leave nothing undecided"
+    );
+    assert_eq!(
+        session.entry_kinds(),
+        vec!["Subscribed", "Observed"],
+        "the tap must have engaged"
     );
 }
 
@@ -326,7 +309,7 @@ async fn subscription_and_revocation_are_themselves_ledger_entries() {
         [LedgerEntry::Subscribed { subscription, .. }] => {
             assert_eq!(subscription.id, id, "the entry carries the allocated id");
             assert_eq!(subscription.mode, SubscriptionMode::Observe);
-            assert_eq!(subscription.reason, "the test subscribes to the workspace");
+            assert_eq!(subscription.reason, "the test subscribes to workspace");
         }
         other => panic!("expected exactly one Subscribed entry, got {other:?}"),
     }
@@ -360,6 +343,116 @@ async fn subscription_and_revocation_are_themselves_ledger_entries() {
         session.entry_kinds(),
         vec!["Subscribed", "Unsubscribed"],
         "a revoked subscription must record nothing further"
+    );
+}
+
+/// The reviewers' relative-path case: the glob matches the resolved path, so
+/// `cd workspace && rm a.txt` must land inside `/…/workspace/**` — and the
+/// record must keep both spellings, the one the command named and the one
+/// the glob matched. Under the chain-backed observe this exited 1 because a
+/// second matcher re-globbed the display path; the tap has no second
+/// matcher.
+#[tokio::test]
+async fn an_observe_subscription_records_a_relative_path_by_its_resolved_form() {
+    let session = Session::new();
+    let target = session.workspace("a.txt");
+    session.write(&target, "content");
+
+    let id = session
+        .subscribe_workspace(&["fs.remove"], SubscriptionMode::Observe)
+        .await;
+
+    session.run("cd workspace").await;
+    let result = session.run("rm a.txt").await;
+    assert_eq!(result.code, 0, "{}", result.text_out());
+    assert!(!target.exists(), "the delete must have run");
+
+    let resources = session.observed_resources();
+    assert_eq!(resources.len(), 1, "{resources:?}");
+    assert_eq!(resources[0].id, "a.txt", "the record keeps what the command named");
+    assert_eq!(
+        resources[0].resolved,
+        target.display().to_string(),
+        "the record keeps what the glob matched"
+    );
+    assert_eq!(resources[0].subscription, id);
+}
+
+/// The reviewers' disjoint-subscription case: one command touching paths
+/// covered by two different observe subscriptions records both, each tagged
+/// with the subscription that covered it. Under the chain-backed observe
+/// this exited 1 because no single subscription covered the whole batch.
+#[tokio::test]
+async fn one_batch_spanning_two_observe_subscriptions_records_both_paths() {
+    let session = Session::new();
+    let in_workspace = session.workspace("a.txt");
+    let in_scratch = session.scratch("b.txt");
+    session.write(&in_workspace, "a");
+    session.write(&in_scratch, "b");
+
+    let workspace_id = session
+        .subscribe_workspace(&["fs.remove"], SubscriptionMode::Observe)
+        .await;
+    let scratch_id = session
+        .subscribe_dir("scratch", &["fs.remove"], SubscriptionMode::Observe)
+        .await;
+
+    let result = session
+        .run(&format!(
+            "rm {} {}",
+            in_workspace.display(),
+            in_scratch.display()
+        ))
+        .await;
+    assert_eq!(result.code, 0, "{}", result.text_out());
+    assert!(!in_workspace.exists() && !in_scratch.exists());
+
+    let resources = session.observed_resources();
+    assert_eq!(
+        resources
+            .iter()
+            .map(|r| (r.id.clone(), r.subscription))
+            .collect::<Vec<_>>(),
+        vec![
+            (in_workspace.display().to_string(), workspace_id),
+            (in_scratch.display().to_string(), scratch_id),
+        ],
+        "each path must name the subscription that covered it"
+    );
+}
+
+/// The reviewers' overlap case, pinned end to end: with an `enforce` and an
+/// `observe` subscription over the same glob, the gate must hold at exit 2.
+/// Under the chain-backed observe, stage 1b matched the observe rule against
+/// the posted enforce request and silently downgraded the gate to a note.
+#[tokio::test]
+async fn an_observe_subscription_over_the_same_glob_must_not_bypass_enforce() {
+    let session = Session::new();
+    let target = session.workspace("a.txt");
+    session.write(&target, "content");
+
+    session
+        .subscribe_workspace(&["fs.remove"], SubscriptionMode::Observe)
+        .await;
+    session
+        .subscribe_workspace(&["fs.remove"], SubscriptionMode::Enforce)
+        .await;
+
+    let result = session.run(&format!("rm {}", target.display())).await;
+    assert_eq!(
+        result.code, 2,
+        "enforce must win over observe: {}",
+        result.text_out()
+    );
+    assert!(
+        result.approval_request().is_some(),
+        "the gate must surface its pending request"
+    );
+    assert!(target.exists(), "nothing may run while the gate holds");
+    assert_eq!(
+        session.entry_kinds(),
+        vec!["Subscribed", "Subscribed", "Requested"],
+        "no grant and no observe record may appear for a held gate"
     );
 }
 

@@ -1137,78 +1137,52 @@ impl ExecContext {
         SubscriptionFilter::new(policy, subscriptions)
     }
 
-    /// Post the observe record for the paths an `observe` subscription
+    /// Post the `Observed` entry for the paths an `observe` subscription
     /// covers, and let the operation proceed.
     ///
-    /// Posts one `Requested`, which stage 1b of the decision chain
-    /// auto-grants as `Granted{Observe}`; the reserved attempt settles with
-    /// the invocation's real exit code at the dispatch seam, like every other
-    /// attempt. It never defers and never exits 2 — an observe subscription
+    /// One entry, straight onto the log — no request, no grant, no attempt,
+    /// nothing in the live index. The gate site's classification is the
+    /// whole decision: each resource carries the display path the command
+    /// named, the resolved path the subscription's glob matched, and the
+    /// winning subscription's id, so the entry records exactly what was
+    /// classified and there is no second matcher to disagree with the
+    /// filter. It never defers and never exits 2 — an observe subscription
     /// decides nothing.
     ///
-    /// `Err(result)` means the ledger could not record the operation at all —
-    /// a full sink, a full ring. That is returned to the caller and never
-    /// swallowed: an operator who subscribed asked for a complete record, and
-    /// an operation running outside a record the operator believes is
-    /// complete is the exact gap a subscription exists to close.
-    ///
-    /// A **deferral** here exits 1, never 2. The gate site classified these
-    /// paths as observed and the chain then declined to auto-grant them, so
-    /// the filter's snapshot and the registry disagree — either the
-    /// subscription was revoked while the command ran, or
-    /// [`SubscriptionFilter::posture`] and stage 1b have drifted apart and a
-    /// record turned into a gate. Exit 2 would offer an operator a request to
-    /// grant for a decision nobody is making, and hide the disagreement
-    /// behind it.
+    /// `Err(result)` exits 1: the ledger could not commit the entry (a full
+    /// ring, a full sink). Never swallowed — an operator who subscribed
+    /// asked for a complete record, and a mutation running outside a record
+    /// the operator believes complete is the exact gap a subscription
+    /// exists to close.
     pub(crate) async fn record_observed(
         &mut self,
         operation: KernelOperation,
         command: &str,
-        paths: Vec<String>,
+        resources: Vec<kaish_types::approval::ObservedResource>,
     ) -> Result<(), ExecResult> {
-        use kaish_tool_api::ApprovalOutcome;
-
-        if paths.is_empty() {
+        if resources.is_empty() {
             return Ok(());
         }
-        let resources: Vec<Resource> = paths
-            .into_iter()
-            .map(|path| Resource::plain(PATH_KIND, path))
-            .collect();
-        let mut builder = ApprovalRequest::builder(operation.as_str())
-            .risk(operation.risk())
-            .reason("an observe subscription covers these paths")
-            // No re-run to offer: the operation is running now. The hint is
-            // display-only, and inventing a command would record a re-run
-            // nobody should type.
-            .hint("");
-        for resource in resources {
-            builder = builder.resource(resource);
-        }
-        let draft = match builder.build() {
-            Ok(draft) => draft,
-            Err(e) => {
-                return Err(ExecResult::failure(
-                    1,
-                    format!("{command}: could not build the observe record: {e}"),
-                ))
-            }
-        };
-        match self.gate(draft, None).await {
-            ApprovalOutcome::Authorized(_) => Ok(()),
-            ApprovalOutcome::Pending(view) => Err(ExecResult::failure(
+        let Some(access) = self.ledger_access.as_ref() else {
+            // Classified as observed, but no ledger to record on: fail
+            // closed, the same posture `request_approval` takes on a
+            // ledgerless context.
+            return Err(ExecResult::failure(
                 1,
-                format!(
-                    "{command}: request {} was posted as an observe record and was not granted — \
-                     the subscription that covered these paths is no longer in the registry",
-                    view.id
-                ),
-            )),
-            other => other
-                .proceed()
-                .map(|_| ())
-                .map_err(|result| prefix_error(command, result)),
-        }
+                format!("{command}: an observe subscription covers these paths but this context has no ledger to record on"),
+            ));
+        };
+        let operation_id = operation.id();
+        access
+            .requester
+            .observed(operation_id, access.principal.clone(), resources)
+            .await
+            .map_err(|e| {
+                ExecResult::failure(
+                    1,
+                    format!("{command}: the observe record could not be committed: {e}"),
+                )
+            })
     }
 
     /// Request approval for one kernel operation — the single call every
@@ -1686,11 +1660,12 @@ impl ExecContext {
             display: String,
             resolved: PathBuf,
             action: MutationAction,
-            /// Whether an `observe` subscription covers this target. Kept
-            /// beside the gate decision rather than folded into it: observe
-            /// records what happened, so it fires for a target the trash
-            /// caught and for a new file, neither of which the gate holds.
-            observed: bool,
+            /// The `observe` subscription covering this target, when one
+            /// does. Kept beside the gate decision rather than folded into
+            /// it: observe records what happened, so it fires for a target
+            /// the trash caught and for a new file, neither of which the
+            /// gate holds.
+            observed: Option<kaish_types::approval::SubscriptionId>,
         }
         // Dedup by resolved path (keep first): a multi-file patch with an
         // explicit target lists the same file once per hunk-group, and we must
@@ -1739,7 +1714,10 @@ impl ExecContext {
                 display: display.clone(),
                 resolved,
                 action,
-                observed: matches!(posture, Posture::Observe(_)),
+                observed: match posture {
+                    Posture::Observe(id) => Some(id),
+                    _ => None,
+                },
             });
         }
 
@@ -1808,10 +1786,18 @@ impl ExecContext {
         // The observe record goes on the log only once the enforce gate has
         // authorized the batch. A batch held at exit 2 never runs, so
         // recording it would claim an operation happened that did not.
-        let observed: Vec<String> = decided
+        let observed: Vec<kaish_types::approval::ObservedResource> = decided
             .iter()
-            .filter(|d| d.observed)
-            .map(|d| d.display.clone())
+            .filter_map(|d| {
+                d.observed.map(|subscription| {
+                    kaish_types::approval::ObservedResource::new(
+                        PATH_KIND,
+                        d.display.clone(),
+                        d.resolved.to_string_lossy(),
+                        subscription,
+                    )
+                })
+            })
             .collect();
         self.record_observed(operation, command, observed).await?;
 

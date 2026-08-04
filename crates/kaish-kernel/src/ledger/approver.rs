@@ -120,9 +120,6 @@ pub trait Approver: Send + Sync {
 pub enum ChainStage {
     /// Stage 1 — a standing grant covered the request.
     Standing,
-    /// Stage 1 — an `observe` subscription covered the request. The
-    /// operation was recorded and allowed to proceed; nothing decided it.
-    Subscription,
     /// Stage 2 — [`Approver::policy`] decided.
     Policy,
     /// Stage 3 — [`Approver::decide`] decided.
@@ -306,28 +303,6 @@ impl DecisionChain {
                     ChainOutcome::Granted {
                         grant,
                         stage: ChainStage::Standing,
-                    },
-                    ctx,
-                )
-                .await;
-        }
-
-        // ── Stage 1b: observe subscriptions ─────────────────────────
-        // Also a pure ledger lookup with no hook and no I/O, and also its
-        // own self-contained transaction. It runs *after* standing grants:
-        // when both cover a request, the record should name the rule that
-        // authorized the operation, not the rule that only watched it.
-        if let Some(grant) = self
-            .authority
-            .grant_from_observe(&request.id, self.grant_ttl)
-            .await?
-        {
-            return self
-                .undo_if_cancelled(
-                    request,
-                    ChainOutcome::Granted {
-                        grant,
-                        stage: ChainStage::Subscription,
                     },
                     ctx,
                 )

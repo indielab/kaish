@@ -419,7 +419,7 @@ reason))` registers a glob over (operation, resource) in one of two modes.
 
 | Mode | What matching operations do |
 |---|---|
-| `SubscriptionMode::Observe` | Post `Requested` + an immediate `Granted{Observe}` and **run**. Never defers, never blocks, never returns exit 2. This is "record everything" with no permission semantics. |
+| `SubscriptionMode::Observe` | Post one `LedgerEntry::Observed` and **run**. Never defers, never blocks, never returns exit 2. A record, not a decision — no request is built, no grant exists, nothing enters the live index, and the entry is evictable the moment it commits. |
 | `SubscriptionMode::Enforce` | Go through the full decision chain, exactly as `set -o approvals` does — but scoped to the glob instead of the whole namespace. |
 
 Operations glob (`fs.*` covers the namespace); resource **kinds match exactly
@@ -447,8 +447,11 @@ Three rules worth knowing before writing a glob:
   /workspace/a /tmp/b` under an observe subscription on `/workspace/**`
   records `/workspace/a` and stays silent about `/tmp/b`. The glob is matched
   against the path the kernel resolved — so a relative path cannot step
-  outside the scope — while the record names the path the command wrote,
-  which is what an auditor is trying to recognize.
+  outside the scope — and each recorded `ObservedResource` carries both
+  spellings: `id` is the path the command wrote (what an auditor recognizes),
+  `resolved` is the path the glob matched, and `subscription` names the
+  covering subscription. One command's covered paths post as one entry, even
+  when their coverage comes from different subscriptions.
 
 `trash.empty` gates regardless of any subscription: it discards the recovery
 net every other `fs.*` operation relies on. `Approvals::subscriptions()` lists
