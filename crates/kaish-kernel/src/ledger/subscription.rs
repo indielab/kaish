@@ -1,10 +1,15 @@
 //! Subscription matching.
 //!
 //! A subscription is a glob over (operation, resource) that puts matching
-//! filesystem operations into one of two postures: `observe` records them and
-//! lets them run, `enforce` sends them through the decision chain. It is the
-//! generalization of the whole-`fs.*` enforce policy `set -o approvals`
-//! installs.
+//! filesystem operations into one of two postures: `observe` posts one
+//! `Observed` entry and lets them run, `enforce` sends them through the
+//! decision chain. It is the generalization of the whole-`fs.*` enforce
+//! policy `set -o approvals` installs.
+//!
+//! **The filter's classification is the whole decision.** An observed path
+//! never builds a request and never re-enters the ledger's matching — the
+//! gate site records exactly what it classified, tagged with the winning
+//! subscription's id. There is no second matcher to disagree with this one.
 //!
 //! **An unsubscribed session pays nothing.** A `rm -rf` over 10,000 paths
 //! must not pay a per-path ledger cost unless an operator asked for one, so
@@ -24,11 +29,9 @@
 //!   scopes. `rm /workspace/a /tmp/b` under an `observe` subscription on
 //!   `/workspace/**` records `/workspace/a` and stays silent about `/tmp/b`.
 
-use kaish_types::approval::{
-    ApprovalRequest, OperationId, Subscription, SubscriptionId, SubscriptionMode,
-};
+use kaish_types::approval::{OperationId, Subscription, SubscriptionId, SubscriptionMode};
 
-use super::patterns::{covers_operation, covers_resource, covers_resource_parts};
+use super::patterns::{covers_operation, covers_resource_parts};
 
 /// What the registry says about one operation on one resource.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -36,8 +39,9 @@ pub enum Posture {
     /// Nothing covers it. No request is built, nothing is allocated, and no
     /// ledger entry is posted.
     Unsubscribed,
-    /// An `observe` subscription covers it: post the record, auto-grant it,
-    /// and proceed. Never defers, never blocks, never returns exit 2.
+    /// An `observe` subscription covers it: post one `Observed` entry and
+    /// proceed. Never defers, never blocks, never returns exit 2 — no
+    /// request is built and nothing is decided.
     Observe(SubscriptionId),
     /// The `set -o approvals` policy or an `enforce` subscription covers it:
     /// run the real decision chain.
@@ -124,34 +128,6 @@ impl SubscriptionFilter {
             None => Posture::Unsubscribed,
         }
     }
-}
-
-/// Whether an `observe` subscription covers **every** resource on `request`,
-/// and which one.
-///
-/// All-or-nothing here, unlike [`SubscriptionFilter::posture`], because this
-/// is the auto-grant decision and not the scoping filter: a grant authorizes
-/// the request's whole resource set or it authorizes nothing. The gate site
-/// is what makes that reachable — it splits its paths by posture and posts
-/// the observe-covered ones as their own request.
-///
-/// Pure glob work with no I/O, so the ledger's critical section may call it
-/// while holding the lock.
-pub(crate) fn observing(
-    subscriptions: &[Subscription],
-    request: &ApprovalRequest,
-) -> Option<SubscriptionId> {
-    subscriptions
-        .iter()
-        .filter(|subscription| subscription.mode == SubscriptionMode::Observe)
-        .filter(|subscription| covers_operation(&subscription.operations, &request.operation))
-        .find(|subscription| {
-            request
-                .resources
-                .iter()
-                .all(|resource| covers_resource(&subscription.resources, resource))
-        })
-        .map(|subscription| subscription.id)
 }
 
 #[cfg(test)]

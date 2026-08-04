@@ -33,9 +33,9 @@ use std::time::{Duration, SystemTime};
 
 use kaish_types::approval::{
     ApprovalRequest, ApprovalRequestDraft, AttemptId, AttemptState, Capture, Condition, Expiring,
-    Grant, GrantTerms, Grounds, LedgerEntry, Observation, Outcome, Principal, RequestContext,
-    RequestId, RequestState, ResourceRef, StandingGrant, StandingId, StateClaim, Subscription,
-    SubscriptionId, Token,
+    Grant, GrantTerms, Grounds, LedgerEntry, Observation, ObservedResource, OperationId, Outcome,
+    Principal, RequestContext, RequestId, RequestState, ResourceRef, StandingGrant, StandingId,
+    StateClaim, Subscription, SubscriptionId, Token,
 };
 use kaish_types::clock::Instant;
 use tokio::sync::mpsc::OwnedPermit;
@@ -1642,110 +1642,43 @@ impl LedgerInner {
         self.lock().subscriptions.values().cloned().collect()
     }
 
-    /// Stage 1b of the decision chain: if an `observe` subscription covers
-    /// **every** resource on `id`'s request, post `Granted{grounds: Observe}`
-    /// for it in the same lock acquisition as the match, and let the
-    /// operation proceed.
+    /// Post one `Observed` entry: an `observe` subscription covered a
+    /// mutation, which proceeds. A record with no chain behind it — no
+    /// request, no grant, no attempt, nothing in the live index — so a
+    /// covered `cp -r` costs one entry, not four per batch plus grant
+    /// machinery. The entry commits through the same append path as
+    /// everything else: it gets a `seq`, lands in the retained ring, streams
+    /// to the sink, and emits its tracing event.
     ///
-    /// This is how a subscription records an operation without deciding it.
-    /// An observe subscription reduces to an unconditional auto-grant, so the
-    /// chain closes as soon as the operation settles and its entries become
-    /// evictable. It charges no use against anything — a subscription is a
-    /// scope, not a budget — and it never denies. `Ok(None)` means no observe
-    /// subscription covered the request and the caller falls through to the
-    /// next stage.
-    pub(crate) fn grant_from_observe(
+    /// `Err` means the record could not be committed (ring or sink full).
+    /// The gate site fails the operation on it: an operator who subscribed
+    /// asked for a complete record, and a mutation running outside a record
+    /// the operator believes complete is the exact gap a subscription
+    /// exists to close.
+    pub(crate) fn post_observed(
         &self,
-        id: &RequestId,
-        grant_ttl: Duration,
-    ) -> Result<Option<Grant>, LedgerError> {
-        // Drawn before the lock for the same reason `grant_from_standing`
-        // draws it there: `getrandom::fill` can block on entropy starvation,
-        // and the ledger lock must never wait on I/O.
-        let token = Token::new(
-            generate_credential().map_err(|e| LedgerError::CredentialUnavailable(e.to_string()))?,
-        );
+        operation: OperationId,
+        by: Principal,
+        resources: Vec<ObservedResource>,
+    ) -> Result<(), LedgerError> {
         let mut guard = self.lock();
-        let (mono, wall) = self.now();
-        let mut all_committed = self.materialize_expiry(&mut guard, id, mono, wall)?;
-        macro_rules! bail {
-            ($err:expr) => {{
-                let err = $err;
-                drop(guard);
-                emit_events(&all_committed);
-                return Err(err);
-            }};
-        }
-        macro_rules! no_match {
-            () => {{
-                drop(guard);
-                emit_events(&all_committed);
-                return Ok(None);
-            }};
-        }
-        if guard.subscriptions.is_empty() {
-            no_match!();
-        }
-        let Some(chain) = guard.chains.get(id) else {
-            bail!(LedgerError::NotFound(id.clone()));
-        };
-        match chain.state {
-            RequestState::Requested => {}
-            RequestState::Granted => bail!(LedgerError::AlreadyDecided(id.clone())),
-            other => bail!(self.terminal_error(id, other, chain.void_reason.clone())),
-        }
-        let request = chain.request.clone();
-
-        let subscriptions: Vec<Subscription> = guard.subscriptions.values().cloned().collect();
-        let Some(winner) = super::subscription::observing(&subscriptions, &request) else {
-            no_match!();
-        };
-
-        let reserved = match guard.reserve_capacity(1, self.config.retained_entries) {
-            Ok(reserved) => reserved,
-            Err(err) => bail!(err),
-        };
-
-        // The request's own declared transitions become the grant's
-        // conditions, exactly as a standing grant's do: observing an
-        // operation must not weaken the redemption-time check it would
-        // otherwise get.
-        let not_after = wall + grant_ttl;
-        let terms = GrantTerms::once_for(&request, not_after);
-        let grant = Grant::from_terms(
-            id.clone(),
-            // The requester is named as the decider. A subscription is a
-            // record-keeping rule with no principal of its own, and naming
-            // an approver here would record a judgment nobody made.
-            request.principal.clone(),
-            Grounds::Observe {
-                subscription: winner,
-            },
-            terms,
-            token.token_prefix(),
-            wall,
-        );
-        let remaining = not_after.duration_since(wall).unwrap_or(Duration::ZERO);
-
+        let (_, wall) = self.now();
+        let reserved = guard.reserve_capacity(1, self.config.retained_entries)?;
         let seq = guard.alloc_seq();
         let entries = vec![(
-            LedgerEntry::Granted {
+            LedgerEntry::Observed {
                 seq,
                 at: wall,
-                grant: grant.clone(),
+                operation,
+                by,
+                resources,
             },
-            Some(id.clone()),
+            None,
         )];
-        all_committed.extend(guard.commit(entries, reserved));
-        if let Some(chain) = guard.chains.get_mut(id) {
-            chain.grant = Some(grant.clone());
-            chain.state = RequestState::Granted;
-            chain.grant_deadline = Some(mono + remaining);
-            chain.token = Some(token);
-        }
+        let committed = guard.commit(entries, reserved);
         drop(guard);
-        emit_events(&all_committed);
-        Ok(Some(grant))
+        emit_events(&committed);
+        Ok(())
     }
 
     /// Retrieve the credential. Appends `KeyRetrieved` naming `by`, and
@@ -2126,6 +2059,9 @@ fn emit_events(entries: &[LedgerEntry]) {
             }
             LedgerEntry::Subscribed { subscription, .. } => {
                 tracing::info!(subscription_id = %subscription.id, mode = ?subscription.mode, "approval.subscribed");
+            }
+            LedgerEntry::Observed { operation, resources, .. } => {
+                tracing::info!(operation = %operation, resource_count = resources.len(), "approval.observed");
             }
             LedgerEntry::Unsubscribed { id, .. } => {
                 tracing::info!(subscription_id = %id, "approval.unsubscribed");

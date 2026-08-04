@@ -159,11 +159,13 @@ impl Tool for Rm {
         let trash_enabled = ctx.scope.trash_enabled();
         let trash_max_size = ctx.scope.trash_max_size();
         // The subscription filter, taken once for the whole batch. With
-        // nothing subscribed and no enforce policy it holds an empty vector
-        // and `posture` answers `Unsubscribed` for every path, so a
-        // 10,000-path `rm -rf` builds no request and posts no entry.
+        // nothing subscribed and no enforce policy, `operation_id` is never
+        // built and no path is classified, so a 10,000-path `rm -rf` does no
+        // ledger work at all — the same early-out `gate_overwrites` takes.
         let subscriptions = ctx.fs_subscriptions();
-        let operation_id = KernelOperation::FsRemove.id();
+        let operation_id = subscriptions
+            .engaged()
+            .then(|| KernelOperation::FsRemove.id());
 
         // Collect per-path decisions in one pass so ONE approval request
         // covers the whole batch — a request names its resources as a set, and
@@ -173,11 +175,11 @@ impl Tool for Rm {
             path: String,
             resolved: PathBuf,
             action: RmAction,
-            /// Whether an `observe` subscription covers this path. Separate
-            /// from `action` because observe records the delete whether the
-            /// trash caught it or not — a subscription records every
-            /// mutation, not only the gated ones.
-            observed: bool,
+            /// The `observe` subscription covering this path, when one does.
+            /// Separate from `action` because observe records the delete
+            /// whether the trash caught it or not — a subscription records
+            /// every mutation, not only the gated ones.
+            observed: Option<kaish_types::approval::SubscriptionId>,
         }
         let mut decisions: Vec<Decision> = Vec::with_capacity(args.positional.len());
         for value in &args.positional {
@@ -202,13 +204,16 @@ impl Tool for Rm {
             let is_dir = entry.as_ref().is_some_and(|s| s.is_dir());
             let is_symlink = entry.as_ref().is_some_and(|s| s.is_symlink());
             // Matched on the **resolved** path so a relative path cannot
-            // escape the glob, recorded under the display path so the log
-            // shows what the command named. `gate_overwrites` does the same.
-            let posture = subscriptions.posture(
-                &operation_id,
-                crate::ledger::PATH_KIND,
-                &resolved.to_string_lossy(),
-            );
+            // escape the glob; the record carries both spellings.
+            // `gate_overwrites` does the same.
+            let posture = match operation_id.as_ref() {
+                Some(operation) => subscriptions.posture(
+                    operation,
+                    crate::ledger::PATH_KIND,
+                    &resolved.to_string_lossy(),
+                ),
+                None => crate::ledger::Posture::Unsubscribed,
+            };
             let action = decide_rm_action(
                 trash_enabled,
                 posture.enforces(),
@@ -222,7 +227,10 @@ impl Tool for Rm {
                 path,
                 resolved,
                 action,
-                observed: matches!(posture, crate::ledger::Posture::Observe(_)),
+                observed: match posture {
+                    crate::ledger::Posture::Observe(id) => Some(id),
+                    _ => None,
+                },
             });
         }
 
@@ -268,10 +276,18 @@ impl Tool for Rm {
         // The observe record lands after the gate authorized the batch. A
         // delete held at exit 2 never happens, so recording it would put an
         // operation on the log that never ran.
-        let observed: Vec<String> = decisions
+        let observed: Vec<kaish_types::approval::ObservedResource> = decisions
             .iter()
-            .filter(|d| d.observed)
-            .map(|d| d.path.clone())
+            .filter_map(|d| {
+                d.observed.map(|subscription| {
+                    kaish_types::approval::ObservedResource::new(
+                        crate::ledger::PATH_KIND,
+                        d.path.clone(),
+                        d.resolved.to_string_lossy(),
+                        subscription,
+                    )
+                })
+            })
             .collect();
         if let Err(result) = ctx
             .record_observed(KernelOperation::FsRemove, "rm", observed)

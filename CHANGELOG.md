@@ -159,8 +159,10 @@ breaking entries are marked **BREAKING**.
   `enforce` (decide) mode, generalizing the whole-namespace `set -o approvals`
   policy into a scoped one. Additive: nothing is subscribed by default and no
   posture changes.
-- An `observe` subscription posts `Requested` + `Granted{Observe}` and **never
-  defers, blocks, or returns exit 2** — it carries no permission semantics.
+- An `observe` subscription posts one `LedgerEntry::Observed` and **never
+  defers, blocks, or returns exit 2** — a record with no chain behind it: no
+  request is built, no grant exists, and nothing lands in the live index, so a
+  covered bulk delete costs one entry rather than four plus grant machinery.
 - **Unsubscribed and ungated stays unposted** — a gate site takes one relaxed
   atomic load before building anything, so a 10,000-path delete on an unsubscribed
   session posts zero entries and allocates zero requests.
@@ -168,15 +170,16 @@ breaking entries are marked **BREAKING**.
   the free-when-unsubscribed rule is asserted as a number rather than described.
 - `enforce` beats `observe` when both cover a path — the stronger posture wins, so
   a subscription can never downgrade a gate to a note.
-- Subscriptions match per resource against the **resolved** path and record the
-  **display** path — a relative path cannot step outside the scope, and the record
-  still names what the command wrote.
+- Subscriptions match per resource against the **resolved** path, and each
+  `ObservedResource` carries both spellings plus the covering subscription's id —
+  a relative path cannot step outside the scope, and the record still names what
+  the command wrote.
 - **`LedgerEntry::Subscribed` / `Unsubscribed`** — registering and revoking a
   subscription are themselves ledger entries; an audit scope that changed with no
   record of the change makes the record it produced unreadable.
-- **`Approvals::subscriptions()` / `any_subscriptions()`**, `Grounds::Observe`,
-  `ChainStage::Subscription`, and `LedgerError::SubscriptionNotFound` — revoking an
-  id that was never issued fails loud instead of reporting success.
+- **`Approvals::subscriptions()` / `any_subscriptions()`**, `Requester::observed`,
+  and `LedgerError::SubscriptionNotFound` — revoking an id that was never issued
+  fails loud instead of reporting success.
 
 ### Changed
 - **`wait` on several gated jobs names the total** (ledger PR 7) —

@@ -151,4 +151,26 @@ impl Requester {
         self.0.drain_outbox();
         self.0.renew(id)
     }
+
+    /// Post one `Observed` entry: an `observe` subscription covered a
+    /// mutation, which proceeds (spec §C.5). A record, not a request — no
+    /// chain is opened, nothing lands in the live index, and there is no
+    /// grant to redeem. Lives on the implementation side because the gate
+    /// sites are what classify a path as observed; nothing here decides
+    /// anything.
+    ///
+    /// `Err` fails the operation closed at the gate site: an operator who
+    /// subscribed asked for a complete record, and a mutation that runs
+    /// outside it is the gap the subscription exists to close.
+    pub async fn observed(
+        &self,
+        operation: OperationId,
+        by: Principal,
+        resources: Vec<ObservedResource>,
+    ) -> Result<(), LedgerError> {
+        // Same reason as `post_request`: a queued settlement can be what
+        // frees the ring capacity this append reserves.
+        self.0.drain_outbox();
+        self.0.post_observed(operation, by, resources)
+    }
 }

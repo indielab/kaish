@@ -964,12 +964,6 @@ pub enum Grounds {
         /// The standing grant that produced this decision.
         grant: StandingId,
     },
-    /// An `observe` subscription matched (spec §C.5). Records the operation
-    /// and proceeds; carries no permission semantics.
-    Observe {
-        /// The subscription that matched.
-        subscription: SubscriptionId,
-    },
     /// The embedder granted directly through its `ApproverHandle`.
     Embedder,
 }
@@ -1154,11 +1148,48 @@ impl Subscription {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SubscriptionMode {
-    /// Matching operations post `Requested` + immediate `Granted{Observe}`
-    /// and proceed; they never defer, never block, never prompt.
+    /// Matching operations post one `Observed` entry and proceed; they never
+    /// defer, never block, never prompt. A record, not a decision — no
+    /// request is built and no grant exists to redeem.
     Observe,
     /// Matching operations go through the decision chain, and may defer.
     Enforce,
+}
+
+/// One resource an `Observed` entry records (spec §C.5).
+///
+/// Carries both spellings of the path deliberately: the subscription's glob
+/// matched `resolved` — a scope a relative path could step outside of is not
+/// a scope — while `id` keeps the string the command named, because that is
+/// what an auditor reading the log recognizes.
+#[non_exhaustive]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ObservedResource {
+    /// Namespace of the identifier — `"path"` for the kernel's fs gates.
+    pub kind: String,
+    /// What the command named.
+    pub id: String,
+    /// The resolved form the subscription's glob matched.
+    pub resolved: String,
+    /// The subscription that covered it.
+    pub subscription: SubscriptionId,
+}
+
+impl ObservedResource {
+    /// Name one observed resource.
+    pub fn new(
+        kind: impl Into<String>,
+        id: impl Into<String>,
+        resolved: impl Into<String>,
+        subscription: SubscriptionId,
+    ) -> Self {
+        Self {
+            kind: kind.into(),
+            id: id.into(),
+            resolved: resolved.into(),
+            subscription,
+        }
+    }
 }
 
 /// An `Approver`'s verdict on a request (spec §C.2).
@@ -1444,6 +1475,27 @@ pub enum LedgerEntry {
         /// The subscription registered, carrying its allocated id.
         subscription: Subscription,
     },
+    /// An `observe` subscription covered a mutation, which proceeded. A
+    /// record with no chain behind it: no request was built, no grant
+    /// exists, and there is nothing to redeem or settle. Posted before the
+    /// mutation runs, so it records that the operation was dispatched under
+    /// the subscription's scope — not that it succeeded; the command's own
+    /// exit code carries that.
+    Observed {
+        /// Monotonic per-ledger sequence number.
+        seq: u64,
+        /// Wall-clock post time.
+        #[serde(with = "crate::rfc3339::system_time")]
+        at: SystemTime,
+        /// The operation observed.
+        operation: OperationId,
+        /// Who ran it.
+        by: Principal,
+        /// Every covered resource, each naming the subscription that
+        /// covered it — one command's covered paths post as one entry,
+        /// however many subscriptions their coverage came from.
+        resources: Vec<ObservedResource>,
+    },
     /// A subscription was revoked. Takes effect immediately for operations
     /// not yet posted; requests already granted under it are unaffected.
     Unsubscribed {
@@ -1496,6 +1548,7 @@ impl LedgerEntry {
             | Self::StandingIssued { seq, .. }
             | Self::StandingRevoked { seq, .. }
             | Self::Subscribed { seq, .. }
+            | Self::Observed { seq, .. }
             | Self::Unsubscribed { seq, .. }
             | Self::TokenRejected { seq, .. } => *seq,
         }
