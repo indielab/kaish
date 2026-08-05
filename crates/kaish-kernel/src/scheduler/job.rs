@@ -380,8 +380,30 @@ impl Job {
                     return false;
                 }
                 Err(tokio::sync::oneshot::error::TryRecvError::Closed) => {
-                    // Channel closed without result - job failed
-                    self.result = Some(ExecResult::failure(1, "job channel closed"));
+                    // The sender dropped without sending a result — the
+                    // spawned task's future panicked and unwound before
+                    // `tx.send(result)` ran (GH #247). `execute_background`
+                    // uses this oneshot-channel path exclusively for every
+                    // `&` job, so this is the ONLY place a background-job
+                    // panic surfaces; a wording indistinguishable from an
+                    // ordinary `exit 1` ("job channel closed", previously)
+                    // hid a kernel bug behind what read as a normal command
+                    // failure, and the case went to `tracing::error!` for
+                    // the first time here — it was not logged at all before.
+                    tracing::error!(
+                        job_id = %self.id,
+                        command = %self.command,
+                        "background job task ended without producing a result — \
+                         its future likely panicked"
+                    );
+                    self.result = Some(ExecResult::failure(
+                        1,
+                        format!(
+                            "job {}: task ended without a result (likely a kernel panic, \
+                             not the command's own exit) — see the kernel's logs",
+                            self.id
+                        ),
+                    ));
                     self.result_rx = None;
                     self.finished_at = Some(kaish_types::clock::system_now());
                     return true;
@@ -764,9 +786,16 @@ impl JobManager {
     /// Listing polls every job, so this is also a completion-observation
     /// point: retention is enforced here (after the snapshot is taken — the
     /// returned list is complete even for entries evicted by it).
+    ///
+    /// Sorted by [`JobId`] (GH #247) — the backing map is a `HashMap`, whose
+    /// iteration order is arbitrary and was leaking straight through to
+    /// `jobs`, `/v/jobs`, and `--json`: two jobs could list as `[2, 1]`. An
+    /// MCP caller handed that order, or a snapshot test pinned against it,
+    /// saw a flake with no code change — sorting makes the order a stated
+    /// contract instead of whatever the hasher happened to do.
     pub async fn list(&self) -> Vec<JobInfo> {
         let mut jobs = self.jobs.lock().await;
-        let infos: Vec<JobInfo> = jobs
+        let mut infos: Vec<JobInfo> = jobs
             .values_mut()
             .map(|job| {
                 let status = job.status();
@@ -774,6 +803,7 @@ impl JobManager {
                 job.to_info(status, approval)
             })
             .collect();
+        infos.sort_by_key(|info| info.id);
         self.enforce_retention_locked(&mut jobs);
         infos
     }
@@ -925,10 +955,14 @@ impl JobManager {
         jobs.get_mut(&id).is_some_and(|job| job.renew_gate(renewed))
     }
 
-    /// List all job IDs.
+    /// List all job IDs, sorted (GH #247 — see [`Self::list`]'s doc for why
+    /// the backing `HashMap`'s iteration order is not good enough here: this
+    /// backs the `/v/jobs` directory listing via [`crate::vfs::JobFs`]).
     pub async fn list_ids(&self) -> Vec<JobId> {
         let jobs = self.jobs.lock().await;
-        jobs.keys().copied().collect()
+        let mut ids: Vec<JobId> = jobs.keys().copied().collect();
+        ids.sort();
+        ids
     }
 
     /// Register a stopped job (from Ctrl-Z on a foreground process).
@@ -1481,6 +1515,37 @@ mod tests {
         assert_eq!(&*result.unwrap().text_out(), "from channel");
     }
 
+    /// GH #247: `execute_background` uses the oneshot-channel path
+    /// exclusively, so a panic inside the spawned task drops the sender
+    /// without a result — the exact shape reproduced here by dropping `tx`
+    /// directly rather than triggering a real panic. Before the fix this
+    /// reported `failed:1` with the generic text "job channel closed",
+    /// indistinguishable from a command that legitimately exited 1 and never
+    /// logged. The result must now name what actually happened (a task that
+    /// ended without producing a result) instead of reading like an ordinary
+    /// command failure.
+    #[tokio::test]
+    async fn test_dropped_sender_reports_as_a_kernel_fault_not_exit_1() {
+        let manager = JobManager::new();
+        let (tx, rx) = oneshot::channel::<ExecResult>();
+
+        let id = manager.register("will panic".to_string(), rx).await;
+        drop(tx); // simulates the spawned task's future panicking mid-flight
+
+        let result = manager.wait(id).await.expect("job must resolve, not hang");
+        assert_eq!(result.code, 1);
+        assert!(
+            !result.err.contains("job channel closed"),
+            "message must not use the old generic wording: {}",
+            result.err
+        );
+        assert!(
+            result.err.contains("panic") || result.err.contains("task ended without a result"),
+            "message must name a kernel fault, not read like an ordinary exit 1: {}",
+            result.err
+        );
+    }
+
     #[tokio::test]
     async fn test_spawn_immediately_available() {
         // Bug J: job should be queryable immediately after spawn()
@@ -1504,6 +1569,28 @@ mod tests {
         let manager = JobManager::new();
         let result = manager.wait(JobId(999)).await;
         assert!(result.is_none());
+    }
+
+    /// GH #247: `list`/`list_ids` iterated the backing `HashMap` directly, so
+    /// two jobs could come back as `[2, 1]` — arbitrary, and a flake source
+    /// for any MCP caller or snapshot test that depended on the order. Job
+    /// ids are minted strictly increasing (`next_id`), so ascending-by-id is
+    /// the one order that is both stable and meaningful (spawn order).
+    #[tokio::test]
+    async fn test_list_and_list_ids_are_sorted_by_id() {
+        let manager = JobManager::new();
+        let mut ids = Vec::new();
+        for n in 0..8 {
+            let (_tx, rx) = oneshot::channel::<ExecResult>();
+            ids.push(manager.register(format!("job-{n}"), rx).await);
+        }
+
+        let listed_ids = manager.list_ids().await;
+        assert_eq!(listed_ids, ids, "list_ids must come back in ascending JobId order");
+
+        let infos = manager.list().await;
+        let info_ids: Vec<JobId> = infos.iter().map(|i| i.id).collect();
+        assert_eq!(info_ids, ids, "list must come back in ascending JobId order");
     }
 
     #[tokio::test]

@@ -220,9 +220,15 @@ impl KernelClient for EmbeddedClient {
     }
 
     async fn shutdown(&self) -> ClientResult<()> {
-        // For embedded client, shutdown is a no-op since we don't own the kernel lifecycle
-        // The kernel will be dropped when the client is dropped
-        Ok(())
+        // GH #245: this used to be a no-op with a comment claiming dropping
+        // the client was enough — false. Background jobs are detached
+        // `tokio::spawn` tasks holding their own `Arc<Kernel>` fork, not a
+        // reference to this client's kernel, so dropping `self.kernel` never
+        // cancels or waits for them; they (and any external child process
+        // trees) keep running until the tokio runtime itself goes away.
+        // `Kernel::shutdown` now does the real work: cancel every tracked
+        // job, then wait a bounded grace per job for it to unwind.
+        self.kernel.shutdown().await.map_err(ClientError::Other)
     }
 
     async fn read_blob(&self, id: &str) -> ClientResult<Vec<u8>> {
@@ -287,6 +293,32 @@ mod tests {
         let result = client.execute("echo hello").await.expect("execute failed");
         assert!(result.ok());
         assert_eq!(result.text_out().trim(), "hello");
+    }
+
+    /// GH #245: `shutdown` used to be a no-op with a comment claiming the
+    /// kernel's `Drop` would clean up background jobs — it never did (jobs
+    /// are detached tasks holding their own kernel fork, not a reference
+    /// back to this client). A `sleep 3600 &` job left running would leak
+    /// forever on `client.shutdown()`. Now it must cancel the job and
+    /// return promptly — `sleep` answers its cancellation token
+    /// immediately, so this should take milliseconds, not anywhere near
+    /// the job's nominal 3600s duration.
+    #[tokio::test]
+    async fn test_shutdown_cancels_a_long_running_background_job() {
+        let client = EmbeddedClient::transient().expect("failed to create client");
+        client
+            .execute("sleep 3600 &")
+            .await
+            .expect("background spawn failed");
+
+        let start = std::time::Instant::now();
+        client.shutdown().await.expect("shutdown failed");
+        let elapsed = start.elapsed();
+
+        assert!(
+            elapsed < std::time::Duration::from_secs(10),
+            "shutdown took {elapsed:?} — the background job was not cancelled promptly"
+        );
     }
 
     #[tokio::test]

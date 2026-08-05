@@ -15,6 +15,74 @@ before it ships.
 
 ---
 
+## Shutdown that doesn't, and a job list that doesn't sort itself (2026-08-05)
+
+Same job-system design audit as GH #240, two more findings from the same
+2026-07-30 sweep: `Kernel::shutdown()` and the sharp edges around it.
+
+`shutdown()` called `JobManager::wait_all()` and nothing else — no timeout,
+no cancellation. `sleep 3600 &` then `shutdown()` blocked for an hour. Worse,
+the trait method an embedder would actually reach for,
+`EmbeddedClient::shutdown`, was a no-op with a comment claiming the kernel's
+`Drop` would clean up background jobs. It wouldn't have, even if `Kernel`
+had a `Drop` impl (it doesn't): a background job's task holds its own
+`Arc<Kernel>` fork, freshly minted by `fork_for_background`, not a reference
+back to the kernel the embedder holds. Dropping the parent's `Arc` doesn't
+touch it. So the embedder's actual choices were hang or leak — the audit's
+phrase for it stuck.
+
+The fix mirrors the kill-lifecycle precedent from PR #284: cancel every
+job's token first (`cancel_all_jobs`, new), then wait `kill_grace + 3s` **per
+job**, same bound `kill %N` gives one target, logging and abandoning
+whatever doesn't unwind in time. Wiring `EmbeddedClient::shutdown` to it
+needed one signature change first — `shutdown` took owned `self`, but
+`EmbeddedClient` only ever holds `Arc<Kernel>`, and `Arc::try_unwrap` had no
+reason to succeed with background-job forks in the picture. Nothing in
+`shutdown`'s body actually needed exclusive ownership — it was always
+working through the shared `Arc<JobManager>` — so `&self` was the honest
+signature, not a workaround.
+
+Chose not to add `impl Drop for Kernel`. It was tempting: cancellation is
+synchronous (`CancellationToken::cancel()`), so a Drop impl could fire it
+without needing `.await`. But iterating jobs to find their tokens needs the
+`Arc<JobManager>`'s async mutex, and the only sync-safe way to touch it from
+Drop is `try_lock()` — best-effort, silently skips cancellation if anything
+else holds the lock at that instant. The issue's own shape-of-fix never
+asked for Drop, and a Drop impl whose behavior depends on lock contention
+timing is exactly the kind of silent inconsistency this project doesn't
+want; documented the gap in EMBEDDING.md instead (call `shutdown()` before
+dropping a kernel that might have background work — there is no automatic
+safety net).
+
+Two adjacent items rode along from the sharp-edges issue (#247) rather than
+stretching this PR to cover all five: a panicked background job's task
+drops its oneshot sender without a result, and that arm of `try_poll` read
+`failed:1` with the text `"job channel closed"` — indistinguishable from an
+ordinary failing command, and never logged. Now it's `tracing::error!`'d and
+says what actually happened. And `JobManager::list`/`list_ids` iterated a
+`HashMap` directly, so two jobs could list as `[2, 1]` — cosmetic in a REPL,
+a real flake source for an MCP caller or a snapshot test. Sorted by `JobId`
+now, which `kaish_types` teaches to order correctly (`Ord`/`PartialOrd`,
+ids are minted strictly increasing, so ascending is spawn order).
+
+One item from #247 turned out to already be fixed and not by this PR: the
+issue described `kill %N` on an embedder-registered job (no cancel token
+attached) as reporting `"not found"` — actively misleading, since the job is
+right there in `jobs`. A throwaway probe test against current `main`
+(register a job via the public `JobManager::register`, then `kernel.execute
+("kill %1")`) showed the real message: `"kill: job 1 has no cancellation
+token and no live process group — nothing to deliver termination to"` —
+exactly right, not "not found". GH #244's kill-lifecycle work must have
+closed this between the audit and now. Worth the reminder: verify a claim
+against current code before building on it, even one from the same issue
+that's otherwise still live.
+
+Left out, deliberately: #247's items 4 (document the tokio-runtime-pinning
+trap — done, folded into this PR's EMBEDDING.md pass since it was one
+paragraph) and 5 (`StreamStats` isn't serializable — the issue itself says
+fold it into whichever PR adds serde to the job types; this wasn't that
+PR). Neither needed code changes here.
+
 ## The watcher loses its paperwork (2026-08-04)
 
 Four days after PR 8 merged, its post-merge review took the observe design
