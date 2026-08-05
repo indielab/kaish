@@ -11,6 +11,14 @@ breaking entries are marked **BREAKING**.
 ## [Unreleased]
 
 ### Added
+- **`Kernel::cancel_all_jobs()`** (GH #245) — cancels every tracked background
+  job's token in one call, the same lever `kill %N` uses (in-process futures
+  exit at their next checkpoint, external children get SIGTERM→SIGKILL).
+  Previously the only bulk lever was a script looping `kill %N` over every id;
+  an embedder tearing down a session had none.
+- **`JobId` implements `Ord`/`PartialOrd`** (`kaish_types`, GH #247) — orders by
+  the wrapped id, which is minted strictly increasing, so sorting by `JobId`
+  gives spawn order. Backs the `JobManager::list`/`list_ids` ordering fix below.
 - **`kaish_types::approval`** (ledger PR 1, `docs/approval-ledger.md`) — pure-data
   vocabulary for the upcoming approval ledger: `RequestId`/`Token`/`AttemptId`/
   `OperationId` identity types, `ApprovalRequest` + builder, `Grant`/`GrantTerms`/
@@ -239,6 +247,31 @@ breaking entries are marked **BREAKING**.
   record. Omitted on the wire when absent, so an `fs.*` entry is unchanged.
 - **BREAKING: `Requester::observed` takes a `plan: Option<Plan>`** (ledger PR 10)
   — `None` for every `fs.*` caller.
+- **BREAKING:** `Kernel::shutdown` now takes `&self` instead of owned `self`,
+  and no longer blocks forever (GH #245) — it cancels every tracked job
+  (`cancel_all_jobs`), then waits up to `kill_grace + 3s` **per job**
+  (mirroring `kill %N`'s own bound) for it to unwind, logging and abandoning
+  any that don't. Before this, a single `sleep 3600 &` left running blocked
+  `shutdown()` for an hour; `&self` lets an embedder holding `Arc<Kernel>`
+  call it without `Arc::try_unwrap`.
+- **BREAKING:** `EmbeddedClient::shutdown` actually shuts the kernel down now
+  (GH #245) — it used to be a no-op with a comment claiming the kernel's
+  `Drop` would clean up background jobs, which was never true (jobs are
+  detached tasks holding their own kernel fork, not a reference back to the
+  client's kernel, and `Kernel` has no `Drop` impl). A caller that previously
+  got an instant no-op now blocks up to `kill_grace + 3s` per tracked job.
+- **`JobManager::list`/`list_ids` return jobs sorted ascending by `JobId`**
+  (GH #247) — previously a `HashMap` iteration, so two jobs could list as
+  `[2, 1]`; an MCP caller handed that order, or a snapshot test pinned
+  against it, saw a flake with no code change.
+- **`docs/EMBEDDING.md` documents three previously-silent job-system
+  boundaries** (GH #245, #247): `reset()` does not touch background jobs
+  (they survive it, still tracked and running); neither
+  `ExecuteOptions::timeout`/`cancel_token` nor `Kernel::cancel()` bounds a
+  backgrounded (`&`) job — only `kill %N` or the new `cancel_all_jobs`/
+  `shutdown` reach one; and a background job dies silently if the tokio
+  runtime that was current when it started is torn down before it finishes
+  (a short-lived-runtime-per-call embedding pattern hits this).
 - **`wait` on several gated jobs names the total** (ledger PR 7) —
   `wait: 3 approvals pending — run \`approvals list\``. The result's `approval`
   field still carries one request: one operation, one request, and widening it to
@@ -374,7 +407,21 @@ breaking entries are marked **BREAKING**.
   requests with), not an attacker — the ledger already records both principals on
   every grant regardless of the flag.
 
+### Removed
+- **BREAKING:** `/v/jobs/{id}/stdout` and `/v/jobs/{id}/stderr` (GH #240) — both
+  filled only once, at job completion, while four docs (`jobfs.rs`, `job.rs`,
+  `docs/LANGUAGE.md`) promised a live stream that never existed; removed rather
+  than made live. A background job's output is not observable through
+  `/v/jobs` at all now, live or after completion — redirect it to a file
+  explicitly (`cmd > /tmp/out &`) and read that back instead.
+
 ### Fixed
+- **A panicked background job no longer reports as an ordinary `exit 1`**
+  (GH #247) — `execute_background` uses a oneshot channel exclusively, so a
+  panic inside the spawned task dropped the sender with no result, and the
+  job read `failed:1` with the generic text `"job channel closed"`:
+  indistinguishable from a command that legitimately exited 1, and never
+  logged. Now `tracing::error!`s and names what happened in the result text.
 - **An approval-gated overwrite that races a concurrent write now fails loud
   instead of clobbering it** — the gate carried a compare-and-swap expectation only
   for trash-snapshotted targets, so an approved target with the trash off (or one

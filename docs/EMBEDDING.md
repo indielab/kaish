@@ -140,8 +140,9 @@ Two ways in:
 - **`Kernel` directly** — full surface, in-process.
 - **`KernelClient`** (`kaish-client` crate) — the frontend trait the REPL
   drives; implement or reuse `EmbeddedClient::new(kernel)` if your app wants
-  a swappable kernel connection. `EmbeddedClient::shutdown()` is a no-op by
-  design: the embedder owns the kernel lifecycle.
+  a swappable kernel connection. `EmbeddedClient::shutdown()` calls
+  `Kernel::shutdown()`: it cancels every background job and waits, bounded —
+  see "Teardown" below for the contract.
 
 ## Capability Features
 
@@ -773,6 +774,44 @@ Fields:
   kaish's execution span parents onto your trace, and baggage merges back
   out through `ExecResult.baggage`.
 
+### Neither `timeout` nor `cancel_token` bounds a background (`&`) job
+
+`ExecuteOptions::timeout` and `cancel_token` govern the call that started a
+`&` job, not the job itself (GH #245). `cmd &` returns `[1]` the instant it's
+registered — by the time the deadline or cancellation could fire, the call
+that would have been bounded by it has already returned. The backgrounded
+pipeline runs on its own fork with its own independent
+`tokio_util::sync::CancellationToken`, deliberately detached so it survives
+the parent call's cancellation (correct shell semantics — `&` is meant to
+outlive the command that started it). `Kernel::cancel()` inherits the same
+boundary: it cancels the *current* foreground execution, never a
+backgrounded one. The only levers that reach a running `&` job are `kill
+%N` from a script, or [`Kernel::cancel_all_jobs`]/[`Kernel::shutdown`] from
+the embedder. There is no per-job timeout at all unless the script sets one
+itself: `timeout 600 cmd &`.
+
+### `Kernel::reset()` does not touch background jobs
+
+`reset()` clears scope and cwd; jobs are not session state, so a `&`
+started before `reset()` keeps running, stays in `jobs`, and the job ID
+counter keeps counting up (GH #245). An embedder that treats `reset()` as
+"new session" — a fresh MCP conversation reusing one kernel, say — inherits
+every job the previous conversation backgrounded. Call
+[`Kernel::cancel_all_jobs`] first if that inheritance is not wanted.
+
+### The tokio runtime must outlive any background job you start
+
+`execute_background` spawns onto whatever tokio runtime is current when
+`execute()` runs (a bare `tokio::spawn`) — kaish does not capture or manage
+its own `Handle` (GH #247). An embedder that builds a short-lived runtime per
+call (`Runtime::new()` + `block_on` per request — a common pattern for a
+one-request-per-thread server) has every background job it started in that
+call die, silently, the instant the runtime drops mid-execution. `Kernel` is
+`Send + Sync` and gives no signal that this matters. If your embedding
+pattern tears down runtimes between calls, either keep one long-lived
+runtime for any kernel that backgrounds work, or avoid `&` entirely on a
+per-call runtime.
+
 ## Argv-Native Execution: `execute_argv`
 
 `Kernel::execute(&str)` is string-native — it lexes and parses its input. If your
@@ -1025,7 +1064,7 @@ The `Filesystem` trait (from `kaish-vfs`, re-exported as
 use std::path::Path;
 use kaish_kernel::vfs::Filesystem;
 
-let data = kernel.vfs().read(Path::new("/v/jobs/1/stdout")).await?;
+let data = kernel.vfs().read(Path::new("/v/jobs/1/status")).await?;
 ```
 
 ## Job Output Capture
@@ -1071,8 +1110,6 @@ job state:
 ```
 /v/jobs/
 ├── 1/
-│   ├── stdout    # Captured stdout (bounded)
-│   ├── stderr    # Captured stderr (bounded)
 │   ├── status    # "running", "stopped", "done:0", "gated", "killed:N", or "failed:N"
 │   ├── command   # Original command string
 │   └── approval  # Pending approval request (JSON) if gated, else empty
@@ -1080,15 +1117,21 @@ job state:
 │   └── ...
 ```
 
+There is no `stdout`/`stderr` node (GH #240 removed it: it filled only once,
+at completion, never live as earlier docs claimed). An embedder that needs a
+background job's output redirects it to a file the job writes to, and reads
+that file back after the job finishes — the job's own captured
+stdout/stderr never reaches the VFS.
+
 ```sh
 # In kaish scripts
-sleep 10 &              # Starts job 1
-jobs                    # Shows: [1] running  /v/jobs/1/
-cat /v/jobs/1/status    # "running"
+sleep 10 > /tmp/out.log &   # Starts job 1, output goes to a file
+jobs                        # Shows: [1] running  /v/jobs/1/
+cat /v/jobs/1/status        # "running"
 
 # After completion
-cat /v/jobs/1/stdout    # Job's stdout
-cat /v/jobs/1/status    # "done:0" on success, "failed:N" otherwise
+cat /tmp/out.log            # Job's output
+cat /v/jobs/1/status        # "done:0" on success, "failed:N" otherwise
 ```
 
 A destructive op backgrounded under `set -o approvals` (`rm x &`) gates in the
@@ -1133,6 +1176,42 @@ foreground job (a TTY concept an embedder never sees) and is otherwise
 `None`. For a finished job's `ExecResult` without blocking, use the
 non-blocking `JobManager::try_result(id) -> Option<ExecResult>` instead of
 `wait`, which parks until the job completes.
+
+`JobManager::list`/`list_ids` return jobs sorted ascending by `JobId` (GH
+#247) — job ids are minted in strictly increasing order, so this is spawn
+order. Before this, both iterated the backing `HashMap` directly, so two
+jobs could come back as `[2, 1]`: arbitrary, and a flake source for any
+caller (an MCP surface handing an agent a job list, a snapshot test) that
+depended on the order.
+
+### Shutting down a kernel
+
+`Kernel::shutdown(&self)` (GH #245) cancels every tracked background job
+([`Kernel::cancel_all_jobs`], the same lever `kill %N` uses — an in-process
+builtin future exits at its next checkpoint, an external child gets
+SIGTERM→SIGKILL), then waits up to `kill_grace + 3s` **per job** for it to
+actually unwind — mirroring `kill %N`'s own bound. The waits are sequential,
+so the worst case is additive: N jobs that all ignore cancellation block
+`shutdown` for N × (kill_grace + 3s); jobs that unwind promptly cost only
+their own unwind time. A job that has not
+unwound by its deadline is logged (`tracing::warn!`) and abandoned: it keeps
+running detached until the tokio runtime itself goes away. Before this fix
+`shutdown` called `JobManager::wait_all()` with no timeout at all — a single
+`sleep 3600 &` blocked it for an hour.
+
+`shutdown` takes `&self`, not owned `self`, specifically so an embedder
+holding `Arc<Kernel>` (as `EmbeddedClient` does) can call it without
+`Arc::try_unwrap` — the work only touches the shared `Arc<JobManager>`,
+never kernel state that would need exclusive ownership. `EmbeddedClient::
+shutdown` now calls straight through to it; it used to be a no-op with a
+comment claiming the kernel's `Drop` would clean up background jobs. That
+was never true: background jobs are detached `tokio::spawn` tasks holding
+their own `Arc<Kernel>` **fork** ([`Kernel::fork_for_background`] mints an
+independent `Arc`), not a reference back to the parent kernel, so dropping
+the parent kernel neither cancels a running job nor waits for it — nor does
+`Kernel` implement `Drop` at all. Call `shutdown()` explicitly before
+dropping a kernel that may have backgrounded work; there is no other way to
+stop it short of `kill %N` on every job.
 
 ## Frontend Completion Helpers (`kaish_client::completion`)
 

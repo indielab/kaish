@@ -20,7 +20,7 @@ In sandboxed mode, paths look native but access outside `$HOME` fails (except `/
 /dev/urandom   endless cryptographic random bytes (also /dev/random)
 /v/blobs/      memory storage for blobs
 /v/bin/        read-only listing of builtins (can invoke: /v/bin/echo hello)
-/v/jobs/{id}/  live background job state (see below)
+/v/jobs/{id}/  background job state (see below)
 /v/approvals/  the approval ledger, read-only (see below)
 ```
 
@@ -32,11 +32,20 @@ runs via the `subprocess` capability against your system `git`, not a VFS mount.
 Each background job gets a directory:
 
 ```
-/v/jobs/{id}/stdout    live output (ring buffer, 10MB max)
-/v/jobs/{id}/stderr    live error stream
 /v/jobs/{id}/status    "running" | "stopped" | "done:0" | "gated" | "killed:N" | "failed:N"
 /v/jobs/{id}/command   original command string
 /v/jobs/{id}/approval  pending approval request (JSON) if gated, else empty
+```
+
+There is no `stdout`/`stderr` node — a background job's output is not
+observable through `/v/jobs` at all, live or after completion. Redirect a
+background job's output to a file yourself if you need it:
+
+```sh
+cargo build > /tmp/build.log &
+cat /v/jobs/1/status       # running
+cat /tmp/build.log         # build output so far
+jobs --cleanup             # remove completed jobs
 ```
 
 A destructive op backgrounded under `set -o approvals` (`rm x &`) gates in the
@@ -44,13 +53,6 @@ background: status is `gated`, and `/v/jobs/{id}/approval` carries the JSON
 request (operation, resources, and the job it belongs to) so the gate can be
 fulfilled. The node never carries a token — approve the request, then re-run
 with `--confirm=<token>`, or, from an embedder, `Kernel::confirm`.
-
-```sh
-cargo build &
-cat /v/jobs/1/status       # running
-cat /v/jobs/1/stdout       # build output so far
-jobs --cleanup             # remove completed jobs
-```
 
 ## /v/approvals — The Approval Ledger
 

@@ -102,9 +102,9 @@ use kaish_glob::glob_match;
 use crate::dispatch::{CommandDispatcher, PipelinePosition};
 use crate::interpreter::{apply_output_format, eval_expr, expand_tilde, json_to_value_no_envelope, value_to_bool, value_to_string, value_to_text_sink, ControlFlow, ExecResult, PathError, Scope};
 use crate::parser::parse;
-use crate::scheduler::{is_bool_type, schema_param_lookup, select_leaf, stderr_stream, BoundedStream, JobManager, PipelineRunner, StderrReceiver};
+use crate::scheduler::{is_bool_type, schema_param_lookup, select_leaf, stderr_stream, JobManager, PipelineRunner, StderrReceiver};
 #[cfg(feature = "subprocess")]
-use crate::scheduler::{drain_to_stream, DEFAULT_STREAM_MAX_SIZE};
+use crate::scheduler::{drain_to_stream, BoundedStream, DEFAULT_STREAM_MAX_SIZE};
 use crate::tools::{register_builtins, ExecContext, GlobalFlags, ToolArgs, ToolRegistry};
 #[cfg(feature = "subprocess")]
 use crate::tools::{resolve_in_path, virtual_cwd_error};
@@ -3746,9 +3746,13 @@ impl Kernel {
 
     /// Execute a pipeline in the background.
     ///
-    /// The command is spawned as a tokio task, registered with the JobManager,
-    /// and its output is captured via BoundedStreams. The job is observable via
-    /// `/v/jobs/{id}/stdout`, `/v/jobs/{id}/stderr`, and `/v/jobs/{id}/status`.
+    /// The command is spawned as a tokio task and registered with the
+    /// JobManager. The job is observable via `/v/jobs/{id}/status`,
+    /// `/v/jobs/{id}/command`, and `/v/jobs/{id}/approval`. There is no
+    /// stdout/stderr node — GH #240 removed `/v/jobs/{id}/stdout` and
+    /// `stderr` rather than making them live (they filled only once, at
+    /// completion, while docs promised a live stream). A caller that needs
+    /// the job's output redirects it explicitly (`cmd > /tmp/out &`).
     ///
     /// Returns immediately with a job ID like "[1]".
     #[tracing::instrument(level = "debug", skip(self, pipeline), fields(command_count = pipeline.commands.len()))]
@@ -3758,20 +3762,11 @@ impl Kernel {
         // Format the command for display in /v/jobs/{id}/command
         let command_str = self.format_pipeline(pipeline);
 
-        // Create bounded streams for output capture
-        let stdout = Arc::new(BoundedStream::default_size());
-        let stderr = Arc::new(BoundedStream::default_size());
-
         // Create channel for result notification
         let (tx, rx) = oneshot::channel();
 
         // Register with JobManager to get job ID and create VFS entries
-        let job_id = self.jobs.register_with_streams(
-            command_str.clone(),
-            rx,
-            stdout.clone(),
-            stderr.clone(),
-        ).await;
+        let job_id = self.jobs.register(command_str.clone(), rx).await;
 
         // Fork the kernel for this background job. The fork snapshots the
         // parent's scope/cwd/aliases/user_tools so mutations stay isolated,
@@ -3816,19 +3811,6 @@ impl Kernel {
             // code to JobManager, so `[N] done:0`/`Job::status()` silently
             // read success even though the output was capped (GH #212).
             crate::output_limit::apply_spill_contract(&mut result, &bg_ctx.output_limit).await;
-
-            // Write output to streams
-            let text = result.text_out();
-            if !text.is_empty() {
-                stdout.write(text.as_bytes()).await;
-            }
-            if !result.err.is_empty() {
-                stderr.write(result.err.as_bytes()).await;
-            }
-
-            // Close streams
-            stdout.close().await;
-            stderr.close().await;
 
             // Send result to JobManager (ignore error if receiver dropped)
             let _ = tx.send(result);
@@ -6224,6 +6206,14 @@ impl Kernel {
     /// are re-applied to the fresh scope rather than silently reverting to
     /// defaults — an embedder that opted into `with_approvals(true)` must not
     /// find the gate quietly disabled after a `reset()` between requests.
+    ///
+    /// **Background jobs are untouched** (GH #245) — `reset()` is a scope/cwd
+    /// reset, not a session boundary for `&`. A job started before `reset()`
+    /// keeps running, stays in `jobs`, and the job ID counter keeps counting
+    /// up. An embedder treating `reset()` as "new session" (a fresh MCP
+    /// conversation reusing one kernel, say) inherits every job the previous
+    /// conversation backgrounded — call [`Self::cancel_all_jobs`] first if
+    /// that inheritance is not wanted.
     pub async fn reset(&self) -> Result<()> {
         {
             let mut scope = self.scope.write().await;
@@ -6251,10 +6241,74 @@ impl Kernel {
         Ok(())
     }
 
-    /// Shutdown the kernel.
-    pub async fn shutdown(self) -> Result<()> {
-        // Wait for all background jobs
-        self.jobs.wait_all().await;
+    /// Trip the cancellation token of every tracked background job (`&`) —
+    /// whether or not `shutdown` follows.
+    ///
+    /// This is the same lever `kill %N` uses: a *running* job's in-process
+    /// future exits at its next checkpoint, and any external children it
+    /// spawned get the SIGTERM→SIGKILL cascade; it then stays tracked with
+    /// status `Killed` once it unwinds. For a *gated* or already-finished
+    /// job the token trip is a no-op — its future has already resolved, the
+    /// job keeps reporting `Gated`/its terminal status, and a gated job's
+    /// pending approval request stays live in the ledger until its TTL
+    /// expires (an operator can still grant and `confirm` it). This only
+    /// *starts* cancellation, it does not wait (pair with
+    /// [`JobManager::wait`]/`wait_all` if the caller needs to block on the
+    /// unwind, bounded as [`Self::shutdown`] does).
+    ///
+    /// A job registered by an embedder via [`JobManager::register`] with no
+    /// cancel token attached has no lever to cancel — silently skipped here,
+    /// same as `kill %N`'s own "no cancellation token" case.
+    ///
+    /// Returns how many jobs a token was actually tripped for.
+    pub async fn cancel_all_jobs(&self) -> usize {
+        let ids = self.jobs.list_ids().await;
+        let mut cancelled = 0;
+        for id in ids {
+            if self.jobs.mark_killed_and_cancel(id, false).await {
+                cancelled += 1;
+            }
+        }
+        cancelled
+    }
+
+    /// Shut down the kernel.
+    ///
+    /// Cancels every tracked background job ([`Self::cancel_all_jobs`]), then
+    /// waits up to `kill_grace + 3s` **per job** — the same bound `kill %N`
+    /// gives a single target (GH #244) — for it to actually unwind. The
+    /// waits are sequential, so the worst case is additive: N jobs that all
+    /// ignore cancellation block shutdown for N × (kill_grace + 3s). Jobs
+    /// that unwind promptly (the normal case) cost only their own unwind
+    /// time. Before this fix `shutdown` called `wait_all()` with no timeout
+    /// at all: `sleep 3600 &` then `shutdown()` blocked for an hour (GH #245).
+    ///
+    /// A job that has not unwound by its deadline is abandoned: logged via
+    /// `tracing::warn!` and left running detached until the tokio runtime
+    /// itself goes away. There is no further lever once `shutdown()` has
+    /// returned — this method does not hang, but it also does not guarantee
+    /// every job actually stopped.
+    ///
+    /// Takes `&self`, not owned `self` — an embedder holding `Arc<Kernel>`
+    /// (e.g. `kaish-client`'s `EmbeddedClient`) can call this without
+    /// `Arc::try_unwrap`, since the work here only touches the shared
+    /// `Arc<JobManager>`, never kernel state that would need exclusive
+    /// ownership.
+    pub async fn shutdown(&self) -> Result<()> {
+        let ids = self.jobs.list_ids().await;
+        self.cancel_all_jobs().await;
+
+        let bound = self.jobs.kill_grace() + Duration::from_secs(3);
+        for id in ids {
+            if tokio::time::timeout(bound, self.jobs.wait(id)).await.is_err() {
+                tracing::warn!(
+                    job_id = %id,
+                    bound_secs = bound.as_secs_f64(),
+                    "kernel shutdown: job did not exit within the grace period after \
+                     cancellation — abandoning it"
+                );
+            }
+        }
         Ok(())
     }
 
@@ -9656,8 +9710,12 @@ AFTER="yes"'"#)
 
         let kernel = Kernel::new(KernelConfig::isolated()).expect("failed to create kernel");
 
-        // Run a simple background command
-        let result = kernel.execute("echo hello &").await.expect("execution failed");
+        // Run a simple background command, redirecting its output to a
+        // memory-backed file — GH #240 removed `/v/jobs/{id}/stdout` (it
+        // filled only once, at completion, never live as four docs claimed),
+        // so a caller that wants a background job's output redirects it
+        // explicitly instead of peeking a VFS node.
+        let result = kernel.execute("echo hello > /tmp/basic_out.txt &").await.expect("execution failed");
         assert!(result.ok(), "background command should succeed: {}", result.err);
         assert!(result.text_out().contains("[1]"), "should return job ID: {}", result.text_out());
 
@@ -9673,8 +9731,8 @@ AFTER="yes"'"#)
             status.text_out()
         );
 
-        // Check stdout
-        let stdout = kernel.execute("cat /v/jobs/1/stdout").await.expect("stdout check failed");
+        // Check the redirected output
+        let stdout = kernel.execute("cat /tmp/basic_out.txt").await.expect("output check failed");
         assert!(stdout.ok());
         assert!(stdout.text_out().contains("hello"));
     }

@@ -13,7 +13,6 @@ use std::time::SystemTime;
 use tokio::sync::{oneshot, Mutex};
 use tokio::task::JoinHandle;
 
-use super::stream::BoundedStream;
 use crate::interpreter::ExecResult;
 
 // Data types re-exported from kaish-types.
@@ -41,14 +40,12 @@ pub struct Job {
     /// hermetic / read-only kernels (custom backend, NoLocal) whose output must
     /// never reach the real filesystem outside the VFS — see
     /// [`JobManager::set_persist_output_files`]. Stamped from the manager when
-    /// the job is registered. Live output is always available in-memory via the
-    /// VFS streams (`/v/jobs/{id}/stdout`), so suppressing the file loses
-    /// nothing for an in-process consumer.
+    /// the job is registered. **When disabled, a hermetic kernel has no way to
+    /// recover a background job's output after the fact** (GH #240 removed the
+    /// `/v/jobs/{id}/stdout`/`stderr` VFS nodes that used to serve as the
+    /// in-process fallback) — a caller that needs the output redirects it to
+    /// a VFS path itself (`cmd > /tmp/out &`).
     persist_output: bool,
-    /// Live stdout stream (bounded ring buffer).
-    stdout_stream: Option<Arc<BoundedStream>>,
-    /// Live stderr stream (bounded ring buffer).
-    stderr_stream: Option<Arc<BoundedStream>>,
     /// OS process ID (for stopped jobs).
     pid: Option<u32>,
     /// OS process group ID (for stopped jobs).
@@ -97,8 +94,6 @@ impl Job {
             result: None,
             output_file: None,
             persist_output: true,
-            stdout_stream: None,
-            stderr_stream: None,
             pid: None,
             pgid: None,
             stopped: false,
@@ -121,41 +116,6 @@ impl Job {
             result: None,
             output_file: None,
             persist_output: true,
-            stdout_stream: None,
-            stderr_stream: None,
-            pid: None,
-            pgid: None,
-            stopped: false,
-            killed: false,
-            cancel: None,
-            pgids: Vec::new(),
-            started_at: kaish_types::clock::system_now(),
-            finished_at: None,
-        }
-    }
-
-    /// Create a new job with attached output streams.
-    ///
-    /// The streams provide live access to job output via `/v/jobs/{id}/stdout` and `/stderr`.
-    pub fn with_streams(
-        id: JobId,
-        session_id: u64,
-        command: String,
-        rx: oneshot::Receiver<ExecResult>,
-        stdout: Arc<BoundedStream>,
-        stderr: Arc<BoundedStream>,
-    ) -> Self {
-        Self {
-            id,
-            session_id,
-            command,
-            handle: None,
-            result_rx: Some(rx),
-            result: None,
-            output_file: None,
-            persist_output: true,
-            stdout_stream: Some(stdout),
-            stderr_stream: Some(stderr),
             pid: None,
             pgid: None,
             stopped: false,
@@ -178,8 +138,6 @@ impl Job {
             result: None,
             output_file: None,
             persist_output: true,
-            stdout_stream: None,
-            stderr_stream: None,
             pid: Some(pid),
             pgid: Some(pgid),
             stopped: true,
@@ -302,16 +260,6 @@ impl Job {
         }
     }
 
-    /// Get the stdout stream (if attached).
-    pub fn stdout_stream(&self) -> Option<&Arc<BoundedStream>> {
-        self.stdout_stream.as_ref()
-    }
-
-    /// Get the stderr stream (if attached).
-    pub fn stderr_stream(&self) -> Option<&Arc<BoundedStream>> {
-        self.stderr_stream.as_ref()
-    }
-
     /// Write job output to a temp file.
     fn write_output_file(&self, result: &ExecResult) -> Option<PathBuf> {
         // This is a human-readable text log; a binary stdout is noted, not
@@ -432,8 +380,30 @@ impl Job {
                     return false;
                 }
                 Err(tokio::sync::oneshot::error::TryRecvError::Closed) => {
-                    // Channel closed without result - job failed
-                    self.result = Some(ExecResult::failure(1, "job channel closed"));
+                    // The sender dropped without sending a result — the
+                    // spawned task's future panicked and unwound before
+                    // `tx.send(result)` ran (GH #247). `execute_background`
+                    // uses this oneshot-channel path exclusively for every
+                    // `&` job, so this is the ONLY place a background-job
+                    // panic surfaces; a wording indistinguishable from an
+                    // ordinary `exit 1` ("job channel closed", previously)
+                    // hid a kernel bug behind what read as a normal command
+                    // failure, and the case went to `tracing::error!` for
+                    // the first time here — it was not logged at all before.
+                    tracing::error!(
+                        job_id = %self.id,
+                        command = %self.command,
+                        "background job task ended without producing a result — \
+                         its future likely panicked"
+                    );
+                    self.result = Some(ExecResult::failure(
+                        1,
+                        format!(
+                            "job {}: task ended without a result (likely a kernel panic, \
+                             not the command's own exit) — see the kernel's logs",
+                            self.id
+                        ),
+                    ));
                     self.result_rx = None;
                     self.finished_at = Some(kaish_types::clock::system_now());
                     return true;
@@ -652,8 +622,11 @@ impl JobManager {
     ///
     /// Disable this for a hermetic / read-only kernel: the host write in
     /// `Job::write_output_file` uses `std::fs` directly and so bypasses the
-    /// VFS (and any read-only mount). Live output stays available in-memory via
-    /// the VFS streams (`/v/jobs/{id}/stdout`), so nothing is lost in-process.
+    /// VFS (and any read-only mount). With this off, a hermetic kernel has no
+    /// remaining way to recover a background job's output — there is no live
+    /// VFS stream to fall back to (GH #240 removed `/v/jobs/{id}/stdout` and
+    /// `stderr`, which never delivered on "live" anyway). A caller that needs
+    /// the output redirects it to a VFS path explicitly (`cmd > /tmp/out &`).
     ///
     /// Must be set before jobs are spawned — the flag is stamped onto each job
     /// at registration time, not consulted at completion.
@@ -698,27 +671,6 @@ impl JobManager {
     pub async fn register(&self, command: String, rx: oneshot::Receiver<ExecResult>) -> JobId {
         let id = JobId(self.next_id.fetch_add(1, Ordering::SeqCst));
         let mut job = Job::from_channel(id, self.session_id, command, rx);
-        job.persist_output = self.persist_output_files();
-
-        let mut jobs = self.jobs.lock().await;
-        jobs.insert(id, job);
-        self.enforce_retention_locked(&mut jobs);
-
-        id
-    }
-
-    /// Register a job with attached output streams.
-    ///
-    /// The streams provide live access to job output via `/v/jobs/{id}/stdout` and `/stderr`.
-    pub async fn register_with_streams(
-        &self,
-        command: String,
-        rx: oneshot::Receiver<ExecResult>,
-        stdout: Arc<BoundedStream>,
-        stderr: Arc<BoundedStream>,
-    ) -> JobId {
-        let id = JobId(self.next_id.fetch_add(1, Ordering::SeqCst));
-        let mut job = Job::with_streams(id, self.session_id, command, rx, stdout, stderr);
         job.persist_output = self.persist_output_files();
 
         let mut jobs = self.jobs.lock().await;
@@ -834,9 +786,16 @@ impl JobManager {
     /// Listing polls every job, so this is also a completion-observation
     /// point: retention is enforced here (after the snapshot is taken — the
     /// returned list is complete even for entries evicted by it).
+    ///
+    /// Sorted by [`JobId`] (GH #247) — the backing map is a `HashMap`, whose
+    /// iteration order is arbitrary and was leaking straight through to
+    /// `jobs`, `/v/jobs`, and `--json`: two jobs could list as `[2, 1]`. An
+    /// MCP caller handed that order, or a snapshot test pinned against it,
+    /// saw a flake with no code change — sorting makes the order a stated
+    /// contract instead of whatever the hasher happened to do.
     pub async fn list(&self) -> Vec<JobInfo> {
         let mut jobs = self.jobs.lock().await;
-        let infos: Vec<JobInfo> = jobs
+        let mut infos: Vec<JobInfo> = jobs
             .values_mut()
             .map(|job| {
                 let status = job.status();
@@ -844,6 +803,7 @@ impl JobManager {
                 job.to_info(status, approval)
             })
             .collect();
+        infos.sort_by_key(|info| info.id);
         self.enforce_retention_locked(&mut jobs);
         infos
     }
@@ -995,34 +955,14 @@ impl JobManager {
         jobs.get_mut(&id).is_some_and(|job| job.renew_gate(renewed))
     }
 
-    /// Read stdout stream content for a job.
-    ///
-    /// Returns `None` if the job doesn't exist or has no attached stream.
-    pub async fn read_stdout(&self, id: JobId) -> Option<Vec<u8>> {
-        let jobs = self.jobs.lock().await;
-        if let Some(job) = jobs.get(&id)
-            && let Some(stream) = job.stdout_stream() {
-                return Some(stream.read().await);
-            }
-        None
-    }
-
-    /// Read stderr stream content for a job.
-    ///
-    /// Returns `None` if the job doesn't exist or has no attached stream.
-    pub async fn read_stderr(&self, id: JobId) -> Option<Vec<u8>> {
-        let jobs = self.jobs.lock().await;
-        if let Some(job) = jobs.get(&id)
-            && let Some(stream) = job.stderr_stream() {
-                return Some(stream.read().await);
-            }
-        None
-    }
-
-    /// List all job IDs.
+    /// List all job IDs, sorted (GH #247 — see [`Self::list`]'s doc for why
+    /// the backing `HashMap`'s iteration order is not good enough here: this
+    /// backs the `/v/jobs` directory listing via [`crate::vfs::JobFs`]).
     pub async fn list_ids(&self) -> Vec<JobId> {
         let jobs = self.jobs.lock().await;
-        jobs.keys().copied().collect()
+        let mut ids: Vec<JobId> = jobs.keys().copied().collect();
+        ids.sort();
+        ids
     }
 
     /// Register a stopped job (from Ctrl-Z on a foreground process).
@@ -1575,6 +1515,37 @@ mod tests {
         assert_eq!(&*result.unwrap().text_out(), "from channel");
     }
 
+    /// GH #247: `execute_background` uses the oneshot-channel path
+    /// exclusively, so a panic inside the spawned task drops the sender
+    /// without a result — the exact shape reproduced here by dropping `tx`
+    /// directly rather than triggering a real panic. Before the fix this
+    /// reported `failed:1` with the generic text "job channel closed",
+    /// indistinguishable from a command that legitimately exited 1 and never
+    /// logged. The result must now name what actually happened (a task that
+    /// ended without producing a result) instead of reading like an ordinary
+    /// command failure.
+    #[tokio::test]
+    async fn test_dropped_sender_reports_as_a_kernel_fault_not_exit_1() {
+        let manager = JobManager::new();
+        let (tx, rx) = oneshot::channel::<ExecResult>();
+
+        let id = manager.register("will panic".to_string(), rx).await;
+        drop(tx); // simulates the spawned task's future panicking mid-flight
+
+        let result = manager.wait(id).await.expect("job must resolve, not hang");
+        assert_eq!(result.code, 1);
+        assert!(
+            !result.err.contains("job channel closed"),
+            "message must not use the old generic wording: {}",
+            result.err
+        );
+        assert!(
+            result.err.contains("panic") || result.err.contains("task ended without a result"),
+            "message must name a kernel fault, not read like an ordinary exit 1: {}",
+            result.err
+        );
+    }
+
     #[tokio::test]
     async fn test_spawn_immediately_available() {
         // Bug J: job should be queryable immediately after spawn()
@@ -1598,6 +1569,28 @@ mod tests {
         let manager = JobManager::new();
         let result = manager.wait(JobId(999)).await;
         assert!(result.is_none());
+    }
+
+    /// GH #247: `list`/`list_ids` iterated the backing `HashMap` directly, so
+    /// two jobs could come back as `[2, 1]` — arbitrary, and a flake source
+    /// for any MCP caller or snapshot test that depended on the order. Job
+    /// ids are minted strictly increasing (`next_id`), so ascending-by-id is
+    /// the one order that is both stable and meaningful (spawn order).
+    #[tokio::test]
+    async fn test_list_and_list_ids_are_sorted_by_id() {
+        let manager = JobManager::new();
+        let mut ids = Vec::new();
+        for n in 0..8 {
+            let (_tx, rx) = oneshot::channel::<ExecResult>();
+            ids.push(manager.register(format!("job-{n}"), rx).await);
+        }
+
+        let listed_ids = manager.list_ids().await;
+        assert_eq!(listed_ids, ids, "list_ids must come back in ascending JobId order");
+
+        let infos = manager.list().await;
+        let info_ids: Vec<JobId> = infos.iter().map(|i| i.id).collect();
+        assert_eq!(info_ids, ids, "list must come back in ascending JobId order");
     }
 
     #[tokio::test]
