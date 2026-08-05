@@ -13,7 +13,6 @@ use std::time::SystemTime;
 use tokio::sync::{oneshot, Mutex};
 use tokio::task::JoinHandle;
 
-use super::stream::BoundedStream;
 use crate::interpreter::ExecResult;
 
 // Data types re-exported from kaish-types.
@@ -41,14 +40,12 @@ pub struct Job {
     /// hermetic / read-only kernels (custom backend, NoLocal) whose output must
     /// never reach the real filesystem outside the VFS — see
     /// [`JobManager::set_persist_output_files`]. Stamped from the manager when
-    /// the job is registered. Live output is always available in-memory via the
-    /// VFS streams (`/v/jobs/{id}/stdout`), so suppressing the file loses
-    /// nothing for an in-process consumer.
+    /// the job is registered. **When disabled, a hermetic kernel has no way to
+    /// recover a background job's output after the fact** (GH #240 removed the
+    /// `/v/jobs/{id}/stdout`/`stderr` VFS nodes that used to serve as the
+    /// in-process fallback) — a caller that needs the output redirects it to
+    /// a VFS path itself (`cmd > /tmp/out &`).
     persist_output: bool,
-    /// Live stdout stream (bounded ring buffer).
-    stdout_stream: Option<Arc<BoundedStream>>,
-    /// Live stderr stream (bounded ring buffer).
-    stderr_stream: Option<Arc<BoundedStream>>,
     /// OS process ID (for stopped jobs).
     pid: Option<u32>,
     /// OS process group ID (for stopped jobs).
@@ -97,8 +94,6 @@ impl Job {
             result: None,
             output_file: None,
             persist_output: true,
-            stdout_stream: None,
-            stderr_stream: None,
             pid: None,
             pgid: None,
             stopped: false,
@@ -121,41 +116,6 @@ impl Job {
             result: None,
             output_file: None,
             persist_output: true,
-            stdout_stream: None,
-            stderr_stream: None,
-            pid: None,
-            pgid: None,
-            stopped: false,
-            killed: false,
-            cancel: None,
-            pgids: Vec::new(),
-            started_at: kaish_types::clock::system_now(),
-            finished_at: None,
-        }
-    }
-
-    /// Create a new job with attached output streams.
-    ///
-    /// The streams provide live access to job output via `/v/jobs/{id}/stdout` and `/stderr`.
-    pub fn with_streams(
-        id: JobId,
-        session_id: u64,
-        command: String,
-        rx: oneshot::Receiver<ExecResult>,
-        stdout: Arc<BoundedStream>,
-        stderr: Arc<BoundedStream>,
-    ) -> Self {
-        Self {
-            id,
-            session_id,
-            command,
-            handle: None,
-            result_rx: Some(rx),
-            result: None,
-            output_file: None,
-            persist_output: true,
-            stdout_stream: Some(stdout),
-            stderr_stream: Some(stderr),
             pid: None,
             pgid: None,
             stopped: false,
@@ -178,8 +138,6 @@ impl Job {
             result: None,
             output_file: None,
             persist_output: true,
-            stdout_stream: None,
-            stderr_stream: None,
             pid: Some(pid),
             pgid: Some(pgid),
             stopped: true,
@@ -300,16 +258,6 @@ impl Job {
             // nothing to restamp is a missed surface, not a corruption.
             None => false,
         }
-    }
-
-    /// Get the stdout stream (if attached).
-    pub fn stdout_stream(&self) -> Option<&Arc<BoundedStream>> {
-        self.stdout_stream.as_ref()
-    }
-
-    /// Get the stderr stream (if attached).
-    pub fn stderr_stream(&self) -> Option<&Arc<BoundedStream>> {
-        self.stderr_stream.as_ref()
     }
 
     /// Write job output to a temp file.
@@ -652,8 +600,11 @@ impl JobManager {
     ///
     /// Disable this for a hermetic / read-only kernel: the host write in
     /// `Job::write_output_file` uses `std::fs` directly and so bypasses the
-    /// VFS (and any read-only mount). Live output stays available in-memory via
-    /// the VFS streams (`/v/jobs/{id}/stdout`), so nothing is lost in-process.
+    /// VFS (and any read-only mount). With this off, a hermetic kernel has no
+    /// remaining way to recover a background job's output — there is no live
+    /// VFS stream to fall back to (GH #240 removed `/v/jobs/{id}/stdout` and
+    /// `stderr`, which never delivered on "live" anyway). A caller that needs
+    /// the output redirects it to a VFS path explicitly (`cmd > /tmp/out &`).
     ///
     /// Must be set before jobs are spawned — the flag is stamped onto each job
     /// at registration time, not consulted at completion.
@@ -698,27 +649,6 @@ impl JobManager {
     pub async fn register(&self, command: String, rx: oneshot::Receiver<ExecResult>) -> JobId {
         let id = JobId(self.next_id.fetch_add(1, Ordering::SeqCst));
         let mut job = Job::from_channel(id, self.session_id, command, rx);
-        job.persist_output = self.persist_output_files();
-
-        let mut jobs = self.jobs.lock().await;
-        jobs.insert(id, job);
-        self.enforce_retention_locked(&mut jobs);
-
-        id
-    }
-
-    /// Register a job with attached output streams.
-    ///
-    /// The streams provide live access to job output via `/v/jobs/{id}/stdout` and `/stderr`.
-    pub async fn register_with_streams(
-        &self,
-        command: String,
-        rx: oneshot::Receiver<ExecResult>,
-        stdout: Arc<BoundedStream>,
-        stderr: Arc<BoundedStream>,
-    ) -> JobId {
-        let id = JobId(self.next_id.fetch_add(1, Ordering::SeqCst));
-        let mut job = Job::with_streams(id, self.session_id, command, rx, stdout, stderr);
         job.persist_output = self.persist_output_files();
 
         let mut jobs = self.jobs.lock().await;
@@ -993,30 +923,6 @@ impl JobManager {
     ) -> bool {
         let mut jobs = self.jobs.lock().await;
         jobs.get_mut(&id).is_some_and(|job| job.renew_gate(renewed))
-    }
-
-    /// Read stdout stream content for a job.
-    ///
-    /// Returns `None` if the job doesn't exist or has no attached stream.
-    pub async fn read_stdout(&self, id: JobId) -> Option<Vec<u8>> {
-        let jobs = self.jobs.lock().await;
-        if let Some(job) = jobs.get(&id)
-            && let Some(stream) = job.stdout_stream() {
-                return Some(stream.read().await);
-            }
-        None
-    }
-
-    /// Read stderr stream content for a job.
-    ///
-    /// Returns `None` if the job doesn't exist or has no attached stream.
-    pub async fn read_stderr(&self, id: JobId) -> Option<Vec<u8>> {
-        let jobs = self.jobs.lock().await;
-        if let Some(job) = jobs.get(&id)
-            && let Some(stream) = job.stderr_stream() {
-                return Some(stream.read().await);
-            }
-        None
     }
 
     /// List all job IDs.

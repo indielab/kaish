@@ -303,6 +303,14 @@ breaking entries are marked **BREAKING**.
 - ShellCheck reports nothing about kaish's extensions; the kaish validator is the
   only checker that sees them.
 
+### Removed
+- **BREAKING:** `/v/jobs/{id}/stdout` and `/v/jobs/{id}/stderr` (GH #240) — both
+  filled only once, at job completion, while four docs (`jobfs.rs`, `job.rs`,
+  `docs/LANGUAGE.md`) promised a live stream that never existed; removed rather
+  than made live. A background job's output is not observable through
+  `/v/jobs` at all now, live or after completion — redirect it to a file
+  explicitly (`cmd > /tmp/out &`) and read that back instead.
+
 ### Fixed
 - **An approval-gated overwrite that races a concurrent write now fails loud
   instead of clobbering it** — the gate carried a compare-and-swap expectation only

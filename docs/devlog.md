@@ -70,6 +70,59 @@ between them unfound.
 This entry rides the refinements PR; the chain-backed design it replaces
 lived on main for four days and never shipped in a release.
 
+## The job stream that was never live (2026-08-05)
+
+GH #240 named a gap a job-system design audit found and a second model
+family confirmed: `/v/jobs/{id}/stdout` and `/stderr` promised a live
+stream in four places (`jobfs.rs`'s own module doc twice, `job.rs`'s
+`persist_output` rationale, `docs/LANGUAGE.md`) and delivered something
+else entirely — the whole buffer arrived in one write, at completion,
+because `execute_background` ran the pipeline to the end before writing
+`result.text_out()`/`result.err` into the job's `BoundedStream`s. Nothing
+ever teed a running child's output into them mid-flight. The tell was in
+the test suite: every `job_stream_tests.rs` case hand-wrote into a
+`BoundedStream` it constructed itself and read it straight back — not one
+drove a real `&` job through `kernel.execute()` and peeked the stream
+while it was still running.
+
+Two ways to close the gap: wire the tee kaish-kernel never had (thread the
+job's stream down through `try_execute_external`'s drain tasks so bytes
+land as they arrive), or admit the promise was never load-bearing and
+remove it. Amy chose removal. The node bought a false sense of "watch it
+build" for an MCP caller that would poll it and see nothing until the
+build was already done — worse than not having the feature, since it
+looks like it should work.
+
+Once the VFS surface was gone, `Job::stdout_stream`/`stderr_stream`,
+`with_streams`, `register_with_streams`, and `JobManager::read_stdout`/
+`read_stderr` had no remaining reader in production — kept, they would
+have been dead code serving a deleted node. Removed the whole path rather
+than leave a write-only apparatus behind, which meant `execute_background`
+stopped constructing per-job `BoundedStream`s at all.
+
+The harder question was what a caller does instead. `job.result` already
+holds the captured stdout/stderr text after completion — it always did,
+that's what `wait` gates on — but nothing surfaces it as text through the
+VFS or `JobInfo` once `/v/jobs/{id}/stdout` is gone. A hermetic kernel
+(`persist_output_files(false)`, no host temp file either) genuinely loses
+the ability to retrieve a background job's output through any kaish
+surface unless the caller redirects explicitly: `cmd > /tmp/out &`, then
+`cat /tmp/out` after the job's `status` reads `done:`. That works today
+(background jobs inherit cwd/env and run real pipelines, redirects
+included) and became the replacement pattern in every test and doc this
+PR touched — `docs/LANGUAGE.md`, `docs/EMBEDDING.md`,
+`kaish-help/content/en/vfs.md`, and the `background_execution_tests.rs`/
+`concurrency_tests.rs` cases that used to `cat /v/jobs/N/stdout`. Worth
+flagging for whoever picks up the "fake `/proc`" idea later: Unix's own
+answer to "read another process's live output" is `/proc/<pid>/fd/1`, not
+a shell-owned convenience node — a future live surface should probably
+follow that shape rather than resurrect this one.
+
+`job_stream_tests.rs` — the file the issue named as the reason this
+survived — is gone; its status/command/list coverage moved to
+`job_vfs_tests.rs` with the stdout/stderr fixtures deleted rather than
+repaired, since there is nothing left to fix them toward.
+
 ## The ledger learns to watch without stopping you (2026-08-03)
 
 PR 8 of the nine. The feature is small and the constraint is the whole job:
