@@ -140,8 +140,9 @@ Two ways in:
 - **`Kernel` directly** — full surface, in-process.
 - **`KernelClient`** (`kaish-client` crate) — the frontend trait the REPL
   drives; implement or reuse `EmbeddedClient::new(kernel)` if your app wants
-  a swappable kernel connection. `EmbeddedClient::shutdown()` is a no-op by
-  design: the embedder owns the kernel lifecycle.
+  a swappable kernel connection. `EmbeddedClient::shutdown()` calls
+  `Kernel::shutdown()`: it cancels every background job and waits, bounded —
+  see "Teardown" below for the contract.
 
 ## Capability Features
 
@@ -1094,7 +1095,10 @@ depended on the order.
 ([`Kernel::cancel_all_jobs`], the same lever `kill %N` uses — an in-process
 builtin future exits at its next checkpoint, an external child gets
 SIGTERM→SIGKILL), then waits up to `kill_grace + 3s` **per job** for it to
-actually unwind — mirroring `kill %N`'s own bound. A job that has not
+actually unwind — mirroring `kill %N`'s own bound. The waits are sequential,
+so the worst case is additive: N jobs that all ignore cancellation block
+`shutdown` for N × (kill_grace + 3s); jobs that unwind promptly cost only
+their own unwind time. A job that has not
 unwound by its deadline is logged (`tracing::warn!`) and abandoned: it keeps
 running detached until the tokio runtime itself goes away. Before this fix
 `shutdown` called `JobManager::wait_all()` with no timeout at all — a single

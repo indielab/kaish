@@ -5982,14 +5982,18 @@ impl Kernel {
         Ok(())
     }
 
-    /// Cancel every tracked background job (`&`) — running, gated, or
-    /// finished-but-unreaped — whether or not `shutdown` follows.
+    /// Trip the cancellation token of every tracked background job (`&`) —
+    /// whether or not `shutdown` follows.
     ///
-    /// Trips each job's cancellation token, the same lever `kill %N` uses:
-    /// an in-process builtin future exits at its next checkpoint, and any
-    /// external children the job spawned get the SIGTERM→SIGKILL cascade.
-    /// The job stays tracked with status `Killed` once it unwinds — this
-    /// only *starts* the cancellation, it does not wait for it (pair with
+    /// This is the same lever `kill %N` uses: a *running* job's in-process
+    /// future exits at its next checkpoint, and any external children it
+    /// spawned get the SIGTERM→SIGKILL cascade; it then stays tracked with
+    /// status `Killed` once it unwinds. For a *gated* or already-finished
+    /// job the token trip is a no-op — its future has already resolved, the
+    /// job keeps reporting `Gated`/its terminal status, and a gated job's
+    /// pending approval request stays live in the ledger until its TTL
+    /// expires (an operator can still grant and `confirm` it). This only
+    /// *starts* cancellation, it does not wait (pair with
     /// [`JobManager::wait`]/`wait_all` if the caller needs to block on the
     /// unwind, bounded as [`Self::shutdown`] does).
     ///
@@ -6013,9 +6017,12 @@ impl Kernel {
     ///
     /// Cancels every tracked background job ([`Self::cancel_all_jobs`]), then
     /// waits up to `kill_grace + 3s` **per job** — the same bound `kill %N`
-    /// gives a single target (GH #244) — for it to actually unwind. Before
-    /// this fix `shutdown` called `wait_all()` with no timeout at all:
-    /// `sleep 3600 &` then `shutdown()` blocked for an hour (GH #245).
+    /// gives a single target (GH #244) — for it to actually unwind. The
+    /// waits are sequential, so the worst case is additive: N jobs that all
+    /// ignore cancellation block shutdown for N × (kill_grace + 3s). Jobs
+    /// that unwind promptly (the normal case) cost only their own unwind
+    /// time. Before this fix `shutdown` called `wait_all()` with no timeout
+    /// at all: `sleep 3600 &` then `shutdown()` blocked for an hour (GH #245).
     ///
     /// A job that has not unwound by its deadline is abandoned: logged via
     /// `tracing::warn!` and left running detached until the tokio runtime
