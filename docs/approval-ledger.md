@@ -1211,6 +1211,33 @@ enforce policy (§C.5) and neither reads nor writes statement posture. `with_pol
 already covers everything script-reachable; the classifier is embedder-registered and no
 script surface mutates it.
 
+**Settled by the design review (deepseek, 2026-08-05)** — five points the section above
+left implicit, fixed here so the implementation does not re-derive them:
+
+- **The tap fires at exactly two sites**: the top-level statement loop and
+  `execute_argv`. Never inside `execute_stmt_flow` or the nested statement loops (user
+  tools, `source`, block capture) — a tap there posts once per loop iteration, which is
+  the thousand-entry mistake the top-level rule exists to prevent. A backgrounded
+  statement (`cmd &`) is a top-level statement and is tapped at the loop site before the
+  spawn; there is no second tap site in the background machinery.
+- **The tap is suppressed under an active redemption context.** A `confirm` replay must
+  not post a second `Observed` entry for the statement it replays.
+- **The tap posts pre-dispatch and records the ask, not the execution.** A
+  gate-classified statement's tap entry precedes its `Requested` entry, and a statement
+  that defers and never runs keeps its tap entry — the record of what was asked is not a
+  record of what ran, and nobody should "fix" the ordering later.
+- **A gated `execute_argv` invocation captures `Capture::Exact`**, not
+  `Capture::Statement` — it already holds a tool name and argv, and `confirm`'s existing
+  arm replays that form. `Capture::Statement` belongs to the statement loop alone.
+- **`cmd.*` never enters the subscription registry.** The classifier is the sole posture
+  decider for statements; a subscription over `cmd.execute` does not exist, so the
+  registry and the classifier cannot disagree. If that ever changes, the precedence
+  question must be answered here first.
+
+The default tap is advisory, not a durable audit trail — an embedder that needs a
+completeness guarantee uses the sink's reliability, and `EMBEDDING.md`'s tap section
+(PR 10) carries that caveat where embedders read it.
+
 ---
 
 ## D. API surfaces
