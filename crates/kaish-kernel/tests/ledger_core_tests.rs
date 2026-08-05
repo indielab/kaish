@@ -14,9 +14,9 @@ use kaish_kernel::ledger::{
     ConditionReport, Ledger, LedgerConfig, LedgerError, LedgerSink, LedgerSinkError,
 };
 use kaish_types::approval::{
-    ApprovalRequest, Capture, Decision, GrantTerms, LedgerEntry, Observation, Outcome, Principal,
-    PrincipalKind, RequestContext, RequestId, RequestState, Resource, ResourceRef, RiskClass,
-    StateClaim,
+    ApprovalRequest, Capture, Decision, GrantTerms, LedgerEntry, Observation, OperationPattern,
+    Outcome, Principal, PrincipalKind, RequestContext, RequestId, RequestState, Resource,
+    ResourceRef, RiskClass, StandingGrant, StateClaim,
 };
 
 fn agent(id: &str) -> Principal {
@@ -727,6 +727,114 @@ fn find_matching_brace(text: &str) -> usize {
         }
     }
     text.len()
+}
+
+// ─────────────────────── §D.2/§E.7 deny_self_approval ───────────────────────
+
+#[tokio::test]
+async fn deny_self_approval_off_by_default_lets_the_requesting_principal_grant() {
+    // The solo-human-REPL case: one principal is legitimately both
+    // requester and approver, and the default must not break it.
+    let (requester, approvals, approver) = Ledger::build(LedgerConfig::default(), None).unwrap();
+    let req = post(&requester, "fs.remove", Duration::from_secs(60)).await;
+    approver
+        .with_principal(agent("agent-1"))
+        .grant(&req.id, terms(&req, far_future()))
+        .await
+        .unwrap();
+    assert_eq!(approvals.state(&req.id), Some(RequestState::Granted));
+}
+
+#[tokio::test]
+async fn deny_self_approval_refuses_a_grant_from_the_requesting_principal() {
+    let config = LedgerConfig {
+        deny_self_approval: true,
+        ..LedgerConfig::default()
+    };
+    let (requester, approvals, approver) = Ledger::build(config, None).unwrap();
+    let req = post(&requester, "fs.remove", Duration::from_secs(60)).await;
+    let err = approver
+        .with_principal(agent("agent-1"))
+        .grant(&req.id, terms(&req, far_future()))
+        .await
+        .unwrap_err();
+    match &err {
+        LedgerError::SelfApproval {
+            request,
+            requested_by,
+            granted_by,
+        } => {
+            assert_eq!(*request, req.id);
+            assert_eq!(*requested_by, agent("agent-1"));
+            assert_eq!(*granted_by, agent("agent-1"));
+        }
+        other => panic!("expected LedgerError::SelfApproval, got {other:?}"),
+    }
+    let message = err.to_string();
+    assert!(
+        message.contains("agent-1"),
+        "the message must name the principal, got: {message}"
+    );
+    assert_eq!(
+        approvals.state(&req.id),
+        Some(RequestState::Requested),
+        "a refused grant must not move the request off Requested"
+    );
+}
+
+#[tokio::test]
+async fn deny_self_approval_on_still_allows_a_grant_from_a_distinct_principal() {
+    let config = LedgerConfig {
+        deny_self_approval: true,
+        ..LedgerConfig::default()
+    };
+    let (requester, approvals, approver) = Ledger::build(config, None).unwrap();
+    let req = post(&requester, "fs.remove", Duration::from_secs(60)).await;
+    approver
+        .with_principal(agent("agent-2"))
+        .grant(&req.id, terms(&req, far_future()))
+        .await
+        .unwrap();
+    assert_eq!(approvals.state(&req.id), Some(RequestState::Granted));
+}
+
+#[tokio::test]
+async fn deny_self_approval_refuses_a_standing_grant_issued_by_the_requesting_principal() {
+    // The same policy at the third `Granted`-producing path: a standing
+    // rule whose own `issued_by` is the requester's principal must be
+    // refused the same way an explicit grant is (one chokepoint, spec's
+    // "not three checks").
+    let config = LedgerConfig {
+        deny_self_approval: true,
+        ..LedgerConfig::default()
+    };
+    let (requester, approvals, approver) = Ledger::build(config, None).unwrap();
+    let req = post(&requester, "fs.remove", Duration::from_secs(60)).await;
+    let rule = StandingGrant::new(
+        vec![OperationPattern::new("fs.remove")],
+        Vec::new(),
+        None,
+        None,
+        agent("agent-1"),
+        "self-issued rule",
+    )
+    .unlimited_uses();
+    approver.grant_standing(rule).await.unwrap();
+
+    let err = approver
+        .grant_from_standing(&req.id, Duration::from_secs(300))
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(&err, LedgerError::SelfApproval { requested_by, granted_by, .. }
+            if *requested_by == agent("agent-1") && *granted_by == agent("agent-1")),
+        "expected LedgerError::SelfApproval naming agent-1 on both sides, got {err:?}"
+    );
+    assert_eq!(
+        approvals.state(&req.id),
+        Some(RequestState::Requested),
+        "a refused standing auto-approval must not move the request off Requested"
+    );
 }
 
 // ─────────────────────── Approver::decide input shape (forward reference) ───────────────────────

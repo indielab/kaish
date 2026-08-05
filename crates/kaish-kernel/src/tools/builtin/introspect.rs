@@ -75,13 +75,20 @@ fn format_tool_list(schemas: &[ToolSchema]) -> ExecResult {
         "NAME".to_string(),
         "DESCRIPTION".to_string(),
         "PARAMS".to_string(),
+        "OPERATIONS".to_string(),
     ];
 
     let nodes: Vec<OutputNode> = schemas
         .iter()
         .map(|s| {
             let param_count = s.params.len().to_string();
-            OutputNode::new(&s.name).with_cells(vec![s.description.clone(), param_count])
+            // Comma-joined: a table cell is a plain string (spec §F.3 item
+            // 5 is additive — the existing `NAME`/`DESCRIPTION`/`PARAMS`
+            // keys and their one-string-per-cell shape must not change
+            // under a policy engine already reading `kaish-tools --json`).
+            // Empty for a tool that gates nothing.
+            OutputNode::new(&s.name)
+                .with_cells(vec![s.description.clone(), param_count, s.operations.join(",")])
         })
         .collect();
 
@@ -104,6 +111,10 @@ fn format_tool_detail(schemas: &[ToolSchema], name: &str) -> ExecResult {
                         p.name, p.param_type, required, p.description
                     ));
                 }
+            }
+
+            if !s.operations.is_empty() {
+                output.push_str(&format!("Operations: {}\n", s.operations.join(", ")));
             }
 
             ExecResult::with_output(OutputData::text(output))

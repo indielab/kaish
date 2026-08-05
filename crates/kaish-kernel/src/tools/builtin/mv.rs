@@ -47,6 +47,7 @@ impl Tool for Mv {
                 ("Move into directory", "mv file.txt /archive/"),
             ],
         )
+        .with_operations([KernelOperation::FsRename.as_str()])
     }
 
     async fn execute(&self, args: ToolArgs, ctx: &mut dyn ToolCtx) -> ExecResult {

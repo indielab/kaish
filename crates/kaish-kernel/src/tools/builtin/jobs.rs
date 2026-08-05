@@ -13,7 +13,7 @@ use crate::tools::{schema_from_clap, ExecContext, ToolCtx, GlobalFlags, Tool, To
 /// field.
 ///
 /// `path` (`/v/jobs/N/`) is deliberately NOT a `JobInfo` field: it names
-/// *this VFS mount's* convention for reaching the job's live streams/status,
+/// *this VFS mount's* convention for reaching the job's observability nodes,
 /// not an intrinsic property of the job itself, so the builtin adds it here
 /// rather than the type baking in a `jobs`-specific presentation detail.
 /// Before GH #241 this function hand-built every field with `serde_json::json!`

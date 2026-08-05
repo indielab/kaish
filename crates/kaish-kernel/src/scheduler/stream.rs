@@ -1,4 +1,4 @@
-//! Bounded streams for job output capture.
+//! Bounded streams for external command output capture.
 //!
 //! Provides ring-buffer-backed streams that:
 //! - Bound memory usage (prevents OOM from large output)

@@ -187,13 +187,16 @@ async fn background_job_runs_user_function() {
         .execute("greet() { echo hello-from-user-fn; }")
         .await
         .expect("define tool");
-    kernel.execute("greet &").await.expect("run in background");
-    // Wait for job 1 and read its stdout.
+    kernel
+        .execute("greet > /tmp/greet_out.txt &")
+        .await
+        .expect("run in background");
+    // Wait for job 1 and read its redirected output.
     wait_for_job(&kernel, 1, Duration::from_secs(2)).await;
     let r = kernel
-        .execute("cat /v/jobs/1/stdout")
+        .execute("cat /tmp/greet_out.txt")
         .await
-        .expect("read stdout");
+        .expect("read redirected output");
     assert!(
         r.text_out().contains("hello-from-user-fn"),
         "background user function didn't run: {}",
@@ -216,13 +219,16 @@ async fn background_job_snapshot_isolation() {
         .execute("snap() { sleep 0.2; echo $VAR; }")
         .await
         .expect("define");
-    kernel.execute("snap &").await.expect("spawn");
+    kernel
+        .execute("snap > /tmp/snap_out.txt &")
+        .await
+        .expect("spawn");
     kernel.execute("VAR=after").await.expect("mutate");
     wait_for_job(&kernel, 1, Duration::from_secs(2)).await;
     let r = kernel
-        .execute("cat /v/jobs/1/stdout")
+        .execute("cat /tmp/snap_out.txt")
         .await
-        .expect("read stdout");
+        .expect("read redirected output");
     assert_eq!(
         r.text_out().trim(),
         "before",

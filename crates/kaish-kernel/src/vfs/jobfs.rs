@@ -5,14 +5,20 @@
 //! ```text
 //! /v/jobs/
 //! └── {job_id}/
-//!     ├── stdout   ← live output stream (ring buffer snapshot)
-//!     ├── stderr   ← live error stream
 //!     ├── status   ← "running" | "stopped" | "done:0" | "gated" | "killed:N" | "failed:N"
-//!     └── command  ← the original command string
+//!     ├── command  ← the original command string
+//!     └── approval ← pending approval request (JSON) if gated, else empty
 //! ```
 //!
 //! This is a read-only, synthesized filesystem. Content is generated from
 //! the JobManager on each read.
+//!
+//! **No `stdout`/`stderr` node.** GH #240: `/v/jobs/{id}/stdout` and
+//! `/stderr` filled only once, at job completion, while four docs promised a
+//! live stream — removed rather than made live (2026-08-05). A caller that
+//! needs a background job's output redirects it explicitly to a file the job
+//! writes to (`cmd > /tmp/out &`, or `/v/blobs/...` for hermetic kernels),
+//! then reads that file after the job finishes.
 
 use async_trait::async_trait;
 use std::io;
@@ -26,10 +32,9 @@ use crate::scheduler::{JobId, JobManager};
 ///
 /// Mounted at `/v/jobs`, this filesystem synthesizes content from the JobManager:
 /// - List root to see all job IDs as directories
-/// - Read `{id}/stdout` for live stdout output
-/// - Read `{id}/stderr` for live stderr output
 /// - Read `{id}/status` for job status ("running", "stopped", "done:0", "gated", "killed:N", "failed:N")
 /// - Read `{id}/command` for the original command string
+/// - Read `{id}/approval` for a pending approval request (JSON), empty if not gated
 pub struct JobFs {
     jobs: Arc<JobManager>,
 }
@@ -45,7 +50,7 @@ impl JobFs {
     /// Expected formats:
     /// - "" or "/" → root (list jobs)
     /// - "{id}" → job directory
-    /// - "{id}/{file}" → specific file (stdout, stderr, status, command)
+    /// - "{id}/{file}" → specific file (status, command, approval)
     fn parse_path(path: &Path) -> Option<(Option<JobId>, Option<&str>)> {
         let path_str = path.to_str()?;
         let path_str = path_str.trim_start_matches('/');
@@ -102,15 +107,6 @@ impl Filesystem for JobFs {
         }
 
         match file {
-            "stdout" => {
-                // Return stream content, or empty if no stream attached
-                let content = self.jobs.read_stdout(job_id).await.unwrap_or_default();
-                Ok(content)
-            }
-            "stderr" => {
-                let content = self.jobs.read_stderr(job_id).await.unwrap_or_default();
-                Ok(content)
-            }
             "status" => {
                 let status = self
                     .jobs
@@ -188,7 +184,7 @@ impl Filesystem for JobFs {
                 Ok(entries)
             }
             Some(id) => {
-                // List job directory: stdout, stderr, status, command
+                // List job directory: status, command, approval
                 if !self.jobs.exists(id).await {
                     return Err(io::Error::new(
                         io::ErrorKind::NotFound,
@@ -197,22 +193,6 @@ impl Filesystem for JobFs {
                 }
 
                 Ok(vec![
-                    DirEntry {
-                        name: "stdout".to_string(),
-                        kind: DirEntryKind::File,
-                        modified: None,
-                        permissions: None,
-                        size: 0, // Dynamic content
-                        symlink_target: None,
-                    },
-                    DirEntry {
-                        name: "stderr".to_string(),
-                        kind: DirEntryKind::File,
-                        modified: None,
-                        permissions: None,
-                        size: 0,
-                        symlink_target: None,
-                    },
                     DirEntry {
                         name: "status".to_string(),
                         kind: DirEntryKind::File,
@@ -277,7 +257,7 @@ impl Filesystem for JobFs {
                 }
 
                 // Validate file name
-                if !["stdout", "stderr", "status", "command", "approval"].contains(&file) {
+                if !["status", "command", "approval"].contains(&file) {
                     return Err(io::Error::new(
                         io::ErrorKind::NotFound,
                         format!("unknown file: {}", file),
@@ -319,27 +299,16 @@ impl Filesystem for JobFs {
 mod tests {
     use super::*;
     use crate::interpreter::ExecResult;
-    use crate::scheduler::BoundedStream;
     use tokio::sync::oneshot;
 
     async fn make_job_manager_with_job() -> (Arc<JobManager>, JobId) {
         let manager = Arc::new(JobManager::new());
 
-        // Create streams
-        let stdout = Arc::new(BoundedStream::new(1024));
-        let stderr = Arc::new(BoundedStream::new(1024));
-
-        // Write some output
-        stdout.write(b"hello from stdout\n").await;
-        stderr.write(b"error message\n").await;
-
         // Create channel for job completion
         let (tx, rx) = oneshot::channel();
 
         // Register job
-        let id = manager
-            .register_with_streams("echo test".to_string(), rx, stdout, stderr)
-            .await;
+        let id = manager.register("echo test".to_string(), rx).await;
 
         // Send result (job completes)
         let _ = tx.send(ExecResult::success("done"));
@@ -376,30 +345,11 @@ mod tests {
         let entries = fs.list(Path::new(&path)).await.unwrap();
 
         let names: Vec<_> = entries.iter().map(|e| &e.name).collect();
-        assert!(names.contains(&&"stdout".to_string()));
-        assert!(names.contains(&&"stderr".to_string()));
+        assert!(!names.contains(&&"stdout".to_string()), "stdout node removed — GH #240");
+        assert!(!names.contains(&&"stderr".to_string()), "stderr node removed — GH #240");
         assert!(names.contains(&&"status".to_string()));
         assert!(names.contains(&&"command".to_string()));
-    }
-
-    #[tokio::test]
-    async fn test_read_stdout() {
-        let (manager, id) = make_job_manager_with_job().await;
-        let fs = JobFs::new(manager);
-
-        let path = format!("{}/stdout", id);
-        let data = fs.read(Path::new(&path)).await.unwrap();
-        assert_eq!(data, b"hello from stdout\n");
-    }
-
-    #[tokio::test]
-    async fn test_read_stderr() {
-        let (manager, id) = make_job_manager_with_job().await;
-        let fs = JobFs::new(manager);
-
-        let path = format!("{}/stderr", id);
-        let data = fs.read(Path::new(&path)).await.unwrap();
-        assert_eq!(data, b"error message\n");
+        assert!(names.contains(&&"approval".to_string()));
     }
 
     #[tokio::test]
@@ -407,12 +357,8 @@ mod tests {
         let manager = Arc::new(JobManager::new());
 
         // Create a job that won't complete
-        let stdout = Arc::new(BoundedStream::new(1024));
-        let stderr = Arc::new(BoundedStream::new(1024));
         let (_tx, rx) = oneshot::channel();
-        let id = manager
-            .register_with_streams("sleep 100".to_string(), rx, stdout, stderr)
-            .await;
+        let id = manager.register("sleep 100".to_string(), rx).await;
 
         let fs = JobFs::new(manager);
 
@@ -469,9 +415,20 @@ mod tests {
         let (manager, id) = make_job_manager_with_job().await;
         let fs = JobFs::new(manager);
 
-        let path = format!("{}/stdout", id);
+        let path = format!("{}/status", id);
         let entry = fs.stat(Path::new(&path)).await.unwrap();
         assert_eq!(entry.kind, DirEntryKind::File);
+    }
+
+    #[tokio::test]
+    async fn test_stat_stdout_removed() {
+        let (manager, id) = make_job_manager_with_job().await;
+        let fs = JobFs::new(manager);
+
+        let path = format!("{}/stdout", id);
+        let result = fs.stat(Path::new(&path)).await;
+        assert!(result.is_err(), "stdout node removed — GH #240");
+        assert_eq!(result.unwrap_err().kind(), io::ErrorKind::NotFound);
     }
 
     #[tokio::test]
@@ -481,7 +438,7 @@ mod tests {
 
         assert!(fs.read_only());
 
-        let write_result = fs.write(Path::new("1/stdout"), b"data").await;
+        let write_result = fs.write(Path::new("1/status"), b"data").await;
         assert!(write_result.is_err());
 
         let mkdir_result = fs.mkdir(Path::new("1")).await;
@@ -496,7 +453,7 @@ mod tests {
         let manager = Arc::new(JobManager::new());
         let fs = JobFs::new(manager);
 
-        let result = fs.read(Path::new("999/stdout")).await;
+        let result = fs.read(Path::new("999/status")).await;
         assert!(result.is_err());
         assert_eq!(result.unwrap_err().kind(), io::ErrorKind::NotFound);
     }

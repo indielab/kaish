@@ -47,6 +47,18 @@ pub struct LedgerConfig {
     /// enough that no in-flight operation should ever cross it. Superseded
     /// once `AttemptGuard`'s outbox exists; flagged for review then.
     pub attempt_stale_after: Duration,
+    /// Refuse a grant whose issuing principal equals the request's own
+    /// principal (spec §D.2, §E.7). Default false: a solo human at the REPL
+    /// is legitimately both requester and approver, so this is an opt-in
+    /// policy for multi-principal embedders, not a blanket
+    /// approver-never-equals-requester invariant. Enforced at the one place
+    /// a `Granted` entry is appended, so it covers an explicit grant, a
+    /// chain-decided grant, and a standing-grant auto-approval alike. Its
+    /// job is catching misconfiguration (an agent session handed a handle
+    /// it should not use to approve its own requests), not resisting an
+    /// attacker — the ledger records both principals on every grant
+    /// regardless of this flag.
+    pub deny_self_approval: bool,
 }
 
 impl Default for LedgerConfig {
@@ -59,6 +71,7 @@ impl Default for LedgerConfig {
             request_ttl: Duration::from_secs(60),
             max_token_attempts: 5,
             attempt_stale_after: Duration::from_secs(600),
+            deny_self_approval: false,
         }
     }
 }

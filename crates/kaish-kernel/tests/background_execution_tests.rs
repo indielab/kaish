@@ -7,8 +7,13 @@
 //! - Spawn the command as a background job
 //! - Register it with JobManager and create /v/jobs/{id}/ VFS entries
 //! - Return immediately with a job ID like "[1]"
-//! - Capture stdout/stderr via BoundedStream
 //! - Allow polling status via /v/jobs/{id}/status
+//!
+//! GH #240 removed `/v/jobs/{id}/stdout`/`stderr` — they filled only once,
+//! at completion, while docs promised a live stream. A test that needs a
+//! background job's actual output redirects it to a file explicitly
+//! (`cmd > /tmp/out &`) and reads that back, the same pattern a caller now
+//! uses in place of the removed node.
 
 // Test-fixture code: unwrap/expect on known-good setup is the idiom here.
 #![allow(clippy::unwrap_used, clippy::expect_used)]
@@ -167,15 +172,18 @@ async fn test_background_job_creates_vfs_entry() {
 #[tokio::test]
 async fn test_background_job_captures_stdout() {
     let kernel = setup().await;
-    kernel.execute("echo 'hello from background' &").await.unwrap();
+    kernel
+        .execute("echo 'hello from background' > /tmp/captures_stdout.txt &")
+        .await
+        .unwrap();
 
     wait_for_job(&kernel, 1, Duration::from_secs(1)).await;
 
-    let result = kernel.execute("cat /v/jobs/1/stdout").await.unwrap();
-    assert!(result.ok(), "cat stdout failed: {}", result.err);
+    let result = kernel.execute("cat /tmp/captures_stdout.txt").await.unwrap();
+    assert!(result.ok(), "cat redirected output failed: {}", result.err);
     assert!(
         result.text_out().contains("hello from background"),
-        "expected stdout content, got: {}",
+        "expected redirected output content, got: {}",
         result.text_out()
     );
 }
@@ -254,14 +262,14 @@ async fn test_multiple_background_jobs() {
 async fn test_each_job_has_correct_output() {
     let kernel = setup().await;
 
-    kernel.execute("echo 'output-one' &").await.unwrap();
-    kernel.execute("echo 'output-two' &").await.unwrap();
+    kernel.execute("echo 'output-one' > /tmp/job1.txt &").await.unwrap();
+    kernel.execute("echo 'output-two' > /tmp/job2.txt &").await.unwrap();
 
     wait_for_job(&kernel, 1, Duration::from_secs(1)).await;
     wait_for_job(&kernel, 2, Duration::from_secs(1)).await;
 
-    let r1 = kernel.execute("cat /v/jobs/1/stdout").await.unwrap();
-    let r2 = kernel.execute("cat /v/jobs/2/stdout").await.unwrap();
+    let r1 = kernel.execute("cat /tmp/job1.txt").await.unwrap();
+    let r2 = kernel.execute("cat /tmp/job2.txt").await.unwrap();
 
     assert!(r1.text_out().contains("output-one"), "job 1 wrong output: {}", r1.text_out());
     assert!(r2.text_out().contains("output-two"), "job 2 wrong output: {}", r2.text_out());
@@ -277,14 +285,14 @@ async fn test_background_job_inherits_env() {
 
     // Set environment variable
     kernel.execute("export MY_VAR=test_value").await.unwrap();
-    kernel.execute("echo $MY_VAR &").await.unwrap();
+    kernel.execute("echo $MY_VAR > /tmp/inherits_env.txt &").await.unwrap();
 
     wait_for_job(&kernel, 1, Duration::from_secs(1)).await;
 
-    let result = kernel.execute("cat /v/jobs/1/stdout").await.unwrap();
+    let result = kernel.execute("cat /tmp/inherits_env.txt").await.unwrap();
     assert!(
         result.text_out().contains("test_value"),
-        "expected env var in output, got: {}",
+        "expected env var in redirected output, got: {}",
         result.text_out()
     );
 }
@@ -297,14 +305,14 @@ async fn test_background_job_inherits_cwd() {
     let dir = format!("/tmp/test_cwd_{}", std::process::id());
     kernel.execute(&format!("mkdir -p {dir}")).await.unwrap();
     kernel.execute(&format!("cd {dir}")).await.unwrap();
-    kernel.execute("pwd &").await.unwrap();
+    kernel.execute("pwd > out.txt &").await.unwrap();
 
     wait_for_job(&kernel, 1, Duration::from_secs(1)).await;
 
-    let result = kernel.execute("cat /v/jobs/1/stdout").await.unwrap();
+    let result = kernel.execute(&format!("cat {dir}/out.txt")).await.unwrap();
     assert!(
         result.text_out().contains(&dir),
-        "expected cwd in output, got: {}",
+        "expected cwd in redirected output, got: {}",
         result.text_out()
     );
 }
@@ -360,11 +368,14 @@ async fn test_spilled_background_job_reports_failed_not_done() {
 async fn test_pipeline_in_background() {
     let kernel = setup().await;
 
-    kernel.execute("echo 'line1\nline2\nline3' | wc -l &").await.unwrap();
+    kernel
+        .execute("echo 'line1\nline2\nline3' | wc -l > /tmp/pipeline_out.txt &")
+        .await
+        .unwrap();
 
     wait_for_job(&kernel, 1, Duration::from_secs(1)).await;
 
-    let result = kernel.execute("cat /v/jobs/1/stdout").await.unwrap();
+    let result = kernel.execute("cat /tmp/pipeline_out.txt").await.unwrap();
     assert!(result.ok(), "cat failed: {}", result.err);
     // wc -l should output "3"
     assert!(

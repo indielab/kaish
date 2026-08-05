@@ -973,7 +973,7 @@ The `Filesystem` trait (from `kaish-vfs`, re-exported as
 use std::path::Path;
 use kaish_kernel::vfs::Filesystem;
 
-let data = kernel.vfs().read(Path::new("/v/jobs/1/stdout")).await?;
+let data = kernel.vfs().read(Path::new("/v/jobs/1/status")).await?;
 ```
 
 ## Job Output Capture
@@ -1019,8 +1019,6 @@ job state:
 ```
 /v/jobs/
 ├── 1/
-│   ├── stdout    # Captured stdout (bounded)
-│   ├── stderr    # Captured stderr (bounded)
 │   ├── status    # "running", "stopped", "done:0", "gated", "killed:N", or "failed:N"
 │   ├── command   # Original command string
 │   └── approval  # Pending approval request (JSON) if gated, else empty
@@ -1028,15 +1026,21 @@ job state:
 │   └── ...
 ```
 
+There is no `stdout`/`stderr` node (GH #240 removed it: it filled only once,
+at completion, never live as earlier docs claimed). An embedder that needs a
+background job's output redirects it to a file the job writes to, and reads
+that file back after the job finishes — the job's own captured
+stdout/stderr never reaches the VFS.
+
 ```sh
 # In kaish scripts
-sleep 10 &              # Starts job 1
-jobs                    # Shows: [1] running  /v/jobs/1/
-cat /v/jobs/1/status    # "running"
+sleep 10 > /tmp/out.log &   # Starts job 1, output goes to a file
+jobs                        # Shows: [1] running  /v/jobs/1/
+cat /v/jobs/1/status        # "running"
 
 # After completion
-cat /v/jobs/1/stdout    # Job's stdout
-cat /v/jobs/1/status    # "done:0" on success, "failed:N" otherwise
+cat /tmp/out.log            # Job's output
+cat /v/jobs/1/status        # "done:0" on success, "failed:N" otherwise
 ```
 
 A destructive op backgrounded under `set -o approvals` (`rm x &`) gates in the

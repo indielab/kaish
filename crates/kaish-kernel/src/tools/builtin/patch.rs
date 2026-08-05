@@ -75,6 +75,7 @@ impl Tool for Patch {
                 ("Strip path prefix", "patch -p1 < changes.patch"),
             ],
         )
+        .with_operations([KernelOperation::FsOverwrite.as_str()])
     }
 
     async fn execute(&self, mut args: ToolArgs, ctx: &mut dyn ToolCtx) -> ExecResult {
