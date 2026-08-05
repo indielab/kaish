@@ -24,6 +24,9 @@ pub enum KernelOperation {
     FsRename,
     /// `kaish-trash empty` discarding the recovery net itself.
     TrashEmpty,
+    /// One top-level statement, recorded before it runs — the statement tap
+    /// and the statement gate (spec §C.6).
+    CmdExecute,
 }
 
 impl KernelOperation {
@@ -34,6 +37,7 @@ impl KernelOperation {
             Self::FsOverwrite => "fs.overwrite",
             Self::FsRename => "fs.rename",
             Self::TrashEmpty => "trash.empty",
+            Self::CmdExecute => "cmd.execute",
         }
     }
 
@@ -41,13 +45,22 @@ impl KernelOperation {
     /// policy matches on it; it carries no redemption policy of its own
     /// (spec §F.3 item 4 — every grant authorizes exactly one successful
     /// settlement, in every risk class alike).
+    ///
+    /// `cmd.execute` is the one operation whose real risk lives elsewhere:
+    /// it covers `ls` and `rm -rf` alike, so the classifier names the risk on
+    /// its `StatementPosture::Gate` and a statement request carries *that*
+    /// (spec §C.6). The value here is the floor a caller gets when nobody
+    /// named one, and it is the conservative end on purpose — an unnamed risk
+    /// must never read as safer than the truth.
     pub const fn risk(self) -> RiskClass {
         match self {
             // The trash already caught everything it could — what reaches
             // these gates is the case with no recovery net left.
-            Self::FsRemove | Self::FsOverwrite | Self::FsRename | Self::TrashEmpty => {
-                RiskClass::Irreversible
-            }
+            Self::FsRemove
+            | Self::FsOverwrite
+            | Self::FsRename
+            | Self::TrashEmpty
+            | Self::CmdExecute => RiskClass::Irreversible,
         }
     }
 
@@ -85,6 +98,7 @@ mod tests {
         KernelOperation::FsOverwrite,
         KernelOperation::FsRename,
         KernelOperation::TrashEmpty,
+        KernelOperation::CmdExecute,
     ];
 
     #[test]

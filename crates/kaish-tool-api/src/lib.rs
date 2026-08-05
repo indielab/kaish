@@ -30,6 +30,10 @@
 //!   grant's preconditions are re-checked at redemption (ledger PR 6). The
 //!   kernel ships the `path` resolver; a plugin registers one per kind it
 //!   names in a `Resource`.
+//! - [`StatementClassifier`] — decides which top-level statements must ask
+//!   before they run (ledger PR 10). An embedder registers one with
+//!   `KernelConfig::with_statement_classifier`; [`CommandNameClassifier`] is
+//!   the reference implementation.
 //!
 //! The pure-data types tools traffic in (`Value`, `ToolArgs`, `ToolSchema`,
 //! `ExecResult`, `OutputData`, …) live one layer down in `kaish-types`.
@@ -40,9 +44,11 @@ mod clap_schema;
 mod ctx;
 mod global_flags;
 mod issue;
+mod statement;
 mod tool;
 
 pub use approval::{ApprovalOutcome, Approvals, AttemptHandle, ResolverError, StateResolver};
+pub use statement::{CommandNameClassifier, StatementClassifier, StatementPosture};
 pub use backend::KernelBackend;
 pub use clap_schema::{params_from_clap, schema_from_clap, schema_tree_from_clap};
 pub use ctx::{PatientGuard, ToolCtx};

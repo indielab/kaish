@@ -459,6 +459,97 @@ net every other `fs.*` operation relies on. `Approvals::subscriptions()` lists
 the live registry; there is no shell surface for `subscribe` — a session that
 could subscribe itself could also unsubscribe itself.
 
+**The statement tap: every statement is recorded, always.** Above the `fs.*`
+layer sits a second one. Every top-level statement posts one chainless
+`LedgerEntry::Observed` entry under operation `cmd.execute`, carrying a `Plan`
+— the statement rendered back to shell text unexpanded, its kind, and every
+command it contains. **There is no configuration that turns this off**: an
+agent getting an automatic second opinion is a property of kaish, not a
+posture an embedder selects. The two layers are independent by design and join
+through trace context, not through the kernel: `fs.*` records what a command
+**touched**, `cmd.execute` records what was **asked to run**, before any of it
+runs.
+
+The cost is one entry per top-level statement. A 1,000-iteration loop posts
+one; a 10,000-path `rm` posts one; a `$(…)`, a sourced script, and a user
+tool's body post none of their own, because their statements belong to the
+enclosing top-level statement's plan.
+
+**The tap is advisory, not a durable audit trail.** A tap append that cannot
+commit — sink backpressure, a full retention ring — emits a **warn** event and
+the statement **still runs**. Nobody opted into a completeness guarantee here;
+an operator who registers an `fs.*` subscription did, which is why that path
+exits 1 and this one does not. An embedder that needs the record to be
+complete gets that from the sink's own reliability (`with_ledger_sink`), not
+from the tap. A gate-classified statement keeps every fail-closed rule: a
+decision that cannot be recorded is not made, and the statement exits **1**.
+
+**The classifier scopes; the chain decides.**
+`KernelConfig::with_statement_classifier(Arc<dyn StatementClassifier>)`
+installs one. It is called once per top-level statement, synchronously, and
+must not block — it runs on the execution path of every statement.
+
+```rust
+use kaish_kernel::ledger::{StatementClassifier, StatementPosture};
+use kaish_types::approval::{Plan, RiskClass};
+
+struct GateWrites;
+impl StatementClassifier for GateWrites {
+    fn classify(&self, plan: &Plan) -> StatementPosture {
+        if plan.commands.iter().any(|c| !c.redirects.is_empty()) {
+            return StatementPosture::gate(
+                "the statement redirects to a file",
+                RiskClass::Recoverable,
+            );
+        }
+        StatementPosture::Observe
+    }
+}
+```
+
+With none registered every statement is `StatementPosture::Observe` — recorded
+and run. A `StatementPosture::Gate { reason, risk }` builds an
+`ApprovalRequest` under `cmd.execute` with the plan attached and one
+`Resource { kind: "cmd", id: <argv0> }` per planned command, then runs the same
+four-stage chain a gated `rm` runs: a standing grant auto-approves it
+(all-or-nothing over every `cmd` resource), `Approver::decide` puts it in front
+of a human under the patient hold, and all-`Defer` is **exit 2** with the view
+on `.approval` and **nothing of the statement executed** — no substitution, no
+redirect target created, no first loop iteration. The classifier has no deny:
+refusal is a chain decision (`Approver::policy`), because a scoping seam that
+can refuse is a second decision chain.
+
+`CommandNameClassifier::new(names, reason, risk)` is the reference
+implementation: it gates a statement when any command it plans is named in
+`names`, matched on argv0 exactly as written. Classifying the plan is what
+tells `rm target.txt` from `echo 'rm target.txt'` and from `grep rm
+changelog.txt` — the plan carries the parse, and a raw line does not.
+
+**Replay of a held statement.** A deferred statement's capture is
+`Capture::Statement { source, index }`: statements carry no source spans, so
+the capture is the program source plus the held statement's index.
+`Kernel::confirm(&handle, &id)` re-parses that source and runs exactly that
+statement, in the originating session — earlier statements' effects
+(variables, cwd) are session state and still hold, and they are not re-run. A
+gated `execute_argv` call captures `Capture::Exact` instead, because it
+already holds a tool name and an argv.
+
+**Redeeming a held statement by re-running it.** The statement gate reads a
+`--confirm=<key>` off the statement's own argv before it drafts, so re-running
+the held line with the key an operator hands back redeems **the original
+request** rather than minting a second one. The same pass keeps the credential
+out of the record: the rendering shows `--confirm=<redacted>` and the captured
+source drops the token entirely, because plan and capture both land in the
+ledger and no ledger entry carries a credential. What *executes* is untouched —
+the builtin's own gate may legitimately consume the same key.
+
+Only a literal key is visible to any of this. `--confirm=${key}` renders
+unexpanded, so nothing is lifted and nothing needs redacting: what the plan
+cannot see, it cannot leak either. A credential a script puts somewhere the
+taxonomy cannot name — the right-hand side of an assignment — is recorded like
+any other text. The tap redacts what it can identify, and this paragraph is
+where that boundary is stated.
+
 **Pinning the policy.** `KernelConfig::with_policy_pinned(true)` makes
 `set +o approvals` fail with **exit 1** and a message naming the pin, rather
 than silently doing nothing — a silent no-op would teach an agent that its

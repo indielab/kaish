@@ -1,5 +1,13 @@
 //! The subscription feature's hard requirement, stated in numbers: **with
-//! nothing subscribed, an `fs.*` operation is free.**
+//! nothing subscribed, an `fs.*` operation costs no request and no per-path
+//! entry, however many paths it names.**
+//!
+//! The statement tap (`docs/approval-ledger.md` §C.6) posts one chainless
+//! entry for the statement itself, and that is the whole cost: 1 entry for
+//! 10,000 paths, not 10,000. The tap is O(top-level statements) by
+//! construction, which is exactly what makes it tenable always-on while
+//! per-path `fs.*` observe stays opt-in — so this test pins the tap's entry
+//! count at 1 rather than pretending the log is empty.
 //!
 //! One test, alone in its own integration binary on purpose.
 //! [`ApprovalRequest::constructed_count`] is a process-wide counter, so a
@@ -20,7 +28,7 @@
 #![cfg(feature = "localfs")]
 
 use kaish_kernel::{Kernel, KernelConfig};
-use kaish_types::approval::ApprovalRequest;
+use kaish_types::approval::{ApprovalRequest, LedgerEntry};
 
 /// How many paths the delete names.
 const PATHS: usize = 10_000;
@@ -66,10 +74,25 @@ async fn an_unsubscribed_ten_thousand_path_delete_posts_nothing_and_builds_no_re
         "an unsubscribed {PATHS}-path delete built {} approval requests — 0 are allowed",
         after - before
     );
-    assert!(
-        kernel.approvals().log(0).is_empty(),
-        "an unsubscribed delete posted ledger entries: {:?}",
-        kernel.approvals().log(0)
+    let log = kernel.approvals().log(0);
+    assert_eq!(
+        log.len(),
+        1,
+        "an unsubscribed {PATHS}-path delete must post exactly the one statement-tap entry: {log:?}"
+    );
+    let LedgerEntry::Observed {
+        operation,
+        resources,
+        ..
+    } = &log[0]
+    else {
+        panic!("the only entry must be the statement tap, got {:?}", log[0]);
+    };
+    assert_eq!(operation.as_str(), "cmd.execute");
+    assert_eq!(
+        resources.len(),
+        1,
+        "one `cmd` resource for the one planned command, not one per path: {resources:?}"
     );
     assert_eq!(
         std::fs::read_dir(&tree).unwrap().count(),

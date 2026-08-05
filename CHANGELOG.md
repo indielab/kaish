@@ -188,6 +188,50 @@ breaking entries are marked **BREAKING**.
 - **`Approvals::subscriptions()` / `any_subscriptions()`**, `Requester::observed`,
   and `LedgerError::SubscriptionNotFound` — revoking an id that was never issued
   fails loud instead of reporting success.
+- **The statement tap: every top-level statement is recorded** (ledger PR 10,
+  `docs/approval-ledger.md` §C.6) — one chainless `LedgerEntry::Observed` under
+  operation `cmd.execute`, carrying the statement's plan. No configuration turns
+  it off: an automatic second opinion is a property of kaish, not a posture an
+  embedder selects.
+- The cost is O(top-level statements): a 1,000-iteration loop posts one entry and
+  a 10,000-path delete posts one, which is what makes always-on tenable while
+  per-path `fs.*` observe stays opt-in.
+- A `$(…)`, a sourced script, and a user tool's body post nothing of their own —
+  their statements belong to the enclosing top-level statement's plan.
+- **A tap that cannot commit warns and the statement still runs** — the tap is a
+  second opinion, not a permission gate, and nobody opted into a completeness
+  guarantee; an `fs.*` subscription's operator did, which is why that path exits 1.
+- **`Plan`/`PlannedCommand`/`PlannedRedirect` (kaish-types)** — the statement
+  rendered back to shell text *unexpanded* (`${HOME}` and `$(…)` as written, so a
+  classifier judges what was asked), its kind, and every command it contains.
+  Truncated at 8 KiB with a marker naming the number.
+- **Re-running a held statement with `--confirm=<key>` redeems the original
+  request** — the gate reads the key off the statement's own argv before drafting,
+  so a re-run never mints a second request and leaves the first pending.
+- A `--confirm=<key>` argument renders as `--confirm=<redacted>` and its token is
+  dropped from `Capture::Statement`'s source — plan and capture both land in the
+  ledger, and no ledger entry carries a credential. Only a literal key is affected
+  (`--confirm=${key}` renders unexpanded and carries no value either way), and
+  nothing is stripped from the argv that executes.
+- **`KernelConfig::with_statement_classifier`** and
+  `kaish_tool_api::{StatementClassifier, StatementPosture}` — the classifier
+  scopes, the chain decides. `Gate { reason, risk }` runs the same four-stage
+  chain a gated `rm` runs, and all-`Defer` is exit 2 with **nothing of the
+  statement executed**: no substitution, no redirect target created, no first
+  loop iteration. There is no deny posture — refusal is a chain decision.
+- **`CommandNameClassifier`** is the reference classifier: it gates when any
+  planned command's argv0 is in a named set, which tells `rm f` from `echo 'rm f'`
+  and from `grep rm log` (measured 9/9 against raw-line token matching's 6/9).
+- **`Capture::Statement { source, index }`** — a held statement's replay form;
+  `Kernel::confirm` re-parses the source and runs exactly that statement in the
+  originating session, where earlier statements' variables and cwd still hold.
+  A gated `execute_argv` captures `Capture::Exact` instead.
+- **`ApprovalRequest.plan` / `ApprovalRequestView.plan` / `Observed.plan`** —
+  additive, serde-defaulted, and omitted on the wire when absent, so an `fs.*`
+  request serializes exactly as before.
+- **`KernelOperation::CmdExecute`** (`"cmd.execute"`), and `cmd` joins
+  `fs`/`trash` as a namespace `OperationId::namespaced` refuses — a plugin cannot
+  pose as the kernel's own statement tap.
 - **`ToolSchema.operations: Vec<String>`** (spec §F.3 item 5) — the dotted
   operation ids a tool can post through `ToolCtx::request_approval` /
   `ExecContext::request_gate`, surfaced through `tools --json` so a policy engine
@@ -196,6 +240,13 @@ breaking entries are marked **BREAKING**.
   `write` (`fs.overwrite`), `mv` (`fs.rename`), `kaish-trash empty` (`trash.empty`).
 
 ### Changed
+- **BREAKING: `ObservedResource.subscription` is `Option<SubscriptionId>`**
+  (ledger PR 10) — the statement tap records one `cmd` resource per planned
+  command and no subscription covers any of them, because `cmd.*` never enters
+  the subscription registry. A sentinel id would be a silent lie in an audit
+  record. Omitted on the wire when absent, so an `fs.*` entry is unchanged.
+- **BREAKING: `Requester::observed` takes a `plan: Option<Plan>`** (ledger PR 10)
+  — `None` for every `fs.*` caller.
 - **BREAKING:** `Kernel::shutdown` now takes `&self` instead of owned `self`,
   and no longer blocks forever (GH #245) — it cancels every tracked job
   (`cancel_all_jobs`), then waits up to `kill_grace + 3s` **per job**

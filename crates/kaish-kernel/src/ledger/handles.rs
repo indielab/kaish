@@ -8,8 +8,9 @@ use std::time::Duration;
 
 use kaish_types::approval::{
     ApprovalRequest, ApprovalRequestDraft, AttemptId, AttemptState, Capture, Grant, GrantTerms,
-    Grounds, LedgerEntry, ObservedResource, OperationId, Outcome, Principal, RequestContext,
-    RequestId, RequestState, StandingGrant, StandingId, Subscription, SubscriptionId, Token,
+    Grounds, LedgerEntry, ObservedResource, OperationId, Outcome, Plan, Principal,
+    RequestContext, RequestId, RequestState, StandingGrant, StandingId, Subscription,
+    SubscriptionId, Token,
 };
 
 use super::core::{build_inner, LedgerInner, SystemWallClock};
@@ -312,25 +313,29 @@ impl Requester {
     }
 
     /// Post one `Observed` entry: an `observe` subscription covered a
-    /// mutation, which proceeds (spec §C.5). A record, not a request — no
-    /// chain is opened, nothing lands in the live index, and there is no
-    /// grant to redeem. Lives on the implementation side because the gate
-    /// sites are what classify a path as observed; nothing here decides
-    /// anything.
+    /// mutation, or the statement tap recorded a statement, and either way
+    /// it proceeds (spec §C.5, §C.6). A record, not a request — no chain is
+    /// opened, nothing lands in the live index, and there is no grant to
+    /// redeem. Lives on the implementation side because the gate sites are
+    /// what classify a path as observed; nothing here decides anything.
     ///
-    /// `Err` fails the operation closed at the gate site: an operator who
-    /// subscribed asked for a complete record, and a mutation that runs
-    /// outside it is the gap the subscription exists to close.
+    /// `plan` is `Some` exactly for the statement tap.
+    ///
+    /// What `Err` means differs by caller, and deliberately: an `fs.*` gate
+    /// site fails the operation closed, because an operator who subscribed
+    /// asked for a complete record; the statement tap warns and runs, because
+    /// nobody opted into a completeness guarantee there (spec §C.6).
     pub async fn observed(
         &self,
         operation: OperationId,
         by: Principal,
         resources: Vec<ObservedResource>,
+        plan: Option<Plan>,
     ) -> Result<(), LedgerError> {
         // Same reason as `post_request`: a queued settlement can be what
         // frees the ring capacity this append reserves.
         self.0.drain_outbox();
-        self.0.post_observed(operation, by, resources)
+        self.0.post_observed(operation, by, resources, plan)
     }
 }
 

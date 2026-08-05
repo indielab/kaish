@@ -8,8 +8,10 @@ use std::time::Duration;
 use async_trait::async_trait;
 use kaish_types::approval::{
     ApprovalRequest, ApprovalRequestDraft, AttemptId, Capture, Condition, Invocation, Observation,
-    Outcome, Principal, RequestContext, RequestId, Resource, ResourceRef,
+    ObservedResource, OperationId, Outcome, Plan, Principal, RequestContext, RequestId, Resource,
+    ResourceRef,
 };
+use kaish_tool_api::{StatementClassifier, StatementPosture};
 
 use crate::ast::Value;
 use crate::backend::{KernelBackend, LocalBackend};
@@ -229,6 +231,26 @@ pub struct ExecContext {
     /// Also the ownership record `settle_with` checks: a tool may report an
     /// outcome for an attempt *this* context reserved and no other.
     pub(crate) attempts: Vec<AttemptGuard>,
+}
+
+/// The resource kind a statement's commands are named under (spec §C.6):
+/// one `cmd` resource per planned command, matched by a standing grant with
+/// the same exact-kind/globbed-id rule everything else uses.
+pub(crate) const CMD_KIND: &str = "cmd";
+
+/// What the statement tap decided (spec §C.6). See
+/// [`ExecContext::tap_statement`].
+pub(crate) enum StatementTap {
+    /// Run the statement. `gated` is true when a gate authorized it, and
+    /// the caller must settle the reserved attempt with the statement's exit
+    /// code once it finishes.
+    Proceed {
+        /// Whether an attempt is reserved and awaiting settlement.
+        gated: bool,
+    },
+    /// Return this result verbatim. **Nothing of the statement has run** —
+    /// no substitution, no redirect opened, no first loop iteration.
+    Halt(Box<ExecResult>),
 }
 
 /// Kernel-internal correlation between a replay and the request it fulfills
@@ -1117,6 +1139,21 @@ impl ExecContext {
         self.redemption = redemption;
     }
 
+    /// Which operation the live replay correlation was granted for, if any.
+    ///
+    /// Peeks without consuming, which is the point: the statement tap has to
+    /// tell "this replay is mine" from "this replay is an `fs.remove` on its
+    /// way to `rm`'s gate". Taking the correlation to find out would strand
+    /// the reservation the inner gate is waiting for.
+    pub(crate) fn redemption_operation(&self) -> Option<OperationId> {
+        let redemption = self.redemption.as_ref()?;
+        let access = self.ledger_access.as_ref()?;
+        access
+            .approvals
+            .get(&redemption.request_id)
+            .map(|chain| chain.request.operation)
+    }
+
     /// The filter every `fs.*` gate site classifies its paths with: the
     /// `set -o approvals` enforce policy plus a snapshot of the subscription
     /// registry.
@@ -1175,7 +1212,7 @@ impl ExecContext {
         let operation_id = operation.id();
         access
             .requester
-            .observed(operation_id, access.principal.clone(), resources)
+            .observed(operation_id, access.principal.clone(), resources, None)
             .await
             .map_err(|e| {
                 ExecResult::failure(
@@ -1183,6 +1220,135 @@ impl ExecContext {
                     format!("{command}: the observe record could not be committed: {e}"),
                 )
             })
+    }
+
+    /// Record one top-level statement, and gate it when the classifier says
+    /// it must ask first (`docs/approval-ledger.md` §C.6).
+    ///
+    /// **Called from exactly two sites** — the top-level statement loop and
+    /// `execute_argv` — and from nowhere inside the recursion. A tap in
+    /// `execute_stmt_flow` or a nested statement loop would post once per
+    /// loop iteration, which is the thousand-entry mistake the top-level rule
+    /// exists to prevent.
+    ///
+    /// Three postures come out of it:
+    ///
+    /// - **Observe** (the default, and the floor): one chainless `Observed`
+    ///   entry carrying the plan, then the statement runs. A tap that cannot
+    ///   commit warns and the statement **still runs** — the tap is a second
+    ///   opinion, not a permission gate, and nobody opted into a completeness
+    ///   guarantee. An `fs.*` subscription's operator did, which is why that
+    ///   path exits 1 and this one does not.
+    /// - **Gate**: the tap entry posts first — it records the *ask*, not the
+    ///   execution, so a statement that defers and never runs still keeps its
+    ///   tap entry — and then the request runs the same decision chain every
+    ///   `fs.*` gate runs. Every fail-closed rule holds there: a decision that
+    ///   cannot be recorded is not made.
+    /// - **Replay**: under a live redemption correlation for `cmd.execute`,
+    ///   no tap posts — `confirm` must not record a second `Observed` for the
+    ///   statement it replays — and the gate runs whatever the posture, so the
+    ///   draft matcher can check the replay against what was granted. A
+    ///   correlation for any *other* operation belongs to a gate site further
+    ///   down and is left untouched.
+    pub(crate) async fn tap_statement(
+        &mut self,
+        plan: Plan,
+        capture: Capture,
+        presented: Option<&str>,
+        classifier: Option<&Arc<dyn StatementClassifier>>,
+    ) -> StatementTap {
+        let replaying = self.redemption_operation();
+        let replaying_this_statement = replaying
+            .as_ref()
+            .is_some_and(|op| op.as_str() == KernelOperation::CmdExecute.as_str());
+        if replaying.is_some() && !replaying_this_statement {
+            // Someone else's authorization is in flight — an `fs.remove`
+            // replay on its way to `rm`'s gate. Neither record it nor consume
+            // it.
+            return StatementTap::Proceed { gated: false };
+        }
+
+        let posture = classifier
+            .map(|c| c.classify(&plan))
+            .unwrap_or(StatementPosture::Observe);
+
+        if !replaying_this_statement {
+            self.record_statement(&plan).await;
+        }
+
+        let (reason, risk) = match &posture {
+            StatementPosture::Gate { reason, risk } => (reason.clone(), *risk),
+            _ if replaying_this_statement => (
+                "replaying a granted statement".to_string(),
+                KernelOperation::CmdExecute.risk(),
+            ),
+            _ => return StatementTap::Proceed { gated: false },
+        };
+
+        let mut builder = ApprovalRequest::builder(KernelOperation::CmdExecute.as_str())
+            .risk(risk)
+            .reason(reason)
+            .hint(plan.rendered.clone())
+            .plan(plan.clone());
+        for command in &plan.commands {
+            builder = builder.resource(Resource::plain(CMD_KIND, command.name.clone()));
+        }
+        let draft = match builder.build() {
+            Ok(draft) => draft,
+            // Unreachable — `cmd.execute` is a well-formed dotted id and the
+            // risk is always set above — but a build failure must never mean
+            // "proceed" for a statement a classifier asked to hold.
+            Err(e) => {
+                return StatementTap::Halt(Box::new(ExecResult::failure(
+                    1,
+                    format!("cmd.execute: could not build the approval request: {e}"),
+                )))
+            }
+        };
+        // `presented` is the `--confirm=<key>` the statement's own argv
+        // carries, lifted out of the plan before it was redacted. Without it
+        // a user re-running a held line with the key they were given would
+        // never redeem: the gate would see no key, mint a second request, and
+        // exit 2 again with the first one still pending (spec §B.4 — one
+        // acceptance contract, and the draft matcher is what correlates a
+        // presentation to the request it is for).
+        match self.gate(draft, presented, Some(capture)).await.proceed() {
+            Ok(_attempt) => StatementTap::Proceed { gated: true },
+            Err(result) => StatementTap::Halt(Box::new(result)),
+        }
+    }
+
+    /// Post the statement tap's chainless `Observed` entry: one `cmd`
+    /// resource per planned command, plus the plan itself (spec §C.6).
+    ///
+    /// A failure warns and returns. This is the one observability path that
+    /// does not fail its operation closed, and the asymmetry is deliberate —
+    /// see [`Self::tap_statement`].
+    async fn record_statement(&self, plan: &Plan) {
+        let Some(access) = self.ledger_access.as_ref() else {
+            return;
+        };
+        let resources = plan
+            .commands
+            .iter()
+            .map(|command| ObservedResource::planned(CMD_KIND, command.name.clone()))
+            .collect();
+        if let Err(err) = access
+            .requester
+            .observed(
+                KernelOperation::CmdExecute.id(),
+                access.principal.clone(),
+                resources,
+                Some(plan.clone()),
+            )
+            .await
+        {
+            tracing::warn!(
+                error = %err,
+                statement = %plan.rendered,
+                "the statement tap could not be recorded — the statement still runs"
+            );
+        }
     }
 
     /// Request approval for one kernel operation — the single call every
@@ -1226,7 +1392,7 @@ impl ExecContext {
                 ))
             }
         };
-        self.gate(draft, presented).await.proceed()
+        self.gate(draft, presented, None).await.proceed()
     }
 
     /// The one acceptance contract behind every approval (spec §B.4): a
@@ -1234,10 +1400,16 @@ impl ExecContext {
     /// `--confirm=<token>`, and a fresh request all land here, and the same
     /// draft matcher decides whether the operation in hand is the operation
     /// that was approved.
+    ///
+    /// `capture` overrides how the invocation is recorded for replay. `None`
+    /// reads the dispatch seam, which is what every tool gate site wants; the
+    /// statement gate passes `Some(Capture::Statement{…})` because the thing
+    /// it would replay is a statement, not an argv (spec §C.6).
     pub(crate) async fn gate(
         &mut self,
         draft: ApprovalRequestDraft,
         presented: Option<&str>,
+        capture: Option<Capture>,
     ) -> kaish_tool_api::ApprovalOutcome {
         use kaish_tool_api::ApprovalOutcome;
 
@@ -1262,7 +1434,7 @@ impl ExecContext {
         }
 
         // ── A fresh request ─────────────────────────────────────────
-        let capture = self.capture();
+        let capture = capture.unwrap_or_else(|| self.capture());
         let request = match access
             .requester
             .post_request(
@@ -2052,7 +2224,7 @@ impl kaish_tool_api::ToolCtx for ExecContext {
         req: kaish_types::approval::ApprovalRequestDraft,
         presented: Option<&str>,
     ) -> kaish_tool_api::ApprovalOutcome {
-        self.gate(req, presented).await
+        self.gate(req, presented, None).await
     }
 
     fn approvals(&self) -> kaish_tool_api::Approvals {

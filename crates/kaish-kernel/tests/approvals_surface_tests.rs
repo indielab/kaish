@@ -301,6 +301,12 @@ async fn the_log_node_is_seq_ordered_ndjson() {
         let seq = entry["seq"].as_u64().expect("every entry carries a seq");
         assert!(seq > last, "entries are seq-ordered: {seq} after {last}");
         last = seq;
+        // Every statement also posts the unconditional statement tap (spec
+        // §C.6), including the `cat` reading this projection. This test is
+        // about the fs chain's ordering, so the taps are filtered out.
+        if entry["operation"].as_str() == Some("cmd.execute") {
+            continue;
+        }
         kinds.push(entry["entry"].as_str().unwrap_or("?").to_string());
     }
     assert_eq!(kinds, vec!["requested", "granted"], "log: {body}");
