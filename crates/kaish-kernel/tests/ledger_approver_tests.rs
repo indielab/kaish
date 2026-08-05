@@ -771,7 +771,14 @@ async fn a_decision_that_overruns_its_own_budget_still_trips_the_watchdog() {
     // Nothing was decided: the request is still pending, with no decision
     // entry behind it.
     assert_eq!(approvals.pending().len(), 1);
-    assert_eq!(approvals.log(0).len(), 1);
+    // One `Requested`, plus the statement tap's unconditional `Observed`
+    // (spec §C.6) for the `gate fs.remove` line itself.
+    let chain_entries: Vec<_> = approvals
+        .log(0)
+        .into_iter()
+        .filter(|e| !matches!(e, LedgerEntry::Observed { .. }))
+        .collect();
+    assert_eq!(chain_entries.len(), 1, "{chain_entries:?}");
 }
 
 /// Cancellation during `decide` posts nothing and never grants (spec §C.2).

@@ -108,6 +108,7 @@ impl Session {
             .approvals()
             .log(0)
             .iter()
+            .filter(|e| !is_statement_tap(e))
             .map(entry_kind)
             .collect()
     }
@@ -118,6 +119,7 @@ impl Session {
             .approvals()
             .log(0)
             .into_iter()
+            .filter(|entry| !is_statement_tap(entry))
             .filter_map(|entry| match entry {
                 LedgerEntry::Observed { resources, .. } => Some(resources),
                 _ => None,
@@ -177,7 +179,8 @@ async fn an_observe_subscription_records_matching_paths_and_stays_silent_about_t
     assert_eq!(resources[0].id, inside.display().to_string());
     assert_eq!(resources[0].resolved, inside.display().to_string());
     assert_eq!(
-        resources[0].subscription, id,
+        resources[0].subscription,
+        Some(id),
         "the entry must name the subscription that covered it"
     );
 }
@@ -375,7 +378,7 @@ async fn an_observe_subscription_records_a_relative_path_by_its_resolved_form() 
         target.display().to_string(),
         "the record keeps what the glob matched"
     );
-    assert_eq!(resources[0].subscription, id);
+    assert_eq!(resources[0].subscription, Some(id));
 }
 
 /// The reviewers' disjoint-subscription case: one command touching paths
@@ -414,8 +417,8 @@ async fn one_batch_spanning_two_observe_subscriptions_records_both_paths() {
             .map(|r| (r.id.clone(), r.subscription))
             .collect::<Vec<_>>(),
         vec![
-            (in_workspace.display().to_string(), workspace_id),
-            (in_scratch.display().to_string(), scratch_id),
+            (in_workspace.display().to_string(), Some(workspace_id)),
+            (in_scratch.display().to_string(), Some(scratch_id)),
         ],
         "each path must name the subscription that covered it"
     );
@@ -470,4 +473,14 @@ async fn revoking_an_unknown_subscription_fails_loudly() {
         err.to_string().contains("subscription 99 does not exist"),
         "{err}"
     );
+}
+
+/// The statement tap (`docs/approval-ledger.md` §C.6) posts one chainless
+/// `Observed{cmd.execute}` entry per top-level statement, unconditionally and
+/// with nothing to subscribe to. These tables are about the `fs.*` chain, so
+/// they read the log with the tap filtered out — "nothing was posted" here
+/// means nothing on the fs chain, which is still the claim that matters and
+/// still O(paths)-free.
+fn is_statement_tap(entry: &LedgerEntry) -> bool {
+    matches!(entry, LedgerEntry::Observed { operation, .. } if operation.as_str() == "cmd.execute")
 }

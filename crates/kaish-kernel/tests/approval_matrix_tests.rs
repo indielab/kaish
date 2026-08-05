@@ -79,6 +79,7 @@ impl Session {
             .approvals()
             .log(0)
             .iter()
+            .filter(|e| !is_statement_tap(e))
             .map(|e| match e {
                 LedgerEntry::Requested { .. } => "Requested",
                 LedgerEntry::Granted { .. } => "Granted",
@@ -995,4 +996,14 @@ async fn two_concurrent_confirms_each_replay_their_own_request() {
         "a replay must never post a second request: {:?}",
         session.kernel.approvals().pending()
     );
+}
+
+/// The statement tap (`docs/approval-ledger.md` §C.6) posts one chainless
+/// `Observed{cmd.execute}` entry per top-level statement, unconditionally and
+/// with nothing to subscribe to. These tables are about the `fs.*` chain, so
+/// they read the log with the tap filtered out — "nothing was posted" here
+/// means nothing on the fs chain, which is still the claim that matters and
+/// still O(paths)-free.
+fn is_statement_tap(entry: &LedgerEntry) -> bool {
+    matches!(entry, LedgerEntry::Observed { operation, .. } if operation.as_str() == "cmd.execute")
 }

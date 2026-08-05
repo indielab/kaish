@@ -34,8 +34,8 @@ use std::time::{Duration, SystemTime};
 use kaish_types::approval::{
     ApprovalRequest, ApprovalRequestDraft, AttemptId, AttemptState, Capture, Condition, Expiring,
     Grant, GrantTerms, Grounds, LedgerEntry, Observation, ObservedResource, OperationId, Outcome,
-    Principal, RequestContext, RequestId, RequestState, ResourceRef, StandingGrant, StandingId,
-    StateClaim, Subscription, SubscriptionId, Token,
+    Plan, Principal, RequestContext, RequestId, RequestState, ResourceRef, StandingGrant,
+    StandingId, StateClaim, Subscription, SubscriptionId, Token,
 };
 use kaish_types::clock::Instant;
 use tokio::sync::mpsc::OwnedPermit;
@@ -1660,6 +1660,7 @@ impl LedgerInner {
         operation: OperationId,
         by: Principal,
         resources: Vec<ObservedResource>,
+        plan: Option<Plan>,
     ) -> Result<(), LedgerError> {
         let mut guard = self.lock();
         let (_, wall) = self.now();
@@ -1672,6 +1673,7 @@ impl LedgerInner {
                 operation,
                 by,
                 resources,
+                plan,
             },
             None,
         )];

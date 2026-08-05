@@ -14,8 +14,9 @@
 //! chain (§D.4), sink backpressure, the invariant checks, the recovery
 //! sweep, the four-stage [`DecisionChain`] (standing → `policy` → `decide` →
 //! defer) with standing-grant matching, redemption-time precondition
-//! verification through the [`StateResolver`]s, and the subscription
-//! registry with its [`SubscriptionFilter`].
+//! verification through the [`StateResolver`]s, the subscription registry
+//! with its [`SubscriptionFilter`], and the statement gate's operation and
+//! classifier seam ([`KernelOperation::CmdExecute`], [`StatementClassifier`]).
 //!
 //! **What is not:** the gate sites. They live where the operations do —
 //! `tools/context.rs`'s `gate_overwrites`, `rm`'s `decide_rm_action`, and
@@ -49,6 +50,11 @@ pub use resolver::{
     StateResolvers, PATH_DIGEST_ALG, PATH_KIND,
 };
 pub use subscription::{Posture, SubscriptionFilter};
+// The statement gate's scoping seam (spec §C.6) lives in `kaish-tool-api`,
+// beside `StateResolver` and for the same reason: it names no kernel type.
+// Re-exported here because an embedder registers it through `KernelConfig`,
+// next to `with_approver` and `with_state_resolver`.
+pub use kaish_tool_api::{CommandNameClassifier, StatementClassifier, StatementPosture};
 pub(crate) use core::condition_conflict;
 pub(crate) use resolver::{conditions_to_observe, digest_path};
 pub use handles::{ApproverHandle, AttemptHandle, AttemptView, Approvals, Ledger, RequestChain, Requester};
