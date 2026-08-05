@@ -47,6 +47,7 @@ impl Tool for Tee {
                 ("Append to log", "echo entry | tee -a log.txt"),
             ],
         )
+        .with_operations([KernelOperation::FsOverwrite.as_str()])
     }
 
     async fn execute(&self, args: ToolArgs, ctx: &mut dyn ToolCtx) -> ExecResult {

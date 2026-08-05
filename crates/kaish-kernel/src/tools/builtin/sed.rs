@@ -94,6 +94,7 @@ impl Tool for Sed {
                 ("Alternation (ERE or GNU BRE)", r"sed 's/cat\|dog/pet/g' file.txt"),
             ],
         )
+        .with_operations([KernelOperation::FsOverwrite.as_str()])
     }
 
     fn validate(&self, args: &ToolArgs) -> Vec<ValidationIssue> {

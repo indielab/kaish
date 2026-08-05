@@ -52,6 +52,7 @@ impl Tool for Write {
                 ("Pipe into write", "echo content | write file.txt"),
             ],
         )
+        .with_operations([KernelOperation::FsOverwrite.as_str()])
     }
 
     async fn execute(&self, args: ToolArgs, ctx: &mut dyn ToolCtx) -> ExecResult {

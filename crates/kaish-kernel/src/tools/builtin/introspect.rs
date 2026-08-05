@@ -75,17 +75,26 @@ fn format_tool_list(schemas: &[ToolSchema]) -> ExecResult {
         "NAME".to_string(),
         "DESCRIPTION".to_string(),
         "PARAMS".to_string(),
+        "OPERATIONS".to_string(),
     ];
 
     let nodes: Vec<OutputNode> = schemas
         .iter()
         .map(|s| {
             let param_count = s.params.len().to_string();
-            OutputNode::new(&s.name).with_cells(vec![s.description.clone(), param_count])
+            OutputNode::new(&s.name)
+                .with_cells(vec![s.description.clone(), param_count, s.operations.join(",")])
         })
         .collect();
 
-    ExecResult::with_output(OutputData::table(headers, nodes))
+    // The table's own cell renders `operations` as a comma-joined string for
+    // the human list; `--json` reads `rich_json` instead (spec §F.3 item 5)
+    // so a policy engine sees the real array, not a string it has to split.
+    // Serializing `[ToolSchema]` cannot fail in practice — it is plain data,
+    // no non-string map keys or NaN floats — so a failure falls back to
+    // `Null` rather than a builtin that panics on its own reflection.
+    let rich = serde_json::to_value(schemas).unwrap_or(serde_json::Value::Null);
+    ExecResult::with_output(OutputData::table(headers, nodes).with_rich_json(rich))
 }
 
 fn format_tool_detail(schemas: &[ToolSchema], name: &str) -> ExecResult {
@@ -104,6 +113,10 @@ fn format_tool_detail(schemas: &[ToolSchema], name: &str) -> ExecResult {
                         p.name, p.param_type, required, p.description
                     ));
                 }
+            }
+
+            if !s.operations.is_empty() {
+                output.push_str(&format!("Operations: {}\n", s.operations.join(", ")));
             }
 
             ExecResult::with_output(OutputData::text(output))

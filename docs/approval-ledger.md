@@ -1710,12 +1710,16 @@ touches them, not blockers here:
   today (env can only turn a rail on), and the cutover footnoted the hermeticity claim in
   `EMBEDDING.md`'s "Initial Variables and Hermetic Subprocess Env" section rather than
   leaving it silently inexact. Moving the reads out to the frontend is still open.
-- `--confirm` has no schema-level marker, so a policy engine cannot discover gateable
-  operations from `tools --json`. Under the ledger the discoverable thing is the *operation
-  taxonomy*, not the flag — add `ToolSchema.operations: Vec<OperationId>` so `tools --json`
-  advertises what a tool can request.
 - `cas_overwrite` is still not OS-atomic (no write-temp-then-rename primitive). Unchanged by
   this design, and per §B.1 the ledger does not claim to fix it.
+
+**Shipped since this list was written:** `ToolSchema.operations: Vec<String>` (0.14.0, the
+"ledger spec gaps" PR) — the dotted operation ids a tool can post, so `kaish-tools --json`
+advertises what a tool can request instead of leaving a policy engine to sniff for
+`--confirm`. Populated for every in-tree gate producer: `rm` (`fs.remove`),
+`cp`/`dd`/`patch`/`sed`/`tee`/`write` (`fs.overwrite`), `mv` (`fs.rename`), `kaish-trash empty`
+(`trash.empty`). A drift test (`tool_schema_operations_tests.rs`) asserts every declared
+operation string matches one of `KernelOperation`'s own ids.
 
 ---
 

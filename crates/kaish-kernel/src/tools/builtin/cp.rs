@@ -51,6 +51,7 @@ impl Tool for Cp {
                 ("Copy directory recursively", "cp -r src/ backup/"),
             ],
         )
+        .with_operations([KernelOperation::FsOverwrite.as_str()])
     }
 
     async fn execute(&self, args: ToolArgs, ctx: &mut dyn ToolCtx) -> ExecResult {
