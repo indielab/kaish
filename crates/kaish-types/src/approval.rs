@@ -1474,8 +1474,12 @@ pub enum LedgerEntry {
         /// Wall-clock post time.
         #[serde(with = "crate::rfc3339::system_time")]
         at: SystemTime,
-        /// The posted request.
-        request: ApprovalRequest,
+        /// The posted request. Boxed because it is by far the widest payload
+        /// any entry carries — a `Plan` alone is three collections — and
+        /// every other variant would otherwise pay its size on every clone
+        /// into the ring and every send to the sink. `Box<T>` serializes as
+        /// `T`, so the wire shape is unchanged.
+        request: Box<ApprovalRequest>,
     },
     /// The approval side posted a grant.
     Granted {
@@ -2234,7 +2238,7 @@ mod tests {
             LedgerEntry::Requested {
                 seq: 1,
                 at,
-                request: sample_request(),
+                request: Box::new(sample_request()),
             },
             LedgerEntry::Granted {
                 seq: 2,

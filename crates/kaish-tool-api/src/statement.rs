@@ -94,7 +94,7 @@ impl StatementClassifier for CommandNameClassifier {
         let hit = plan
             .commands
             .iter()
-            .find(|command| self.names.iter().any(|name| *name == command.name));
+            .find(|command| self.names.contains(&command.name));
         match hit {
             Some(command) => StatementPosture::Gate {
                 reason: format!("{}: {}", self.reason, command.name),

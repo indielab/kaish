@@ -663,7 +663,7 @@ impl LedgerInner {
             LedgerEntry::Requested {
                 seq,
                 at: wall,
-                request: request.clone(),
+                request: Box::new(request.clone()),
             },
             Some(id),
         )];
