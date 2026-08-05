@@ -1107,6 +1107,13 @@ pub trait ToolCtx: Send + Sync {
 
     /// Post an approval request and obtain authorization to proceed.
     ///
+    /// `presented` is the plugin's own `--confirm=<token>` value, when its
+    /// argv carried one — the plugin-side counterpart of
+    /// `ExecContext::request_gate`'s `presented` parameter, so an out-of-tree
+    /// tool (kaish-git's key handoff) can honor a re-run credential the same
+    /// way an in-tree gate site does. A plugin cannot forge the credential —
+    /// it only relays what argv handed it.
+    ///
     /// Only `ApprovalOutcome::Authorized` may proceed. `proceed()` converts
     /// every other variant into the `ExecResult` the tool returns **verbatim**
     /// — exit 2 when a decision is pending, exit 1 for a denial, a refusal, a
@@ -1115,8 +1122,12 @@ pub trait ToolCtx: Send + Sync {
     ///
     /// Default impl fails **closed**: a context with no ledger (a unit-test
     /// harness, a minimal embedder) returns `Unsupported` rather than permitting.
-    async fn request_approval(&mut self, req: ApprovalRequest) -> ApprovalOutcome {
-        let _ = req;
+    async fn request_approval(
+        &mut self,
+        req: ApprovalRequest,
+        presented: Option<&str>,
+    ) -> ApprovalOutcome {
+        let _ = (req, presented);
         ApprovalOutcome::Unsupported
     }
 
