@@ -1995,33 +1995,38 @@ impl Kernel {
             redirects: Vec::new(),
         };
 
-        // The second — and last — statement tap site (spec §C.6). The argv
-        // door bypasses the statement loop entirely, and a door the gate does
-        // not watch is not a gate. Its capture is `Exact`, not `Statement`:
-        // it already holds a tool name and an argv, and `confirm`'s existing
-        // arm replays that form.
         let stmt = Stmt::Command(command.clone());
-        let gated = match self.tap_statement(&stmt, argv_capture(name, argv)).await {
-            crate::tools::StatementTap::Proceed { gated } => gated,
-            crate::tools::StatementTap::Halt(held) => return Ok(*held),
-        };
-
         let pipeline = crate::ast::Pipeline {
             commands: vec![command],
             background: false,
         };
-        let result = self
-            .run_under_watchdog(timeout, &cancel, self.execute_pipeline(&pipeline))
-            .await?;
-        if gated {
-            self.exec_ctx.write().await.settle_attempts(result.code).await;
-        }
+        // Tap and dispatch run under one watchdog, as they do at the string
+        // door — a gate that puts a human in the loop suspends the script
+        // clock through `ctx.patient`, and a watchdog installed only around
+        // the dispatch would leave that decision unbounded.
+        let work = async {
+            // The second — and last — statement tap site (spec §C.6). The
+            // argv door bypasses the statement loop entirely, and a door the
+            // gate does not watch is not a gate. Its capture is `Exact`, not
+            // `Statement`: it already holds a tool name and an argv, and
+            // `confirm`'s existing arm replays that form.
+            let gated = match self.tap_statement(&stmt, argv_capture(name, argv)).await {
+                crate::tools::StatementTap::Proceed { gated } => gated,
+                crate::tools::StatementTap::Halt(held) => return Ok(*held),
+            };
+            let result = self.execute_pipeline(&pipeline).await?;
+            if gated {
+                self.exec_ctx.write().await.settle_attempts(result.code).await;
+            }
+            Ok(result)
+        };
+        let result = self.run_under_watchdog(timeout, &cancel, work).await?;
         self.update_last_result(&result).await;
         Ok(result)
     }
 
-    /// Fulfill a granted approval request by replaying its exact captured
-    /// invocation — the highest-fidelity approval path (spec §B.4).
+    /// Fulfill a granted approval request by replaying exactly what was
+    /// captured — the highest-fidelity approval path (spec §B.4).
     ///
     /// Inspect a gated result with [`ExecResult::approval_request`], apply
     /// whatever policy (allowlist, model review) over `view.operation` and
@@ -2032,6 +2037,12 @@ impl Kernel {
     /// posting a second one. A draft that does not match is refused
     /// (`DraftMismatch`) and nothing is performed.
     ///
+    /// Two captures replay. `Capture::Exact` re-dispatches the captured tool
+    /// and argv. `Capture::Statement` re-parses the captured program source
+    /// and runs exactly the held statement (spec §C.6), in the originating
+    /// session — earlier statements already ran there, and their variables
+    /// and cwd still hold, so they are not re-run.
+    ///
     /// The handle is a required argument because that is what makes this an
     /// authority action: the signature cannot be satisfied without one, so
     /// there is no bridge to it from anything holding only a `Kernel`.
@@ -2039,10 +2050,15 @@ impl Kernel {
     /// # Errors
     ///
     /// Exits 2 when the request's [`Capture`](kaish_types::approval::Capture)
-    /// is anything but `Exact`, naming the variant found — a request raised
-    /// outside a dispatch seam (`Capture::DirectExecution`, a unit test) is
-    /// still grantable and still redeemable by presenting its key with
-    /// `--confirm=<token>`; what it is not is replayable from here.
+    /// is neither `Exact` nor `Statement`, naming the variant found — a
+    /// request raised outside a dispatch seam (`Capture::DirectExecution`, a
+    /// unit test) is still grantable and still redeemable by presenting its
+    /// key with `--confirm=<token>`; what it is not is replayable from here.
+    ///
+    /// Exits 1 when a `Capture::Statement`'s source no longer parses, or
+    /// parses to fewer statements than the captured index — the record names
+    /// a statement that is not there, and running a different one would be a
+    /// wrong replay.
     ///
     /// Exits 1 when the request has no live grant, was already settled
     /// successfully (the settled outcome is reported instead of re-running
@@ -2240,12 +2256,14 @@ impl Kernel {
             return Ok(ExecResult::failure(124, "timeout: timed out after 0s".to_string()));
         }
 
-        let gated = match self.tap_statement(stmt, capture).await {
-            crate::tools::StatementTap::Proceed { gated } => gated,
-            crate::tools::StatementTap::Halt(held) => return Ok(*held),
-        };
-
+        // Tap and statement run under one watchdog, as they do at both other
+        // doors: the gate this replay re-enters can hold on a human, and
+        // `ctx.patient` needs a live watchdog to suspend.
         let work = async {
+            let gated = match self.tap_statement(stmt, capture).await {
+                crate::tools::StatementTap::Proceed { gated } => gated,
+                crate::tools::StatementTap::Halt(held) => return Ok(*held),
+            };
             let flow = self.execute_stmt_flow(stmt).await?;
             let drained = {
                 let mut receiver = self.stderr_receiver.lock().await;
@@ -2260,12 +2278,12 @@ impl Kernel {
             if !drained.is_empty() {
                 result.err = format!("{}{}", drained, result.err);
             }
+            if gated {
+                self.exec_ctx.write().await.settle_attempts(result.code).await;
+            }
             Ok(result)
         };
         let result = self.run_under_watchdog(timeout, &cancel, work).await?;
-        if gated {
-            self.exec_ctx.write().await.settle_attempts(result.code).await;
-        }
         self.update_last_result(&result).await;
         Ok(result)
     }
