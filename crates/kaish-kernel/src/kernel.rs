@@ -5947,6 +5947,14 @@ impl Kernel {
     /// are re-applied to the fresh scope rather than silently reverting to
     /// defaults — an embedder that opted into `with_approvals(true)` must not
     /// find the gate quietly disabled after a `reset()` between requests.
+    ///
+    /// **Background jobs are untouched** (GH #245) — `reset()` is a scope/cwd
+    /// reset, not a session boundary for `&`. A job started before `reset()`
+    /// keeps running, stays in `jobs`, and the job ID counter keeps counting
+    /// up. An embedder treating `reset()` as "new session" (a fresh MCP
+    /// conversation reusing one kernel, say) inherits every job the previous
+    /// conversation backgrounded — call [`Self::cancel_all_jobs`] first if
+    /// that inheritance is not wanted.
     pub async fn reset(&self) -> Result<()> {
         {
             let mut scope = self.scope.write().await;
@@ -5974,10 +5982,67 @@ impl Kernel {
         Ok(())
     }
 
-    /// Shutdown the kernel.
-    pub async fn shutdown(self) -> Result<()> {
-        // Wait for all background jobs
-        self.jobs.wait_all().await;
+    /// Cancel every tracked background job (`&`) — running, gated, or
+    /// finished-but-unreaped — whether or not `shutdown` follows.
+    ///
+    /// Trips each job's cancellation token, the same lever `kill %N` uses:
+    /// an in-process builtin future exits at its next checkpoint, and any
+    /// external children the job spawned get the SIGTERM→SIGKILL cascade.
+    /// The job stays tracked with status `Killed` once it unwinds — this
+    /// only *starts* the cancellation, it does not wait for it (pair with
+    /// [`JobManager::wait`]/`wait_all` if the caller needs to block on the
+    /// unwind, bounded as [`Self::shutdown`] does).
+    ///
+    /// A job registered by an embedder via [`JobManager::register`] with no
+    /// cancel token attached has no lever to cancel — silently skipped here,
+    /// same as `kill %N`'s own "no cancellation token" case.
+    ///
+    /// Returns how many jobs a token was actually tripped for.
+    pub async fn cancel_all_jobs(&self) -> usize {
+        let ids = self.jobs.list_ids().await;
+        let mut cancelled = 0;
+        for id in ids {
+            if self.jobs.mark_killed_and_cancel(id, false).await {
+                cancelled += 1;
+            }
+        }
+        cancelled
+    }
+
+    /// Shut down the kernel.
+    ///
+    /// Cancels every tracked background job ([`Self::cancel_all_jobs`]), then
+    /// waits up to `kill_grace + 3s` **per job** — the same bound `kill %N`
+    /// gives a single target (GH #244) — for it to actually unwind. Before
+    /// this fix `shutdown` called `wait_all()` with no timeout at all:
+    /// `sleep 3600 &` then `shutdown()` blocked for an hour (GH #245).
+    ///
+    /// A job that has not unwound by its deadline is abandoned: logged via
+    /// `tracing::warn!` and left running detached until the tokio runtime
+    /// itself goes away. There is no further lever once `shutdown()` has
+    /// returned — this method does not hang, but it also does not guarantee
+    /// every job actually stopped.
+    ///
+    /// Takes `&self`, not owned `self` — an embedder holding `Arc<Kernel>`
+    /// (e.g. `kaish-client`'s `EmbeddedClient`) can call this without
+    /// `Arc::try_unwrap`, since the work here only touches the shared
+    /// `Arc<JobManager>`, never kernel state that would need exclusive
+    /// ownership.
+    pub async fn shutdown(&self) -> Result<()> {
+        let ids = self.jobs.list_ids().await;
+        self.cancel_all_jobs().await;
+
+        let bound = self.jobs.kill_grace() + Duration::from_secs(3);
+        for id in ids {
+            if tokio::time::timeout(bound, self.jobs.wait(id)).await.is_err() {
+                tracing::warn!(
+                    job_id = %id,
+                    bound_secs = bound.as_secs_f64(),
+                    "kernel shutdown: job did not exit within the grace period after \
+                     cancellation — abandoning it"
+                );
+            }
+        }
         Ok(())
     }
 

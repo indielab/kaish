@@ -9,7 +9,12 @@ use crate::clock;
 use crate::approval::ApprovalRequestView;
 
 /// Unique identifier for a background job.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+///
+/// `Ord`/`PartialOrd` order by the wrapped id — job ids are minted in
+/// increasing order (`JobManager`'s `next_id` counter), so sorting by
+/// `JobId` gives spawn order (GH #247: `JobManager::list`/`list_ids`
+/// previously iterated a `HashMap` in arbitrary order).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(transparent)]
 pub struct JobId(pub u64);
