@@ -89,6 +89,51 @@ plan ≥ raw and requires at least one disagreement rather than pinning the
 percentage — the number belongs to the corpus, and a hard-coded one would rot
 the first time someone adds a case.
 
+**The review found the thing I never thought about: `--confirm`.** The
+pre-merge review came back NOT READY with two blockers and one root cause — the
+statement gate did not interact with the redemption key at all. Two symptoms,
+one bug wearing two coats. Functionally, a user handed a key for a held
+statement re-runs the line with it and *nothing happens*: the gate hardcoded
+`presented: None`, so it saw no key, minted a second request, and deferred
+again with the first still pending. There was no other statement-level way to
+redeem. And because the re-run minted a request, its
+`Capture::Statement.source` — the line as typed — carried the live key into
+`ApprovalRequest.capture`, which reaches the view, `/v/approvals`, and
+`LedgerEntry::Requested`. I had redacted `Plan.rendered` and stopped one field
+short, which is the tidiest illustration I have of why "I redacted it" is not
+the same claim as "the record carries no credential".
+
+The fix is one walk because it is one rule: lift the literal key out of the
+argv, hand it to the gate, redact it from the rendering, remove the token from
+the captured source. Making one predicate decide all three fixed a wrinkle the
+first cut had — `--confirm=${key}` was rendering as `<redacted>` even though an
+unexpanded plan never held the value. Now a literal key is redacted and a
+variable renders as written, which is the honest rule: **what the record cannot
+see, it cannot leak.**
+
+Then reviewing my own fix found the case *it* missed. The capture records the
+whole program source, so redacting the held statement's key leaves an earlier
+line's key sitting in it — `rm --confirm=<key> a` on line 1, `rm b` held on
+line 2, and the credential rides along one statement over. The scan is
+program-wide now. Two rounds on one seam, each finding the same class of bug
+one scope wider; the lesson worth keeping is that "where does this string end
+up" deserves the same walk as "where does this string come from".
+
+The review's medium was a real hole too: `confirm`'s `result?` could return
+before the settlement below it, so a replay that *errored* left its attempt
+`Reserved` until the sweep abandoned it — every later redemption of that grant
+failing `AttemptInFlight` in between. Finding a statement that errors rather
+than exiting non-zero took three tries (arithmetic in argv is an exit code; a
+glob with no matches is an exit code; an assignment whose right-hand side will
+not evaluate is an error), and that hunt was worth more than the fix: kaish
+converts most failures into exit codes on purpose, and the few that stay errors
+are exactly where an invariant like this one hides.
+
+On the low finding — a panicking classifier — I chose documentation over a
+guard, and documented it on `Approver` too. kaish does not `catch_unwind` an
+embedder hook anywhere; the tree's answer to "a hook died" is drop-safety, not
+a swallow. Guarding one of the two hooks would have been the worst of both.
+
 ## Shutdown that doesn't, and a job list that doesn't sort itself (2026-08-05)
 
 Same job-system design audit as GH #240, two more findings from the same
