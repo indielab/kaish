@@ -50,7 +50,7 @@ impl JobFs {
     /// Expected formats:
     /// - "" or "/" → root (list jobs)
     /// - "{id}" → job directory
-    /// - "{id}/{file}" → specific file (stdout, stderr, status, command)
+    /// - "{id}/{file}" → specific file (status, command, approval)
     fn parse_path(path: &Path) -> Option<(Option<JobId>, Option<&str>)> {
         let path_str = path.to_str()?;
         let path_str = path_str.trim_start_matches('/');
@@ -184,7 +184,7 @@ impl Filesystem for JobFs {
                 Ok(entries)
             }
             Some(id) => {
-                // List job directory: stdout, stderr, status, command
+                // List job directory: status, command, approval
                 if !self.jobs.exists(id).await {
                     return Err(io::Error::new(
                         io::ErrorKind::NotFound,
