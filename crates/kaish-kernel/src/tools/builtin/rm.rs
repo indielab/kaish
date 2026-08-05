@@ -128,6 +128,7 @@ impl Tool for Rm {
                 ),
             ],
         )
+        .with_operations([KernelOperation::FsRemove.as_str()])
     }
 
     async fn execute(&self, mut args: ToolArgs, ctx: &mut dyn ToolCtx) -> ExecResult {

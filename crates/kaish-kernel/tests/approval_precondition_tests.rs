@@ -430,7 +430,7 @@ impl Tool for GitPush {
             ))
             .build()
             .expect("a well-formed draft");
-        if let Err(result) = ctx.request_approval(draft).await.proceed() {
+        if let Err(result) = ctx.request_approval(draft, None).await.proceed() {
             return result;
         }
         self.pushed.fetch_add(1, Ordering::SeqCst);

@@ -218,6 +218,12 @@ breaking entries are marked **BREAKING**.
 - **`KernelOperation::CmdExecute`** (`"cmd.execute"`), and `cmd` joins
   `fs`/`trash` as a namespace `OperationId::namespaced` refuses — a plugin cannot
   pose as the kernel's own statement tap.
+- **`ToolSchema.operations: Vec<String>`** (spec §F.3 item 5) — the dotted
+  operation ids a tool can post through `ToolCtx::request_approval` /
+  `ExecContext::request_gate`, surfaced through `tools --json` so a policy engine
+  can discover gateable operations instead of sniffing `--confirm`. Populated for
+  every in-tree gate producer: `rm` (`fs.remove`), `cp`/`dd`/`patch`/`sed`/`tee`/
+  `write` (`fs.overwrite`), `mv` (`fs.rename`), `kaish-trash empty` (`trash.empty`).
 
 ### Changed
 - **BREAKING: `ObservedResource.subscription` is `Option<SubscriptionId>`**
@@ -347,6 +353,20 @@ breaking entries are marked **BREAKING**.
   collections.
 - ShellCheck reports nothing about kaish's extensions; the kaish validator is the
   only checker that sees them.
+- **BREAKING: `ToolCtx::request_approval` takes a second `presented: Option<&str>`
+  argument** (`docs/approval-ledger.md` §D.1) — a plugin now has a path to relay its
+  own `--confirm=<token>` the way `ExecContext::request_gate` already does for
+  in-tree gate sites; without it kaish-git's key-handoff flow had no way to honor a
+  presented credential at all. The method is defaulted, so an out-of-tree
+  `ToolCtx` implementor that overrides none of the approval-ledger methods
+  compiles unchanged; one that overrides `request_approval` needs the new
+  parameter.
+- **`with_deny_self_approval(bool)` on `LedgerConfig` is enforced** (spec §D.2,
+  §E.7) — default false; when true, a grant whose issuing principal equals the
+  request's principal is refused, loud, naming both principals. Catches
+  misconfiguration (an agent session handed a handle it shouldn't approve its own
+  requests with), not an attacker — the ledger already records both principals on
+  every grant regardless of the flag.
 
 ### Fixed
 - **An approval-gated overwrite that races a concurrent write now fails loud

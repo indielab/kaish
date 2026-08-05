@@ -49,6 +49,11 @@ impl Tool for KaishTrash {
                 ("Empty trash", "kaish-trash empty"),
             ],
         )
+        // Flat tool, one schema for `list`/`restore`/`config`/`empty` alike
+        // (no clap subcommand tree — see the module doc); only `empty` gates,
+        // so this names what the tool *can* post, not what every invocation
+        // reaches.
+        .with_operations([KernelOperation::TrashEmpty.as_str()])
     }
 
     async fn execute(&self, args: ToolArgs, ctx: &mut dyn ToolCtx) -> ExecResult {

@@ -52,6 +52,7 @@ impl Tool for Dd {
         )
         .example("Random bytes to a file", "dd if=/dev/urandom of=key.bin bs=16 count=1")
         .example("Discard a measured stream", "dd if=/dev/zero of=/dev/null bs=1k count=10")
+        .with_operations([KernelOperation::FsOverwrite.as_str()])
     }
 
     async fn execute(&self, args: ToolArgs, ctx: &mut dyn ToolCtx) -> ExecResult {

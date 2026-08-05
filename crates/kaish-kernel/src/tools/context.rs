@@ -2207,14 +2207,16 @@ impl kaish_tool_api::ToolCtx for ExecContext {
     /// granted — redeemed into a reserved attempt before this returns, so a
     /// tool that gets `Authorized` may proceed immediately.
     ///
-    /// A plugin presents no credential through this method: the
-    /// `--confirm=<token>` path is `ExecContext::request_gate`'s, and both
-    /// land on the same draft matcher.
+    /// `presented` is a plugin's own `--confirm=<token>` value, when its argv
+    /// carried one — the same bearer-key path `ExecContext::request_gate`
+    /// takes for an in-tree gate site, so both land on the same draft
+    /// matcher (`gate`, above).
     async fn request_approval(
         &mut self,
         req: kaish_types::approval::ApprovalRequestDraft,
+        presented: Option<&str>,
     ) -> kaish_tool_api::ApprovalOutcome {
-        self.gate(req, None, None).await
+        self.gate(req, presented, None).await
     }
 
     fn approvals(&self) -> kaish_tool_api::Approvals {

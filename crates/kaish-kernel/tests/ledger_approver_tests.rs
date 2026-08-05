@@ -1062,6 +1062,26 @@ async fn kernel_build_mints_one_authority_and_a_plain_session_holds_none() {
 }
 
 #[tokio::test]
+async fn with_deny_self_approval_wires_kernelconfig_through_to_the_minted_ledger() {
+    // `post()` always posts as `agent("agent-1")` — re-attribute the minted
+    // authority to that same principal so this exercises the self-approval
+    // path, proving `KernelConfig::with_deny_self_approval` actually reaches
+    // the `LedgerConfig` `Kernel::build` mints the ledger with, not just the
+    // ledger-core `deny_self_approval` field tested directly elsewhere.
+    let (kernel, authority) = Kernel::build(KernelConfig::isolated().with_deny_self_approval(true)).expect("build");
+    let request = post(kernel.requester(), "fs.remove", vec![]).await;
+    let err = authority
+        .with_principal(agent("agent-1"))
+        .grant(&request.id, GrantTerms::once_for(&request, far_future()))
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(err, LedgerError::SelfApproval { .. }),
+        "KernelConfig::with_deny_self_approval must reach the minted ledger's config, got {err:?}"
+    );
+}
+
+#[tokio::test]
 async fn a_session_given_a_handle_holds_authority_and_joins_its_ledger() {
     let (_requester, approvals, authority) = Ledger::build(LedgerConfig::default(), None).unwrap();
     let kernel = Kernel::new(

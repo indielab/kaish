@@ -1227,6 +1227,29 @@ impl LedgerInner {
 
     // ── Authorizations (ApproverHandle) ─────────────────────────────
 
+    /// Refuse a grant whose issuing principal equals the request's own
+    /// principal, when [`LedgerConfig::deny_self_approval`] is on (spec
+    /// §D.2, §E.7). The one chokepoint both `Granted`-producing paths call
+    /// through — [`Self::grant`] (an explicit `ApproverHandle::grant` and
+    /// every chain-decided grant alike, since both funnel through it) and
+    /// [`Self::grant_from_standing`] — so this is checked once per grant,
+    /// not once per caller.
+    fn check_deny_self_approval(
+        &self,
+        id: &RequestId,
+        requested_by: &Principal,
+        decided_by: &Principal,
+    ) -> Result<(), LedgerError> {
+        if self.config.deny_self_approval && requested_by == decided_by {
+            return Err(LedgerError::SelfApproval {
+                request: id.clone(),
+                requested_by: requested_by.clone(),
+                granted_by: decided_by.clone(),
+            });
+        }
+        Ok(())
+    }
+
     pub(crate) fn grant(
         &self,
         id: &RequestId,
@@ -1269,6 +1292,9 @@ impl LedgerInner {
             RequestState::Requested => {}
             RequestState::Granted => bail!(LedgerError::AlreadyDecided(id.clone())),
             other => bail!(self.terminal_error(id, other, chain.void_reason.clone())),
+        }
+        if let Err(err) = self.check_deny_self_approval(id, &chain.request.principal, &decided_by) {
+            bail!(err);
         }
         // An approver may narrow (add or tighten) the request's declared
         // transition claims and may never widen them — every
@@ -1476,6 +1502,9 @@ impl LedgerInner {
             no_match!();
         };
         let decided_by = rule.issued_by.clone();
+        if let Err(err) = self.check_deny_self_approval(id, &request.principal, &decided_by) {
+            bail!(err);
+        }
         let not_after = match rule.expires_at {
             Some(rule_expiry) => (wall + grant_ttl).min(rule_expiry),
             None => wall + grant_ttl,

@@ -258,6 +258,18 @@ pub struct ToolSchema {
     /// See [`ToolSchema::with_glob_passthrough`].
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub glob_passthrough: bool,
+    /// Dotted operation ids this tool can post through
+    /// `ToolCtx::request_approval` / `ExecContext::request_gate`
+    /// (`docs/approval-ledger.md` §A.6, §F.3) — what a policy engine reads
+    /// off `tools --json` to discover gateable operations instead of
+    /// sniffing for a `--confirm` flag. Empty for a tool that never gates
+    /// anything. A flat tool with several behaviors behind one schema
+    /// (`kaish-trash`'s `list`/`restore`/`config`/`empty`) lists every
+    /// operation any of its behaviors can post, not just the ones the
+    /// current invocation will reach — the schema is reflected once, before
+    /// argv says which behavior runs. See [`ToolSchema::with_operations`].
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub operations: Vec<String>,
 }
 
 impl ToolSchema {
@@ -274,6 +286,7 @@ impl ToolSchema {
             owns_output: false,
             raw_argv: false,
             glob_passthrough: false,
+            operations: Vec::new(),
         }
     }
 
@@ -289,6 +302,13 @@ impl ToolSchema {
     /// See [`ToolSchema::glob_passthrough`].
     pub fn with_glob_passthrough(mut self) -> Self {
         self.glob_passthrough = true;
+        self
+    }
+
+    /// Declare the dotted operation ids this tool can post through the
+    /// approval ledger. See [`ToolSchema::operations`].
+    pub fn with_operations(mut self, operations: impl IntoIterator<Item = impl Into<String>>) -> Self {
+        self.operations = operations.into_iter().map(Into::into).collect();
         self
     }
 

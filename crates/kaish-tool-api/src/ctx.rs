@@ -122,6 +122,14 @@ pub trait ToolCtx: Send + Sync {
     /// timing, since a plugin cannot forge those. The real `ToolCtx` stamps
     /// the rest before posting.
     ///
+    /// `presented` is the `--confirm=<token>` value when the caller's argv
+    /// supplied one, `None` otherwise — the plugin-side counterpart of
+    /// `ExecContext::request_gate`'s own `presented` parameter, so a plugin
+    /// (kaish-git's key handoff, for one) can honor a re-run credential the
+    /// same way an in-tree gate site does. A plugin cannot forge the
+    /// credential itself — it only relays what argv handed it — so this adds
+    /// no new authority, just a path to use one that already exists.
+    ///
     /// Only `ApprovalOutcome::Authorized` may proceed. Call `.proceed()` on
     /// the result and propagate its `Err(ExecResult)` verbatim — every other
     /// variant converts to the exit code a gate site returns without
@@ -132,8 +140,12 @@ pub trait ToolCtx: Send + Sync {
     /// The default impl fails **closed**: a context with no ledger (a
     /// unit-test harness, a minimal embedder) returns `Unsupported` rather
     /// than permitting.
-    async fn request_approval(&mut self, req: ApprovalRequestDraft) -> ApprovalOutcome {
-        let _ = req;
+    async fn request_approval(
+        &mut self,
+        req: ApprovalRequestDraft,
+        presented: Option<&str>,
+    ) -> ApprovalOutcome {
+        let _ = (req, presented);
         ApprovalOutcome::Unsupported
     }
 
@@ -324,10 +336,23 @@ mod tests {
     #[tokio::test]
     async fn bare_toolctx_request_approval_defaults_to_unsupported() {
         let mut ctx = BareCtx::new();
-        let outcome = ctx.request_approval(draft()).await;
+        let outcome = ctx.request_approval(draft(), None).await;
         assert!(
             matches!(outcome, ApprovalOutcome::Unsupported),
             "the default impl must fail closed with Unsupported, got {outcome:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn bare_toolctx_request_approval_ignores_a_presented_credential_with_no_ledger() {
+        // A context with no ledger has nothing to check a credential
+        // against, so a `presented` token changes nothing — still
+        // `Unsupported`, never mistaken for a decision.
+        let mut ctx = BareCtx::new();
+        let outcome = ctx.request_approval(draft(), Some("deadbeef")).await;
+        assert!(
+            matches!(outcome, ApprovalOutcome::Unsupported),
+            "a presented credential must not bypass the fail-closed default, got {outcome:?}"
         );
     }
 
