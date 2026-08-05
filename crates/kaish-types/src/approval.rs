@@ -278,7 +278,7 @@ pub struct OperationId(String);
 
 /// Namespace prefixes reserved for in-tree kernel operations. A plugin
 /// cannot register under these — see [`OperationId::namespaced`].
-const RESERVED_OPERATION_PREFIXES: &[&str] = &["fs", "trash"];
+const RESERVED_OPERATION_PREFIXES: &[&str] = &["fs", "trash", "cmd"];
 
 /// Why an [`OperationId`] could not be built.
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
@@ -305,9 +305,9 @@ impl OperationId {
     }
 
     /// Build a plugin-namespaced `OperationId`: `namespaced("git", "push")`
-    /// → `"git.push"`. Rejects the reserved `fs`/`trash` prefixes, which
-    /// belong to the kernel — a plugin cannot pose as an in-tree operation
-    /// (spec §A.6).
+    /// → `"git.push"`. Rejects the reserved `fs`/`trash`/`cmd` prefixes,
+    /// which belong to the kernel — a plugin cannot pose as an in-tree
+    /// operation (spec §A.6).
     pub fn namespaced(prefix: &str, rest: &str) -> Result<Self, OperationIdError> {
         if prefix.is_empty() || rest.is_empty() {
             return Err(OperationIdError::Empty);
@@ -514,6 +514,109 @@ pub enum StateClaim {
     Unspecified,
 }
 
+// ───────────────────────── The statement plan ─────────────────────────
+
+/// What one top-level statement was asked to run (spec §C.6).
+///
+/// Built from the AST after validation and **before** execution, so it is
+/// parse information and never execution information: no substitution has
+/// run, no redirect has been opened, no loop has taken its first iteration.
+/// Nested statements — loop bodies, `if` branches, user-tool bodies — belong
+/// to their enclosing top-level statement's plan and are never planned
+/// separately.
+#[non_exhaustive]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Plan {
+    /// The statement rendered back to shell text, **unexpanded**: `${HOME}`
+    /// and `$(...)` appear as written, because a classifier judges what was
+    /// asked, not what it resolved to. Truncated at
+    /// [`PLAN_RENDER_LIMIT`] bytes with a marker naming the limit.
+    pub rendered: String,
+    /// The statement's kind: `"command"`, `"pipeline"`, `"for"`,
+    /// `"and_chain"`, …
+    pub statement_kind: String,
+    /// Every command the statement contains, control-structure bodies
+    /// included.
+    pub commands: Vec<PlannedCommand>,
+}
+
+/// The byte limit [`Plan::rendered`] is truncated at: 8 KiB. A statement
+/// longer than this is a generated program, and a classifier that needs more
+/// than 8 KiB of it is reading the wrong field — [`Plan::commands`] carries
+/// the structure.
+pub const PLAN_RENDER_LIMIT: usize = 8 * 1024;
+
+impl Plan {
+    /// Assemble a plan. The only constructor for this `#[non_exhaustive]`
+    /// type — `rendered` is stored verbatim, so a producer truncates before
+    /// calling.
+    pub fn new(
+        rendered: impl Into<String>,
+        statement_kind: impl Into<String>,
+        commands: Vec<PlannedCommand>,
+    ) -> Self {
+        Self {
+            rendered: rendered.into(),
+            statement_kind: statement_kind.into(),
+            commands,
+        }
+    }
+}
+
+/// One command inside a [`Plan`], as written (spec §C.6).
+#[non_exhaustive]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PlannedCommand {
+    /// argv0 as written — never resolved through aliases, `PATH`, or the
+    /// tool registry.
+    pub name: String,
+    /// The arguments, rendered unexpanded.
+    pub args: Vec<String>,
+    /// The redirections this command declares.
+    pub redirects: Vec<PlannedRedirect>,
+    /// Whether the enclosing pipeline was backgrounded with `&`.
+    pub background: bool,
+}
+
+impl PlannedCommand {
+    /// Name one planned command. The only constructor for this
+    /// `#[non_exhaustive]` type.
+    pub fn new(
+        name: impl Into<String>,
+        args: Vec<String>,
+        redirects: Vec<PlannedRedirect>,
+        background: bool,
+    ) -> Self {
+        Self {
+            name: name.into(),
+            args,
+            redirects,
+            background,
+        }
+    }
+}
+
+/// One redirection inside a [`PlannedCommand`] (spec §C.6).
+#[non_exhaustive]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PlannedRedirect {
+    /// The operator as written: `">"`, `">>"`, `"2>"`, `"<"`, `"<<<"`, …
+    pub kind: String,
+    /// The target, rendered unexpanded — `> ${LOG}` keeps `${LOG}`.
+    pub target: String,
+}
+
+impl PlannedRedirect {
+    /// Name one planned redirection. The only constructor for this
+    /// `#[non_exhaustive]` type.
+    pub fn new(kind: impl Into<String>, target: impl Into<String>) -> Self {
+        Self {
+            kind: kind.into(),
+            target: target.into(),
+        }
+    }
+}
+
 // ───────────────────────── Capture ─────────────────────────
 
 /// The exact captured invocation of a gated tool call: the argv the approval
@@ -545,6 +648,20 @@ pub enum Capture {
     CaptureFailed {
         /// What went wrong while capturing.
         reason: String,
+    },
+    /// A statement gate (spec §C.6): the whole program source plus the index
+    /// of the held top-level statement. Replayable — `Kernel::confirm`
+    /// re-parses the source and executes exactly statement `index`, in the
+    /// originating session, where earlier statements' effects (variables,
+    /// cwd) are session state and still hold. Statements carry no source
+    /// spans, which is why the capture is source-plus-index rather than a
+    /// slice.
+    Statement {
+        /// The program source the top-level loop parsed.
+        source: String,
+        /// Which top-level statement of that source was held, counting
+        /// from 0 over every statement the parse produced.
+        index: usize,
     },
 }
 
@@ -601,6 +718,12 @@ pub struct ApprovalRequest {
     pub ttl: Duration,
     /// Set when this request renews an expired predecessor (spec §B.5).
     pub supersedes: Option<RequestId>,
+    /// The parsed statement plan, present exactly when the operation is the
+    /// statement gate (spec §C.6). Typed here and mirrored as `cmd`
+    /// resources, so a classifier reads structure and a standing grant
+    /// matches globs.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub plan: Option<Plan>,
 }
 
 impl ApprovalRequest {
@@ -616,6 +739,7 @@ impl ApprovalRequest {
             reason: String::new(),
             hint: String::new(),
             supersedes: None,
+            plan: None,
         }
     }
 
@@ -673,6 +797,10 @@ pub struct ApprovalRequestView {
     pub ttl: Duration,
     /// See [`ApprovalRequest::supersedes`].
     pub supersedes: Option<RequestId>,
+    /// See [`ApprovalRequest::plan`]. An approver reads this to see what the
+    /// statement was asked to run.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub plan: Option<Plan>,
 }
 
 impl From<ApprovalRequest> for ApprovalRequestView {
@@ -691,6 +819,7 @@ impl From<ApprovalRequest> for ApprovalRequestView {
             requested_at: req.requested_at,
             ttl: req.ttl,
             supersedes: req.supersedes,
+            plan: req.plan,
         }
     }
 }
@@ -721,6 +850,11 @@ pub struct ApprovalRequestDraft {
     pub hint: String,
     /// Set when this request renews an expired predecessor.
     pub supersedes: Option<RequestId>,
+    /// The parsed statement plan, for the statement gate (spec §C.6). The
+    /// plan is producer information — it comes from the AST the gate site
+    /// holds — so it rides on the draft rather than being kernel-stamped.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub plan: Option<Plan>,
 }
 
 impl ApprovalRequestDraft {
@@ -758,6 +892,7 @@ impl ApprovalRequestDraft {
             requested_at,
             ttl,
             supersedes: self.supersedes,
+            plan: self.plan,
         }
     }
 }
@@ -771,6 +906,7 @@ pub struct ApprovalRequestBuilder {
     reason: String,
     hint: String,
     supersedes: Option<RequestId>,
+    plan: Option<Plan>,
 }
 
 /// Why an [`ApprovalRequestBuilder::build`] call failed.
@@ -818,6 +954,13 @@ impl ApprovalRequestBuilder {
         self
     }
 
+    /// Attach the parsed statement plan (spec §C.6). Set by the statement
+    /// gate and by nothing else — an `fs.*` request carries no plan.
+    pub fn plan(mut self, plan: Plan) -> Self {
+        self.plan = Some(plan);
+        self
+    }
+
     /// Finish the draft. Fails when `operation` is empty or `risk` was never
     /// set.
     pub fn build(self) -> Result<ApprovalRequestDraft, ApprovalRequestBuildError> {
@@ -831,6 +974,7 @@ impl ApprovalRequestBuilder {
             reason: self.reason,
             hint: self.hint,
             supersedes: self.supersedes,
+            plan: self.plan,
         })
     }
 }
@@ -1156,7 +1300,7 @@ pub enum SubscriptionMode {
     Enforce,
 }
 
-/// One resource an `Observed` entry records (spec §C.5).
+/// One resource an `Observed` entry records (spec §C.5, §C.6).
 ///
 /// Carries both spellings of the path deliberately: the subscription's glob
 /// matched `resolved` — a scope a relative path could step outside of is not
@@ -1165,18 +1309,24 @@ pub enum SubscriptionMode {
 #[non_exhaustive]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ObservedResource {
-    /// Namespace of the identifier — `"path"` for the kernel's fs gates.
+    /// Namespace of the identifier — `"path"` for the kernel's fs gates,
+    /// `"cmd"` for the statement tap.
     pub kind: String,
     /// What the command named.
     pub id: String,
-    /// The resolved form the subscription's glob matched.
+    /// The resolved form the subscription's glob matched. Equal to `id` when
+    /// nothing resolved it.
     pub resolved: String,
-    /// The subscription that covered it.
-    pub subscription: SubscriptionId,
+    /// The subscription that covered it, or `None` when no subscription did.
+    /// The statement tap (spec §C.6) is always `None`: `cmd.*` never enters
+    /// the subscription registry, because the classifier is the sole posture
+    /// decider for statements and two deciders could disagree.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub subscription: Option<SubscriptionId>,
 }
 
 impl ObservedResource {
-    /// Name one observed resource.
+    /// Name one resource a subscription covered (spec §C.5).
     pub fn new(
         kind: impl Into<String>,
         id: impl Into<String>,
@@ -1187,7 +1337,19 @@ impl ObservedResource {
             kind: kind.into(),
             id: id.into(),
             resolved: resolved.into(),
-            subscription,
+            subscription: Some(subscription),
+        }
+    }
+
+    /// Name one resource the statement tap recorded (spec §C.6): no
+    /// subscription covered it, and nothing resolved its id.
+    pub fn planned(kind: impl Into<String>, id: impl Into<String>) -> Self {
+        let id = id.into();
+        Self {
+            kind: kind.into(),
+            resolved: id.clone(),
+            id,
+            subscription: None,
         }
     }
 }
@@ -1493,8 +1655,15 @@ pub enum LedgerEntry {
         by: Principal,
         /// Every covered resource, each naming the subscription that
         /// covered it — one command's covered paths post as one entry,
-        /// however many subscriptions their coverage came from.
+        /// however many subscriptions their coverage came from. The
+        /// statement tap records one `cmd` resource per planned command,
+        /// covered by no subscription.
         resources: Vec<ObservedResource>,
+        /// The statement plan, present exactly on a `cmd.execute` entry
+        /// from the statement tap (spec §C.6). `None` for every `fs.*`
+        /// entry — a path batch has no statement behind it to plan.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        plan: Option<Plan>,
     },
     /// A subscription was revoked. Takes effect immediately for operations
     /// not yet posted; requests already granted under it are unaffected.
@@ -1674,6 +1843,12 @@ mod tests {
             OperationId::namespaced("trash", "empty"),
             Err(OperationIdError::ReservedPrefix(p)) if p == "trash"
         ));
+        // The statement gate's namespace (spec §C.6). A plugin posting
+        // `cmd.execute` would pose as the kernel's own statement tap.
+        assert!(matches!(
+            OperationId::namespaced("cmd", "execute"),
+            Err(OperationIdError::ReservedPrefix(p)) if p == "cmd"
+        ));
     }
 
     #[test]
@@ -1747,6 +1922,7 @@ mod tests {
             reason,
             hint,
             supersedes,
+            plan,
         } = draft;
         assert_eq!(operation.as_str(), "git.push");
         assert_eq!(risk, RiskClass::Irreversible);
@@ -1754,6 +1930,8 @@ mod tests {
         assert_eq!(reason, "pushing to a protected branch");
         assert!(hint.contains("<token>"));
         assert!(supersedes.is_none());
+        // Only the statement gate attaches a plan (spec §C.6).
+        assert!(plan.is_none());
     }
 
     #[test]
@@ -1850,7 +2028,9 @@ mod tests {
             requested_at,
             ttl,
             supersedes,
+            plan,
         } = req;
+        let _: Option<Plan> = plan;
         let _: RequestId = id;
         let _: OperationId = operation;
         let _: RiskClass = risk;
@@ -1896,7 +2076,9 @@ mod tests {
             requested_at,
             ttl,
             supersedes,
+            plan,
         } = view;
+        let _: Option<Plan> = plan;
         let _: RequestId = id;
         let _: OperationId = operation;
         let _: RiskClass = risk;
@@ -2138,13 +2320,52 @@ mod tests {
                 by: by.clone(),
                 reason: "policy changed".to_string(),
             },
-            LedgerEntry::TokenRejected {
+            LedgerEntry::Subscribed {
                 seq: 13,
+                at,
+                subscription: Subscription::new(
+                    vec![OperationPattern::new("fs.*")],
+                    vec![ResourcePattern::new("path", "/workspace/**")],
+                    SubscriptionMode::Observe,
+                    "watch the workspace",
+                ),
+            },
+            LedgerEntry::Observed {
+                seq: 14,
+                at,
+                operation: OperationId::new("cmd.execute").expect("a valid dotted id"),
+                by: by.clone(),
+                resources: vec![ObservedResource::planned("cmd", "cargo")],
+                plan: Some(sample_plan()),
+            },
+            LedgerEntry::Unsubscribed {
+                seq: 15,
+                at,
+                id: SubscriptionId::new(1),
+                by: by.clone(),
+                reason: "scope narrowed".to_string(),
+            },
+            LedgerEntry::TokenRejected {
+                seq: 16,
                 at,
                 request: Some(request.clone()),
                 attempts: 3,
             },
         ]
+    }
+
+    /// A plan the statement tap would build for `cargo build > ${LOG}`.
+    fn sample_plan() -> Plan {
+        Plan::new(
+            "cargo build > ${LOG}",
+            "command",
+            vec![PlannedCommand::new(
+                "cargo",
+                vec!["build".to_string()],
+                vec![PlannedRedirect::new(">", "${LOG}")],
+                false,
+            )],
+        )
     }
 
     #[test]
@@ -2223,6 +2444,9 @@ mod tests {
         "voided",
         "standing_issued",
         "standing_revoked",
+        "subscribed",
+        "observed",
+        "unsubscribed",
         "token_rejected",
     ];
 
@@ -2258,6 +2482,68 @@ mod tests {
                 _ => {}
             }
         }
+    }
+
+    // ── The statement plan (spec §C.6) ──
+
+    #[test]
+    fn capture_statement_round_trips_with_its_source_and_index() {
+        // The capture `Kernel::confirm` replays from: statements carry no
+        // source spans, so the whole program plus an index is the capture.
+        let capture = Capture::Statement {
+            source: "x=1\nrm -rf ${DIR}".to_string(),
+            index: 1,
+        };
+        let json = serde_json::to_value(&capture).expect("serialize");
+        let back: Capture = serde_json::from_value(json).expect("deserialize");
+        assert_eq!(capture, back);
+    }
+
+    #[test]
+    fn plan_round_trips_with_every_planned_field() {
+        let plan = sample_plan();
+        let json = serde_json::to_value(&plan).expect("serialize");
+        let back: Plan = serde_json::from_value(json).expect("deserialize");
+        assert_eq!(plan, back);
+        assert_eq!(back.commands[0].redirects[0].kind, ">");
+        // Unexpanded: the target keeps `${LOG}` as written, because a
+        // classifier judges what was asked, not what it resolved to.
+        assert_eq!(back.commands[0].redirects[0].target, "${LOG}");
+    }
+
+    #[test]
+    fn a_request_without_a_plan_omits_the_field_on_the_wire() {
+        // `plan` is additive: an `fs.*` request serializes exactly as it did
+        // before the statement gate existed.
+        let req = sample_request();
+        assert!(req.plan.is_none());
+        let json = serde_json::to_value(&req).expect("serialize");
+        assert!(json.get("plan").is_none(), "plan must be omitted: {json}");
+        let back: ApprovalRequest = serde_json::from_value(json).expect("deserialize");
+        assert_eq!(req, back);
+    }
+
+    #[test]
+    fn a_planned_resource_names_no_subscription() {
+        // `cmd.*` never enters the subscription registry (spec §C.6), so the
+        // statement tap's resources carry no subscription id — and the field
+        // is omitted rather than faked with a sentinel.
+        let resource = ObservedResource::planned("cmd", "rm");
+        assert_eq!(resource.subscription, None);
+        assert_eq!(resource.resolved, "rm");
+        let json = serde_json::to_value(&resource).expect("serialize");
+        assert!(
+            json.get("subscription").is_none(),
+            "an unsubscribed resource must omit the field: {json}"
+        );
+    }
+
+    #[test]
+    fn a_subscribed_resource_still_names_its_subscription() {
+        let resource = ObservedResource::new("path", "x.txt", "/w/x.txt", SubscriptionId::new(7));
+        assert_eq!(resource.subscription, Some(SubscriptionId::new(7)));
+        let json = serde_json::to_value(&resource).expect("serialize");
+        assert_eq!(json.get("subscription"), Some(&serde_json::json!(7)));
     }
 
     // ── Outcome: no plain Cancelled variant ──
