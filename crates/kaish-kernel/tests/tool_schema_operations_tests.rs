@@ -65,6 +65,13 @@ fn every_declared_operation_matches_a_kernel_operation() {
     // exact producer -> operation mapping spec §F.3 item 5 names (rm ->
     // fs.remove, the seven gate_overwrites callers -> fs.overwrite except
     // mv -> fs.rename, kaish-trash -> trash.empty).
+    //
+    // Known gap (review, 2026-08-05): a NEW gate site that forgets to declare
+    // its operation on the schema AND skips this table passes both checks —
+    // neither the enum (compile-time, per operation.rs) nor this test sees
+    // the omission; the builtin just never shows in `tools --json`'s
+    // OPERATIONS column. Self-correcting for policy engines, but when adding
+    // a gate site, add its row here.
     let by_tool: BTreeMap<&str, Vec<&str>> = declared
         .iter()
         .fold(BTreeMap::new(), |mut map, (tool, op)| {
