@@ -6,6 +6,11 @@
 //! itself has no OS dependency, so this file compiles and passes
 //! featureless.
 
+// Test-fixture code: unwrap/expect on known-good setup is the idiom here.
+// `resolvers_with_git_ref` is a plain helper fn, not itself a `#[test]`, so
+// clippy's `allow-{unwrap,expect}-in-tests` does not cover its `.expect()`.
+#![allow(clippy::unwrap_used, clippy::expect_used)]
+
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 
