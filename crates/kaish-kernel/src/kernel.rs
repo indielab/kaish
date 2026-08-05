@@ -2896,6 +2896,22 @@ impl Kernel {
         // Reset cancellation token for this execution.
         let cancel = self.reset_cancel();
 
+        // Every credential this program presents, from **any** of its
+        // statements (spec §A.2). A `Capture::Statement` records the whole
+        // source, so a key on line 1 would ride along in the capture of a
+        // statement held on line 5 — redacting only the held statement's own
+        // key would leave that one behind. Scanned once, and only for a source
+        // that mentions the flag at all, so the ordinary line pays nothing.
+        let program_keys: Vec<String> = if input.contains("confirm=") {
+            program
+                .statements
+                .iter()
+                .flat_map(|stmt| crate::ast::plan::plan_statement(stmt).presented_keys)
+                .collect()
+        } else {
+            Vec::new()
+        };
+
         for (index, stmt) in program.statements.into_iter().enumerate() {
             if matches!(stmt, Stmt::Empty) {
                 continue;
@@ -2917,7 +2933,7 @@ impl Kernel {
             // and no entry may carry a credential (spec §A.2).
             let planned = crate::ast::plan::plan_statement(&stmt);
             let capture = kaish_types::approval::Capture::Statement {
-                source: crate::ast::plan::redact_keys(input, &planned.presented_keys),
+                source: crate::ast::plan::redact_keys(input, &program_keys),
                 index,
             };
             let gated = match self.tap_statement(planned, capture).await {

@@ -592,6 +592,37 @@ async fn no_readable_surface_carries_a_key_a_re_run_presented() {
     );
 }
 
+/// A key one statement presented does not ride along in a **later**
+/// statement's capture. `Capture::Statement` records the whole program
+/// source, so redacting only the held statement's own key would leave an
+/// earlier line's key sitting in it.
+#[tokio::test]
+async fn a_key_from_an_earlier_statement_is_redacted_from_a_later_capture() {
+    let session = Session::gating_rm();
+    session.write("first.txt", "delete me");
+    session.write("second.txt", "delete me too");
+
+    let held = session.run("rm first.txt").await;
+    let id = held.approval_request().expect("a pending request").id;
+    let key = session.grant_and_key(&id).await;
+
+    // One program: line 0 redeems with the key, line 1 is held in its turn.
+    let second = session
+        .run(&format!("rm --confirm={key} first.txt\nrm second.txt"))
+        .await;
+    assert_eq!(second.code, 2, "the second statement must be held: {}", second.err);
+    let view = second.approval_request().expect("a second pending request");
+    let Capture::Statement { source, index } = &view.capture else {
+        panic!("expected a statement capture, got {:?}", view.capture);
+    };
+    assert_eq!(*index, 1);
+    assert!(
+        !source.contains(&key),
+        "the earlier statement's key rode along in the capture: {source}"
+    );
+    assert_eq!(source, "rm first.txt\nrm second.txt");
+}
+
 /// The same scan for a key that never redeems: an unmatched presentation
 /// posts nothing, and what it does record still carries no credential.
 #[tokio::test]

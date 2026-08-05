@@ -15,9 +15,9 @@
 //!
 //! The collection walk also lifts out any literal `--confirm=<key>` the
 //! statement's argv carries ([`StatementPlan::presented_keys`]) — the same
-//! two spellings [`render_arg`] redacts. One walk finds the credential,
-//! redacts it from the record, and hands it to the gate, so the three cannot
-//! disagree about what the statement presented.
+//! two spellings the rendering redacts. One predicate decides all three of
+//! lift, redact, and render, so they cannot disagree about what the statement
+//! presented.
 
 use kaish_types::approval::{Plan, PlannedCommand, PlannedRedirect, PLAN_RENDER_LIMIT};
 use kaish_types::Value;
@@ -678,7 +678,7 @@ mod tests {
     use super::*;
     use crate::parser::parse;
 
-    fn plan_of(source: &str) -> Plan {
+    fn planned_of(source: &str) -> StatementPlan {
         let program = parse(source).expect("the fixture parses");
         let stmt = program
             .statements
@@ -686,6 +686,10 @@ mod tests {
             .find(|s| !matches!(s, Stmt::Empty))
             .expect("one statement");
         plan_statement(&stmt)
+    }
+
+    fn plan_of(source: &str) -> Plan {
+        planned_of(source).plan
     }
 
     #[test]
@@ -832,5 +836,70 @@ mod tests {
     fn a_short_rendering_carries_no_marker() {
         let plan = plan_of("echo hi");
         assert_eq!(plan.rendered, "echo hi");
+    }
+
+    // ── The presented credential (spec §A.2, §C.6) ──
+
+    #[test]
+    fn a_literal_key_is_lifted_and_redacted() {
+        let planned = planned_of("rm --confirm=deadbeef target.txt");
+        assert_eq!(planned.presented_keys, vec!["deadbeef".to_string()]);
+        assert_eq!(planned.plan.rendered, "rm --confirm=<redacted> target.txt");
+        assert_eq!(
+            planned.plan.commands[0].args,
+            vec!["--confirm=<redacted>".to_string(), "target.txt".to_string()]
+        );
+    }
+
+    #[test]
+    fn the_bare_word_assign_spelling_is_lifted_too() {
+        // `dd` takes its operands as `key=value`, so this is the same
+        // credential wearing the other spelling.
+        let planned = planned_of("dd if=a of=b confirm=deadbeef");
+        assert_eq!(planned.presented_keys, vec!["deadbeef".to_string()]);
+        assert!(
+            planned.plan.rendered.ends_with("confirm=<redacted>"),
+            "got: {}",
+            planned.plan.rendered
+        );
+    }
+
+    #[test]
+    fn a_variable_carried_key_is_neither_lifted_nor_redacted() {
+        // Nothing to lift and nothing to leak: an unexpanded plan never held
+        // the value, so it renders as written like any other variable.
+        let planned = planned_of("rm --confirm=${key} target.txt");
+        assert!(planned.presented_keys.is_empty());
+        assert_eq!(planned.plan.rendered, "rm --confirm=${key} target.txt");
+    }
+
+    #[test]
+    fn a_key_inside_a_loop_body_is_still_lifted() {
+        let planned = planned_of("for f in a b; do rm --confirm=deadbeef $f; done");
+        assert_eq!(planned.presented_keys, vec!["deadbeef".to_string()]);
+    }
+
+    #[test]
+    fn redaction_takes_the_whole_token_and_leaves_one_space() {
+        let source = "rm --confirm=deadbeef target.txt";
+        assert_eq!(
+            redact_keys(source, &["deadbeef".to_string()]),
+            "rm target.txt"
+        );
+    }
+
+    #[test]
+    fn redaction_leaves_a_source_that_never_presented_a_key_alone() {
+        let source = "rm target.txt";
+        assert_eq!(redact_keys(source, &[]), source);
+        assert_eq!(redact_keys(source, &["deadbeef".to_string()]), source);
+    }
+
+    #[test]
+    fn redaction_covers_both_spellings_across_a_multi_statement_source() {
+        let source = "echo one\ndd if=a confirm=deadbeef\nrm --confirm=deadbeef x";
+        let redacted = redact_keys(source, &["deadbeef".to_string()]);
+        assert!(!redacted.contains("deadbeef"), "got: {redacted}");
+        assert_eq!(redacted, "echo one\ndd if=a\nrm x");
     }
 }
