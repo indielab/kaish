@@ -15,6 +15,80 @@ before it ships.
 
 ---
 
+## The statement gate: recording what was asked, before anything runs (2026-08-05)
+
+Ledger PR 10, and the first layer that watches *statements* rather than paths.
+The `fs.*` layer records what a command touched. This one records what was
+asked to run, before any of it runs — which means the record has to be built
+out of the parse, not out of execution, and that constraint decided almost
+every question that followed.
+
+**The plan is what a classifier reads, so it renders unexpanded.** `${HOME}`
+stays `${HOME}`; `$(cat list)` stays `$(cat list)`. There was an existing
+renderer — `Kernel::format_expr` — and the temptation was to extend it. It
+turned out to be the wrong shape: `format_expr` renders a job listing, so it
+drops what it cannot show ("...", `"..."`, `<<heredoc`). A plan is an audit
+record and a policy input; a `_ => "..."` arm there is a silent hole in both.
+So the plan renderer is a parallel AST walk with no fallback arm, mirroring
+the sexpr formatter's coverage, and the 8 KiB truncation the spec asks for
+carries a marker that names the number. The structure survives the cut — a
+classifier that needs more than 8 KiB of *text* is reading the wrong field.
+
+**The tap fires at exactly two sites, and the tests are what hold it there.**
+The top-level statement loop and `execute_argv`. The design review settled
+this before implementation, and after building it I understand why it needed
+settling: `execute_stmt_flow` is the obvious place, it is one function, and it
+would post a thousand entries for a thousand-iteration loop. The rule is easy
+to state and easy to violate later, so the matrix has a test for the loop (one
+entry), for a user tool's body, for a `$(…)`, and for a sourced script — each
+of which would light up if someone "simplified" the tap into the recursion.
+
+**Two bugs the tree found that the spec had not.** The first was ours the
+moment we wrote it: the plan rendered `rm --confirm=<the real token>` straight
+into the ledger, and §A.2 says no entry carries a credential. The existing
+`no_projection_contains_the_issued_credential` test caught it on the first
+full run — the value of a test that scans serialized bytes for the issued
+token rather than asserting on a field list. The renderer now redacts the
+`confirm` argument's value in both spellings (`--confirm=` and `dd`'s bare
+`confirm=`), keeping the fact that a key was presented and none of the key.
+
+The second was structural. `ObservedResource.subscription` was a required
+`SubscriptionId`, and the statement tap has no subscription — `cmd.*` never
+enters the registry, by design, so the classifier stays the sole posture
+decider. A sentinel id would have been a lie in an audit record, so the field
+became `Option`, `new` kept its meaning, and the tap got its own `planned`
+constructor. That is the second time in this ledger series that "what do I put
+here when there is nothing" was the question that found the real design.
+
+**Always-on had to be paid for honestly.** PR 8 shipped a test asserting an
+unsubscribed 10,000-path delete posts *zero* entries. That assertion is now
+false — it posts one, for the statement. Rather than filter the tap out and
+leave the claim looking untouched, the test states the new number: 1 entry and
+0 approval requests for 10,000 paths. The load-bearing property was never "the
+log is empty", it was "the cost is not per path", and that still holds. The
+`fs.*` matrices do filter the tap out, because those tables are about the fs
+chain and always were.
+
+**Replay by index.** A held statement has no source span to slice, so the
+capture is the program source plus the statement's index — `confirm` re-parses
+outside the execute lock (pure computation), then runs exactly that statement
+under the lock. Earlier statements already ran in that session and their
+variables and cwd still hold, which is what makes `target=chosen.txt` on line 1
+visible to the replayed `rm ${target}` on line 2. The sharp edge was the
+redemption context: a `confirm` of an *fs.remove* also passes through the
+`execute_argv` tap site, and if the statement gate took that correlation the
+inner `rm` gate would find nothing waiting for it. The site peeks at the
+granted operation instead of taking the correlation, and leaves anything that
+is not `cmd.execute` alone.
+
+**The measurement, not the assertion.** §C.6 says the reference classifier
+ships with a measurement of whether the plan discriminates better than the raw
+line. It does: 9/9 against 6/9 over a small labeled corpus, disagreeing on
+`echo 'rm target.txt'`, `grep rm changelog.txt`, and `cat rm`. The test asserts
+plan ≥ raw and requires at least one disagreement rather than pinning the
+percentage — the number belongs to the corpus, and a hard-coded one would rot
+the first time someone adds a case.
+
 ## The watcher loses its paperwork (2026-08-04)
 
 Four days after PR 8 merged, its post-merge review took the observe design
