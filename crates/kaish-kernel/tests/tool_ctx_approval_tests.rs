@@ -6,10 +6,17 @@
 //! itself has no OS dependency, so this file compiles and passes
 //! featureless.
 
+// Test-fixture code: unwrap/expect on known-good setup is the idiom here.
+// `resolvers_with_git_ref` is a plain helper fn, not itself a `#[test]`, so
+// clippy's `allow-{unwrap,expect}-in-tests` does not cover its `.expect()`.
+#![allow(clippy::unwrap_used, clippy::expect_used)]
+
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 
-use kaish_kernel::ledger::{ConditionReport, DecisionChain, Ledger, LedgerConfig};
+use kaish_kernel::ledger::{
+    ConditionReport, DecisionChain, Ledger, LedgerConfig, ResolverError, StateResolver, StateResolvers,
+};
 use kaish_kernel::vfs::{MemoryFs, VfsRouter};
 use kaish_kernel::{ExecContext, LedgerAccess};
 use kaish_tool_api::{ApprovalOutcome, Tool, ToolArgs, ToolCtx};
@@ -17,6 +24,30 @@ use kaish_types::approval::{
     ApprovalRequest, Capture, GrantTerms, Observation, Outcome, Principal, PrincipalKind, RequestState,
     ResourceRef, RiskClass, StateClaim,
 };
+
+/// Resolves `git.ref` to whatever the fixture's own transition claims as its
+/// prior state — just enough to let `present_key`'s redemption-time
+/// precondition check (spec §B.4) pass for the confirm-token tests below.
+/// Not a real git backend; a real out-of-tree plugin brings its own resolver.
+struct FixtureGitRefResolver;
+
+#[async_trait::async_trait]
+impl StateResolver for FixtureGitRefResolver {
+    fn kind(&self) -> &str {
+        "git.ref"
+    }
+
+    async fn observe(&self, _id: &str) -> Result<StateClaim, ResolverError> {
+        Ok(StateClaim::Exact("a1b2c3d".to_string()))
+    }
+}
+
+fn resolvers_with_git_ref() -> Arc<StateResolvers> {
+    Arc::new(
+        StateResolvers::from_registrations(vec![Arc::new(FixtureGitRefResolver)])
+            .expect("git.ref is not the reserved path kind"),
+    )
+}
 
 fn ctx_with_memory_fs() -> ExecContext {
     let mut vfs = VfsRouter::new();
@@ -57,7 +88,7 @@ async fn kernel_request_approval_round_trips_a_request_through_the_ledger() {
         .build()
         .unwrap();
 
-    let outcome = ctx.request_approval(draft).await;
+    let outcome = ctx.request_approval(draft, None).await;
     let view = match outcome {
         ApprovalOutcome::Pending(view) => *view,
         other => panic!("PR 3 wires no decision chain — every post must defer to Pending, got {other:?}"),
@@ -90,7 +121,7 @@ async fn kernel_request_approval_with_no_ledger_wired_is_unsupported() {
         .risk(RiskClass::Irreversible)
         .build()
         .unwrap();
-    let outcome = ctx.request_approval(draft).await;
+    let outcome = ctx.request_approval(draft, None).await;
     assert!(matches!(outcome, ApprovalOutcome::Unsupported));
 }
 
@@ -105,6 +136,7 @@ mod plugin_dangerous {
     use async_trait::async_trait;
     use kaish_tool_api::{ExecResult, Tool, ToolArgs, ToolCtx, ToolSchema};
     use kaish_types::approval::{ApprovalRequest, Resource, RiskClass, StateClaim};
+    use kaish_types::Value;
 
     /// The transition this fixture claims — public so the surrounding test
     /// can build a matching `Observation` at redemption time without
@@ -135,7 +167,7 @@ mod plugin_dangerous {
             ToolSchema::new("plugin-dangerous", "fixture: gates a synthetic dangerous operation")
         }
 
-        async fn execute(&self, _args: ToolArgs, ctx: &mut dyn ToolCtx) -> ExecResult {
+        async fn execute(&self, args: ToolArgs, ctx: &mut dyn ToolCtx) -> ExecResult {
             let draft = match ApprovalRequest::builder("plugin.dangerous")
                 .risk(RiskClass::Irreversible)
                 .resource(ref_resource())
@@ -146,8 +178,16 @@ mod plugin_dangerous {
                 Ok(draft) => draft,
                 Err(e) => return ExecResult::failure(1, e.to_string()),
             };
+            // `--confirm=<token>` relayed from argv, exactly the way a real
+            // out-of-tree plugin (kaish-git) would read its own flag and pass
+            // it through — this is the fixture proving `ToolCtx::request_approval`
+            // carries `presented` (ledger PR "spec-gaps" item 1).
+            let presented = match args.named.get("confirm") {
+                Some(Value::String(token)) => Some(token.as_str()),
+                _ => None,
+            };
             // The one call pattern (spec §C.1) — the entire gate.
-            match ctx.request_approval(draft).await.proceed() {
+            match ctx.request_approval(draft, presented).await.proceed() {
                 Ok(_attempt) => ExecResult::success("dangerous operation performed"),
                 Err(result) => result,
             }
@@ -244,4 +284,106 @@ async fn plugin_dangerous_fixture_gates_end_to_end_through_tool_api_alone() {
     let chain = approvals.get(&view.id).expect("chain must still exist after settlement");
     assert_eq!(chain.attempts.len(), 1);
     assert_eq!(chain.attempts[0].outcome, Some(Outcome::Exit(0)));
+}
+
+#[tokio::test]
+async fn plugin_dangerous_fixture_honors_a_presented_confirm_token() {
+    // Ledger PR "spec-gaps" item 1: a plugin tool now has a path to relay
+    // its own `--confirm=<token>` the way an in-tree gate site does. Before
+    // this PR `ToolCtx::request_approval` took no `presented` parameter at
+    // all, so this flow had no way to reach `Authorized` on the same
+    // invocation shape as `rm --confirm=<token>` (`execute_argv_tests.rs`).
+    use plugin_dangerous::PluginDangerous;
+
+    let (requester, approvals, approver) = Ledger::build(LedgerConfig::default(), None).unwrap();
+    let mut ctx = ctx_with_memory_fs();
+    ctx.ledger_access = Some(LedgerAccess {
+        requester,
+        approvals: approvals.clone(),
+        chain: chain_over(&approver),
+        principal: agent("agent-1"),
+        request_ttl: Duration::from_secs(60),
+        job_id: None,
+        resolvers: resolvers_with_git_ref(),
+        session_authority: None,
+    });
+    let tool = PluginDangerous;
+
+    // 1. First invocation, no `--confirm`: posts and defers, same as the
+    //    plain end-to-end test above.
+    let result = tool.execute(ToolArgs::new(), &mut ctx).await;
+    assert_eq!(result.code, 2, "a deferred request must be exit 2, not a bare failure");
+    let view = result
+        .approval_request()
+        .expect("Pending must post the view on ExecResult's control-plane field")
+        .clone();
+
+    // 2. Grant it, out of band, exactly as an approver would.
+    let mut terms_draft = ApprovalRequest::builder("plugin.dangerous")
+        .risk(RiskClass::Irreversible)
+        .build()
+        .unwrap();
+    terms_draft.resources = view.resources.clone();
+    let terms_source = terms_draft.stamp(
+        view.id.clone(),
+        view.principal.clone(),
+        view.capture.clone(),
+        view.context.clone(),
+        view.requested_at,
+        view.ttl,
+        view.job_id,
+    );
+    let not_after = SystemTime::now() + Duration::from_secs(300);
+    approver
+        .grant(&view.id, GrantTerms::once_for(&terms_source, not_after))
+        .await
+        .unwrap();
+
+    // 3. Retrieve the real credential — the thing a frontend would splice
+    //    into the printed re-run hint (`plugin-dangerous --confirm=<token>`).
+    let token = approver.token_for(&view.id).expect("a granted request has a credential").reveal().to_string();
+
+    // 4. Re-invoke the fixture with `--confirm=<token>` relayed through its
+    //    own argv (`args.named["confirm"]`), the way a real out-of-tree
+    //    plugin would parse its own flags and hand the value to
+    //    `ToolCtx::request_approval`'s new `presented` parameter.
+    let mut args = ToolArgs::new();
+    args.named.insert("confirm".to_string(), kaish_types::Value::String(token));
+    let confirmed = tool.execute(args, &mut ctx).await;
+    assert_eq!(
+        confirmed.code, 0,
+        "a correct presented token must authorize the operation, got: {}",
+        confirmed.err
+    );
+    let chain = approvals.get(&view.id).expect("chain must still exist after redemption");
+    assert_eq!(chain.attempts.len(), 1, "the presented token must have reserved exactly one attempt");
+}
+
+#[tokio::test]
+async fn plugin_dangerous_fixture_rejects_a_wrong_presented_confirm_token() {
+    // The other half: a plugin relaying a bad token must fail closed, not
+    // silently fall through to the operation.
+    use plugin_dangerous::PluginDangerous;
+
+    let (requester, approvals, approver) = Ledger::build(LedgerConfig::default(), None).unwrap();
+    let mut ctx = ctx_with_memory_fs();
+    ctx.ledger_access = Some(LedgerAccess {
+        requester,
+        approvals: approvals.clone(),
+        chain: chain_over(&approver),
+        principal: agent("agent-1"),
+        request_ttl: Duration::from_secs(60),
+        job_id: None,
+        resolvers: resolvers_with_git_ref(),
+        session_authority: None,
+    });
+    let tool = PluginDangerous;
+
+    let mut args = ToolArgs::new();
+    args.named.insert(
+        "confirm".to_string(),
+        kaish_types::Value::String("0000000000000000000000000000000000000000".to_string()),
+    );
+    let result = tool.execute(args, &mut ctx).await;
+    assert_eq!(result.code, 1, "a wrong presented token must fail closed, not proceed");
 }

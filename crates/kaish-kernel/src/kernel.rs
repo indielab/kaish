@@ -729,6 +729,29 @@ impl KernelConfig {
         self
     }
 
+    /// Refuse a grant whose issuing principal equals the request's own
+    /// principal (spec §D.2, §E.7). Default false: a solo human at the REPL
+    /// is legitimately both requester and approver, so this is an opt-in
+    /// policy for multi-principal embedders, not a blanket
+    /// approver-never-equals-requester invariant. Enforced ledger-wide at
+    /// grant-posting time — it catches misconfiguration (an agent session
+    /// handed a handle it should not use to approve its own requests), not
+    /// resisting an attacker.
+    ///
+    /// Sets [`crate::ledger::LedgerConfig::deny_self_approval`] on this
+    /// kernel's own ledger config, creating a default one if
+    /// [`Self::with_ledger`] was not called; call order between the two
+    /// matters exactly the way it does for any field both touch — the last
+    /// call wins. Like [`Self::with_ledger`], this is refused together with
+    /// [`Self::with_approver_handle`] (an adopted ledger already has a
+    /// configuration).
+    pub fn with_deny_self_approval(mut self, deny: bool) -> Self {
+        let mut config = self.ledger_config.take().unwrap_or_default();
+        config.deny_self_approval = deny;
+        self.ledger_config = Some(config);
+        self
+    }
+
     /// Post every ledger entry to `sink` as it commits (spec §D.4). Without
     /// one the ledger is purely in-memory: bounded retention, no external
     /// record. The sink applies backpressure and a full queue fails a

@@ -11,7 +11,7 @@
 use std::fmt;
 
 use kaish_types::approval::{
-    Outcome, RequestId, RequestState, ResourceRef, StandingId, StateClaim, SubscriptionId,
+    Outcome, Principal, RequestId, RequestState, ResourceRef, StandingId, StateClaim, SubscriptionId,
 };
 
 /// Why a ledger transaction did not commit. Every non-`InvariantViolated`
@@ -129,6 +129,23 @@ pub enum LedgerError {
     /// a second successful settlement against one grant. Never means
     /// "proceed" (spec §A.1).
     InvariantViolated(String),
+    /// `LedgerConfig::deny_self_approval` is on and the principal that would
+    /// decide this grant is the same principal that requested it (spec
+    /// §D.2, §E.7). Refused before the grant is appended — catches
+    /// misconfiguration, not an attacker; the ledger still records both
+    /// principals on every grant regardless of this policy. Both fields are
+    /// equal by construction — this variant is only ever raised when they
+    /// match — but the error names both roles explicitly rather than one
+    /// value, so the message reads as "requested by X, would be granted by
+    /// X" instead of leaving the reader to infer the second role.
+    SelfApproval {
+        /// The request this grant would have authorized.
+        request: RequestId,
+        /// The requesting principal.
+        requested_by: Principal,
+        /// The principal that would have decided the grant.
+        granted_by: Principal,
+    },
 }
 
 impl fmt::Display for LedgerError {
@@ -202,6 +219,11 @@ impl fmt::Display for LedgerError {
             Self::InvariantViolated(detail) => {
                 write!(f, "approval ledger invariant violated: {detail}")
             }
+            Self::SelfApproval { request, requested_by, granted_by } => write!(
+                f,
+                "request {request} refused: requested by {requested_by:?}, would be granted by {granted_by:?} \
+                 — deny_self_approval refuses a principal approving its own request"
+            ),
         }
     }
 }
