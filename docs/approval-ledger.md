@@ -1,6 +1,6 @@
 # The kaish approval ledger
 
-**Status:** living design doc — spec current as of 2026-08-02; implementation beginning.
+**Status:** living design doc — spec current as of 2026-08-05; PRs 1–8 landed, statement gate (§C.6) in design.
 This file in kaish `docs/` is the canonical copy (migrated from kaish-extras 2026-08-01;
 the extras copy is superseded).
 **Target:** kaish kernel (post-0.13) · **Motivating embedder:** kaijutsu · **First in-kernel consumer:** kaish-git's write profile
@@ -289,6 +289,10 @@ pub struct ApprovalRequest {
     pub ttl: Duration,
     /// Set when this request renews an expired predecessor (§B.5).
     pub supersedes: Option<RequestId>,
+    /// The parsed statement plan, present exactly when the operation is the
+    /// statement gate (§C.6). Typed here and mirrored as `cmd` resources, so a
+    /// classifier reads structure and a standing grant matches globs.
+    pub plan: Option<Plan>,
 }
 ```
 
@@ -434,7 +438,7 @@ pub enum LedgerEntry {
     /// Each resource carries the display path, the resolved path the glob
     /// matched, and the covering subscription's id.
     Observed    { seq: u64, at: SystemTime, operation: OperationId, by: Principal,
-                  resources: Vec<ObservedResource> },
+                  resources: Vec<ObservedResource>, plan: Option<Plan> },
     /// A bad credential was presented. `request` is `Some` when the presenting
     /// draft matched a live request (so the count means something) and `None`
     /// when it matched nothing. Carries the running count; the fifth rejection
@@ -479,7 +483,7 @@ from a closed enum, and the mapping from enum to dotted string is an exhaustive 
 **adding a gate site without registering its operation is a compile error**.
 
 ```rust
-pub enum KernelOperation { FsRemove, FsOverwrite, FsRename, TrashEmpty }
+pub enum KernelOperation { FsRemove, FsOverwrite, FsRename, TrashEmpty, CmdExecute }
 impl KernelOperation { pub const fn id(self) -> &'static str { /* exhaustive match */ } }
 ```
 
@@ -715,6 +719,13 @@ pub enum Capture {
     Unavailable { reason: String },
     /// Capture was attempted and failed.
     CaptureFailed { reason: String },
+    /// A statement gate (§C.6): the whole program source plus the index of the
+    /// held top-level statement. Replayable — `confirm` re-parses the source and
+    /// executes exactly statement `index`, in the originating session, where
+    /// earlier statements' effects (variables, cwd) are session state and still
+    /// hold. Statements carry no source spans, which is why the capture is
+    /// source-plus-index rather than a slice.
+    Statement { source: String, index: usize },
 }
 ```
 
@@ -1092,6 +1103,114 @@ The registry lives on the approval side and is consulted at the gate before
 entry, the registry with its atomic any-subscription flag, and the glob filter. It changes
 no default posture, so it lands after the cutover rather than gating it (§H, PR 8).
 
+### C.6 The statement gate — observe-all at the command level
+
+*Added 2026-08-05 from Amy's 2026-08-04/05 rulings: statement-level gating; observe-all
+non-optional; classifier scopes, chain decides; the plan lives in both resources and a
+typed field; one operation id.*
+
+Every top-level statement is recorded, and a classifier decides which ones must ask
+first. This is the second observability layer, above `fs.*` (§C.5), and the two are
+independent by design: the filesystem layer records what a command **touched**; the
+statement layer records what was **asked to run**, before any of it runs. An embedder
+joins them through trace context, not through the kernel.
+
+**The unit is the top-level statement.** One REPL line's statement, one statement of a
+`.kai` script, or one `execute_argv` invocation (which bypasses the statement loop and is
+covered explicitly — a door the gate does not watch is not a gate). Nested statements —
+loop bodies, `if` branches, user-tool bodies — belong to their enclosing top-level
+statement's plan and are never separately gated or recorded. Two consequences, both
+deliberate: a gate holds the statement before *anything* of it has run — no substitution,
+no redirect opened, no first loop iteration — and a 1,000-iteration loop is one entry,
+not a thousand. Recording what the iterations actually touched is the `fs.*` layer's job.
+
+**The plan is parse information, not execution information.** Built from the AST after
+validation, before execution:
+
+```rust
+#[non_exhaustive]
+pub struct Plan {
+    /// The statement rendered back to shell text, unexpanded: `${HOME}` and
+    /// `$(...)` appear as written, because the classifier judges what was asked,
+    /// not what it resolved to. Truncated at 8 KiB with a loud marker.
+    pub rendered: String,
+    /// `Stmt::kind_name()`: "command", "pipeline", "for", "and_chain", …
+    pub statement_kind: String,
+    /// Every command the statement contains, control-structure bodies included.
+    pub commands: Vec<PlannedCommand>,
+}
+
+#[non_exhaustive]
+pub struct PlannedCommand {
+    pub name: String,                    // argv0 as written
+    pub args: Vec<String>,               // rendered, unexpanded
+    pub redirects: Vec<PlannedRedirect>, // kind + rendered target
+    pub background: bool,
+}
+```
+
+The plan lives in **both** places: as the typed `ApprovalRequest.plan` field (and on the
+`Observed` entry), and as resources — one `Resource { kind: "cmd", id: <argv0> }` per
+planned command — so standing grants and policy match statements through the same
+exact-kind/globbed-id machinery everything else uses ("auto-approve statements whose
+every command matches `cargo`" is all-or-nothing §C.4 matching, unchanged). Whether the
+plan gives a classifier more discrimination than the raw line is a testable claim; the
+reference classifier ships with a measurement, not an assertion.
+
+**Observe-all is non-optional.** Every executed top-level statement posts one chainless
+`Observed` entry carrying its plan — operation `cmd.execute`, no request, no grant,
+nothing in the live index, evictable the moment it commits. There is no configuration
+that turns this off: an agent getting an automatic second opinion is a property of kaish,
+not a posture an embedder selects. The cost is O(top-level statements), which is what
+makes always-on tenable here while per-path `fs.*` observe stays opt-in. Eviction from
+the retained ring is history aging out, not an error. A tap append that cannot commit at
+all (sink backpressure, §D.4) emits a warn event and the statement **still runs** — the
+default tap is a second opinion, not a permission gate, and nobody opted into a
+completeness guarantee; a §C.5 subscription's operator did, which is why that path exits
+1 and this one does not. Gated statements keep the fail-closed rule: a decision that
+cannot be recorded is not made.
+
+**The classifier scopes; the chain decides.**
+
+```rust
+pub trait StatementClassifier: Send + Sync {
+    /// Synchronous and non-blocking, like `Approver::policy` (§C.2). Called once
+    /// per top-level statement.
+    fn classify(&self, plan: &Plan) -> StatementPosture;
+}
+
+#[non_exhaustive]
+pub enum StatementPosture {
+    /// Record and run. The default, and the floor — there is no silent posture.
+    Observe,
+    /// Build an ApprovalRequest and run the §C.2 decision chain. The classifier
+    /// names the risk because the taxonomy cannot: `cmd.execute` covers `ls`
+    /// and `rm -rf` alike.
+    Gate { reason: String, risk: RiskClass },
+}
+```
+
+`KernelConfig::with_statement_classifier` registers one; with none registered, every
+statement is `Observe`. A gate-classified statement enters the existing chain unchanged —
+a standing grant auto-approves it, `Approver::decide` puts it in front of a human under
+the patient hold, and all-`Defer` is exit 2 with the request pending, which at a TTY REPL
+returns the line to the user (§C.3) and in a script halts execution at that statement.
+The classifier has no deny: refusal is a chain decision (`Approver::policy`), because a
+scoping seam that can refuse is a second decision chain.
+
+**Deferral holds the whole line; replay is by statement index.** The capture is
+`Capture::Statement { source, index }` (§B.4): statements carry no source spans, so the
+capture is the program source the top-level loop already holds plus the held statement's
+index. `Kernel::confirm` re-parses the source and executes exactly statement `index` in
+the originating session, where earlier statements' effects — variables, cwd — are session
+state and still hold. There is no mid-construct gate to resume, because the unit is
+top-level by definition.
+
+`set -o approvals` and the statement layer are independent: the flag is an `fs.*`
+enforce policy (§C.5) and neither reads nor writes statement posture. `with_policy_pinned`
+already covers everything script-reachable; the classifier is embedder-registered and no
+script surface mutates it.
+
 ---
 
 ## D. API surfaces
@@ -1169,6 +1288,7 @@ placeholder is substituted by a frontend holding an `ApproverHandle` (§D.3).
 .with_deny_self_approval(bool)               // refuse a grant whose principal is the requester's
                                              // (default false; for multi-principal embedders — §E.7)
 .with_state_resolver(Arc<dyn StateResolver>) // per resource kind
+.with_statement_classifier(Arc<dyn StatementClassifier>)  // §C.6; absent = every statement Observe
 
 // Kernel — construction mints exactly one authority capability
 fn build(config: KernelConfig) -> (Kernel, ApproverHandle);
@@ -1973,6 +2093,42 @@ path is recorded under both spellings; one batch spanning two observe subscripti
 records both paths; an `enforce` subscription over the same glob does gate, including
 when an observe subscription also covers it; subscription and revocation are themselves
 ledger entries.
+
+---
+
+**PR 10 — `feat(kernel): the statement gate — cmd.execute observe-all and the classifier`**
+
+§C.6 in full: `Plan`/`PlannedCommand`/`PlannedRedirect` and `StatementClassifier`/
+`StatementPosture` in the API crates, `KernelOperation::CmdExecute`, the plan renderer
+(extending `format_pipeline` toward faithful unexpanded rendering), the top-level-loop
+tap and gate, `Capture::Statement` with `confirm`'s parse-and-execute-index replay,
+`execute_argv` coverage, and `Observed.plan`/`ApprovalRequest.plan`.
+
+*Tests:* every top-level statement posts exactly one `Observed{plan}` entry and a
+1,000-iteration loop posts one; a gate-classified statement defers to exit 2 with
+nothing executed (no substitution side effects, no redirect target created); a standing
+grant over `cmd` resources auto-approves and all-or-nothing holds when one command of
+three is uncovered; `confirm` on a `Capture::Statement` replays exactly the held
+statement with earlier statements' variables visible; `execute_argv` posts the same
+entry the statement loop would; a sink-backpressured tap warns and runs while a
+backpressured *gate* still fails closed; rendering truncates at 8 KiB with the marker;
+the plan-vs-raw-line discrimination measurement for the reference classifier.
+
+---
+
+**PR 11 — `feat(repl): the REPL fulfills its own gates`**
+
+The reference REPL retains the `ApproverHandle` from `Kernel::build`, installs
+`TerminalApprover` (§C.3), substitutes the hint's `<token>` placeholder on retrieval,
+ships the static/regex `StatementClassifier` as the reference example, and makes
+`approvals grant` work at the prompt. Closes the gap where the REPL described in
+§C.3/§D.3 could not fulfil its own gates — gated `rm` said "an operator must grant it"
+and there was no operator.
+
+*Tests:* a TTY session grants at the prompt and the statement proceeds inline; a
+non-TTY session defers to exit 2 and never writes a prompt; `approvals grant` succeeds
+in the REPL session and still exits 1 in an `agent()` session; the rendered re-run line
+carries the real token only in an authority-holding session.
 
 ---
 
