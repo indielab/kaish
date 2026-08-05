@@ -2033,7 +2033,9 @@ impl Kernel {
             // gate does not watch is not a gate. Its capture is `Exact`, not
             // `Statement`: it already holds a tool name and an argv, and
             // `confirm`'s existing arm replays that form.
-            let gated = match self.tap_statement(&stmt, argv_capture(name, argv)).await {
+            let planned = crate::ast::plan::plan_statement(&stmt);
+            let capture = argv_capture(name, argv, &planned.presented_keys);
+            let gated = match self.tap_statement(planned, capture).await {
                 crate::tools::StatementTap::Proceed { gated } => gated,
                 crate::tools::StatementTap::Halt(held) => return Ok(*held),
             };
@@ -2223,30 +2225,34 @@ impl Kernel {
             let mut ctx = self.exec_ctx.write().await;
             ctx.clear_redemption();
         }
-        let result = result?;
-
-        // Settle the reservation with what the replay actually did. Usually
-        // redundant — the gate site adopted the attempt and the dispatch seam
-        // already settled it, and settlement is idempotent by `AttemptId`, so
-        // this appends nothing. It is load-bearing for the replay that never
+        // Settle the reservation with what the replay actually did — **before
+        // the `?`**, so an execution error settles too. Usually redundant:
+        // the gate site adopted the attempt and the dispatch seam already
+        // settled it, and settlement is idempotent by `AttemptId`, so this
+        // appends nothing. It is load-bearing for the replay that never
         // reaches its gate at all: `rm` on a path that vanished between the
         // grant and the replay fails at its `lstat` and returns before
         // `request_gate`, which would otherwise leave the attempt `Reserved`
         // forever and make every later redemption fail `AttemptInFlight` —
-        // a grant an operator could no longer use. A non-zero settlement does
-        // not consume the grant (spec §A.1), so the retry stays available.
+        // a grant an operator could no longer use. An erroring replay is the
+        // same hazard reached the other way, which is why `Outcome::Error`
+        // is recorded rather than propagated past an unsettled attempt.
+        // A non-zero settlement does not consume the grant (spec §A.1), so
+        // the retry stays available either way.
+        let outcome = match &result {
+            Ok(result) => kaish_types::approval::Outcome::Exit(result.code),
+            Err(err) => kaish_types::approval::Outcome::Error(err.to_string()),
+        };
         if let Err(err) = self
             .approvals
             .requester
-            .settle_by_ids(
-                request_id,
-                attempt.attempt_id(),
-                kaish_types::approval::Outcome::Exit(result.code),
-            )
+            .settle_by_ids(request_id, attempt.attempt_id(), outcome)
             .await
         {
             tracing::debug!(error = %err, "confirm: settling the replayed attempt did not apply");
         }
+
+        let result = result?;
 
         if result.ok()
             && let Some(id) = chain.request.job_id
@@ -2283,7 +2289,11 @@ impl Kernel {
         // doors: the gate this replay re-enters can hold on a human, and
         // `ctx.patient` needs a live watchdog to suspend.
         let work = async {
-            let gated = match self.tap_statement(stmt, capture).await {
+            // The captured source was recorded credential-free, so a replayed
+            // statement presents no key: the redemption correlation on the
+            // context is what authorizes it.
+            let planned = crate::ast::plan::plan_statement(stmt);
+            let gated = match self.tap_statement(planned, capture).await {
                 crate::tools::StatementTap::Proceed { gated } => gated,
                 crate::tools::StatementTap::Halt(held) => return Ok(*held),
             };
@@ -2902,17 +2912,15 @@ impl Kernel {
             // has run *nothing*: no substitution, no redirect opened, no
             // first loop iteration. The capture is source-plus-index because
             // statements carry no source spans; `confirm` re-parses and runs
-            // exactly this index.
-            let gated = match self
-                .tap_statement(
-                    &stmt,
-                    kaish_types::approval::Capture::Statement {
-                        source: input.to_string(),
-                        index,
-                    },
-                )
-                .await
-            {
+            // exactly this index — with every `--confirm=<key>` removed from
+            // the recorded source, because the capture lands in the ledger
+            // and no entry may carry a credential (spec §A.2).
+            let planned = crate::ast::plan::plan_statement(&stmt);
+            let capture = kaish_types::approval::Capture::Statement {
+                source: crate::ast::plan::redact_keys(input, &planned.presented_keys),
+                index,
+            };
+            let gated = match self.tap_statement(planned, capture).await {
                 crate::tools::StatementTap::Proceed { gated } => gated,
                 crate::tools::StatementTap::Halt(held) => {
                     on_output(&held);
@@ -3011,15 +3019,20 @@ impl Kernel {
     /// here and only here: this runs under the execute lock, so no other
     /// statement is executing, and an `Approver` reaches the ledger through
     /// its own handles rather than through this context.
+    /// `capture` is built from the statement's presented credentials, so a
+    /// caller that captures source text can redact it — see
+    /// [`crate::ast::plan::redact_keys`]. The keys reach the gate as
+    /// `presented` and are stripped from nothing that executes.
     async fn tap_statement(
         &self,
-        stmt: &Stmt,
+        planned: crate::ast::plan::StatementPlan,
         capture: kaish_types::approval::Capture,
     ) -> crate::tools::StatementTap {
-        let plan = crate::ast::plan::plan_statement(stmt);
         let classifier = self.approvals.statement_classifier.clone();
+        let presented = planned.presented_keys.first().map(String::as_str);
         let mut ctx = self.exec_ctx.write().await;
-        ctx.tap_statement(plan, capture, classifier.as_ref()).await
+        ctx.tap_statement(planned.plan, capture, presented, classifier.as_ref())
+            .await
     }
 
     /// Settle the attempt the statement gate reserved, with what the
@@ -7300,11 +7313,21 @@ pub(crate) fn argv_to_args(argv: &[Value]) -> Vec<Arg> {
 /// records `CaptureFailed` naming the size rather than a lossy placeholder a
 /// replay would run as a literal string — a wrong replay is worse than a
 /// refused one.
-fn argv_capture(name: &str, argv: &[Value]) -> kaish_types::approval::Capture {
+///
+/// `presented_keys` are the credentials this argv carries; their tokens are
+/// dropped from the capture. The record must not hold a credential (spec
+/// §A.2), and a replay is authorized by its redemption correlation, so
+/// re-presenting a spent key would only count a rejection somewhere.
+fn argv_capture(
+    name: &str,
+    argv: &[Value],
+    presented_keys: &[String],
+) -> kaish_types::approval::Capture {
     use kaish_types::approval::{Capture, Invocation};
     let mut tokens = Vec::with_capacity(argv.len());
     for value in argv {
         match value {
+            Value::String(s) if presents_a_key(s, presented_keys) => continue,
             Value::String(s) => tokens.push(s.clone()),
             Value::Int(i) => tokens.push(i.to_string()),
             Value::Float(f) => tokens.push(f.to_string()),
@@ -7324,6 +7347,14 @@ fn argv_capture(name: &str, argv: &[Value]) -> kaish_types::approval::Capture {
     Capture::Exact(Invocation {
         tool: name.to_string(),
         argv: tokens,
+    })
+}
+
+/// Whether one argv token is a `--confirm=<key>` (or `confirm=<key>`) for
+/// one of the credentials this statement presented.
+fn presents_a_key(token: &str, presented_keys: &[String]) -> bool {
+    presented_keys.iter().any(|key| {
+        token == format!("--confirm={key}") || token == format!("confirm={key}")
     })
 }
 

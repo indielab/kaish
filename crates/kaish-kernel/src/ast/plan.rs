@@ -12,6 +12,12 @@
 //! statement contains — control-structure bodies, `if` conditions, and
 //! command substitutions included, because every one of them is a command
 //! this statement would run.
+//!
+//! The collection walk also lifts out any literal `--confirm=<key>` the
+//! statement's argv carries ([`StatementPlan::presented_keys`]) — the same
+//! two spellings [`render_arg`] redacts. One walk finds the credential,
+//! redacts it from the record, and hands it to the gate, so the three cannot
+//! disagree about what the statement presented.
 
 use kaish_types::approval::{Plan, PlannedCommand, PlannedRedirect, PLAN_RENDER_LIMIT};
 use kaish_types::Value;
@@ -21,13 +27,54 @@ use super::types::{
     RecordKey, Redirect, Stmt, StringPart, TestExpr, ToolDef, VarPath, VarSegment, WhileLoop,
 };
 
+/// One statement's plan, plus the redemption credentials its argv presented.
+pub struct StatementPlan {
+    /// What the statement was asked to run, with every credential redacted.
+    pub plan: Plan,
+    /// Every literal `--confirm=<key>` (or `confirm=<key>`) the statement's
+    /// argv carries, in source order.
+    ///
+    /// **Literal only.** A plan is unexpanded, so `--confirm=${key}` reads as
+    /// `${key}` here and nothing is lifted — which is exactly right both
+    /// ways: what the record cannot see, the record cannot leak, and what
+    /// the gate cannot see, the builtin's own gate still gets, because
+    /// nothing is stripped from the argv that executes.
+    pub presented_keys: Vec<String>,
+}
+
 /// Build the plan for one top-level statement.
-pub fn plan_statement(stmt: &Stmt) -> Plan {
-    Plan::new(
-        truncate_rendering(render_stmt(stmt)),
-        stmt.kind_name(),
-        planned_commands(stmt),
-    )
+pub fn plan_statement(stmt: &Stmt) -> StatementPlan {
+    let collected = collect(stmt);
+    StatementPlan {
+        plan: Plan::new(
+            truncate_rendering(render_stmt(stmt)),
+            stmt.kind_name(),
+            collected.commands,
+        ),
+        presented_keys: collected.keys,
+    }
+}
+
+/// Remove every one of `keys` from captured source text.
+///
+/// The capture is what `Kernel::confirm` replays, and it lands in the ledger
+/// on the way there — where no entry may carry a credential (spec §A.2). The
+/// whole `--confirm=<key>` token goes, not just its value: a replay runs
+/// under a redemption correlation and is authorized by that, so a replayed
+/// statement re-presenting a spent key would only count a rejection against
+/// some request. Leaving `<redacted>` in the argv would do exactly that.
+pub fn redact_keys(source: &str, keys: &[String]) -> String {
+    let mut out = source.to_string();
+    for key in keys {
+        for spelling in [format!("--{CONFIRM_KEY}={key}"), format!("{CONFIRM_KEY}={key}")] {
+            // Take the separating space with the token so the surrounding
+            // words stay one space apart; fall back to the bare token for a
+            // spelling that opens its line.
+            out = out.replace(&format!(" {spelling}"), "");
+            out = out.replace(&spelling, "");
+        }
+    }
+    out
 }
 
 /// Cut a rendering to [`PLAN_RENDER_LIMIT`] bytes, naming the cut.
@@ -54,18 +101,32 @@ fn truncate_rendering(rendered: String) -> String {
 
 // ───────────────────────── Command collection ─────────────────────────
 
-/// Every command the statement contains, in source order.
+/// What one collection walk produces: the statement's commands, and the
+/// credentials their argv presented.
+#[derive(Default)]
+struct Collected {
+    commands: Vec<PlannedCommand>,
+    keys: Vec<String>,
+}
+
+/// Every command the statement contains, in source order, plus any literal
+/// redemption key its argv carries.
 ///
 /// A `for` body's commands, an `if` condition's command, and a `$(…)`
 /// substitution's commands are all in here: each is a command this statement
 /// would run, so each is a `cmd` resource a standing grant has to cover.
-pub fn planned_commands(stmt: &Stmt) -> Vec<PlannedCommand> {
-    let mut out = Vec::new();
+fn collect(stmt: &Stmt) -> Collected {
+    let mut out = Collected::default();
     collect_stmt(stmt, false, &mut out);
     out
 }
 
-fn collect_stmt(stmt: &Stmt, background: bool, out: &mut Vec<PlannedCommand>) {
+/// Every command the statement contains, in source order.
+pub fn planned_commands(stmt: &Stmt) -> Vec<PlannedCommand> {
+    collect(stmt).commands
+}
+
+fn collect_stmt(stmt: &Stmt, background: bool, out: &mut Collected) {
     match stmt {
         Stmt::Assignment(a) => collect_expr(&a.value, background, out),
         Stmt::Command(cmd) => collect_command(cmd, background, out),
@@ -118,13 +179,13 @@ fn collect_stmt(stmt: &Stmt, background: bool, out: &mut Vec<PlannedCommand>) {
     }
 }
 
-fn collect_block(stmts: &[Stmt], background: bool, out: &mut Vec<PlannedCommand>) {
+fn collect_block(stmts: &[Stmt], background: bool, out: &mut Collected) {
     for stmt in stmts {
         collect_stmt(stmt, background, out);
     }
 }
 
-fn collect_command(cmd: &Command, background: bool, out: &mut Vec<PlannedCommand>) {
+fn collect_command(cmd: &Command, background: bool, out: &mut Collected) {
     let mut args = Vec::new();
     for arg in &cmd.args {
         args.push(render_arg(arg));
@@ -134,12 +195,20 @@ fn collect_command(cmd: &Command, background: bool, out: &mut Vec<PlannedCommand
         .iter()
         .map(|r| PlannedRedirect::new(r.kind.to_string(), render_expr(&r.target)))
         .collect();
-    out.push(PlannedCommand::new(
+    out.commands.push(PlannedCommand::new(
         cmd.name.clone(),
         args,
         redirects,
         background,
     ));
+    // Lift any literal credential out of the argv on the same pass that
+    // redacts it from the rendering — one walk, one truth about what this
+    // statement presented.
+    for arg in &cmd.args {
+        if let Some(key) = presented_key(arg) {
+            out.keys.push(key);
+        }
+    }
     // Substitutions nested inside this command's own arguments and redirect
     // targets are commands too, and they run before it does.
     for arg in &cmd.args {
@@ -156,7 +225,7 @@ fn collect_command(cmd: &Command, background: bool, out: &mut Vec<PlannedCommand
     }
 }
 
-fn collect_expr(expr: &Expr, background: bool, out: &mut Vec<PlannedCommand>) {
+fn collect_expr(expr: &Expr, background: bool, out: &mut Collected) {
     match expr {
         Expr::Command(cmd) => collect_command(cmd, background, out),
         Expr::CommandSubst(stmts) => collect_block(stmts, background, out),
@@ -200,13 +269,13 @@ fn collect_expr(expr: &Expr, background: bool, out: &mut Vec<PlannedCommand>) {
     }
 }
 
-fn collect_parts(parts: &[StringPart], background: bool, out: &mut Vec<PlannedCommand>) {
+fn collect_parts(parts: &[StringPart], background: bool, out: &mut Collected) {
     for part in parts {
         collect_part(part, background, out);
     }
 }
 
-fn collect_part(part: &StringPart, background: bool, out: &mut Vec<PlannedCommand>) {
+fn collect_part(part: &StringPart, background: bool, out: &mut Collected) {
     match part {
         StringPart::CommandSubst(stmts) => collect_block(stmts, background, out),
         StringPart::VarWithDefault { default, .. } => collect_parts(default, background, out),
@@ -222,7 +291,7 @@ fn collect_part(part: &StringPart, background: bool, out: &mut Vec<PlannedComman
     }
 }
 
-fn collect_test(test: &TestExpr, background: bool, out: &mut Vec<PlannedCommand>) {
+fn collect_test(test: &TestExpr, background: bool, out: &mut Collected) {
     match test {
         TestExpr::FileTest { path, .. } => collect_expr(path, background, out),
         TestExpr::StringTest { value, .. } => collect_expr(value, background, out),
@@ -319,14 +388,41 @@ const CONFIRM_KEY: &str = "confirm";
 /// shows that a key was presented; shows none of it.
 const REDACTED: &str = "<redacted>";
 
+/// The literal credential this argument presents, if it is a `confirm`
+/// argument carrying one.
+///
+/// A non-literal value (`--confirm=${key}`, `--confirm=$(cat key)`) yields
+/// `None`: the plan is unexpanded, so the value is not knowable here. That
+/// costs nothing — the statement gate does not see the key, the record does
+/// not carry it either, and the argv that executes is untouched, so the
+/// builtin's own gate still receives whatever it resolves to.
+fn presented_key(arg: &Arg) -> Option<String> {
+    let value = match arg {
+        Arg::Named { key, value } | Arg::WordAssign { key, value } if key == CONFIRM_KEY => value,
+        _ => return None,
+    };
+    match value {
+        Expr::Literal(Value::String(s)) => Some(s.clone()),
+        _ => None,
+    }
+}
+
 fn render_arg(arg: &Arg) -> String {
+    // A `confirm` argument carrying a *literal* is a credential and is
+    // redacted; one carrying `${key}` or `$(…)` is not, and renders as
+    // written like every other unexpanded value. One predicate decides all
+    // three of lift, redact, and render, so they cannot disagree.
+    if presented_key(arg).is_some() {
+        return match arg {
+            // `dd` takes its operands as bare `key=value`, so `confirm=<key>`
+            // is a second spelling of the same credential.
+            Arg::WordAssign { key, .. } => format!("{key}={REDACTED}"),
+            _ => format!("--{CONFIRM_KEY}={REDACTED}"),
+        };
+    }
     match arg {
         Arg::Positional(e) => render_expr(e),
-        Arg::Named { key, .. } if key == CONFIRM_KEY => format!("--{key}={REDACTED}"),
         Arg::Named { key, value } => format!("--{}={}", key, render_expr(value)),
-        // `dd` takes its operands as bare `key=value`, so `confirm=<token>`
-        // is a second spelling of the same credential.
-        Arg::WordAssign { key, .. } if key == CONFIRM_KEY => format!("{key}={REDACTED}"),
         Arg::WordAssign { key, value } => format!("{}={}", key, render_expr(value)),
         Arg::ShortFlag(f) => format!("-{f}"),
         Arg::LongFlag(f) => format!("--{f}"),

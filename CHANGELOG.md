@@ -197,8 +197,14 @@ breaking entries are marked **BREAKING**.
   rendered back to shell text *unexpanded* (`${HOME}` and `$(…)` as written, so a
   classifier judges what was asked), its kind, and every command it contains.
   Truncated at 8 KiB with a marker naming the number.
-- A `--confirm=<token>` argument renders as `--confirm=<redacted>` — the plan
-  lands in the ledger, and no ledger entry carries a credential.
+- **Re-running a held statement with `--confirm=<key>` redeems the original
+  request** — the gate reads the key off the statement's own argv before drafting,
+  so a re-run never mints a second request and leaves the first pending.
+- A `--confirm=<key>` argument renders as `--confirm=<redacted>` and its token is
+  dropped from `Capture::Statement`'s source — plan and capture both land in the
+  ledger, and no ledger entry carries a credential. Only a literal key is affected
+  (`--confirm=${key}` renders unexpanded and carries no value either way), and
+  nothing is stripped from the argv that executes.
 - **`KernelConfig::with_statement_classifier`** and
   `kaish_tool_api::{StatementClassifier, StatementPosture}` — the classifier
   scopes, the chain decides. `Gate { reason, risk }` runs the same four-stage

@@ -24,6 +24,16 @@ pub trait StatementClassifier: Send + Sync {
     /// it runs on the execution path of every statement, before anything of
     /// the statement has run. Do I/O or model calls in `Approver::decide`,
     /// which runs under the patient hold; this is the cheap scoping pass.
+    ///
+    /// **It must not panic, and a panic propagates.** kaish installs no
+    /// `catch_unwind` here — the same contract `Approver::policy` and
+    /// `Approver::decide` carry, and for the same reason: a hook that panics
+    /// is an embedder bug, and swallowing it would run the statement under a
+    /// posture nothing decided. The unwind corrupts nothing (an in-flight
+    /// attempt settles through its drop guard, and the kernel's locks do not
+    /// poison), so the loud outcome is the honest one. Return
+    /// [`StatementPosture::Observe`] for input a classifier does not
+    /// understand.
     fn classify(&self, plan: &Plan) -> StatementPosture;
 }
 

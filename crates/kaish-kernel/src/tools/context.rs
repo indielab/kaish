@@ -1254,6 +1254,7 @@ impl ExecContext {
         &mut self,
         plan: Plan,
         capture: Capture,
+        presented: Option<&str>,
         classifier: Option<&Arc<dyn StatementClassifier>>,
     ) -> StatementTap {
         let replaying = self.redemption_operation();
@@ -1304,7 +1305,14 @@ impl ExecContext {
                 )))
             }
         };
-        match self.gate(draft, None, Some(capture)).await.proceed() {
+        // `presented` is the `--confirm=<key>` the statement's own argv
+        // carries, lifted out of the plan before it was redacted. Without it
+        // a user re-running a held line with the key they were given would
+        // never redeem: the gate would see no key, mint a second request, and
+        // exit 2 again with the first one still pending (spec §B.4 — one
+        // acceptance contract, and the draft matcher is what correlates a
+        // presentation to the request it is for).
+        match self.gate(draft, presented, Some(capture)).await.proceed() {
             Ok(_attempt) => StatementTap::Proceed { gated: true },
             Err(result) => StatementTap::Halt(Box::new(result)),
         }

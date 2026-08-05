@@ -1234,6 +1234,28 @@ left implicit, fixed here so the implementation does not re-derive them:
   registry and the classifier cannot disagree. If that ever changes, the precedence
   question must be answered here first.
 
+*Settled at implementation time (PR 10),* because the text above left it open:
+
+- **The statement gate reads a presented `--confirm=<key>` off the plan before it
+  drafts, and the captured source is credential-redacted.** Both halves are one rule
+  and neither works alone. A statement is redeemed by re-running the line with the key,
+  so the gate has to *see* the key — without it the re-run mints a second request and
+  defers again with the first still pending, and there is no other statement-level path
+  to `--confirm` (§B.4's one acceptance contract). And `Capture::Statement.source` is
+  the line as typed, so that same re-run would write a live credential into
+  `ApprovalRequest.capture` — which reaches the view, `/v/approvals`, and
+  `LedgerEntry::Requested`, where §A.2 says no entry carries a credential. One AST walk
+  therefore lifts the key, redacts it from the rendering, and removes the whole
+  `--confirm=<key>` token from the captured source; the argv that *executes* is
+  untouched, because the builtin's own gate may legitimately consume the same key.
+  Removal rather than a `<redacted>` placeholder: a replay is authorized by its
+  redemption correlation, so a replayed statement re-presenting a spent key would only
+  count a rejection against something. Only a **literal** key is visible to any of this
+  — `--confirm=${key}` renders unexpanded and carries no value to lift or to leak,
+  which is the same boundary in both directions. A credential a script puts somewhere
+  the taxonomy cannot name — the right-hand side of an assignment — is recorded like
+  any other text; the tap redacts what it can identify, and says so.
+
 The default tap is advisory, not a durable audit trail — an embedder that needs a
 completeness guarantee uses the sink's reliability, and `EMBEDDING.md`'s tap section
 (PR 10) carries that caveat where embedders read it.

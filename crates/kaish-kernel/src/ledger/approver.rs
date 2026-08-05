@@ -59,6 +59,15 @@ const DEFAULT_GRANT_TTL: Duration = Duration::from_secs(300);
 /// (§A.2), and retrieval lives on [`ApproverHandle`], which the chain never
 /// hands out.
 ///
+/// **Neither decision method may panic, and a panic propagates.** kaish
+/// installs no `catch_unwind` around either — a hook that panics is an
+/// embedder bug, and swallowing it would let an operation proceed under a
+/// decision nothing made. The unwind corrupts nothing: an in-flight attempt
+/// settles `Unknown{Cancelled}` through its drop guard, and the kernel's
+/// locks do not poison.
+/// [`StatementClassifier::classify`](crate::ledger::StatementClassifier::classify)
+/// carries the same contract, for the same reason.
+///
 /// ```compile_fail
 /// use kaish_kernel::ledger::Approver;
 /// use kaish_types::approval::{ApprovalRequestView, Decision};

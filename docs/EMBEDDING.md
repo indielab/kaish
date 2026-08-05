@@ -533,10 +533,21 @@ statement, in the originating session — earlier statements' effects
 gated `execute_argv` call captures `Capture::Exact` instead, because it
 already holds a tool name and an argv.
 
-Two things a plan never carries: a resolved value (it is unexpanded by
-construction), and a credential — a `--confirm=<token>` argument renders as
-`--confirm=<redacted>`, because the plan lands in the ledger and no ledger
-entry carries a credential.
+**Redeeming a held statement by re-running it.** The statement gate reads a
+`--confirm=<key>` off the statement's own argv before it drafts, so re-running
+the held line with the key an operator hands back redeems **the original
+request** rather than minting a second one. The same pass keeps the credential
+out of the record: the rendering shows `--confirm=<redacted>` and the captured
+source drops the token entirely, because plan and capture both land in the
+ledger and no ledger entry carries a credential. What *executes* is untouched —
+the builtin's own gate may legitimately consume the same key.
+
+Only a literal key is visible to any of this. `--confirm=${key}` renders
+unexpanded, so nothing is lifted and nothing needs redacting: what the plan
+cannot see, it cannot leak either. A credential a script puts somewhere the
+taxonomy cannot name — the right-hand side of an assignment — is recorded like
+any other text. The tap redacts what it can identify, and this paragraph is
+where that boundary is stated.
 
 **Pinning the policy.** `KernelConfig::with_policy_pinned(true)` makes
 `set +o approvals` fail with **exit 1** and a message naming the pin, rather

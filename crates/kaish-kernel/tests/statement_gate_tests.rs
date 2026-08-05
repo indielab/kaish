@@ -16,12 +16,12 @@ use std::sync::Arc;
 
 use kaish_kernel::interpreter::ExecResult;
 use kaish_kernel::ledger::{
-    ApproverHandle, CommandNameClassifier, LedgerConfig, StatementClassifier,
+    ApproverHandle, CommandNameClassifier, LedgerConfig, StatementClassifier, StatementPosture,
 };
 use kaish_kernel::{Kernel, KernelConfig};
 use kaish_types::approval::{
-    Capture, GrantTerms, LedgerEntry, OperationPattern, Plan, Principal, PrincipalKind, RequestId,
-    ResourcePattern, RiskClass, StandingGrant,
+    AttemptState, Capture, GrantTerms, LedgerEntry, OperationPattern, Outcome, Plan, Principal,
+    PrincipalKind, RequestId, ResourcePattern, RiskClass, StandingGrant,
 };
 use kaish_types::Value;
 
@@ -131,6 +131,56 @@ impl Session {
             )
             .await
             .expect("the grant must post");
+    }
+
+    /// Grant `id` and retrieve its bearer key — what an operator hands back
+    /// to whoever re-runs the line.
+    async fn grant_and_key(&self, id: &RequestId) -> String {
+        self.grant(id).await;
+        self.authority
+            .token_for(id)
+            .expect("a granted request has a key")
+            .reveal()
+            .to_string()
+    }
+
+    /// Every request id the ledger holds, in allocation order.
+    fn request_ids(&self) -> Vec<RequestId> {
+        let mut ids = self.kernel.approvals().ids();
+        ids.sort_by_key(RequestId::seq);
+        ids
+    }
+
+    /// Everything a reader can reach: the whole ledger log plus every VFS
+    /// projection under `/v/approvals`. What a credential scan searches.
+    async fn readable_surface(&self, ids: &[RequestId]) -> String {
+        let mut surface = serde_json::to_string(&self.kernel.approvals().log(0))
+            .expect("the log serializes");
+        surface.push_str(&serde_json::to_string(&self.kernel.approvals().pending()).unwrap());
+        for node in ["pending", "standing", "log"] {
+            surface.push_str(&self.run(&format!("cat /v/approvals/{node}")).await.text_out());
+        }
+        for id in ids {
+            for node in ["request", "state", "attempts", "grant"] {
+                surface.push_str(
+                    &self
+                        .run(&format!("cat /v/approvals/{id}/{node}"))
+                        .await
+                        .text_out(),
+                );
+            }
+        }
+        surface
+    }
+}
+
+/// Gates every statement, whatever it plans — including the ones that plan no
+/// commands at all.
+struct GateEverything;
+
+impl StatementClassifier for GateEverything {
+    fn classify(&self, _plan: &Plan) -> StatementPosture {
+        StatementPosture::gate("the test gates everything", RiskClass::Reversible)
     }
 }
 
@@ -465,6 +515,119 @@ async fn an_fs_replay_passes_through_the_statement_site_untouched() {
 }
 
 // ============================================================================
+// Redeeming a held statement by re-running it with the key
+// ============================================================================
+
+/// The other half of `confirm`: an operator hands the key back, the agent
+/// re-runs the line with `--confirm=<key>`, and **the original request**
+/// redeems. Without the statement gate reading the key off its own plan, the
+/// re-run would mint a second request and exit 2 again with the first still
+/// pending.
+#[tokio::test]
+async fn re_running_a_held_statement_with_the_key_redeems_the_original_request() {
+    let session = Session::gating_rm();
+    session.write("target.txt", "delete me");
+
+    let held = session.run("rm target.txt").await;
+    assert_eq!(held.code, 2, "{}", held.err);
+    let id = held.approval_request().expect("a pending request").id;
+    let key = session.grant_and_key(&id).await;
+
+    let redeemed = session.run(&format!("rm --confirm={key} target.txt")).await;
+    assert_eq!(
+        redeemed.code, 0,
+        "the re-run must redeem, not defer again: {}",
+        redeemed.err
+    );
+    assert!(!session.path("target.txt").exists(), "the statement must run");
+
+    assert_eq!(
+        session.request_ids(),
+        vec![id.clone()],
+        "the re-run must redeem the original request, not mint a second one"
+    );
+    let chain = session.kernel.approvals().get(&id).expect("the chain");
+    assert_eq!(
+        chain.attempts.len(),
+        1,
+        "exactly one attempt, and it belongs to the original request"
+    );
+    assert_eq!(chain.attempts[0].state, AttemptState::Settled);
+    assert_eq!(chain.attempts[0].outcome, Some(Outcome::Exit(0)));
+    assert!(
+        session.kernel.approvals().pending().is_empty(),
+        "the chain must be closed, not left pending"
+    );
+}
+
+/// The §A.2 scan, extended to the statement gate: **no** reader-visible
+/// surface carries the issued credential — not the log, not `/v/approvals`,
+/// and not `Capture::Statement.source`, which is the raw line the user typed
+/// and therefore the one place a re-run's key would land verbatim.
+#[tokio::test]
+async fn no_readable_surface_carries_a_key_a_re_run_presented() {
+    let session = Session::gating_rm();
+    session.write("target.txt", "delete me");
+
+    let held = session.run("rm target.txt").await;
+    let id = held.approval_request().expect("a pending request").id;
+    let key = session.grant_and_key(&id).await;
+    session.run(&format!("rm --confirm={key} target.txt")).await;
+
+    // The record still shows that a key was presented — redaction removes the
+    // secret, not the fact. Read this before the scan below, whose own `cat`
+    // statements are tapped too.
+    let re_run = session
+        .plans()
+        .last()
+        .cloned()
+        .expect("a plan for the re-run");
+    assert_eq!(re_run.rendered, "rm --confirm=<redacted> target.txt");
+
+    let ids = session.request_ids();
+    let surface = session.readable_surface(&ids).await;
+    assert!(
+        !surface.contains(&key),
+        "a reader-visible surface leaked the credential {key}: {surface}"
+    );
+}
+
+/// The same scan for a key that never redeems: an unmatched presentation
+/// posts nothing, and what it does record still carries no credential.
+#[tokio::test]
+async fn a_key_that_matches_nothing_leaks_nothing() {
+    let session = Session::observing();
+    let bogus = "0123456789abcdef0123456789abcdef";
+    session.run(&format!("rm --confirm={bogus} nothing.txt")).await;
+
+    let surface = session.readable_surface(&session.request_ids()).await;
+    assert!(
+        !surface.contains(bogus),
+        "an unmatched presentation leaked its key: {surface}"
+    );
+}
+
+/// A key carried by a variable is neither lifted nor redacted, and needs to
+/// be neither: the plan is unexpanded, so the statement that presents it
+/// records `${key}` and never the value. Redaction covers exactly what the
+/// record can see, which is exactly what it could leak.
+#[tokio::test]
+async fn a_variable_carried_key_renders_as_written_and_carries_no_value() {
+    let session = Session::observing();
+    let secret = "fedcba9876543210fedcba9876543210";
+    session.run(&format!("key={secret}")).await;
+    session.run("rm --confirm=${key} nothing.txt").await;
+
+    let plans = session.plans();
+    let presenting = plans.last().expect("a plan");
+    assert_eq!(presenting.rendered, "rm --confirm=${key} nothing.txt");
+    assert!(
+        !presenting.rendered.contains(secret) && !presenting.commands[0].args.contains(&secret.to_string()),
+        "the statement that presents the key must record no value: {presenting:?}"
+    );
+}
+
+// ============================================================================
 // The argv door
 // ============================================================================
 
@@ -517,6 +680,66 @@ async fn a_gated_execute_argv_captures_exact() {
         .expect("confirm");
     assert_eq!(replayed.code, 0, "{}", replayed.err);
     assert!(!session.path("target.txt").exists());
+}
+
+/// A replay whose statement **errors** still settles its attempt. An attempt
+/// left `Reserved` fails every later redemption of its grant with
+/// `AttemptInFlight` until the sweep abandons it — a grant an operator could
+/// no longer use, for a replay that never ran.
+#[tokio::test]
+async fn a_replay_that_errors_still_settles_its_attempt() {
+    // An assignment whose right-hand side cannot be evaluated is one of the
+    // few statements that fails as an *error* rather than an exit code, which
+    // is exactly the path that used to skip the settlement. It plans no
+    // commands, so it needs a classifier that gates on more than a name.
+    let session = Session::build(Some(Arc::new(GateEverything)), None);
+    let held = session.run("boom=$((1/0))").await;
+    assert_eq!(held.code, 2, "{}", held.err);
+    let id = held.approval_request().expect("a pending request").id;
+    session.grant(&id).await;
+
+    let replayed = session.kernel.confirm(&session.authority, &id).await;
+    assert!(
+        replayed.is_err(),
+        "the fixture must error on replay, or this proves nothing"
+    );
+
+    let chain = session.kernel.approvals().get(&id).expect("the chain");
+    assert_eq!(chain.attempts.len(), 1, "{:?}", chain.attempts);
+    assert_eq!(
+        chain.attempts[0].state,
+        AttemptState::Settled,
+        "an errored replay must not leave its attempt Reserved: {:?}",
+        chain.attempts[0]
+    );
+    assert!(
+        matches!(chain.attempts[0].outcome, Some(Outcome::Error(_))),
+        "the honest record of an error is Outcome::Error: {:?}",
+        chain.attempts[0].outcome
+    );
+}
+
+// ============================================================================
+// The classifier's panic contract
+// ============================================================================
+
+/// A classifier that panics takes the execution down with it — documented on
+/// `StatementClassifier::classify` and matching `Approver::policy`, which
+/// kaish does not guard either. Swallowing it would run the statement under a
+/// posture nothing decided.
+struct PanickingClassifier;
+
+impl StatementClassifier for PanickingClassifier {
+    fn classify(&self, _plan: &Plan) -> StatementPosture {
+        panic!("the embedder's classifier is broken");
+    }
+}
+
+#[tokio::test]
+#[should_panic(expected = "the embedder's classifier is broken")]
+async fn a_panicking_classifier_propagates_rather_than_being_swallowed() {
+    let session = Session::build(Some(Arc::new(PanickingClassifier)), None);
+    let _ = session.run("echo hi").await;
 }
 
 // ============================================================================
