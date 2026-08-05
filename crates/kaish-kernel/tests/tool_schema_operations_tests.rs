@@ -93,7 +93,12 @@ fn every_declared_operation_matches_a_kernel_operation() {
 }
 
 #[tokio::test]
-async fn kaish_tools_json_surfaces_operations_as_a_real_array() {
+async fn kaish_tools_json_surfaces_operations_through_the_list_view() {
+    // `kaish-tools --json`'s existing NAME/DESCRIPTION/PARAMS table shape is
+    // a pre-existing contract (a policy engine or script already reads it) —
+    // spec §F.3 item 5 is additive, so this proves the new OPERATIONS column
+    // arrives alongside the old keys rather than replacing the table's shape
+    // wholesale.
     let (kernel, _authority) = Kernel::build(KernelConfig::isolated()).expect("kernel build");
     let result = kernel.execute("kaish-tools --json").await.expect("execute");
     assert_eq!(result.code, 0, "kaish-tools --json failed: {}", result.err);
@@ -104,26 +109,23 @@ async fn kaish_tools_json_surfaces_operations_as_a_real_array() {
 
     let rm = array
         .iter()
-        .find(|v| v.get("name").and_then(|n| n.as_str()) == Some("rm"))
+        .find(|v| v.get("NAME").and_then(|n| n.as_str()) == Some("rm"))
         .expect("rm must be listed");
-    let rm_ops: Vec<&str> = rm
-        .get("operations")
-        .and_then(|o| o.as_array())
-        .expect("rm's operations must be a JSON array, not a joined string")
-        .iter()
-        .filter_map(|v| v.as_str())
-        .collect();
+    assert!(rm.get("DESCRIPTION").is_some(), "the pre-existing DESCRIPTION key must survive");
     assert_eq!(
-        rm_ops,
-        vec!["fs.remove"],
+        rm.get("OPERATIONS").and_then(|o| o.as_str()),
+        Some("fs.remove"),
         "rm must advertise fs.remove through kaish-tools --json"
     );
 
-    // A non-gating tool must not fabricate an operations array.
+    // A non-gating tool must not fabricate an operation.
     let cat = array
         .iter()
-        .find(|v| v.get("name").and_then(|n| n.as_str()) == Some("cat"))
+        .find(|v| v.get("NAME").and_then(|n| n.as_str()) == Some("cat"))
         .expect("cat must be listed");
-    let cat_ops = cat.get("operations").and_then(|o| o.as_array()).map(|a| a.len()).unwrap_or(0);
-    assert_eq!(cat_ops, 0, "cat never gates anything and must declare no operations");
+    assert_eq!(
+        cat.get("OPERATIONS").and_then(|o| o.as_str()),
+        Some(""),
+        "cat never gates anything and must declare no operations"
+    );
 }
