@@ -1116,6 +1116,27 @@ Nothing about the passage of an hour makes a stale approval better.
 job's held request is a ledger reference, so cancellation has somewhere to write, and a job
 discarded while latched cancels its request with `Withdrawn` rather than orphaning it.
 
+**Teardown must close what it orphans, and this is a hard requirement rather than
+housekeeping.** A request whose requester is gone — a discarded job, a shut-down session —
+cannot be cancelled by its owner, because its owner no longer exists. Nothing else will
+close it either: an authority holder *could* `deny` it, but only if a human notices. It
+therefore holds a live slot for the life of the process, and capacity (§D.4) is a backstop
+against accumulation, not a substitute for cleanup.
+
+Every teardown path that can strand a request closes it:
+
+| Teardown | Obligation |
+|---|---|
+| A job is discarded | Cancel its held request, `Withdrawn` |
+| A job is cancelled or killed | Cancel its held request, `Withdrawn` |
+| A session shuts down | Cancel every request its principal still owns |
+| A kernel shuts down | Cancel every live request in its scope (§A.7) |
+
+Under a request TTL this was invisible: an orphan expired on its own and returned its slot,
+so a missing teardown path cost sixty seconds of capacity and nothing else. Without one it
+costs a slot permanently — which is why the obligation is written here rather than left to
+each call site to remember.
+
 **What an embedder builds on this.** Deadlines are the embedder's (§A.10), and `cancel` is
 the whole mechanism they need: a bridge that wants a fifteen-minute horizon runs its own
 timer and calls `cancel(id, rev, DeadlinePassed)`; one that wants none never calls it. The
@@ -2520,13 +2541,19 @@ dropped.
 
 §A.10 and §B.5: delete `request_ttl`, the request-expiry path, and `attempt_stale_after`;
 `ApprovalRequest::deadline` becomes `Option`, defaulting to `None`; add `Requester::cancel`
-and `CancelReason`; add `ApprovalOutcome::Closed`.
+and `CancelReason`; add `ApprovalOutcome::Closed`; and **wire the teardown obligations in
+§B.5's table**, which is the lane's real risk — `abandon_request` today has exactly one
+production caller (the cancelled-grant undo in `ledger/approver.rs`), so job discard, job
+kill, session shutdown, and kernel shutdown all currently strand a held request. Expiry was
+covering for that; nothing covers it after this lane.
 
 *Tests:* the parked case on `fix/approval-lease-expiry` — a decision that takes longer than
 any lease is honored — plus a request still `Requested` after an interval that would have
 expired it; `cancel` on another principal's request is refused; a cancelled request's
 `supersedes` chain is walkable; `Closed` is returned where `LedgerUnavailable` used to be,
-and `LedgerUnavailable` no longer describes a request's own state.
+and `LedgerUnavailable` no longer describes a request's own state. And one test per row of
+§B.5's teardown table, each asserting the live count returns to zero — a discarded job, a
+killed job, a shut-down session, and `Kernel::shutdown` with a gated job outstanding.
 
 **R3 — `refactor(kernel)!: revision checks on every transition`**
 
