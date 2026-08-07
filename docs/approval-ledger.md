@@ -514,6 +514,35 @@ pub enum LedgerEntry {
     /// when it matched nothing. Carries the running count; the fifth rejection
     /// against one request voids it (§F.3).
     TokenRejected   { seq: u64, at: SystemTime, request: Option<RequestId>, attempts: u32 },
+    /// An undecided request was closed from the requesting side (§B.5).
+    Cancelled   { seq: u64, at: SystemTime, request: RequestId, by: Principal, reason: CancelReason },
+    /// An operation quoted a revision that was no longer current and was
+    /// refused (§B.6). Recorded rather than dropped, so a late human answer
+    /// to an already-closed request is a readable fact.
+    RevisionRejected { seq: u64, at: SystemTime, request: RequestId, by: Principal,
+                       quoted: u64, current: u64, attempted: TransitionKind },
+    /// One attributed judgment on the way to a decision (§C.7). Never a
+    /// decision itself — an assessment explains, a `Granted`/`Denied`
+    /// decides.
+    Assessed    { seq: u64, at: SystemTime, request: RequestId, assessment: ApprovalAssessment },
+}
+```
+
+**The record envelope.** Entries are read through a versioned wrapper, never as a bare
+`LedgerEntry`, so a consumer written against 0.14 can be handed a later ledger's output and
+know what it is holding:
+
+```rust
+#[non_exhaustive]
+#[derive(serde::Serialize, serde::Deserialize)]
+pub struct LedgerRecord {
+    /// Bumped when an entry's shape changes in a way a reader must notice.
+    pub schema_version: u16,
+    pub sequence: u64,
+    pub at: SystemTime,
+    /// Which kernel/session/actor this record belongs to (§A.7).
+    pub scope: ApprovalScope,
+    pub entry: LedgerEntry,
 }
 
 /// Names a resource without its transition claim: the pair an `Observation`
@@ -537,14 +566,29 @@ pub enum LostCause { Cancelled, ExecutorLost }
 ```
 
 `seq` is monotonic per ledger. `at` is wall-clock, from `kaish_types::clock::system_now`,
-and exists purely for the record — **all expiry math uses `clock::Instant`**, so a
-wall-clock jump can neither extend nor void a live grant. This is a genuine hazard for a
-system that intends to hold approvals for minutes-to-hours across a laptop suspend; call it
-out in the doc comment so nobody "simplifies" it later.
+and exists purely for the record. Since §A.10 there is no expiry math to protect from a
+wall-clock jump: nothing in the ledger consults a clock to decide anything, and the two
+remaining deadlines (`Grant::not_after`, the request's optional `deadline`) are wall-clock
+values compared when observed. A laptop suspend can therefore make a grant look expired
+that a monotonic clock would have kept alive — which is the correct reading, because
+`not_after` is a promise about wall-clock time made by whoever set it.
 
 No entry carries a credential (§A.2), so the whole log is safe to stream to a sink, project
 into `/v/approvals`, and print. Serde is stable and internally tagged, so NDJSON is the
 obvious durable form (§D.4).
+
+**Compatibility rules, so `schema_version` is worth carrying.** A version number that
+nobody knows how to react to is decoration:
+
+- Every public type in this document is `#[non_exhaustive]`, and every field added later
+  carries a serde default.
+- A reader **must tolerate unknown object fields** — they are a newer writer's additions,
+  not corruption.
+- A reader **must not silently drop an unknown entry variant or an unrecognized
+  `schema_version`.** It surfaces the record as unknown, with its `sequence` and `scope`
+  intact, so a gap in an audit log is visible as a gap. Dropping it would let a reader
+  report a clean history it did not actually verify.
+- `schema_version` bumps when a reader must notice a change, not on every addition.
 
 ### A.6 Anti-drift for the operation taxonomy
 
@@ -769,7 +813,8 @@ per key; a second attempt appends nothing and returns `Ok`.
 | Entry | Uniqueness key |
 |---|---|
 | `Granted` / `Denied` | `request_id` (a second decision is `LedgerError::AlreadyDecided`) |
-| `Expired` | `(request_id, what)` — one for the request TTL, one for the grant `not_after` |
+| `Expired` | `(request_id, what)` — the grant's `not_after`, or a request's optional `deadline` when one was set (§A.10) |
+| `Cancelled` | `request_id` |
 | `Voided` | `request_id` |
 | `Redeemed` | `attempt_id`, allocated by the reservation itself |
 | `Settled` / attempt-level `Abandoned` | `attempt_id` |
@@ -802,7 +847,8 @@ stateDiagram-v2
 
     Requested --> Granted   : approval side posts Grant
     Requested --> Denied    : approval side posts Denial
-    Requested --> Expired   : request TTL, nobody decided
+    Requested --> Cancelled : requester withdraws (§B.5)
+    Requested --> Expired   : optional deadline, when the embedder set one
     Requested --> Abandoned : job discarded / session shutdown
     Requested --> Voided    : 5 rejected credentials
 
@@ -813,11 +859,16 @@ stateDiagram-v2
     Granted --> Abandoned : job discarded / session shutdown
     Granted --> [*]       : an attempt settled successfully — the chain closes
 
-    Expired --> [*] : renewable — a NEW request links via `supersedes`
+    Cancelled --> [*] : ask again — a NEW request links via `supersedes`
+    Expired --> [*]   : ask again — a NEW request links via `supersedes`
     Denied --> [*]
     Voided --> [*]
     Abandoned --> [*]
 ```
+
+**`Requested` has no timeout edge.** Nothing moves a request out of `Requested` except a
+decision, a cancellation, a discarded job, a voided credential chain, or a deadline the
+embedder chose to set (§A.10). A request nobody answers stays answerable.
 
 Attempt:
 
@@ -870,7 +921,9 @@ Request level:
 | — | `post_request` | `Requested` | `Requested` | — |
 | `Requested` | `grant` | `Granted` | `Granted` | — |
 | `Requested` | `deny` | `Denied` | `Denied` | — |
-| `Requested` | TTL elapsed (observed) | `Expired` | `Expired{what: Request}` | — |
+| `Requested` | `cancel`, current revision | `Cancelled` | `Cancelled{reason}` | — |
+| `Requested` | `cancel`, stale revision | unchanged | `RevisionRejected{quoted, current}` | `LedgerError::StaleRevision` — refused and recorded, never applied (§B.6) |
+| `Requested` | optional `deadline` elapsed (observed) | `Expired` | `Expired{what: Request}` | only when the embedder set one; there is no default (§A.10) |
 | `Requested` | `redeem` before any decision | ✗ | `TokenRejected{Some}` | `LedgerError::NotAuthorized` — exit 1, loud; no grant exists, so no key does either |
 | `Requested`/`Granted` | bad key, draft matches this request | unchanged | `TokenRejected{Some, attempts: n}` | `LedgerError::NotAuthorized` — exit 1, loud |
 | `Requested`/`Granted` | 5th bad key against this request | `Voided` | `TokenRejected{Some, attempts: 5}` + `Voided` | request is dead; a later *good* key fails naming the void |
@@ -884,8 +937,9 @@ Request level:
 | `Granted` | attempt settles `Unknown` | closed | `Settled` | effects unknown — a retry needs a fresh request |
 | `Granted` | `not_after` elapsed | `Expired` | `Expired{what: Grant}` | — |
 | `Granted` | `grant` again | ✗ | none | `LedgerError::AlreadyDecided` |
-| `Denied`/`Voided`/`Abandoned` | anything | ✗ | none | `LedgerError::Terminal` |
-| `Expired` | `renew` | new `Requested` | `Requested{supersedes}` | — |
+| `Requested`/`Granted` | `grant` or `deny`, stale revision | unchanged | `RevisionRejected{quoted, current}` | `LedgerError::StaleRevision` — the late-answer rule (§B.6) |
+| `Denied`/`Voided`/`Abandoned`/`Cancelled` | anything | ✗ | none | `LedgerError::Terminal` |
+| `Cancelled`/`Expired`/`Denied` | ask again | new `Requested` | `Requested{supersedes}` | — |
 
 The `TokenRejected{Some}` rows above cover the *bearer-key* redemption form (a presented
 `--confirm=<token>` string, or its ledger-core equivalent). The internal-context form (the
@@ -1042,38 +1096,93 @@ exactly why.
   widening. Five call sites had the bug at once, invisibly, until a request first
   declared a transition.
 
-### B.5 Expiry and renewal — the dead-nonce-forever fix
+### B.5 Cancellation — the dead-nonce-forever fix
 
-Today a `Latched` background job at T+61s is unfulfillable and unkillable-without-discard.
-Under the ledger:
+The original fix here was expiry plus renewal: a request died at 60s and the requester
+posted a fresh one to carry the intent forward. §A.10 removed the first half, so this
+section is what remains, and it is smaller.
 
-- Expiry **materializes** an `Expired` entry the first time it is observed (on any read of
-  the request's state, or on the ledger's opportunistic sweep — the same place today's GC
-  runs). It does not silently vanish. The record shows "nobody decided in 60s", which is a
-  fact worth having.
-- `Expired` is not terminal for the *thread of intent*. `Kernel::renew(request_id)` (and
-  `approvals renew <id>`, and `Job::renew_gate()`) posts a **new** `Requested` carrying the
-  original's operation, resources, capture, principal, and trace context, with `supersedes:
-  Some(old_id)`. The chain is walkable, so "this took four attempts over two hours" is
-  legible. **Renewal is a requester action, not an approval action** — the principal that
-  owns the request may renew it without holding any authority, which is what lets a gated
-  agent keep its own request alive.
-- A session holding the ledger's authority may also renew any request, not only its own: it
-  could already `grant` or `deny` that request, so withholding renewal from it would be a
-  special case with nothing behind it. Every other session renewing another principal's
-  request is refused. Either way the renewed request names the **original** requester as its
-  principal — the renewer is not separately attributed, because renewal carries the thread
-  of intent forward rather than restarting it under a new name, and who acted is already in
-  the record (§A.2).
-- Renewal re-observes the transitions before posting. If the world already moved, renewal
-  fails loud rather than posting a request whose claims are already false.
-- `JobStatus::Latched` keeps its name and meaning ("held on an unsatisfied gate"). What
-  changes is that a latched job's held request is now a ledger reference, so renewal has
-  somewhere to write.
+**A request lives until it is decided or cancelled.** There is no timeout, so the problem
+this section originally solved — a `Latched` background job at T+61s that is unfulfillable
+and unkillable-without-discard — does not arise: at T+61s the request is still `Requested`
+and still answerable. What the ledger needs instead is a way to *end* an undecided request,
+because with no clock closing them something must.
 
-**Renewal is not re-approval.** A renewed request starts at `Requested` and needs a fresh
-decision. A standing grant will auto-approve it again; a human will be asked again. That is
-correct: nothing about the passage of an hour makes a stale approval better.
+```rust
+impl Requester {
+    /// Close an undecided request. Refused if `expected_revision` is stale
+    /// (§B.6) or the request is already terminal.
+    pub async fn cancel(
+        &self,
+        id: RequestId,
+        expected_revision: u64,
+        reason: CancelReason,
+    ) -> Result<ApprovalRequestView, LedgerError>;
+}
+
+#[non_exhaustive]
+pub enum CancelReason {
+    /// The requesting side stopped wanting it: job discarded, session ended,
+    /// the agent moved on.
+    Withdrawn,
+    /// An embedder's own deadline policy closed it. The kernel records this;
+    /// it never originates it (§A.10).
+    DeadlinePassed,
+    /// Superseded by a later request for the same intent.
+    Superseded { by: RequestId },
+}
+```
+
+**Cancellation is a requester action.** The principal that owns the request may cancel it
+without holding any authority — that is what lets a gated agent withdraw its own request.
+A session holding the ledger's authority may also cancel any request, on the same reasoning
+that let it renew one before: it could already `deny` that request, so withholding
+cancellation would be a special case with nothing behind it. Any other session cancelling
+another principal's request is refused.
+
+`Cancelled` is terminal for the request and not for the thread of intent. Asking again
+posts a **new** `Requested` with `supersedes: Some(old_id)`, exactly as renewal did, so
+"this took four attempts over two hours" stays legible and the chain stays walkable. The
+new request re-observes its transitions before posting: if the world already moved, it
+fails loud rather than posting claims that are already false. It names the original
+requester as principal, because the thread of intent is being carried forward rather than
+restarted under a new name, and who acted is already in the record (§A.2).
+
+**Asking again is not re-approval.** A superseding request starts at `Requested` and needs
+a fresh decision. A standing grant will auto-approve it again; a human will be asked again.
+Nothing about the passage of an hour makes a stale approval better.
+
+`JobStatus::Latched` keeps its name and meaning ("held on an unsatisfied gate"). A latched
+job's held request is a ledger reference, so cancellation has somewhere to write, and a job
+discarded while latched cancels its request with `Withdrawn` rather than orphaning it.
+
+**What an embedder builds on this.** Deadlines are the embedder's (§A.10), and `cancel` is
+the whole mechanism they need: a bridge that wants a fifteen-minute horizon runs its own
+timer and calls `cancel(id, rev, DeadlinePassed)`; one that wants none never calls it. The
+revision check is what makes that safe against the race that matters — a deadline firing at
+the same moment a human answers cannot close a request that just got decided, because the
+decision bumped the revision the timer was holding.
+
+### B.6 Revision checks — the late-answer rule
+
+Every recorded transition bumps the request's `revision` (§A.7). Every operation that
+changes a request quotes the revision it believes it is acting on:
+
+> **A decision, cancellation, or resolution quoting a revision other than the request's
+> current one is refused and recorded — never applied, and never silently ignored.**
+
+The refusal is itself an entry, so "a human answered a prompt for a request that had
+already been cancelled" is a fact an auditor can read rather than an event that vanished.
+
+This is what makes out-of-band approval safe. An approval that travels to a human and back
+crosses an unbounded gap, and during that gap the request can be decided by a standing
+rule, cancelled by its owner, superseded, or closed by a settlement. Without the check, the
+late answer wins by arriving last. With it, the late answer is refused against the state it
+was actually made against, which is the correct outcome and also the auditable one.
+
+Idempotency and revision-checking coexist without conflict: settling an attempt twice is
+still a no-op by `AttemptId` (§A.1), because that is one operation arriving twice rather
+than two operations disagreeing about state.
 
 ---
 
