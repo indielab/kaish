@@ -156,6 +156,18 @@ struct docs and `//` comments are both safe places for mechanism.
 >
 > After: `/// Unset a variable (-u VAR). Repeatable: -u A -u B.`
 
+A **blank `///` line** is the third safe place, and the least obvious one. clap splits a
+doc comment there: everything before the blank line becomes short help, everything after
+becomes long help, and `params_from_clap` publishes short help only. `env`'s `-u` and
+`uname`'s `--host` both keep four lines of mechanism this way, directly under the field
+they explain, and neither ships a word of it. Use it when the mechanism belongs next to
+the published line rather than below it.
+
+That split is also why you cannot audit this by reading the source. A reviewer grepping
+`env.rs` for `to_argv` finds the mechanism and reports a leak that does not exist; only
+the published surface settles it. Read `Kernel::tool_schemas()`, or run the test named
+below.
+
 **When you touch a builtin, audit every `///` on its clap struct.** Grooming alone cannot
 reach this class: the mechanism leaks sit in files nobody has reason to open, so the audit
 has to ride along with any visit to the file.
@@ -178,9 +190,23 @@ entry when you fix it, and add one when you find a violation you are not fixing 
   labels in the builtin corpus are still noun phrases ("Case-insensitive", "Compact
   notation (default)"). Fix the ones in a file you are already editing; there is no sweep
   scheduled, deliberately — the label needs the person who understands the example.
-- Error and diagnostic strings have never been swept, and they are full weight. An agent
-  reads a failure message more often than any help topic, so this is the highest-value
-  unswept surface in the corpus.
+- Error and diagnostic strings are full weight and largely unswept — about 745 failure
+  sites. An agent reads a failure message more often than any help topic, so this is the
+  highest-value surface left. A first pass found seven that name something the reader
+  cannot act on: `exec.rs:81` and `spawn.rs:103` (`allow_external_commands=false`, a
+  `KernelConfig` field — `env.rs:180` says "sandbox mode" for the same condition and reads
+  better), `timeout.rs:134` (`into_arc()`), `kaish_vfs.rs:39` and `:410`
+  (`KernelConfig::with_overlay(true)`, the `localfs` feature), `kill.rs:518`, and
+  `uname.rs:208` (cargo feature names).
+- **Open question on those seven:** some are arguably not leaks but deliberate
+  dual-audience messages. `kaish_vfs.rs:39` names the REPL flag *and* the embedder call,
+  each labeled, and a `timeout` dispatcher error can only be fixed by an embedder — so the
+  reader who can act IS the embedder. Decide the rule before rewriting them; the guide's
+  own test ("does the reader need it to predict behavior") does not settle who the reader
+  is when a builtin fails for a reason only the host can change.
+- Two messages state a constraint without its grammar: `sleep.rs:69` ("invalid time
+  interval" — no value, no accepted forms, unlike its sibling at `:107`) and
+  `kaish_trash.rs:196` (value but no suffix rules). `timeout.rs:100` is the model to copy.
 - Tools behind a capability feature are only walked by the mechanism-leak test when the
   build enables them. Run it with `--features full` after touching `timeout`, `tokens`,
   or `ps`; the default CI run does not see them.
