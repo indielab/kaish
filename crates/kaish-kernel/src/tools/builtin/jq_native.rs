@@ -82,7 +82,7 @@ struct JqArgs {
     #[command(flatten)]
     global: GlobalFlags,
 
-    /// Files to read instead of stdin. The filter comes first:
+    /// File to read instead of stdin, given after the filter:
     /// `jq '.name' data.json`.
     #[arg(hide = true)]
     rest: Vec<String>,

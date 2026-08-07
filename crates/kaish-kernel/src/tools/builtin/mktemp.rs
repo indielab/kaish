@@ -48,9 +48,10 @@ struct MktempArgs {
     #[command(flatten)]
     global: GlobalFlags,
 
-    /// Template whose trailing `X`s become random characters. Same as
-    /// `--template`: `mktemp job.XXXXXX` and `mktemp --template job.XXXXXX`
-    /// are equivalent.
+    /// Template whose runs of `X` become random characters, wherever they
+    /// sit: `myapp.XXX.tmp` becomes `myapp.f9d.tmp`. Same as `--template`,
+    /// so `mktemp job.XXXXXX` and `mktemp --template job.XXXXXX` are
+    /// equivalent.
     // Hidden sink: read off `args.positional`, so the `--template` param in
     // the schema covers both spellings.
     #[arg(hide = true)]
