@@ -1,6 +1,6 @@
 # The kaish approval ledger
 
-**Status:** living design doc — spec current as of 2026-08-05; PRs 1–8 landed, statement gate (§C.6) in design.
+**Status:** living design doc — spec current as of 2026-08-07; PRs 1–8 and the statement gate (§C.6) landed; the pre-0.14 contract rework (§0.1) is in design.
 This file in kaish `docs/` is the canonical copy (migrated from kaish-extras 2026-08-01;
 the extras copy is superseded).
 **Target:** kaish kernel (post-0.13) · **Motivating embedder:** kaijutsu · **First in-kernel consumer:** kaish-git's write profile
@@ -48,6 +48,50 @@ The confirmation latch is deleted and its behavior is re-expressed on the ledger
 operation class (`fs.*`), one policy ("ask the human"), the same `--confirm=<token>` UX,
 the same exit code 2.
 
+## 0.1 Mechanism, not policy — the line this design holds
+
+Added 2026-08-07, in the pre-0.14 contract rework. Nothing external pins these shapes yet:
+both embedders are ours and both pin crates.io 0.13, which has no ledger at all. This is
+the last cheap moment to move them, so the rework moves them on one principle rather than
+patching seven findings independently.
+
+> **The kernel owns the mechanism, the invariants, and the audit record. The embedder owns
+> the policy.**
+
+The kernel's half is the part that must be correct under concurrency and identical for
+everyone: the balance rule (one grant, one successful settlement), the state machine and
+its loud illegal transitions, the append-only record and its timestamps, the seams where a
+decision is asked for, and the types that make a bypass unrepresentable. The embedder's
+half is every question whose right answer differs per deployment: how long an unanswered
+request should live, what counts as a secret, what a classifier believes, when to escalate
+to a human.
+
+Two consequences are load-bearing enough to state as rules, because they read as absences
+otherwise and someone will eventually try to fix them back:
+
+**The kernel stamps records with when things happened. The kernel never reads a clock to
+decide anything.** Every entry carries `at: SystemTime` — an audit log without timestamps
+is not an audit log. But no *decision* consults a clock: there is no request TTL, no
+expiry sweep, and no staleness deadline on an attempt. A request lives until it is decided
+or cancelled. The grant's `not_after` is the sole exception and is not a counter-example:
+it is a value the approval side *sets*, compared once at redemption, never a deadline the
+ledger wakes up to enforce. See §A.10 for why, and §B.5 for what replaced expiry.
+
+**The kernel redacts exactly one thing: its own key.** It can do that exactly, with no
+heuristics, because it minted the credential and knows the string. It does not detect
+credentials in general — no flag-name lists, no URL-userinfo parsing, no entropy scoring.
+A shell cannot win that game and a spec that promises best-effort secret detection has
+made a guarantee it cannot keep. What the kernel provides instead is one normalization
+point every sink passes through and a value type that cannot serialize an undecided value,
+so an embedder that installs a redactor gets it applied everywhere, including to sinks
+added later. See §A.8.
+
+The same line resolves the rest of the rework: the kernel supplies the classifier's input
+wrapper and the rule that a classifier error means `Gate` (§C.6), and the embedder supplies
+the classifier; the kernel supplies an append-only recorder for assessments (§C.7), and the
+embedder supplies the assessors. Where this document says the kernel does not do something,
+it is this line being held, not an omission.
+
 ### Vocabulary
 
 The ledger replaces the latch's words along with its code. These are the terms this
@@ -66,6 +110,10 @@ document uses; it does not use synonyms for them.
 | **standing grant** | A rule that auto-grants matching future requests, and is itself a ledger entry (§C.4). |
 | **subscription** | A glob-scoped registration making matching operations `observe` (record only) or `enforce` (decide) — §C.5. |
 | **authority** | Holding an `ApproverHandle`: the capability to grant, deny, revoke, and retrieve a key. |
+| **scope** | Which kernel, session, and actor a request belongs to (`ApprovalScope`, §A.7). Every request carries one; handles derive scoped views from it. |
+| **binding** | The context a grant was decided against — plan digest, cwd, scope, sandbox profile (`PlanBinding`, §A.9). A replay outside its binding is a new request, not a redemption. |
+| **assessment** | One attributed judgment recorded on the way to a decision — a classifier's, a specialist's, a human's (§C.7). Assessments explain a decision; they are not themselves decisions. |
+| **cancel** | To close an undecided request from the requesting side (§B.5). What replaced expiry: the kernel does not time a request out, so something must be able to end one. |
 
 **`latch` and `nonce` retire with the mechanism.** A latch is now a request in the
 `Requested` state; a nonce is now a name plus a key. Two spellings of the retired word
@@ -266,6 +314,18 @@ Pretending to more than that would be the worst thing we could ship.
 #[non_exhaustive]
 pub struct ApprovalRequest {
     pub id: RequestId,
+    /// Which kernel, session, and actor this request belongs to (§A.7).
+    /// Mandatory: a helper hosting several sessions must never need an
+    /// external map to answer "whose request is this?".
+    pub scope: ApprovalScope,
+    /// Set when this request was raised while another was already being
+    /// satisfied — a statement gate that reaches an `fs.*` gate underneath
+    /// it. Lets a UI show one nested prompt instead of two unrelated ones
+    /// (§A.7).
+    pub parent: Option<RequestId>,
+    /// Bumped on every recorded transition. A late decision quoting a stale
+    /// revision is refused, not applied (§B.6).
+    pub revision: u64,
     /// Dotted taxonomy. In-tree values come from a closed enum (see A.6);
     /// plugins register a namespace prefix at construction ("git.").
     pub operation: OperationId,      // "fs.remove", "trash.empty", "git.push"
@@ -286,9 +346,19 @@ pub struct ApprovalRequest {
     /// contains a credential.
     pub hint: String,
     pub requested_at: SystemTime,
-    pub ttl: Duration,
-    /// Set when this request renews an expired predecessor (§B.5).
+    /// When this request stops being answerable. `None` — the default —
+    /// means it never does: it lives until decided or cancelled. The kernel
+    /// does not enforce this field on a timer; it is compared when the
+    /// request is next observed, exactly like a grant's `not_after`. An
+    /// embedder that wants deadlines sets them and cancels what it no
+    /// longer wants (§A.5, §B.5).
+    pub deadline: Option<SystemTime>,
+    /// Set when this request replaces a closed predecessor — the operation
+    /// was cancelled, or denied, and asked again (§B.5).
     pub supersedes: Option<RequestId>,
+    /// The context this request was raised in, and the context a redemption
+    /// must still match (§A.9).
+    pub binding: PlanBinding,
     /// The parsed statement plan, present exactly when the operation is the
     /// statement gate (§C.6). Typed here and mirrored as `cmd` resources, so a
     /// classifier reads structure and a standing grant matches globs.
@@ -491,6 +561,186 @@ Plugins get `OperationId::namespaced(prefix, rest)`, where the prefix is registe
 tool-registration time. A plugin that posts `fs.remove` gets a loud rejection — the `fs.`
 namespace belongs to the kernel. This is cheap and it keeps a policy engine's vocabulary
 honest.
+
+### A.7 Scope, parenthood, and revision
+
+One process can host many sessions. A helper bridging an agent conversation to a human
+runs one kernel per session, or one ledger behind several kernels, and in either shape the
+question "whose request is this, and may this reader see it?" has to be answerable from the
+request itself. Answering it from an external map is how a confused deputy is built.
+
+```rust
+#[non_exhaustive]
+pub struct ApprovalScope {
+    /// The kernel that raised it. Minted per kernel at construction.
+    pub kernel_id: KernelId,
+    /// The conversation, connection, or task the kernel is serving. Supplied
+    /// by the embedder; `None` for a single-session kernel like the REPL.
+    pub session_id: Option<SessionId>,
+    /// The actor on whose behalf the operation runs, when the embedder
+    /// distinguishes one from the session (a subagent under a user).
+    pub actor_id: Option<PrincipalId>,
+}
+```
+
+Scope is mandatory on the request and travels onto every entry about it (§A.5). Handles
+derive from it: `approvals.scope(session)` yields a read side that sees only that session's
+requests, and `authority.scope(session)` a grant side that can decide only within it. **The
+read side needs scoping as much as the grant side does** — under the always-on statement
+tap (§C.6) a request carries the command text that raised it, so an unscoped reader in a
+multi-session process reads every session's commands.
+
+This is API hygiene, not a process boundary. A scoped handle stops a session's code from
+reaching another session's requests by accident or by confusion; it does not stop hostile
+Rust in the same process, which can reach anything the process can. §A.2's disclaimer
+applies here unchanged.
+
+**Parenthood.** A statement gate that grants can still reach an `fs.*` gate underneath it,
+which is correct defense in depth and produces a second request. `parent` names the first,
+so a UI can render one nested prompt. Two rules keep the hierarchy honest: a grant on a
+parent never implies authority for a child unless the parent grant's own operation and
+resources cover it, and a child is never auto-approved merely for having an approved
+parent. Approval storms are a real hazard — a human shown four prompts for one command
+learns to click through them — but the fix is coalescing in the UI on top of a correct
+hierarchy, not a broader grant underneath.
+
+**Revision.** Every recorded transition bumps `revision`. Decisions quote the revision they
+were made against, and one that quotes a stale revision is refused and recorded rather than
+applied (§B.6). This is what makes a late answer safe: a human who answers a prompt after
+the operation was cancelled, superseded, or already decided cannot revive it, and the
+attempt shows in the record.
+
+### A.8 Redaction: one seam, one type, one thing the kernel does itself
+
+The statement gate is always on (§C.6), so the rendered source of every top-level statement
+reaches five sinks: the classifier's input, the `Observed` entry, `Capture::Statement`,
+tracing, and the `/v/approvals` projection. Anything typed literally on a command line
+reaches all five.
+
+**What the kernel redacts: its own key, and nothing else.** It knows that string exactly —
+it minted it — so the redaction is exact and needs no detection. The kernel does not hunt
+for credentials in general. There is no flag-name list, no URL-userinfo parsing, no entropy
+scoring. Those are heuristics; heuristics have false negatives; and a spec that promises to
+find secrets it cannot define has made a guarantee it will break. This is §0.1's line: the
+kernel supplies the mechanism, the embedder decides what a secret is.
+
+The exposure this bounds is genuinely narrow, and the spec should say so rather than imply
+more. **An approval key authorizes exactly one successful settlement** (§A.1). Once
+redeemed it is inert, and a redeemed key in an audit record is a historical fact, not a
+credential. The case that still matters is a key that leaks *before* redemption into a
+surface reaching a less-trusted reader — a model's prompt, an out-of-band approval UI —
+where it is live authorization for as long as its grant is. That case is why the kernel
+does this one redaction itself instead of leaving it to the embedder like the rest.
+
+**What the kernel provides for everything else** is the shape, not the policy:
+
+```rust
+/// One value inside a rendered plan. A sink serializes `PlannedValue`, never
+/// a bare `String`, so a value reaches a sink only after something decided
+/// whether it was a secret.
+#[non_exhaustive]
+pub enum PlannedValue {
+    Plain(String),
+    Redacted {
+        /// The embedder's own label — "bearer-token", "password". The kernel
+        /// does not interpret it.
+        kind: String,
+        /// Stable salted digest prefix, when the redactor supplies one, so an
+        /// auditor can ask "the same credential as last time?" without
+        /// holding it.
+        fingerprint: Option<String>,
+    },
+}
+
+/// Installed by the embedder at kernel construction. Runs once, at the one
+/// normalization point, before any sink sees the plan.
+pub trait Redactor: Send + Sync {
+    fn redact(&self, value: &str, site: ValueSite) -> Option<RedactionMark>;
+}
+```
+
+Two properties do the work. **One normalization point:** the plan is redacted once, before
+it is classified, observed, captured, attached to a request, or projected — so a sink added
+later inherits the redaction instead of becoming a new leak. That the `--confirm` fix in
+#296 had to find three separate leaks of one credential is the argument for this, and the
+third was found only because someone went looking a fourth time. **A type that cannot hold
+an undecided value:** a sink cannot serialize a `PlannedValue` without the redaction
+question having been answered, so forgetting is a compile error rather than a review
+finding.
+
+No `Redactor` installed means every value is `Plain`. That is the honest default for a
+shell: the kernel is not quietly pretending to protect something.
+
+### A.9 Replay binding
+
+A grant is a decision about an operation *in a context*. `Capture::Statement` records source
+plus a statement index (§B.4), and re-parsing that source later is not the same thing as
+replaying what was approved: cwd, variables, mounts, and expansions can all have moved
+underneath it.
+
+```rust
+#[non_exhaustive]
+pub struct PlanBinding {
+    /// Digest over the redacted, rendered plan — what was actually judged.
+    pub plan_digest: PlanDigest,
+    /// The working directory it was judged in, as a logical VFS path.
+    pub cwd: VirtualPath,
+    pub scope: ApprovalScope,
+    /// Which sandbox profile was in force, when the embedder names them.
+    pub sandbox_profile: Option<SandboxProfileId>,
+}
+```
+
+> **A grant may be redeemed only by an attempt whose binding matches the one the grant was
+> decided against, and whose operation and resources the grant covers. Anything else is a
+> new request.**
+
+This does not replace the redemption-time precondition check (§B.4); the two answer
+different questions. `StateResolver` asks whether the *world* still matches what was
+claimed. The binding asks whether the *operation* is still the one that was judged. A
+resolver cannot cover a cwd change, because nothing declared the cwd as a precondition.
+
+This absorbs §I.3's open question about path canonicalization: the canonical form is
+whatever the binding records, and a redemption compares against it rather than re-deriving
+one.
+
+### A.10 What the kernel does with time
+
+The kernel stamps records. The kernel does not decide with a clock.
+
+Every entry carries `at: SystemTime` (§A.5) — an append-only record of security decisions
+with no timestamps is not auditable, so observation stays. What left is every use of a
+clock as an *input to a decision*:
+
+| Removed | Why |
+|---|---|
+| Request TTL and the `Expired`-on-timeout path | Pure policy, and the defaults were wrong in a way that shipped: `request_ttl` defaulted to 60s while `Approver::decide_budget` defaulted to 300s, so the kernel handed an approver a five-minute budget to spend against a one-minute lease. A decision arriving at 90s was refused against a request that had already expired underneath it — and reported as `LedgerUnavailable`, which named the wrong thing. |
+| The `attempt_stale_after` recovery sweep | It existed as a stopgap until `AttemptGuard` had an outbox, by its own definition. The outbox exists. A dropped attempt is now reported by the guard, not inferred from elapsed time. |
+
+What stays, and why none of it is a counter-example:
+
+- **`Grant::not_after`** is set by the approval side and compared once, when a redemption is
+  attempted. The ledger never wakes up to enforce it. A grant with no bound would be a
+  standing grant, and §C.4 already has a deliberate, separate type for that.
+- **`ApprovalRequest::deadline`** is `Option`, defaults to `None`, and behaves the same way:
+  compared when observed, never enforced on a timer.
+- **The patient hold** around `Approver::decide` (§C.2) is watchdog machinery. It keeps a
+  human's think time from tripping a script timeout. It bounds how long the *kernel* waits,
+  not how long an approval is valid, and those were only ever confused because they were
+  measured in the same units.
+
+**The cost, stated plainly.** With no expiry, an undecided request occupies a live slot
+until something closes it, so `live_capacity` and `live_capacity_per_principal` (§D.4)
+become the only backstop — an embedder that posts requests nobody answers eventually fills
+the ledger. That is the intended trade: the failure mode moves from *your approval silently
+expired* to *the ledger is full*, with a number, at a point where someone can act. Silent
+expiry is exactly the failure kaish refuses everywhere else.
+
+**And what it costs embedders:** each one now implements the expiry policy it wants, and
+they will differ. That is the point rather than a regret — an ACP bridge wants a long
+horizon with renewal while a human answers, a REPL wants to ask again on the next prompt,
+and a batch agent wants no expiry at all. A single kernel default cannot be right for all
+three, and the one we shipped was right for none of them.
 
 ---
 
