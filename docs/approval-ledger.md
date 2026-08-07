@@ -1,10 +1,10 @@
 # The kaish approval ledger
 
-**Status:** living design doc — spec current as of 2026-08-07; PRs 1–8 and the statement gate (§C.6) landed; the pre-0.14 contract rework (§0.1) is in design.
+**Status:** living design doc — spec current as of 2026-08-07. The ledger core, the latch cutover, and the statement gate have landed; §H names what remains before 0.14.0.
 This file in kaish `docs/` is the canonical copy (migrated from kaish-extras 2026-08-01;
 the extras copy is superseded).
 **Target:** kaish kernel (post-0.13) · **Motivating embedder:** kaijutsu · **First in-kernel consumer:** kaish-git's write profile
-**Inputs:** [safety-inventory](https://github.com/tobert/kaish-extras/blob/main/docs/design/safety-inventory-2026-08.md) (problem statement), [kaish-extras git.md](https://github.com/tobert/kaish-extras/blob/main/docs/git.md) §7 (first consumer), kaish `main` @ `818ff48`
+**Inputs:** [safety-inventory](https://github.com/tobert/kaish-extras/blob/main/docs/design/safety-inventory-2026-08.md) (problem statement), [kaish-extras git.md](https://github.com/tobert/kaish-extras/blob/main/docs/git.md) §7 (first consumer)
 **Reviews:** [gemini-pro](https://github.com/tobert/kaish-extras/blob/main/docs/design/reviews/ledger-review-gemini-2026-08.md), [gpt-sol](https://github.com/tobert/kaish-extras/blob/main/docs/design/reviews/ledger-review-gpt-2026-08.md)
 **Supersedes:** the confirmation latch, which is deleted outright (see §F)
 
@@ -116,34 +116,6 @@ survive, because the §F.2 rename table is the whole break and does not reach th
 shell option (now `set -o approvals`), and `JobStatus::Gated` (wire spelling `"gated"`), which is
 pinned. §I asks whether they should change. PR 9 updates the Terms tables in `CLAUDE.md`
 and `README.md` to match this one.
-
-### Verification notes against the tree
-
-Claims from the safety inventory re-verified at `818ff48`; refinements worth carrying:
-
-- `generate_nonce` (`crates/kaish-kernel/src/nonce.rs:174-191`) was confirmed non-CSPRNG
-  and folded to `u32`. Fixed in kaish #259: 16 bytes from `getrandom`, 32 lowercase hex.
-  The rejected-attempt limit that shipped alongside it in the original plan was
-  **deliberately deferred** there, because a wrong `--confirm` guess does not identify
-  which issued credential it was aimed at. The attempt model in §A.5 is what gives that
-  counter somewhere principled to attach; it lands with the ledger core (§H).
-- `NonceStore` uses `kaish_types::clock::Instant` for TTL (monotonic) but records no
-  wall-clock time at all, so there is nothing to audit *with* even if we added a sink.
-- The dispatch-seam capture (`crates/kaish-kernel/src/kernel.rs:3322`) is unconditional and
-  explicitly documented as such — good, because the ledger needs the invocation on *every*
-  request. It does, however, substitute an empty argv when capture is unavailable
-  (`kernel.rs:3310-3321`), which §B.4 replaces with an explicit capture status.
-- `async_trait` is already a dependency of `kaish-tool-api` and `Tool` already uses it
-  (`crates/kaish-tool-api/src/tool.rs:19`). `ToolCtx` does not, but adding `#[async_trait]`
-  to it with **defaulted** async methods is not a breaking change for existing implementors.
-- `wait`'s single-latch behavior is at `crates/kaish-kernel/src/tools/builtin/wait.rs:138-140`
-  (`latch.get_or_insert`), with the "first latch wins" comment intact.
-- `Scope` has no readonly/pin concept of any kind
-  (`crates/kaish-kernel/src/interpreter/scope.rs:602-608`) — `set +o latch` is a plain
-  setter. Confirmed.
-- Cancellation is cooperative and has no dropped-future callback (`ctx.rs:82-101`), and the
-  dispatch seam's post-execution code runs only on normal return (`kernel.rs:3324-3340`).
-  §C.1's settlement guard exists because of those two facts.
 
 ---
 
@@ -1057,7 +1029,7 @@ For git this is the whole story: approve `refs/heads/main: a1b2… → c3d4…`;
 to `e5f6…` while the human was thinking, the push does not happen and the record says
 exactly why.
 
-*Settled at implementation time (PR 6),* because the text above leaves them open:
+Four rules the text above leaves open, settled here:
 
 - **`StateResolver` lives in `kaish-tool-api`, not the kernel.** The party that names a
   resource kind is the party that knows how to read it, and a plugin depends on
@@ -1124,10 +1096,9 @@ pub enum CancelReason {
 
 **Cancellation is a requester action.** The principal that owns the request may cancel it
 without holding any authority — that is what lets a gated agent withdraw its own request.
-A session holding the ledger's authority may also cancel any request, on the same reasoning
-that let it renew one before: it could already `deny` that request, so withholding
-cancellation would be a special case with nothing behind it. Any other session cancelling
-another principal's request is refused.
+A session holding the ledger's authority may also cancel any request, not only its own: it
+could already `deny` that request, so withholding cancellation would be a special case with
+nothing behind it. Any other session cancelling another principal's request is refused.
 
 `Cancelled` is terminal for the request and not for the thread of intent. Asking again
 posts a **new** `Requested` with `supersedes: Some(old_id)`, so "this took four attempts
@@ -1193,18 +1164,52 @@ branch on *why* it may not proceed:
 pub enum ApprovalOutcome {
     /// A grant existed (or was decided inline) and an attempt is reserved.
     Authorized(AttemptHandle),
-    /// No decision yet. The view is tokenless (§A.2).
-    Pending(ApprovalRequestView),
+    /// No decision yet. Carries what a caller needs to present the request
+    /// and to resume it; the view is tokenless (§A.2).
+    Pending(Box<PendingApproval>),
     Denied { request: RequestId, reason: String },
     /// A precondition on the grant no longer holds, or could not be observed.
     /// The grant is voided and the operation must re-request (§B.4).
     Refused { request: RequestId, detail: String },
+    /// The request was closed while the decision was in flight — cancelled,
+    /// superseded, or past a deadline the embedder set. Distinct from
+    /// `LedgerUnavailable`: nothing is wrong with the ledger, and retrying
+    /// this request will never work. Ask again (§B.5).
+    Closed { request: RequestId, state: RequestState },
     /// This context has no ledger — a unit-test harness or a minimal embedder.
     Unsupported,
     /// The ledger refused to record: sink backpressure or live capacity (§D.4).
+    /// A condition of the *ledger*, and retryable. Never used to report a
+    /// request's own state.
     LedgerUnavailable { reason: String },
 }
+
+/// What a caller needs to show a pending request and to pick it back up.
+#[non_exhaustive]
+pub struct PendingApproval {
+    pub request: ApprovalRequestView,
+    pub resume: ResumeAction,
+}
+
+/// How this request continues once it is decided. Structured, because a
+/// caller must not have to infer it from the capture's shape.
+#[non_exhaustive]
+pub enum ResumeAction {
+    /// Re-run the statement with the key; the digest names what was approved
+    /// (§A.9).
+    ConfirmStatement { plan_digest: PlanDigest },
+    /// Replay the captured invocation via `Kernel::confirm`.
+    RetryOperation,
+    /// Grantable and redeemable, but the kernel cannot replay it — the
+    /// caller must re-issue the operation itself (§B.4's capture statuses).
+    NotReplayable { reason: String },
+}
 ```
+
+**`Closed` exists because `LedgerUnavailable` was answering two questions.** One says *the
+ledger could not record this, try again*; the other says *this request is over, asking
+again will not help*. Collapsing them tells an embedder to retry a healthy ledger forever,
+and tells a human nothing about what actually happened to their request.
 
 **Every non-`Authorized` variant fails closed.** `proceed()` is the convenience that maps
 them to the `ExecResult` a tool returns without inspection: `Pending` → exit 2 with the
@@ -1802,8 +1807,9 @@ let req = ApprovalRequest::builder("git.push")
 ```
 
 `ApprovalRequest` lives in `kaish-types`, so the builder produces a *draft* and
-`request_approval` stamps `id`, `principal`, `capture`, `context`, `requested_at`, and
-`ttl` from the context. A plugin cannot forge a principal or an invocation, and it cannot
+`request_approval` stamps `id`, `scope`, `parent`, `revision`, `principal`, `capture`,
+`context`, `binding`, and `requested_at` from the context — everything a plugin must not be
+able to choose. A plugin cannot forge a principal or an invocation, and it cannot
 put a credential in the `hint` because it has no way to obtain one — the literal `<token>`
 placeholder is substituted by a frontend holding an `ApproverHandle` (§D.3).
 
@@ -1828,7 +1834,10 @@ placeholder is substituted by a frontend holding an `ApproverHandle` (§D.3).
 // Kernel — construction mints exactly one authority capability
 fn build(config: KernelConfig) -> (Kernel, ApproverHandle);
 fn approvals(&self) -> Approvals;                          // read side, no authority
-async fn renew(&self, id: &RequestId) -> Result<ApprovalRequestView>;  // requester action
+/// Close an undecided request (§B.5). Requester action: no authority needed
+/// for your own request. Revision-checked (§B.6).
+async fn cancel(&self, id: &RequestId, rev: u64, why: CancelReason)
+    -> Result<ApprovalRequestView>;
 /// Reserve an attempt and replay the captured invocation. The handle is a
 /// required argument: replay is an execution (kernel) authorized by the
 /// approval side (handle), and the signature is what enforces that (§B.4).
@@ -1836,20 +1845,54 @@ async fn confirm(&self, by: &ApproverHandle, id: &RequestId) -> Result<ExecResul
 
 // ApproverHandle — the approval side. Not constructible any other way.
 // Pure-record operations only; nothing here dispatches an execution.
-async fn grant(&self, id: &RequestId, terms: GrantTerms) -> Result<()>;
-async fn deny(&self, id: &RequestId, reason: &str) -> Result<()>;
+// Every state-changing call is revision-checked (§B.6): a decision quoting a
+// stale revision is refused and recorded, never applied.
+async fn grant(&self, id: &RequestId, rev: u64, terms: GrantTerms) -> Result<()>;
+async fn deny(&self, id: &RequestId, rev: u64, reason: &str) -> Result<()>;
 async fn grant_standing(&self, g: StandingGrant) -> Result<StandingId>;
 async fn revoke_standing(&self, id: &StandingId, reason: &str) -> Result<()>;
 async fn subscribe(&self, s: Subscription) -> Result<SubscriptionId>;   // §C.5
 fn token_for(&self, id: &RequestId) -> Option<Token>;      // appends KeyRetrieved (§A.2)
+/// A view of this handle restricted to one session (§A.7). The derived
+/// handle can decide only within that scope.
+fn scope(&self, session: SessionId) -> ApproverHandle;
 
 // Approvals (read side)
-fn pending(&self) -> Vec<ApprovalRequestView>;    // the primitive the inventory asks for
+fn pending(&self, page: PageRequest) -> ApprovalPage;
 fn state(&self, id: &RequestId) -> Option<RequestState>;
 fn get(&self, id: &RequestId) -> Option<RequestChain>;  // request + decision + attempts
 fn standing(&self) -> Vec<StandingGrant>;
-fn log(&self, since: u64) -> Vec<LedgerEntry>;          // seq-cursored
+fn log(&self, since: u64, limit: usize) -> LedgerPage;  // seq-cursored, bounded
+/// A read side restricted to one session. Needed as much as the grant side
+/// is: a request carries the command text that raised it (§A.7).
+fn scope(&self, session: SessionId) -> Approvals;
 ```
+
+**Listings are paginated and filterable, not bare vectors.** The statement tap posts an
+`Observed` entry per top-level statement (§C.6), so in a long-lived embedder the log and
+the pending set are both unbounded in principle:
+
+```rust
+#[non_exhaustive]
+pub struct PageRequest {
+    pub cursor: Option<LedgerCursor>,
+    pub limit: usize,
+    /// Restrict to one session/actor. Independent of handle scoping — this
+    /// filters, that constrains.
+    pub scope: Option<ApprovalScope>,
+    pub state: Option<RequestState>,
+    pub since: Option<SystemTime>,
+}
+
+#[non_exhaustive]
+pub struct ApprovalPage {
+    pub items: Vec<ApprovalRequestView>,
+    pub next: Option<LedgerCursor>,
+}
+```
+
+The cursor is the stable `seq`, so a reader that stops and resumes cannot miss an entry or
+see one twice.
 
 **Where the handle comes from.** `Kernel::build` mints exactly one `ApproverHandle` and
 returns it to the embedder, which decides which sessions get a clone. A session that should
@@ -1880,7 +1923,7 @@ differs is what a frontend can *retrieve*:
   placeholder. Today's human UX, unchanged.
 - A session **without** the handle (the `agent()` / `agent_with_root()` / `isolated()`
   default) has no method that returns a credential. Its exit-2 message is `pending approval
-  <request-id> — an operator must grant it`. The agent can see, renew, and reason about its
+  <request-id> — an operator must grant it`. The agent can see, cancel, and reason about its
   pending requests; it cannot redeem them.
 - Exactly one builtin bridges to the approval side — `approvals` — and only through a
   handle installed on the session. Every other builtin has no path to `grant`, and a test
@@ -1902,15 +1945,15 @@ pattern):
 |---|---|
 | `approvals list [--pending\|--all\|--standing]` | typed `OutputData`, `--json` via the kernel |
 | `approvals show <id>` | full request + decision + attempt chain |
-| `approvals log [--since <seq>]` | the retained entries, seq-ordered; the record §E reads |
-| `approvals renew <id>` | post a superseding request; loud if the world already moved |
+| `approvals log [--since <seq>] [--limit N]` | the retained entries, seq-ordered and bounded; the record §E reads |
+| `approvals cancel <id>` | close your own undecided request (§B.5); no authority needed |
 | `approvals grant <id> [--until <duration>]` | **requires an `ApproverHandle` on the session**; there is no `--once` flag, because every grant is once (§A.1) |
 | `approvals deny <id> [--reason R]` | requires the handle |
 | `approvals revoke <standing-id>` | requires the handle |
 
 **The authority check is the single most important new property.** Without a handle,
 `approvals grant` fails with exit 1 and a message naming the reason. The agent can *see*
-what is pending and *renew* it; it cannot approve itself. Anything else makes the whole
+what is pending and *cancel* its own; it cannot approve itself. Anything else makes the whole
 exercise theater, given that the agent's whole job is running shell commands.
 
 **Multi-pending gates.** `ExecResult.approval` stays a single `Option<Box<…>>` — one
@@ -1959,8 +2002,10 @@ pub struct LedgerConfig {
     pub retained_entries: usize,
     /// Bounded sink queue. Default 1024 entries.
     pub sink_queue: usize,
-    pub request_ttl: Duration,        // default 60s — today's nonce TTL
     pub max_token_attempts: u32,      // default 5
+    /// Refuse a grant whose issuing principal is the request's own (§E.7).
+    /// Default false: a solo human at the REPL is legitimately both.
+    pub deny_self_approval: bool,
 }
 
 pub trait LedgerSink: Send + Sync {
@@ -1981,6 +2026,14 @@ memory pressure, and it is a real
 scenario for a long-running agent that gates thousands of operations and never settles
 them. Per-principal quotas and a `ledger.live_requests` metric make the DoS case visible
 before it becomes an outage.
+
+**These limits carry more weight than they look like they do.** Since nothing expires
+(§A.10), the live index is relieved only by decisions, settlements, and cancellations —
+capacity is the sole backstop against an embedder that asks and never answers. That is the
+deliberate trade: a full ledger says so, with a number and a remedy, where a silent expiry
+would have quietly discarded the request instead. An embedder holding requests open for
+long human latencies should raise `live_capacity` to match its own concurrency and watch
+the metric.
 
 **Sink backpressure fails closed, and never blocks the reactor.** The sink is fed by a
 bounded async queue of 1024 entries. When the queue is full, the ledger does not block the
@@ -2018,7 +2071,7 @@ The old latch nonce was one string doing two jobs: it *identified* the request a
 
 - **`RequestId`** is the request's **name**. Public by design — safe to print, put in a
   tool result, hand to anyone. Everything about the request except redemption works by
-  name: inspect it, renew it, approve it, deny it.
+  name: inspect it, cancel it, approve it, deny it.
 - **`Token`** is the **key**. A secret credential the kernel holds; no public type has a
   field for it, and only a session holding an `ApproverHandle` can retrieve it (§D.3). An
   authority-less session never sees it — not redacted out, never present. It is a **bearer**
@@ -2423,235 +2476,88 @@ unknown) · `approval.voided` (warn) · `approval.standing_issued` (info) ·
 
 ## H. Kaish PR breakdown
 
-**Landed:** `security(kernel): CSPRNG confirmation nonces` — kaish #259, merged 2026-08-02.
-It replaced the 32-bit non-CSPRNG generator and made entropy failure loud. Its
-rejected-attempt half was deferred for want of an attempt-identity model; that model is
-§A.5 and the counter lands with PR 2 below.
+Dependency order; each PR carries its own tests, docs, and changelog bullets. No
+compatibility steps and no parallel old/new types — the ledger is unreleased, so a change
+to it is a rewrite rather than a migration.
 
-The plan is aggressive-clean: no compatibility step, one cutover. The latch-pin PR that
-originally sat here is folded into PR 5 — building hardening on `NonceStore` when
-`NonceStore` is about to be deleted is wasted motion. Dependency order; each PR carries its
-own tests, docs, and changelog bullets.
+**Landed.** PRs 1–8 built the ledger and cut the latch over to it; PR 10 built the
+statement gate (§C.6). Their contents are the body of this document, and their
+decision records are in `git log`. What each one carried:
 
----
+| PR | Carried |
+|---|---|
+| 1 | `kaish-types::approval` — the vocabulary (§A) |
+| 2 | The ledger core: state machine, credential index, partitioned retention, sink backpressure (§A, §B, §D.4) |
+| 3 | `ToolCtx::request_approval`/`approvals`/`settle_with` and the drop-safe `AttemptGuard` (§C.1) |
+| 4 | The decision chain, the authority capability, standing grants (§C.2, §C.4) |
+| 5 | The cutover: the latch deleted, `fs.*` gate sites moved to the ledger (§F) |
+| 6 | Redemption-time precondition verification (§B.4) |
+| 7 | `/v/approvals`, the `approvals` builtin (§D.3) |
+| 8 | `fs.*` observability subscriptions (§C.5) |
+| 10 | The statement gate: `Plan`, the classifier seam, the two-site tap, `Capture::Statement` replay (§C.6) |
 
-**PR 1 — `feat(types): approval-ledger vocabulary`**
-
-Add `kaish-types::approval`: `RequestId`, `Token`, `AttemptId`, `OperationId`, `RiskClass`,
-`Resource`, `StateClaim`, `Transition`, `Principal`, `Capture`, `Invocation`,
-`RequestContext`, `ApprovalRequest` + builder, `ApprovalRequestView`, `Grant`, `GrantTerms`,
-`Grounds`, `Condition`, `Observation`, `StandingGrant`, `ResourcePattern`, `Subscription`,
-`Decision`, `Outcome`, `LostCause`, `LedgerEntry`, `RequestState`, `AttemptState`
-(`Reserved`/`Settled`/`Abandoned`), `ResourceRef` (kind + id), plus the id newtypes
-(`StandingId`, `SubscriptionId`) and the small enums they name (`PrincipalKind`, `Expiring`,
-`OperationPattern`). Pure data plus serde; no behavior. Additive, not breaking. Pattern
-*matching* stays out (it needs `kaish-glob`, which `kaish-types` must not depend on) — only
-the pattern data lives here.
-
-*Tests that prove it:* serde round-trip for every `LedgerEntry` variant including the
-internal tag; **no public type in the module has a field of type `Token`** (an API-surface
-snapshot test — this is the §A.2 boundary, and it is checkable); `Grant` has no redemption-
-limit field (the single-success rule is structural, not configurable — §A.1); a `RequestId`
-renders as `req_<8hex>_<seq>` and contains no hyphen, and a short form is rejected on parse;
-an `ApprovalRequest` with an empty operation fails to build; `OperationId::namespaced`
-rejects the reserved `fs.`/`trash.` prefixes; `StateClaim::Unspecified` never compares equal
-to a concrete claim; builder-drafted requests carry no principal and no capture (proving
-those are kernel-stamped).
+Also landed: `security(kernel): CSPRNG confirmation nonces` (kaish #259), which replaced
+the 32-bit non-CSPRNG generator and made entropy failure loud.
 
 ---
 
-**PR 2 — `feat(kernel): the approval ledger core`**
+### Remaining work
 
-`Ledger`, the `Requester`/`Approvals`/`ApproverHandle` split, both state machines, the
-§B.1 linearization contract, attempt reservation and idempotent settlement, the credential
-index with `KeyRetrieved`, the rejected-attempt limit #259 deferred, partitioned retention,
-`LedgerSink` with bounded-queue backpressure, `LedgerConfig`, the invariant checks, and the
-recovery sweep. The `ApproverHandle`'s **pure-record** methods land here — `grant`, `deny`,
-`grant_standing`, `revoke_standing`, `token_for`. `Kernel::confirm(&handle, id)` does
-**not**: it dispatches an execution, and there is nothing to replay until gate sites exist,
-so it lands with the cutover (PR 5). Wired to **no gate sites** — a self-contained subsystem
-with no observable behavior change. Additive, not breaking.
+**R1 — `refactor(kernel)!: identity, binding, and the versioned record`**
 
-*Tests:* the §B.3 transition tables as an rstest matrix, with every illegal transition
-asserted to return the specific `LedgerError` **and** to leave the state unchanged; two
-concurrent redemptions of one grant produce exactly one `Redeemed` and one
-`AttemptInFlight`; after an attempt settles non-zero a second redemption succeeds, and after
-one settles `Exit(0)` a second presentation reports the settled outcome without a new
-`Redeemed`; a second successful settlement against one grant is `InvariantViolated`;
-settling the same `AttemptId` twice appends one entry and returns `Ok`; a derived event
-posted twice appends once; the live index fails loud rather than evicting a live chain, and
-a full sink queue returns `LedgerUnavailable` rather than blocking or dropping; `Requester`
-has no method producing a `Grant` and `ApproverHandle` has no public constructor
-(compile-fail tests via `trybuild`); `token_for` appends `KeyRetrieved` naming the retriever,
-and a key redeems from a principal other than the requester's (bearer, by design — §A.2);
-wall-clock jumps forward and backward neither extend nor void a grant; `seq` is gap-free
-under concurrent posts from 16 tasks; the recovery sweep closes a `Redeemed` with no
-successor as `Abandoned`; the **fifth** bad credential presentation voids the request and a
-subsequent *good* one fails naming the void, while five bad presentations matching no live
-request void nothing.
+§A.7, §A.9, and §A.5's envelope: `ApprovalScope` on every request and record, `parent`,
+`revision`, `PlanBinding`, `LedgerRecord` with `schema_version`, and `scope()` on both
+`ApproverHandle` and `Approvals`. The widest of these lanes and the one everything else
+sits on, so it goes first.
 
----
+*Tests:* a request raised under a scoped handle is invisible to another session's
+`Approvals`; a nested `fs.*` gate under a statement gate names the statement's request as
+`parent`; a grant whose binding disagrees with the replay's cwd is refused and a new
+request is posted; an unknown entry variant round-trips as unknown rather than being
+dropped.
 
-**PR 3 — `feat(tool-api): ToolCtx::request_approval — plugins as first-class gate producers`**
+**R2 — `refactor(kernel)!: no clock-driven decisions`**
 
-`#[async_trait]` on `ToolCtx`; defaulted `request_approval` / `approvals` / `settle_with`;
-`ApprovalOutcome` and its `proceed()`; the `AttemptHandle`; the dispatcher's `AttemptGuard`
-with its synchronous outbox; `ExecContext`'s real implementations. Defaulted methods mean
-existing implementors compile unchanged — additive, not breaking. **This is the PR
-kaish-git is blocked on.**
+§A.10 and §B.5: delete `request_ttl`, the request-expiry path, and `attempt_stale_after`;
+`ApprovalRequest::deadline` becomes `Option`, defaulting to `None`; add `Requester::cancel`
+and `CancelReason`; add `ApprovalOutcome::Closed`.
 
-*Tests:* a bare `ToolCtx` impl using the defaults returns `Unsupported` → exit 1 and posts
-nothing (fails closed); the kernel's impl round-trips a request through the ledger; a
-dropped tool future settles its attempt as `Outcome::Unknown{Cancelled}` and never as an
-exit code (the test that would have caught the after-return design); a panicking tool
-settles the same way; an in-tree fixture tool that depends on **only `kaish-tool-api`**
-gates a synthetic `plugin.dangerous` operation end to end — request, defer, exit 2,
-out-of-band grant, `confirm` replay, settle. That fixture is the acceptance criterion: if it
-needs `kaish-kernel` or `as_any_mut`, the PR is not done.
+*Tests:* the parked case on `fix/approval-lease-expiry` — a decision that takes longer than
+any lease is honored — plus a request still `Requested` after an interval that would have
+expired it; `cancel` on another principal's request is refused; a cancelled request's
+`supersedes` chain is walkable; `Closed` is returned where `LedgerUnavailable` used to be,
+and `LedgerUnavailable` no longer describes a request's own state.
 
----
+**R3 — `refactor(kernel)!: revision checks on every transition`**
 
-**PR 4 — `feat(kernel): Approver chain, authority capability, and standing grants`**
+§B.6: `revision` quoted by `grant`/`deny`/`cancel`, `LedgerError::StaleRevision`, and the
+`RevisionRejected` entry.
 
-The four-stage chain (standing → `policy` → `decide` → defer), `KernelConfig::with_approver`
-/ `with_principal` / `with_approver_handle`, `Kernel::build` returning the handle,
-`StandingGrant` matching against `kaish-glob`, the patient-hold wrapper around `decide`.
-Additive; default behavior (no approver configured) is exactly today's defer-to-exit-2. Not
-breaking.
+*Tests:* a decision quoting a stale revision is refused **and** recorded; a cancel racing a
+grant leaves exactly one winner and one `RevisionRejected`; settling twice is still a
+silent no-op, since idempotency and revision-checking must not be confused.
 
-*Tests:* stages fire in order and a non-`Defer` short-circuits; `Defer` through all four
-yields exit 2 with a pending view; a standing grant covering 3 of 4 resources **Defers**
-(all-or-nothing); kind must match exactly, only `id` globs; a standing grant copies the
-request's transitions into the grant's conditions; `max_uses` consumption is exact under 8
-concurrent matching requests; `decide` runs under a patient hold so a 90-second decision
-does not trip a 30-second script timeout; cancellation during `decide` posts nothing and
-never grants; `Approver::decide` is never invoked while the ledger lock is held (a
-deadlock-shaped test: `decide` calls `ctx.approvals().pending()`); an `Approver` receives an
-`ApprovalRequestView` and has no path to a credential.
+**R4 — `refactor(kernel)!: the classifier contract and assessments`**
 
----
+§C.6's `StatementClassificationInput`/`ExecutionContext`/`StatementAssessment` and the
+`Err` → `Gate` mapping; §C.7's `DecisionContext`, `AssessmentRecorder`, and the `Assessed`
+entry.
 
-**PR 5 — `refactor(kernel)!: the latch becomes the ledger` — BREAKING, the cutover**
+*Tests:* a classifier returning `Err` gates and does not observe; a panicking classifier
+gates rather than unwinding into the statement loop; a classifier cannot lower a static
+floor; assessments appended before a `decide` cancellation survive it; `ExecutionContext`
+carries no host path.
 
-One PR, no compatibility step. Delete `NonceStore` and `NonceScope` and every latch type.
-Reimplement `latch_result`, `gate_overwrites`, `rm`'s `decide_rm_action`, and `kaish-trash
-empty` on `request_approval` — ten gate sites, rewritten in ledger vocabulary. Apply the
-§F.2 rename table across `ExecResult`, `JobInfo`, the `--json` envelope, and the VFS path.
-`set -o latch` becomes `set -o approvals`, the whole-namespace `fs.*` enforce policy (no
-glob, no `observe` — those are PR 8); `set +o approvals` removes it and is refused under a
-pin. `JobStatus::Latched` becomes `JobStatus::Gated` (wire `"gated"`). Land
-`Kernel::confirm(&handle, &id)` here — this is the first PR with something to replay — along
-with `RedemptionContext` correlation and the `Capture` status, so replay stops substituting
-an empty argv. Carry the §F.3 hardening that belongs with the cutover: the policy pin, and
-the end of reusable redemption (one successful settlement per grant, a key presented after
-success reporting the settled outcome instead of re-running it). Insta snapshots updated in
-the same PR.
+**R5 — `refactor(kernel)!: redaction seam and pagination`**
 
-**Write the operation matrix first** — operation × trash × approval × reversible ×
-foreground/background/direct → expected entries and expected failure behavior — and land it
-as the test table. The invariant "a trash failure is loud, never falls through to an
-unprotected overwrite" is a row in it that must not change.
+§A.8's `PlannedValue`, the single normalization point, and the `Redactor` trait, with the
+approval key as the one in-kernel redaction; §D.2's `PageRequest`/`ApprovalPage` and the
+bounded `log`.
 
-*Tests:* **the entire existing `latch_trash_tests.rs` suite, ported and green** — including
-the capstone `backgrounded_latch_is_reachable_and_confirmable`,
-`confirm_retires_the_originating_backgrounded_job`, `jobs_cleanup_keeps_latched_job`,
-`kill_refuses_latched_job`, `confirm_replays_a_path_with_spaces_the_hint_cannot`, and
-`latch_in_a_pipeline_stage_overrides_later_success`. New: the operation matrix; with no
-subscription and no policy, an `rm` posts **nothing** and the ledger is empty (§C.5's
-free-when-unsubscribed rule); under an `enforce` subscription the same `rm` produces
-`Requested`→`Granted`→`Redeemed`→`Settled{Exit(0)}`; `kaish-trash empty` gates regardless of
-any subscription; a session with no `ApproverHandle` has no reachable path to `grant` (a
-test that walks the builtin registry and asserts `approvals` is the only bridge); the pin
-survives a `$(…)` cmdsub, a pipeline stage, a background job, and a `.kai` script, and both
-the `set +o latch` and `flags=["o"] positional=["latch"]` parse paths are refused; a replay
-whose fresh draft does not match the granted operation fails `DraftMismatch` rather than
-posting a second request; `confirm` on a `Capture::Unavailable` request fails naming the
-variant; **re-presenting a key after a successful `rm` reports the settled outcome and the
-file is deleted exactly once** (the behavior change the latch's reusable nonce hid — this
-test is the point of the item); trash still wins over the gate per `decide_mutation_action`.
-
-Changelog: one `**BREAKING:**` bullet per renamed surface, plus the mapping table.
-
----
-
-**PR 6 — `feat(kernel): redemption-time precondition verification`**
-
-`StateResolver`, the kernel's `path` resolver (digest through the backend), condition
-evaluation outside the critical section with the observation carried into it (§B.1),
-`Refused` + grant voiding. `cas_overwrite` is re-expressed as a ledger condition; the
-byte-snapshot stays where it is (the ledger stores the digest, not the content). Kept
-separate from PR 5 so the cutover stays a pure migration with no semantic additions.
-
-*Tests:* a file changed between grant and redemption produces `Refused` + `Voided` and a
-loud `ExecResult`, and the file is not written (the existing CAS test, re-expressed against
-the ledger); a `Refused` redemption reserves no `AttemptId`; a resolver I/O error refuses
-rather than passing (the hazard `context.rs:276-280` already documents); the `Redeemed`
-entry records what was observed and when; a stub `git.ref` resolver proves a non-path kind
-works end to end; a grant with all-`Unspecified` conditions redeems and the record shows it
-was unconditioned.
-
----
-
-**PR 7 — `feat(kernel): /v/approvals, the approvals builtin, and gate renewal` — BREAKING (VFS path)**
-
-The `/v/approvals` mount (read-only; writes `Unsupported`), the `approvals` builtin with the
-authority check, `Kernel::renew` / `Job::renew_gate()`, and `wait`'s "N pending" message.
-
-*Tests:* `/v/approvals/pending` enumerates gates across multiple background jobs; every
-write path under `/v/approvals` returns `Unsupported`; no VFS projection contains a
-credential (asserted by scanning the serialized bytes for the issued token); `approvals
-grant` is refused with exit 1 in a session without a handle and permitted in one with it;
-an authority-less session *can* renew its own request and cannot renew another principal's;
-a background job whose request expired is renewable and then confirmable — the
-dead-nonce-forever case, closed; `wait` on two gated jobs reports both in its message while
-surfacing one on `.approval`.
-
----
-
-**PR 8 — `feat(kernel): fs.* observability subscriptions`**
-
-The subscription registry, the atomic any-subscription fast path, and the glob filter
-(§C.5), generalizing PR 5's whole-namespace enforce policy into a scoped subscription.
-Additive and deliberately after the cutover: it changes no default posture, and the
-unsubscribed path must be provably free before it is worth shipping.
-
-*As landed (PR 8 + the tap refinement that followed its review):* PR 8 shipped observe as
-a chain — `Requested` + auto-`Granted{Grounds::Observe}` per covered batch, matched a
-second time inside the decision chain. Its two-family review found three bugs in exactly
-that second matching (a resolved-vs-display mismatch, an all-or-nothing batch grouping,
-and an enforce request auto-granted by an overlapping observe rule), and the follow-up PR
-replaced the chain with the chainless `Observed` entry §C.5 now describes — the
-subscription registry and filter were unchanged; the auto-grant machinery was deleted
-rather than repaired.
-
-*Tests:* with nothing subscribed, a 10,000-path `rm -rf` posts zero entries and allocates no
-`ApprovalRequest` (a counter on the constructor); an `observe` subscription over
-`/workspace/**` posts one `Observed` entry naming matching paths and nothing for
-`/tmp/**`; an `observe` subscription never blocks and never returns exit 2; a relative
-path is recorded under both spellings; one batch spanning two observe subscriptions
-records both paths; an `enforce` subscription over the same glob does gate, including
-when an observe subscription also covers it; subscription and revocation are themselves
-ledger entries.
-
----
-
-**PR 10 — `feat(kernel): the statement gate — cmd.execute observe-all and the classifier`**
-
-§C.6 in full: `Plan`/`PlannedCommand`/`PlannedRedirect` and `StatementClassifier`/
-`StatementPosture` in the API crates, `KernelOperation::CmdExecute`, the plan renderer
-(extending `format_pipeline` toward faithful unexpanded rendering), the top-level-loop
-tap and gate, `Capture::Statement` with `confirm`'s parse-and-execute-index replay,
-`execute_argv` coverage, and `Observed.plan`/`ApprovalRequest.plan`.
-
-*Tests:* every top-level statement posts exactly one `Observed{plan}` entry and a
-1,000-iteration loop posts one; a gate-classified statement defers to exit 2 with
-nothing executed (no substitution side effects, no redirect target created); a standing
-grant over `cmd` resources auto-approves and all-or-nothing holds when one command of
-three is uncovered; `confirm` on a `Capture::Statement` replays exactly the held
-statement with earlier statements' variables visible; `execute_argv` posts the same
-entry the statement loop would; a sink-backpressured tap warns and runs while a
-backpressured *gate* still fails closed; rendering truncates at 8 KiB with the marker;
-the plan-vs-raw-line discrimination measurement for the reference classifier.
+*Tests:* a value reaches no sink as a bare `String`; an installed `Redactor` covers all
+five sinks including one added by the test; with no `Redactor`, values are `Plain` and
+nothing pretends otherwise; a listing over more entries than one page returns a cursor that
+neither repeats nor skips.
 
 ---
 
@@ -2687,15 +2593,14 @@ permanent home.
 
 ## I. Open questions
 
-1. **Retention defaults.** 1024 live requests and 256 per principal are guesses. What a live
-   chain now costs is bounded on both ends: a chain closes on its first successful
-   settlement (§A.1, §B.2), and one that never settles expires at `not_after`. So the
-   numbers bind only on a session holding many *undecided* requests at once, which is the
-   case worth measuring. Open until a real workload says otherwise; the metric
-   (`ledger.live_requests`) exists so the answer is measurable rather than argued.
-
-   *Dissolved by the single-success rule:* the earlier worry that an unlimited grant would
-   occupy the live index until `not_after` no matter what. There is no unlimited grant.
+1. **Retention defaults.** 1024 live requests and 256 per principal are guesses, and they
+   now carry the weight expiry used to share: a chain closes on its first successful
+   settlement (§A.1, §B.2), a grant stops authorizing at `not_after`, and an undecided
+   request is relieved only by a decision or a cancel (§A.10). So the numbers bind on a
+   session holding many undecided requests at once — which is precisely the ACP-style
+   workload, where a human may be slow and several asks may stack up. Open until a real
+   workload says otherwise; the metric (`ledger.live_requests`) exists so the answer is
+   measurable rather than argued.
 2. **Standing-grant matching semantics.** §C.4 fixes all-or-nothing, exact-kind, and
    globbed-id, and the gpt review's remaining questions have no recorded answer: set versus
    multiset semantics for duplicate resources; whether one pattern may match several
@@ -2704,11 +2609,16 @@ permanent home.
    be safer. PR 4 cannot ship without answers, because they are its contract.
 3. **Requirements raised in review with no decision recorded.** Resource canonicalization
    before matching and before recording — path symlinks, ref normalization, encoding, case
-   sensitivity. Partial multi-resource effects: one approved request may mutate two of four
-   resources before failing, so a `Settled{Exit(1)}` must not be read as "nothing landed".
-   Privacy and retention of captured argv and resource names, which can carry secrets into
-   a sink. Tenant isolation if a ledger is ever shared across principals that should not
-   read each other's records.
+   sensitivity. `PlanBinding` (§A.9) settles the *replay* half of this by recording the
+   canonical form rather than re-deriving one; the matching half is still open. Partial
+   multi-resource effects: one approved request may mutate two of four resources before
+   failing, so a `Settled{Exit(1)}` must not be read as "nothing landed".
+
+   *Resolved since:* privacy of captured argv and resource names is §A.8's seam — the
+   kernel redacts its own key and provides the chokepoint and the type; what else counts as
+   a secret is the embedder's to decide. Tenant isolation is §A.7's scoped handles, with
+   the standing caveat that scoping is API hygiene and not a boundary against hostile code
+   in the same process.
 4. ~~**The two surviving spellings of the retired word.**~~ **Resolved 2026-08-02 (Amy):
    the latch is completely retired — the ledger gets its own grammar in code, docs, and
    help text.** `set -o latch` becomes `set -o approvals` (with `KAISH_LATCH` →
