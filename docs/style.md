@@ -181,8 +181,9 @@ entry when you fix it, and add one when you find a violation you are not fixing 
 - Error and diagnostic strings have never been swept, and they are full weight. An agent
   reads a failure message more often than any help topic, so this is the highest-value
   unswept surface in the corpus.
-- Tools behind a capability feature escape the mechanism-leak test below, which builds an
-  `isolated()` kernel. `kaish-tools-host`'s `ps` is the only one today; audit it by hand.
+- Tools behind a capability feature are only walked by the mechanism-leak test when the
+  build enables them. Run it with `--features full` after touching `timeout`, `tokens`,
+  or `ps`; the default CI run does not see them.
 
 Mechanism leaks in **published param descriptions** are now a test, not a rule:
 `crates/kaish-kernel/tests/published_prose_tests.rs` walks the live registry and fails on

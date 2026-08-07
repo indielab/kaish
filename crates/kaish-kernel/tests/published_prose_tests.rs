@@ -14,9 +14,12 @@
 //! `docs/style.md`, "Do not leak the kernel" is the rule; the "Known debt"
 //! section records the sweep that motivated this test.
 //!
-//! Coverage gap: the kernel here is `KernelConfig::isolated()`, so tools
-//! registered only under a capability feature — `kaish-tools-host`'s `ps`
-//! behind `host` — are not walked. Audit those by hand when you touch them.
+//! Coverage depends on features: the registry only holds what the build
+//! enabled, so a default run does not walk `timeout`, `tokens`, or `ps`. Run
+//! `cargo test -p kaish-kernel --features full --test published_prose_tests`
+//! to cover every capability-gated builtin. Both were green when this landed.
+//! (`--all-features` does not build — a `schemars` bound in `kaish-types`
+//! fails independently of this test.)
 
 // Test-fixture code: unwrap/expect on known-good setup is the idiom here.
 #![allow(clippy::unwrap_used, clippy::expect_used)]
