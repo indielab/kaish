@@ -11,6 +11,18 @@ breaking entries are marked **BREAKING**.
 ## [Unreleased]
 
 ### Added
+- **`kaish-help`: four missing Foundations fragments** — unquoted comma splitting
+  a word (`sed -n 1,3p`), a compound statement (`for`/`while`/`if`/`case`) unable
+  to feed a pipe, `[ … ]` not being a command, and bare `yes`/`no` being lexer
+  errors. All four are real parse/lexer errors, verified live against 0.13; the
+  comma and pipe rules were undocumented anywhere in `kaish-help`, and all four
+  were absent from the fragment registry, so none reached
+  `Recipe::agent_onboarding()`/`Recipe::tool_description()` — the surfaces an
+  embedded agent actually reads. The comma and pipe rules also join
+  `content/en/limits.md`.
+- **`Selector::with_overlay()`/`without_overlay()`** (`kaish-help`) — chainable
+  opt-in/opt-out for the new `Concept::Overlay` on any `Recipe`, e.g.
+  `Recipe::agent_onboarding().with_overlay()`.
 - **`Kernel::cancel_all_jobs()`** (GH #245) — cancels every tracked background
   job's token in one call, the same lever `kill %N` uses (in-process futures
   exit at their next checkpoint, external children get SIGTERM→SIGKILL).
@@ -240,6 +252,16 @@ breaking entries are marked **BREAKING**.
   `write` (`fs.overwrite`), `mv` (`fs.rename`), `kaish-trash empty` (`trash.empty`).
 
 ### Changed
+- **BREAKING: `kaish-help`'s overlay-mode guidance is opt-in.** The
+  `--overlay`/`kaish-vfs` paragraph (formerly the always-on `Foundations`
+  fragment `overlay-mode`) is now its own `Concept::Overlay` and no longer
+  appears by default in `Recipe::agent_onboarding()` or
+  `Recipe::tool_description()`. Most embedders never enable `--overlay`
+  (kaijutsu never does; kaibo's read-only sandbox was hand-stripping this same
+  paragraph out of its tool description already), and unused overlay
+  instructions are worse than silence — they invite a `kaish-vfs commit` call
+  that does nothing. An embedder that uses overlay opts back in with
+  `Recipe::agent_onboarding().with_overlay()`.
 - **BREAKING: `ObservedResource.subscription` is `Option<SubscriptionId>`**
   (ledger PR 10) — the statement tap records one `cmd` resource per planned
   command and no subscription covers any of them, because `cmd.*` never enters
