@@ -18,8 +18,9 @@ belongs to kaish — `[[ … ]]` and native list literals (`xs=[a b c]`, see
 it is real syntax the parser understands, so kaish can **validate it before
 running** (catch a malformed test, an unknown operator, an unquoted expansion),
 and it carries the richer tests (membership, regex, shape guards) plus compound
-`&&`/`||`/`!` in one construct. Reach for `test` for muscle memory or where a
-plain command is wanted — `test -f x && echo yes`, `if test "$a" = "$b"; then`.
+`&&`/`||`/`!` in one construct. Use `test` when you want a plain command, or
+when the `sh` habit is faster to type — `test -f x && echo yes`,
+`if test "$a" = "$b"; then`.
 
 ## Lexer/Parser Limitations
 

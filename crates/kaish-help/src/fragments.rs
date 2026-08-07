@@ -104,8 +104,8 @@ pub const FRAGMENTS: &[Fragment] = &[
         Variant::Contrast,
         Depth::Reference,
         None,
-        "Bash splits unquoted `$VAR` on `$IFS`; kaish never does, so the defensive-\
-         quoting dance is unnecessary.",
+        "Bash splits unquoted `$VAR` on `$IFS`; kaish never does, so you never have \
+         to quote a variable just to keep it whole.",
     ),
     en(
         Concept::Foundations,
