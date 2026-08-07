@@ -1523,8 +1523,48 @@ cannot be recorded is not made.
 ```rust
 pub trait StatementClassifier: Send + Sync {
     /// Synchronous and non-blocking, like `Approver::policy` (§C.2). Called once
-    /// per top-level statement.
-    fn classify(&self, plan: &Plan) -> StatementPosture;
+    /// per top-level statement. An `Err` means `Gate`, never `Observe`.
+    fn classify(
+        &self,
+        input: &StatementClassificationInput<'_>,
+    ) -> Result<StatementAssessment, ClassificationError>;
+}
+
+pub struct StatementClassificationInput<'a> {
+    /// The redacted, rendered statement (§A.8) and its structure.
+    pub plan: &'a Plan,
+    pub context: &'a ExecutionContext,
+}
+
+/// What the statement would run against. A classifier judging `rm -rf .`
+/// needs to know where "." is; one judging a write needs to know whether the
+/// target is a scratch mount or the project.
+#[non_exhaustive]
+pub struct ExecutionContext {
+    /// Logical VFS path, never a host path.
+    pub cwd: VirtualPath,
+    pub scope: ApprovalScope,
+    pub sandbox_profile: Option<SandboxProfileId>,
+    pub mounts: Vec<MountDescriptor>,
+}
+
+#[non_exhaustive]
+pub struct MountDescriptor {
+    pub prefix: VirtualPath,
+    /// The embedder's classification of what lives there.
+    pub class: MountClass,   // Project | Scratch | System | External
+    pub access: MountAccess, // ReadOnly | ReadWrite
+}
+
+#[non_exhaustive]
+pub struct StatementAssessment {
+    pub posture: StatementPosture,
+    /// Who judged. Recorded on the `Assessed` entry (§C.7).
+    pub assessor: AssessorId,
+    /// Stable version or weight identity, when a model decided. "A model
+    /// allowed this" is not a reproducible audit statement without it.
+    pub model: Option<ModelIdentity>,
+    pub confidence: Option<f32>,
 }
 
 #[non_exhaustive]
@@ -1538,6 +1578,31 @@ pub enum StatementPosture {
 }
 ```
 
+**Logical paths only.** `ExecutionContext` carries VFS paths and mount classes, never host
+paths. A classifier is frequently a model, its input frequently leaves the process, and
+`/home/amy/clients/acme` says things `Project` does not.
+
+**`Observe` is a bypass, so every uncertain answer must be `Gate`.** The kernel maps `Err`
+to `Gate` — not to `Observe`, and not to a panic. A classifier that fails to load, times
+out, sees input outside its distribution, or is unsure returns the safe answer by
+construction, and the alternative is a statement gate that quietly stops gating when its
+classifier breaks. Three rules follow from the same reasoning, and belong to whoever writes
+a classifier:
+
+- A classifier may **raise** posture to `Gate` freely. It may never lower a posture the
+  kernel's own static rules set — a model is an escalation path, not an override.
+- Dangerous syntax classes keep static gate floors that no classifier can clear.
+- The statement gate is not the only enforcement. Plugin and `fs.*` gates still fire
+  underneath it (§A.7's parenthood), so a classifier's false negative costs defense in
+  depth rather than all of it.
+
+**The command text is adversarial data.** A classifier reading a statement is reading input
+an agent may have been talked into producing, and an LLM-backed one is reading it as
+*prompt*. Whoever writes that classifier owns the consequences: structure the prompt so
+command text is data rather than instruction, schema-validate what comes back, and do not
+let a high-impact allow rest on the model alone. The kernel cannot enforce any of this,
+which is exactly why it is written down here.
+
 `KernelConfig::with_statement_classifier` registers one; with none registered, every
 statement is `Observe`. A gate-classified statement enters the existing chain unchanged —
 a standing grant auto-approves it, `Approver::decide` puts it in front of a human under
@@ -1545,6 +1610,15 @@ the patient hold, and all-`Defer` is exit 2 with the request pending, which at a
 returns the line to the user (§C.3) and in a script halts execution at that statement.
 The classifier has no deny: refusal is a chain decision (`Approver::policy`), because a
 scoping seam that can refuse is a second decision chain.
+
+**The classifier stays synchronous, and that is a decision rather than an oversight.** It
+runs in front of *every* top-level statement, including the ones nobody would ever gate, so
+making it async would put optional model or network latency on the path of `ls`, and would
+let a classifier's unavailability stall ordinary execution. The escape hatch already exists
+and costs nothing: a classifier too slow for the statement path returns `Gate`, and the
+expensive judgment happens in `Approver::decide`, which is async, bounded by a budget, and
+already the place slow decisions live. A classifier belongs preloaded and bounded — no
+downloads, no queue waits, no remote calls.
 
 **Deferral holds the whole line; replay is by statement index.** The capture is
 `Capture::Statement { source, index }` (§B.4): statements carry no source spans, so the
@@ -1559,8 +1633,7 @@ enforce policy (§C.5) and neither reads nor writes statement posture. `with_pol
 already covers everything script-reachable; the classifier is embedder-registered and no
 script surface mutates it.
 
-**Settled by the design review (deepseek, 2026-08-05)** — five points the section above
-left implicit, fixed here so the implementation does not re-derive them:
+**Five tap rules the implementation must not re-derive:**
 
 - **The tap fires at exactly two sites**: the top-level statement loop and
   `execute_argv`. Never inside `execute_stmt_flow` or the nested statement loops (user
@@ -1582,7 +1655,7 @@ left implicit, fixed here so the implementation does not re-derive them:
   registry and the classifier cannot disagree. If that ever changes, the precedence
   question must be answered here first.
 
-*Settled at implementation time (PR 10),* because the text above left it open:
+And the key-handling rule, which is the kernel's one redaction (§A.8) at this seam:
 
 - **The statement gate reads a presented `--confirm=<key>` off the plan before it
   drafts, and the captured source is credential-redacted.** Both halves are one rule
@@ -1607,6 +1680,60 @@ left implicit, fixed here so the implementation does not re-derive them:
 The default tap is advisory, not a durable audit trail — an embedder that needs a
 completeness guarantee uses the sink's reliability, and `EMBEDDING.md`'s tap section
 (PR 10) carries that caveat where embedders read it.
+
+### C.7 Assessments — recording how a decision was reached
+
+A decision records *what* was decided (§A.4). An assessment records *how*, and there are
+usually several: a classifier scoped the statement, a policy rule matched, a specialist
+model scored it, a human was asked. Only the last step posts `Granted`. Without a place to
+put the rest, "why did this get approved?" is answerable only from whatever the embedder
+happened to log on the side.
+
+```rust
+/// Handed to `Approver::policy` and `Approver::decide`.
+#[non_exhaustive]
+pub struct DecisionContext {
+    /// When the patient hold expires (§C.2). Read it to bound your own work.
+    pub deadline: Instant,
+    pub cancellation: CancellationToken,
+    /// Append-only. Records survive `decide` being cancelled at its budget.
+    pub assessments: AssessmentRecorder,
+}
+
+#[non_exhaustive]
+pub struct ApprovalAssessment {
+    pub request: RequestId,
+    pub assessor: AssessorId,
+    pub stage: AssessmentStage,
+    pub outcome: AssessmentOutcome, // Allow | Deny | Abstain | Escalate
+    pub reason: String,
+    pub risk: Option<RiskClass>,
+    pub confidence: Option<f32>,
+    /// Stable version or weight identity. "The specialist allowed this" is
+    /// not reproducible without it.
+    pub model: Option<ModelIdentity>,
+    pub latency: Duration,
+}
+```
+
+**A recorder, not a return value.** An approver that returned its assessments alongside its
+decision would lose them in exactly the case they matter most: a `decide` that overran its
+budget and was cancelled, or an LLM call that timed out, has no return path but has already
+learned something worth recording. Appending as it goes means the record survives the
+cancellation.
+
+**Assessments are not decisions.** An `Assessed` entry authorizes nothing; only `Granted`
+does. This keeps the balance rule (§A.1) intact no matter how many layers an embedder
+stacks inside its one `Approver`.
+
+**One `Approver` remains the kernel's authorization boundary.** A router feeding
+specialists feeding an LLM feeding a human is a routed pipeline *inside* an embedder's impl,
+not a chain the kernel composes. The kernel taking a list of approvers would have to answer
+whether deny overrides allow, whether allow short-circuits, whether a timeout is abstention
+or denial, and whether the human is always last — security-sensitive semantics that differ
+per deployment and that nobody should get by default. `DecisionContext` is what makes such
+a pipeline auditable without the kernel knowing its topology; reusable combinators can be
+written later, above this seam, without changing it.
 
 ---
 
