@@ -50,11 +50,6 @@ the same exit code 2.
 
 ## 0.1 Mechanism, not policy — the line this design holds
 
-Added 2026-08-07, in the pre-0.14 contract rework. Nothing external pins these shapes yet:
-both embedders are ours and both pin crates.io 0.13, which has no ledger at all. This is
-the last cheap moment to move them, so the rework moves them on one principle rather than
-patching seven findings independently.
-
 > **The kernel owns the mechanism, the invariants, and the audit record. The embedder owns
 > the policy.**
 
@@ -86,7 +81,7 @@ point every sink passes through and a value type that cannot serialize an undeci
 so an embedder that installs a redactor gets it applied everywhere, including to sinks
 added later. See §A.8.
 
-The same line resolves the rest of the rework: the kernel supplies the classifier's input
+The same line resolves the rest of this design: the kernel supplies the classifier's input
 wrapper and the rule that a classifier error means `Gate` (§C.6), and the embedder supplies
 the classifier; the kernel supplies an append-only recorder for assessments (§C.7), and the
 embedder supplies the assessors. Where this document says the kernel does not do something,
@@ -705,12 +700,11 @@ pub trait Redactor: Send + Sync {
 
 Two properties do the work. **One normalization point:** the plan is redacted once, before
 it is classified, observed, captured, attached to a request, or projected — so a sink added
-later inherits the redaction instead of becoming a new leak. That the `--confirm` fix in
-#296 had to find three separate leaks of one credential is the argument for this, and the
-third was found only because someone went looking a fourth time. **A type that cannot hold
-an undecided value:** a sink cannot serialize a `PlannedValue` without the redaction
-question having been answered, so forgetting is a compile error rather than a review
-finding.
+later inherits the redaction instead of becoming a new leak. Redaction applied per-seam
+instead is how one credential reaches three sinks through three individually-correct
+fixes. **A type that cannot hold an undecided value:** a sink cannot serialize a
+`PlannedValue` without the redaction question having been answered, so forgetting is a
+compile error rather than a review finding.
 
 No `Redactor` installed means every value is `Plain`. That is the honest default for a
 shell: the kernel is not quietly pretending to protect something.
@@ -753,15 +747,19 @@ one.
 The kernel stamps records. The kernel does not decide with a clock.
 
 Every entry carries `at: SystemTime` (§A.5) — an append-only record of security decisions
-with no timestamps is not auditable, so observation stays. What left is every use of a
-clock as an *input to a decision*:
+with no timestamps is not auditable, so observation stays. What the kernel does not have is
+any use of a clock as an *input to a decision*:
 
-| Removed | Why |
-|---|---|
-| Request TTL and the `Expired`-on-timeout path | Pure policy, and the defaults were wrong in a way that shipped: `request_ttl` defaulted to 60s while `Approver::decide_budget` defaulted to 300s, so the kernel handed an approver a five-minute budget to spend against a one-minute lease. A decision arriving at 90s was refused against a request that had already expired underneath it — and reported as `LedgerUnavailable`, which named the wrong thing. |
-| The `attempt_stale_after` recovery sweep | It existed as a stopgap until `AttemptGuard` had an outbox, by its own definition. The outbox exists. A dropped attempt is now reported by the guard, not inferred from elapsed time. |
+- **No request TTL.** How long an unanswered request should live is policy, and it differs
+  per deployment in a way no single default can cover: a bridge waiting on a human wants a
+  long horizon, a REPL wants to ask again at the next prompt, a batch agent wants no
+  expiry at all. A kernel default here is wrong for someone by construction, and wrong
+  silently — the request is simply gone when they look.
+- **No staleness deadline on an attempt.** A dropped attempt is reported by `AttemptGuard`'s
+  outbox (§C.1), which knows the executor went away. Inferring the same fact from elapsed
+  time would be guessing at something the kernel is already told.
 
-What stays, and why none of it is a counter-example:
+What the kernel keeps, and why none of it is a counter-example:
 
 - **`Grant::not_after`** is set by the approval side and compared once, when a redemption is
   attempted. The ledger never wakes up to enforce it. A grant with no bound would be a
@@ -774,17 +772,12 @@ What stays, and why none of it is a counter-example:
   measured in the same units.
 
 **The cost, stated plainly.** With no expiry, an undecided request occupies a live slot
-until something closes it, so `live_capacity` and `live_capacity_per_principal` (§D.4)
-become the only backstop — an embedder that posts requests nobody answers eventually fills
-the ledger. That is the intended trade: the failure mode moves from *your approval silently
-expired* to *the ledger is full*, with a number, at a point where someone can act. Silent
-expiry is exactly the failure kaish refuses everywhere else.
-
-**And what it costs embedders:** each one now implements the expiry policy it wants, and
-they will differ. That is the point rather than a regret — an ACP bridge wants a long
-horizon with renewal while a human answers, a REPL wants to ask again on the next prompt,
-and a batch agent wants no expiry at all. A single kernel default cannot be right for all
-three, and the one we shipped was right for none of them.
+until something closes it, so `live_capacity` and `live_capacity_per_principal` (§D.4) are
+the only backstop — an embedder that posts requests nobody answers eventually fills the
+ledger. That is the intended trade. The failure mode is *the ledger is full*, with a number,
+at a point where someone can act, rather than *your approval silently expired*; silent
+expiry is exactly the failure kaish refuses everywhere else. An embedder that wants a
+deadline sets one and cancels what it no longer wants (§B.5).
 
 ---
 
@@ -1096,17 +1089,13 @@ exactly why.
   widening. Five call sites had the bug at once, invisibly, until a request first
   declared a transition.
 
-### B.5 Cancellation — the dead-nonce-forever fix
+### B.5 Cancellation
 
-The original fix here was expiry plus renewal: a request died at 60s and the requester
-posted a fresh one to carry the intent forward. §A.10 removed the first half, so this
-section is what remains, and it is smaller.
-
-**A request lives until it is decided or cancelled.** There is no timeout, so the problem
-this section originally solved — a `Latched` background job at T+61s that is unfulfillable
-and unkillable-without-discard — does not arise: at T+61s the request is still `Requested`
-and still answerable. What the ledger needs instead is a way to *end* an undecided request,
-because with no clock closing them something must.
+**A request lives until it is decided or cancelled.** Nothing times it out (§A.10), so the
+dead-nonce problem the latch had — a held operation that becomes unfulfillable at T+61s and
+cannot be killed without discarding the job — does not arise here: at T+61s the request is
+still `Requested` and still answerable. What the ledger needs instead is a way to *end* an
+undecided request, because with no clock closing them something must.
 
 ```rust
 impl Requester {
@@ -1141,8 +1130,8 @@ cancellation would be a special case with nothing behind it. Any other session c
 another principal's request is refused.
 
 `Cancelled` is terminal for the request and not for the thread of intent. Asking again
-posts a **new** `Requested` with `supersedes: Some(old_id)`, exactly as renewal did, so
-"this took four attempts over two hours" stays legible and the chain stays walkable. The
+posts a **new** `Requested` with `supersedes: Some(old_id)`, so "this took four attempts
+over two hours" stays legible and the chain stays walkable. The
 new request re-observes its transitions before posting: if the world already moved, it
 fails loud rather than posting claims that are already false. It names the original
 requester as principal, because the thread of intent is being carried forward rather than
