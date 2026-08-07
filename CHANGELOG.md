@@ -306,6 +306,18 @@ breaking entries are marked **BREAKING**.
   `write` (`fs.overwrite`), `mv` (`fs.rename`), `kaish-trash empty` (`trash.empty`).
 
 ### Changed
+- **Twenty-three builtins no longer publish clap mechanism as a parameter's
+  description** — `pwd`, `test`, `jq`, `sed`, `mktemp`, `patch`, `scatter`,
+  `gather`, `push`, `typeof`, and the rest now describe what the operand does;
+  models were being shipped `Sink — to_argv() always emits --` instead.
+- **`sed --in-place` documents the real `-i.bak` limit** and drops its pointer
+  to the deleted `docs/issues.md`; the suffix is tracked in GH #180.
+- **Example labels in `sed`, `grep`, `kill`, and `jq` are imperative**
+  ("Match either alternative", not "Alternation (ERE or GNU BRE)") — a label
+  sits next to a command and should read like one.
+- **`escape hatch` is a kaish term** (`README.md`, `CLAUDE.md`) — about thirty
+  uses across the corpus already carry one meaning, so the guide records what
+  is true instead of banning it.
 - **BREAKING: `kaish-help`'s overlay-mode guidance is opt-in.** The
   `--overlay`/`kaish-vfs` paragraph (formerly the always-on `Foundations`
   fragment `overlay-mode`) is now its own `Concept::Overlay` and no longer
